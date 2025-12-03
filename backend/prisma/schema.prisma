@@ -1,0 +1,111 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// User/Seller model
+model User {
+  id            String   @id @default(uuid())
+  email         String   @unique
+  passwordHash  String   @map("password_hash")
+  name          String?
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  sellerAccounts SellerAccount[]
+  products       Product[]
+  orders         Order[]
+  inventory      Inventory[]
+
+  @@map("users")
+}
+
+// Seller accounts connected to marketplaces (Amazon, eBay, etc.)
+model SellerAccount {
+  id          String   @id @default(uuid())
+  userId      String   @map("user_id")
+  marketplace String   // 'amazon' | 'ebay' | 'walmart' | 'etsy'
+  sellerId    String?  @map("seller_id") // Marketplace seller ID
+  credentials Json     // Encrypted tokens, refresh tokens, etc.
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, marketplace])
+  @@map("seller_accounts")
+  @@index([userId])
+}
+
+// Products/SKUs
+model Product {
+  id          String   @id @default(uuid())
+  userId      String   @map("user_id")
+  sku         String
+  asin        String?  // Amazon ASIN
+  title       String?
+  imageUrl    String?  @map("image_url")
+  costOfGoods Decimal? @map("cost_of_goods") @db.Decimal(10, 2)
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  orders   Order[]
+  inventory Inventory?
+
+  @@unique([userId, sku])
+  @@index([userId])
+  @@index([asin])
+  @@map("products")
+}
+
+// Orders from marketplaces
+model Order {
+  id              String   @id @default(uuid())
+  userId          String   @map("user_id")
+  productId       String   @map("product_id")
+  orderId         String   @map("order_id") // Marketplace order ID
+  marketplace     String   // 'amazon' | 'ebay' | etc.
+  sku             String
+  asin            String?
+  quantity        Int      @default(1)
+  itemPrice       Decimal  @map("item_price") @db.Decimal(10, 2)
+  fees            Json     // FBA fees, referral fees, etc.
+  totalProfit     Decimal? @map("total_profit") @db.Decimal(10, 2)
+  rawResponse     Json?    @map("raw_response") // Full API response
+  orderDate       DateTime @map("order_date")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([orderId, marketplace])
+  @@index([userId])
+  @@index([userId, orderDate])
+  @@index([productId])
+  @@map("orders")
+}
+
+// Inventory levels
+model Inventory {
+  id         String   @id @default(uuid())
+  userId     String   @map("user_id")
+  productId  String   @unique @map("product_id")
+  currentQty Int      @default(0) @map("current_qty")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("inventory")
+}
