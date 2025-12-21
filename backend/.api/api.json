@@ -1,0 +1,11 @@
+{
+  "version": "1.0",
+  "apis": [
+    {
+      "identifier": "sp-api",
+      "source": "@sp-api/v2.0#c900ifmg8fvtxz",
+      "integrity": "sha512-xJM5JT87/Mj1z93TfK5An0t/HNB4FZQkfcimVNljf+5GKnXxyN48xG/FxgYdrM3Foh65lYK8xM5GxVETHhOSzA==",
+      "installerVersion": "6.1.3"
+    }
+  ]
+}

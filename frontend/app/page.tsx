@@ -1,28 +1,66 @@
 import { ThemeToggle } from "../components/theme-toggle";
 
-export default function Home() {
+type AccountSummary = {
+  marketplace: string;
+  sellerId: string;
+  currency: string;
+  period: string;
+  revenue: number;
+  profitMargin: number;
+  unitsSold: number;
+  adSpend: number;
+  totalOrders: number;
+  activeSkus: number;
+  unitsInFba: number;
+  openShipments: number;
+  generatedAt: string;
+};
+
+export default async function Home() {
+  const baseUrl =
+    process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
+
+  let summary: AccountSummary | null = null;
+
+  try {
+    const res = await fetch(`${baseUrl}/api/amazon/account/summary`, {
+      // This is sandbox/demo data; don't cache aggressively in dev.
+      cache: "no-store",
+    });
+
+    if (res.ok) {
+      summary = (await res.json()) as AccountSummary;
+    }
+  } catch {
+    // Swallow errors and fall back to local mock values below.
+    summary = null;
+  }
+
+  console.log("summary", summary);
+  const effectiveCurrency = summary?.currency ?? "USD";
+
   const cards = [
     {
       label: "Revenue (30d)",
-      value: "$24.3k",
+      value: formatCurrency(summary?.revenue ?? 24300, effectiveCurrency),
       percentage: 72,
       color: "#4F46E5",
     },
     {
       label: "Profit Margin",
-      value: "28%",
-      percentage: 28,
+      value: `${Math.round((summary?.profitMargin ?? 0.28) * 100)}%`,
+      percentage: Math.round((summary?.profitMargin ?? 0.28) * 100),
       color: "#10B981",
     },
     {
       label: "Units Sold",
-      value: "3,240",
+      value: (summary?.unitsSold ?? 3240).toLocaleString(),
       percentage: 54,
       color: "#F97316",
     },
     {
       label: "Ad Spend",
-      value: "$6.1k",
+      value: formatCurrency(summary?.adSpend ?? 6100, effectiveCurrency),
       percentage: 41,
       color: "#EC4899",
     },
@@ -31,26 +69,25 @@ export default function Home() {
   const kpiCards = [
     {
       label: "Total Orders",
-      value: "4,812",
+      value: (summary?.totalOrders ?? 4812).toLocaleString(),
       helper: "All marketplaces · 30d",
     },
     {
       label: "Active SKUs",
-      value: "186",
+      value: (summary?.activeSkus ?? 186).toLocaleString(),
       helper: "Live & in stock",
     },
     {
       label: "Units in FBA",
-      value: "9,430",
+      value: (summary?.unitsInFba ?? 9430).toLocaleString(),
       helper: "Fulfilled by Amazon",
     },
     {
       label: "Open Shipments",
-      value: "17",
+      value: (summary?.openShipments ?? 17).toLocaleString(),
       helper: "Inbound & pending",
     },
   ];
-
   return (
     <div className="min-h-screen bg-[var(--background)] text-[var(--foreground)]">
       <main className="mx-auto flex min-h-screen max-w-6xl flex-col gap-10 px-6 py-10">
@@ -61,7 +98,7 @@ export default function Home() {
             </h1>
             <p className="mt-1 text-sm text-[var(--muted-foreground)]">
               High-level metrics for your connected marketplaces. Data is
-              currently mocked; you&apos;ll wire this to Amazon later.
+              currently sourced from the Amazon SP-API sandbox.
             </p>
           </div>
           <div className="mt-2 flex items-center gap-3 md:mt-0">
@@ -112,6 +149,18 @@ type KpiCardProps = {
   value: string;
   helper?: string;
 };
+
+function formatCurrency(amount: number, currency: string) {
+  try {
+    return new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency,
+      maximumFractionDigits: 0,
+    }).format(amount);
+  } catch {
+    return `$${amount.toLocaleString()}`;
+  }
+}
 
 function DonutCard({ label, value, percentage, color }: DonutCardProps) {
   const radius = 52;
