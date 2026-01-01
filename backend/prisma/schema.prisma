@@ -13,6 +13,7 @@ datasource db {
 // User/Seller model
 model User {
   id            String   @id @default(uuid())
+  clerkId       String?  @unique
   email         String   @unique
   passwordHash  String   @map("password_hash")
   name          String?

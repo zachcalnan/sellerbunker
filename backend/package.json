@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@api/sp-api": "file:.api/apis/sp-api",
+    "@clerk/backend": "^2.29.0",
     "@nestjs/bullmq": "^11.0.4",
     "@nestjs/common": "^11.0.1",
     "@nestjs/config": "^4.0.2",

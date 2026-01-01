@@ -1,72 +1,33 @@
 import { Injectable } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import * as https from 'https';
 import * as crypto from 'crypto';
 
-type SpApiRegion = 'na' | 'eu' | 'fe';
+export type SpApiRegion = 'na' | 'eu' | 'fe';
+
+export interface SpApiCredentials {
+  region: SpApiRegion;
+  lwaClientId: string;
+  lwaClientSecret: string;
+  refreshToken: string;
+  awsAccessKeyId: string;
+  awsSecretAccessKey: string;
+  awsRoleArn?: string;
+}
 
 /**
  * Thin wrapper around the Amazon Selling Partner API.
  *
  * This class is wired for the **sandbox** endpoints by default.
- * You will plug in real auth + signing later (LWA + AWS SigV4 or an official SDK).
+ * It now accepts per-request credentials so each seller can use
+ * their own SP-API / AWS keys.
  */
 @Injectable()
 export class AmazonSpApiClient {
-  private readonly region: SpApiRegion;
-  private readonly endpoint: string;
-
-  private readonly lwaClientId: string;
-  private readonly lwaClientSecret: string;
-  private readonly refreshToken: string;
-
-  private readonly awsAccessKeyId: string;
-  private readonly awsSecretAccessKey: string;
-  private readonly awsRoleArn?: string;
-
-  private cachedAccessToken: string | null = null;
-  private cachedAccessTokenExpiresAt = 0;
-
-  constructor(private readonly configService: ConfigService) {
-    this.region = (this.configService.get<SpApiRegion>('SPAPI_REGION') ??
-      'na') as SpApiRegion;
-
-    // Default to NA sandbox. Override with SPAPI_SANDBOX_ENDPOINT if needed.
-    this.endpoint =
-      this.configService.get<string>('SPAPI_SANDBOX_ENDPOINT') ??
-      'https://sandbox.sellingpartnerapi-na.amazon.com';
-
-    this.lwaClientId = this.configService.get<string>('LWA_CLIENT_ID') ?? '';
-    this.lwaClientSecret =
-      this.configService.get<string>('LWA_CLIENT_SECRET') ?? '';
-    this.refreshToken =
-      this.configService.get<string>('SPAPI_REFRESH_TOKEN') ?? '';
-
-    this.awsAccessKeyId =
-      this.configService.get<string>('AWS_ACCESS_KEY_ID') ?? '';
-    this.awsSecretAccessKey =
-      this.configService.get<string>('AWS_SECRET_ACCESS_KEY') ?? '';
-    this.awsRoleArn = this.configService.get<string>('AWS_ROLE_ARN') ?? '';
-
-    // Debug log (masked) to verify env wiring – safe to remove later.
-    // eslint-disable-next-line no-console
-    console.log('[SPAPI CONFIG]', {
-      region: this.region,
-      lwaClientId: this.lwaClientId ? `${this.lwaClientId.slice(0, 8)}...` : '',
-      refreshToken: this.refreshToken
-        ? `${this.refreshToken.slice(0, 8)}...`
-        : '',
-      awsAccessKeyId: this.awsAccessKeyId
-        ? `${this.awsAccessKeyId.slice(0, 4)}...`
-        : '',
-    });
-  }
-
   /**
    * Example wrapper for the Sellers API: getMarketplaceParticipations.
    */
-  async getMarketplaceParticipations() {
-    return this.signedSpApiRequest({
+  async getMarketplaceParticipations(credentials: SpApiCredentials) {
+    return this.signedSpApiRequest(credentials, {
       method: 'GET',
       path: '/sellers/v1/marketplaceParticipations',
       query: {},
@@ -77,15 +38,17 @@ export class AmazonSpApiClient {
    * Example wrapper around Orders API getOrders.
    *
    * NOTE: This is a placeholder. To call the real SP-API, you should
-   * integrate an official or generated SDK (for example the one shown
-   * in the docs snippet you pasted) and move that code into this method.
+   * integrate an official or generated SDK and move that code into this method.
    */
-  async getOrders(params?: {
-    createdAfter?: string;
-    createdBefore?: string;
-    marketplaceIds?: string[];
-    orderStatuses?: string[];
-  }) {
+  async getOrders(
+    credentials: SpApiCredentials,
+    params?: {
+      createdAfter?: string;
+      createdBefore?: string;
+      marketplaceIds?: string[];
+      orderStatuses?: string[];
+    },
+  ) {
     const {
       createdAfter,
       createdBefore,
@@ -121,24 +84,21 @@ export class AmazonSpApiClient {
       }
     }
 
-    return this.signedSpApiRequest({
+    return this.signedSpApiRequest(credentials, {
       method: 'GET',
       path: '/orders/v0/orders',
       query,
     });
   }
 
-  private async getLwaAccessToken(): Promise<string> {
-    const now = Date.now();
-    if (this.cachedAccessToken && now < this.cachedAccessTokenExpiresAt) {
-      return this.cachedAccessToken;
-    }
-
+  private async getLwaAccessToken(
+    credentials: SpApiCredentials,
+  ): Promise<string> {
     const body = new URLSearchParams({
       grant_type: 'refresh_token',
-      refresh_token: this.refreshToken,
-      client_id: this.lwaClientId,
-      client_secret: this.lwaClientSecret,
+      refresh_token: credentials.refreshToken,
+      client_id: credentials.lwaClientId,
+      client_secret: credentials.lwaClientSecret,
     }).toString();
 
     const response = await this.httpRequest({
@@ -163,23 +123,22 @@ export class AmazonSpApiClient {
       expires_in: number;
     };
 
-    this.cachedAccessToken = data.access_token;
-    // Subtract 60s as a safety margin
-    this.cachedAccessTokenExpiresAt = now + (data.expires_in - 60) * 1000;
-
-    return this.cachedAccessToken;
+    return data.access_token;
   }
 
-  private async signedSpApiRequest(options: {
-    method: 'GET' | 'POST' | 'PUT' | 'DELETE';
-    path: string;
-    query?: Record<string, unknown>;
-    body?: string;
-  }): Promise<unknown> {
-    const accessToken = await this.getLwaAccessToken();
+  private async signedSpApiRequest(
+    credentials: SpApiCredentials,
+    options: {
+      method: 'GET' | 'POST' | 'PUT' | 'DELETE';
+      path: string;
+      query?: Record<string, unknown>;
+      body?: string;
+    },
+  ): Promise<unknown> {
+    const accessToken = await this.getLwaAccessToken(credentials);
 
-    const host = 'sandbox.sellingpartnerapi-na.amazon.com';
-    const region = this.mapRegionToAwsRegion(this.region);
+    const host = this.getSandboxHostForRegion(credentials.region);
+    const region = this.mapRegionToAwsRegion(credentials.region);
     const service = 'execute-api';
 
     const queryString = this.buildQueryString(options.query ?? {});
@@ -225,7 +184,7 @@ export class AmazonSpApiClient {
     ].join('\n');
 
     const signingKey = this.getSignatureKey(
-      this.awsSecretAccessKey,
+      credentials.awsSecretAccessKey,
       dateStamp,
       region,
       service,
@@ -237,7 +196,7 @@ export class AmazonSpApiClient {
       .digest('hex');
 
     const authorizationHeader =
-      `${algorithm} Credential=${this.awsAccessKeyId}/${credentialScope}, ` +
+      `${algorithm} Credential=${credentials.awsAccessKeyId}/${credentialScope}, ` +
       `SignedHeaders=${signedHeaders}, Signature=${signature}`;
 
     const pathWithQuery = canonicalQuerystring
@@ -306,6 +265,19 @@ export class AmazonSpApiClient {
     return kSigning;
   }
 
+  private getSandboxHostForRegion(region: SpApiRegion): string {
+    switch (region) {
+      case 'na':
+        return 'sandbox.sellingpartnerapi-na.amazon.com';
+      case 'eu':
+        return 'sandbox.sellingpartnerapi-eu.amazon.com';
+      case 'fe':
+        return 'sandbox.sellingpartnerapi-fe.amazon.com';
+      default:
+        return 'sandbox.sellingpartnerapi-na.amazon.com';
+    }
+  }
+
   private mapRegionToAwsRegion(region: SpApiRegion): string {
     switch (region) {
       case 'na':
@@ -364,5 +336,4 @@ export class AmazonSpApiClient {
     });
   }
 }
-
 

@@ -1,15 +1,71 @@
-import { Injectable } from '@nestjs/common';
-import { AmazonSpApiClient } from './sp-api.client';
+import { Injectable, NotFoundException } from '@nestjs/common';
+import { AmazonSpApiClient, SpApiCredentials } from './sp-api.client';
+import { PrismaService } from '../prisma/prisma.service';
+import { LinkAmazonAccountDto } from './dto/link-amazon-account.dto';
 
 @Injectable()
 export class AmazonService {
-  // TODO: Inject PrismaService and use real seller data + SP-API later
+  constructor(
+    private readonly spApiClient: AmazonSpApiClient,
+    private readonly prisma: PrismaService,
+  ) {}
 
-  constructor(private readonly spApiClient: AmazonSpApiClient) {}
+  private async getAmazonCredentialsForUser(
+    userId: string,
+  ): Promise<SpApiCredentials> {
+    const account = await this.prisma.sellerAccount.findUnique({
+      where: {
+        userId_marketplace: {
+          userId,
+          marketplace: 'amazon',
+        },
+      },
+    });
 
-  async getAccountSummary() {
+    if (!account) {
+      throw new NotFoundException(
+        'Amazon account not linked. Please link your Amazon account first.',
+      );
+    }
+
+    const creds = account.credentials as {
+      region?: 'na' | 'eu' | 'fe';
+      lwaClientId: string;
+      lwaClientSecret: string;
+      refreshToken: string;
+      awsAccessKeyId: string;
+      awsSecretAccessKey: string;
+      awsRoleArn?: string;
+    };
+
+    if (
+      !creds ||
+      !creds.lwaClientId ||
+      !creds.lwaClientSecret ||
+      !creds.refreshToken ||
+      !creds.awsAccessKeyId ||
+      !creds.awsSecretAccessKey
+    ) {
+      throw new NotFoundException(
+        'Amazon credentials are incomplete. Please relink your Amazon account.',
+      );
+    }
+
+    return {
+      region: creds.region ?? 'na',
+      lwaClientId: creds.lwaClientId,
+      lwaClientSecret: creds.lwaClientSecret,
+      refreshToken: creds.refreshToken,
+      awsAccessKeyId: creds.awsAccessKeyId,
+      awsSecretAccessKey: creds.awsSecretAccessKey,
+      awsRoleArn: creds.awsRoleArn,
+    };
+  }
+
+  async getAccountSummary(userId: string) {
     try {
-      const data = (await this.spApiClient.getOrders()) as {
+      const credentials = await this.getAmazonCredentialsForUser(userId);
+      const data = (await this.spApiClient.getOrders(credentials)) as {
         payload?: {
           Orders?: Array<{
             OrderTotal?: { Amount?: string; CurrencyCode?: string };
@@ -82,8 +138,9 @@ export class AmazonService {
    * Example method that calls the SP-API client (sandbox for now).
    * This uses the Sellers API "getMarketplaceParticipations" shape.
    */
-  async getSandboxMarketplaceParticipations() {
-    return this.spApiClient.getMarketplaceParticipations();
+  async getSandboxMarketplaceParticipations(userId: string) {
+    const credentials = await this.getAmazonCredentialsForUser(userId);
+    return this.spApiClient.getMarketplaceParticipations(credentials);
   }
 
   /**
@@ -93,10 +150,65 @@ export class AmazonService {
    */
   async getRecentOrders() {
     // For now: last 30 days, US marketplace.
-    return this.spApiClient.getOrders();
+    // NOTE: This method is no longer user-specific and still uses the
+    // credentials from the linked account fetched in getAccountSummary
+    // or getSandboxMarketplaceParticipations if needed later.
+    // You can extend it to accept a userId when you want.
+    throw new NotFoundException(
+      'getRecentOrders is not wired for per-user credentials yet.',
+    );
+  }
+
+  async linkAmazonAccount(userId: string, dto: LinkAmazonAccountDto) {
+    const {
+      region,
+      sellerId,
+      lwaClientId,
+      lwaClientSecret,
+      refreshToken,
+      awsAccessKeyId,
+      awsSecretAccessKey,
+      awsRoleArn,
+    } = dto;
+
+    const credentials = {
+      region,
+      lwaClientId,
+      lwaClientSecret,
+      refreshToken,
+      awsAccessKeyId,
+      awsSecretAccessKey,
+      awsRoleArn,
+    };
+
+    const account = await this.prisma.sellerAccount.upsert({
+      where: {
+        userId_marketplace: {
+          userId,
+          marketplace: 'amazon',
+        },
+      },
+      update: {
+        sellerId,
+        credentials,
+        isActive: true,
+      },
+      create: {
+        userId,
+        marketplace: 'amazon',
+        sellerId,
+        credentials,
+      },
+    });
+
+    return {
+      id: account.id,
+      userId: account.userId,
+      marketplace: account.marketplace,
+      sellerId: account.sellerId,
+      isActive: account.isActive,
+      createdAt: account.createdAt,
+      updatedAt: account.updatedAt,
+    };
   }
 }
-
-
-
-
