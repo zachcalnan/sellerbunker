@@ -1,5 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { AmazonSpApiClient, SpApiCredentials } from './sp-api.client';
+import { ConfigService } from '@nestjs/config';
+import { AmazonSpApiClient, SpApiCredentials, SpApiRegion } from './sp-api.client';
 import { PrismaService } from '../prisma/prisma.service';
 import { LinkAmazonAccountDto } from './dto/link-amazon-account.dto';
 
@@ -8,6 +9,7 @@ export class AmazonService {
   constructor(
     private readonly spApiClient: AmazonSpApiClient,
     private readonly prisma: PrismaService,
+    private readonly configService: ConfigService,
   ) {}
 
   private async getAmazonCredentialsForUser(
@@ -63,8 +65,21 @@ export class AmazonService {
   }
 
   async getAccountSummary(userId: string) {
+    let credentials: SpApiCredentials;
+
+    // If the user has not linked an Amazon account yet, surface a 404 back to the client.
     try {
-      const credentials = await this.getAmazonCredentialsForUser(userId);
+      credentials = await this.getAmazonCredentialsForUser(userId);
+    } catch (error) {
+      if (error instanceof NotFoundException) {
+        // "Amazon account not linked" or "credentials incomplete" should not fall back to demo data
+        throw error;
+      }
+      // For any other unexpected error getting credentials, also bubble up.
+      throw error;
+    }
+
+    try {
       const data = (await this.spApiClient.getOrders(credentials)) as {
         payload?: {
           Orders?: Array<{
@@ -115,7 +130,7 @@ export class AmazonService {
         generatedAt: new Date().toISOString(),
       };
     } catch {
-      // Fallback to static demo values if SP-API call fails.
+      // Fallback to static demo values only if the SP-API call itself fails.
       return {
         marketplace: 'amazon',
         sellerId: 'DEMO-SELLER-123',
@@ -210,5 +225,142 @@ export class AmazonService {
       createdAt: account.createdAt,
       updatedAt: account.updatedAt,
     };
+  }
+
+  /**
+   * Builds the Amazon Seller Central consent URL for a given user and region.
+   * The user is encoded into the state payload so we can resolve them on callback.
+   */
+  async getAmazonConnectUrl(userId: string, regionCode: string): Promise<string> {
+    const applicationId = this.configService.get<string>('AMAZON_APP_ID');
+    const redirectUri = this.configService.get<string>('AMAZON_REDIRECT_URI');
+
+    if (!applicationId || !redirectUri) {
+      throw new Error('AMAZON_APP_ID and AMAZON_REDIRECT_URI must be configured');
+    }
+
+    const baseUrl = this.getSellerCentralBaseUrl(regionCode);
+
+    const statePayload = {
+      userId,
+      region: regionCode,
+    };
+    const state = Buffer.from(JSON.stringify(statePayload)).toString('base64url');
+
+    const url = new URL('/apps/authorize/consent', baseUrl);
+    url.searchParams.set('application_id', applicationId);
+    url.searchParams.set('redirect_uri', redirectUri);
+    url.searchParams.set('state', state);
+
+    return url.toString();
+  }
+
+  /**
+   * Handles the OAuth callback from Amazon, exchanges the auth code for a refresh token,
+   * and persists the SellerAccount row tied to the original user.
+   */
+  async handleOauthCallback(params: {
+    code: string;
+    sellingPartnerId: string;
+    state: string;
+  }): Promise<void> {
+    const { code, sellingPartnerId, state } = params;
+
+    const decodedStateJson = Buffer.from(state, 'base64url').toString('utf8');
+    const { userId, region } = JSON.parse(decodedStateJson) as {
+      userId: string;
+      region: string;
+    };
+
+    const redirectUri = this.configService.get<string>('AMAZON_REDIRECT_URI');
+    const lwaClientId = this.configService.get<string>('LWA_CLIENT_ID');
+    const lwaClientSecret = this.configService.get<string>('LWA_CLIENT_SECRET');
+    const awsAccessKeyId = this.configService.get<string>('AWS_ACCESS_KEY_ID') ?? '';
+    const awsSecretAccessKey =
+      this.configService.get<string>('AWS_SECRET_ACCESS_KEY') ?? '';
+    const awsRoleArn = this.configService.get<string>('AWS_ROLE_ARN') ?? undefined;
+
+    if (!redirectUri || !lwaClientId || !lwaClientSecret) {
+      throw new Error('LWA_CLIENT_ID, LWA_CLIENT_SECRET and AMAZON_REDIRECT_URI must be configured');
+    }
+
+    // Exchange the auth code for a refresh token
+    const body = new URLSearchParams({
+      grant_type: 'authorization_code',
+      code,
+      client_id: lwaClientId,
+      client_secret: lwaClientSecret,
+      redirect_uri: redirectUri,
+    }).toString();
+
+    const response = await fetch('https://api.amazon.com/auth/o2/token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Length': body.length.toString(),
+      },
+      body,
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(
+        `Failed to exchange SP-API auth code: ${response.status} ${text}`,
+      );
+    }
+
+    const tokenJson = (await response.json()) as {
+      refresh_token?: string;
+    };
+
+    if (!tokenJson.refresh_token) {
+      throw new Error('No refresh_token returned from Amazon');
+    }
+
+    const spRegion = this.mapRegionCodeToSpApiRegion(region);
+
+    await this.linkAmazonAccount(userId, {
+      region: spRegion,
+      sellerId: sellingPartnerId,
+      lwaClientId,
+      lwaClientSecret,
+      refreshToken: tokenJson.refresh_token,
+      awsAccessKeyId,
+      awsSecretAccessKey,
+      awsRoleArn,
+    });
+  }
+
+  private getSellerCentralBaseUrl(regionCode: string): string {
+    switch (regionCode.toUpperCase()) {
+      case 'EU':
+        return 'https://sellercentral-europe.amazon.com';
+      case 'US':
+      case 'NA':
+        return 'https://sellercentral.amazon.com';
+      case 'CA':
+        return 'https://sellercentral.amazon.ca';
+      case 'MX':
+        return 'https://sellercentral.amazon.com.mx';
+      case 'AU':
+        return 'https://sellercentral.amazon.com.au';
+      default:
+        return 'https://sellercentral-europe.amazon.com';
+    }
+  }
+
+  private mapRegionCodeToSpApiRegion(regionCode: string): SpApiRegion {
+    switch (regionCode.toUpperCase()) {
+      case 'EU':
+        return 'eu';
+      case 'US':
+      case 'NA':
+      case 'CA':
+      case 'MX':
+        return 'na';
+      case 'AU':
+      default:
+        return 'na';
+    }
   }
 }

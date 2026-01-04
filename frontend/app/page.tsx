@@ -148,7 +148,9 @@ export default function Home() {
                   }`}
                 />
                 {isSignedIn
-                  ? "Authenticated with Clerk (using linked Amazon account)"
+                  ? summary
+                    ? "Authenticated with Clerk (Amazon account connected)"
+                    : "Authenticated with Clerk — connect Amazon to see live data"
                   : "Please sign in (top-right) to load live data"}
               </span>
             </div>
@@ -161,8 +163,41 @@ export default function Home() {
           </div>
         )}
         {error ? (
-          <div className="rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-xs text-red-700">
-            {error}
+          <div className="flex flex-col gap-3 rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-xs text-red-700">
+            <span>{error}</span>
+            {isSignedIn && (
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    const token = await getToken({ template: "backend" });
+                    if (!token) {
+                      return;
+                    }
+                    const res = await fetch(
+                      `${baseUrl}/api/amazon/connect?region=EU`,
+                      {
+                        headers: {
+                          Authorization: `Bearer ${token}`,
+                        },
+                      }
+                    );
+                    if (!res.ok) {
+                      return;
+                    }
+                    const data = (await res.json()) as { url?: string };
+                    if (data?.url) {
+                      window.location.href = data.url;
+                    }
+                  } catch {
+                    // swallow for now; the existing error message will remain
+                  }
+                }}
+                className="inline-flex w-fit items-center justify-center rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white shadow-sm transition hover:bg-emerald-700"
+              >
+                Connect Amazon
+              </button>
+            )}
           </div>
         ) : null}
 
