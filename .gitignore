@@ -40,3 +40,6 @@ docker-compose.override.yml
 
 # Prisma
 prisma/migrations/
+
+# Misc large local files
+main.js
