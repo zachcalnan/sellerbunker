@@ -251,6 +251,7 @@ export class AmazonService {
     url.searchParams.set('application_id', applicationId);
     url.searchParams.set('redirect_uri', redirectUri);
     url.searchParams.set('state', state);
+    url.searchParams.set('version', 'beta');
 
     return url.toString();
   }

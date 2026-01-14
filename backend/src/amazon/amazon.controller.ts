@@ -13,7 +13,6 @@ import { AmazonService } from './amazon.service';
 import { LinkAmazonAccountDto } from './dto/link-amazon-account.dto';
 import { ClerkAuthGuard } from '../auth/clerk-auth.guard';
 
-@UseGuards(ClerkAuthGuard)
 @Controller('amazon')
 export class AmazonController {
   constructor(private readonly amazonService: AmazonService) {}
@@ -22,6 +21,7 @@ export class AmazonController {
    * Starts the Amazon Seller Central consent flow.
    * Example: GET /api/amazon/connect?region=EU
    */
+  @UseGuards(ClerkAuthGuard)
   @Get('connect')
   async connectAmazon(
     @Req() req: { user: { userId: string } },
@@ -46,17 +46,25 @@ export class AmazonController {
     @Query('state') state: string,
     @Res() res: Response,
   ) {
-    await this.amazonService.handleOauthCallback({
-      code,
-      sellingPartnerId,
-      state,
-    });
+    console.log('CALLBACK ROUTE HIT', { code, sellingPartnerId, state });
 
-    return res.send(
-      'Your Amazon account is now linked. You can close this tab and return to the dashboard.',
-    );
+    try {
+      await this.amazonService.handleOauthCallback({
+        code,
+        sellingPartnerId,
+        state,
+      });
+
+      return res.send(
+        'Your Amazon account is now linked. You can close this tab and return to the dashboard.',
+      );
+    } catch (e) {
+      console.error('OAUTH CALLBACK ERROR:', e);
+      return res.status(500).send('OAuth callback failed');
+    }
   }
 
+  @UseGuards(ClerkAuthGuard)
   @Post('link')
   linkAmazonAccount(
     @Req() req: { user: { userId: string } },
@@ -65,6 +73,7 @@ export class AmazonController {
     return this.amazonService.linkAmazonAccount(req.user.userId, dto);
   }
 
+  @UseGuards(ClerkAuthGuard)
   @Get('account/summary')
   getAccountSummary(@Req() req: { user: { userId: string } }) {
     return this.amazonService.getAccountSummary(req.user.userId);
