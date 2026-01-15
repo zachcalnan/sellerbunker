@@ -79,6 +79,19 @@ export class AmazonController {
     return this.amazonService.getAccountSummary(req.user.userId);
   }
 
+  @UseGuards(ClerkAuthGuard)
+  @Get('sales/timeseries')
+  getSalesTimeSeries(
+    @Req() req: { user: { userId: string } },
+    @Query('start') start?: string,
+    @Query('end') end?: string,
+  ) {
+    return this.amazonService.getSalesTimeSeries(req.user.userId, {
+      start,
+      end,
+    });
+  }
+
   @Get('sandbox/marketplaces')
   async getSandboxMarketplaces(@Req() req: { user: { userId: string } }) {
     // Example endpoint that proxies the SP-API Sellers "getMarketplaceParticipations"

@@ -39,7 +39,7 @@ export function ThemeToggle() {
       <button
         type="button"
         aria-label="Toggle dark mode"
-        className="inline-flex h-9 items-center rounded-full bg-[var(--surface-muted)] px-3 text-xs font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--surface-border)]"
+        className="inline-flex h-9 items-center rounded-full bg-[var(--surface-muted)] px-3 text-xs font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--surface-border)] cursor-pointer"
       >
         Theme
       </button>
@@ -53,7 +53,7 @@ export function ThemeToggle() {
       type="button"
       onClick={toggleTheme}
       aria-label="Toggle dark mode"
-      className="inline-flex h-9 items-center gap-2 rounded-full bg-[var(--surface-muted)] px-3 text-xs font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--surface-border)] hover:brightness-95 transition-colors"
+      className="inline-flex h-9 items-center gap-2 rounded-full bg-[var(--surface-muted)] px-3 text-xs font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--surface-border)] hover:brightness-95 transition-colors cursor-pointer"
     >
       <span className="relative flex h-4 w-7 items-center rounded-full bg-[var(--surface-border)]">
         <span

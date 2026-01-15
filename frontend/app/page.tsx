@@ -20,6 +20,17 @@ type AccountSummary = {
   generatedAt: string;
 };
 
+type SalesPoint = {
+  date: string;
+  revenue: number;
+  orders: number;
+};
+
+type SalesSeries = {
+  currency: string;
+  points: SalesPoint[];
+};
+
 export default function Home() {
   const baseUrl =
     process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
@@ -223,6 +234,13 @@ export default function Home() {
                 <KpiCard key={card.label} {...card} />
               ))}
             </div>
+
+            <SalesTrend
+              baseUrl={baseUrl}
+              isSignedIn={isSignedIn}
+              getToken={getToken}
+              currency={effectiveCurrency}
+            />
           </section>
         )}
       </main>
@@ -242,6 +260,299 @@ type KpiCardProps = {
   value: string;
   helper?: string;
 };
+
+type SalesTrendProps = {
+  baseUrl: string;
+  isSignedIn: boolean | undefined;
+  getToken: (args: { template?: string }) => Promise<string | null>;
+  currency: string;
+};
+
+function SalesTrend({
+  baseUrl,
+  isSignedIn,
+  getToken,
+  currency,
+}: SalesTrendProps) {
+  const [sales, setSales] = useState<SalesSeries | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [mode, setMode] = useState<"revenue" | "orders">("revenue");
+  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!isSignedIn) {
+      setSales(null);
+      return;
+    }
+
+    const fetchSales = async () => {
+      setLoading(true);
+      setError(null);
+
+      try {
+        const token = await getToken({ template: "backend" });
+        const res = await fetch(`${baseUrl}/api/amazon/sales/timeseries`, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        });
+
+        if (!res.ok) {
+          setError("Failed to load sales trend.");
+          setSales(null);
+          return;
+        }
+
+        const data = (await res.json()) as SalesSeries;
+        setSales(data);
+      } catch {
+        setError("Unable to load sales trend.");
+        setSales(null);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchSales();
+  }, [isSignedIn, getToken, baseUrl, setSales, setError]);
+
+  if (!sales && !loading && !error) {
+    return null;
+  }
+
+  const points = sales?.points ?? [];
+  const maxValue =
+    points.length > 0
+      ? points.reduce(
+          (m, p) =>
+            Math.max(
+              m,
+              mode === "revenue" ? p.revenue : p.orders
+            ),
+          0
+        )
+      : 0;
+
+  const width = 400;
+  const height = 140;
+  const paddingX = 32; // extra room on the left for y-axis labels
+  const paddingBottom = 16;
+  const paddingTop = 24; // extra room at the top for hover labels
+
+  const barAreaHeight = height - paddingTop - paddingBottom;
+  const barAreaWidth = width - paddingX * 2;
+  const bucketWidth =
+    points.length > 0 ? barAreaWidth / points.length : barAreaWidth;
+  const barWidth = bucketWidth * 0.6;
+
+  return (
+    <div className="mt-8 rounded-xl bg-[var(--surface-muted)] p-4 ring-1 ring-[var(--surface-border)]">
+      <div className="mb-3 flex items-center justify-between">
+        <div>
+          <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
+            Sales Trend
+          </p>
+          <p className="mt-0.5 text-[11px] text-[var(--muted-foreground)]">
+            Last 30 days ·{" "}
+            {mode === "revenue" ? currency : "Orders"}
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <div className="inline-flex rounded-full bg-[var(--surface)] p-0.5 text-[10px] ring-1 ring-[var(--surface-border)]">
+            <button
+              type="button"
+              onClick={() => setMode("revenue")}
+              className={`px-2 py-0.5 rounded-full ${
+                mode === "revenue"
+                  ? "bg-[var(--foreground)] text-[var(--background)]"
+                  : "text-[var(--muted-foreground)]"
+              } cursor-pointer`}
+            >
+              Revenue
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode("orders")}
+              className={`px-2 py-0.5 rounded-full ${
+                mode === "orders"
+                  ? "bg-[var(--foreground)] text-[var(--background)]"
+                  : "text-[var(--muted-foreground)]"
+              } cursor-pointer`}
+            >
+              Orders
+            </button>
+          </div>
+          {loading && (
+            <span className="text-[11px] text-[var(--muted-foreground)]">
+              Loading…
+            </span>
+          )}
+        </div>
+      </div>
+      {error && (
+        <p className="text-[11px] text-red-600">{error}</p>
+      )}
+      {!error && points.length === 0 && !loading && (
+        <p className="text-[11px] text-[var(--muted-foreground)]">
+          No orders found for the selected period yet.
+        </p>
+      )}
+      {points.length > 0 && (
+        <svg
+          viewBox={`0 0 ${width} ${height}`}
+          className="mt-2 h-40 w-full"
+        >
+          {/* Y-axis grid / labels */}
+          {maxValue > 0 &&
+            [0, 0.5, 1].map((ratio, idx) => {
+              const value = maxValue * ratio;
+              const y =
+                paddingTop +
+                (1 - ratio) * barAreaHeight;
+              return (
+                <g key={`y-${idx}`}>
+                  <line
+                    x1={paddingX}
+                    x2={width - paddingX}
+                    y1={y}
+                    y2={y}
+                    stroke="currentColor"
+                    strokeWidth={0.5}
+                    opacity={0.15}
+                  />
+                  <text
+                    x={4}
+                    y={y + 3}
+                    fontSize="8"
+                    fill="currentColor"
+                  >
+                    {mode === "revenue"
+                      ? formatCurrency(
+                          Math.round(value),
+                          currency
+                        )
+                      : Math.round(value).toLocaleString()}
+                  </text>
+                </g>
+              );
+            })}
+
+          {points.map((p, idx) => {
+            const x =
+              paddingX +
+              idx * bucketWidth +
+              (bucketWidth - barWidth) / 2;
+            const valueRatio =
+              maxValue > 0
+                ? (mode === "revenue"
+                    ? p.revenue
+                    : p.orders) / maxValue
+                : 0;
+            const barHeight = valueRatio * barAreaHeight;
+            const y = paddingTop + (barAreaHeight - barHeight);
+
+            return (
+              <g key={p.date}>
+                <rect
+                  x={x}
+                  y={y}
+                  width={barWidth}
+                  height={barHeight}
+                  fill={hoveredIndex === idx ? "#4F46E5" : "#A5B4FC"}
+                  rx={2}
+                  className="cursor-pointer"
+                  onMouseEnter={() => setHoveredIndex(idx)}
+                  onMouseLeave={() => setHoveredIndex(null)}
+                />
+              </g>
+            );
+          })}
+          {hoveredIndex !== null && points[hoveredIndex] && (
+            (() => {
+              const p = points[hoveredIndex];
+              const x =
+                paddingX +
+                hoveredIndex * bucketWidth +
+                bucketWidth / 2;
+              const valueRatio =
+                maxValue > 0
+                  ? (mode === "revenue"
+                      ? p.revenue
+                      : p.orders) / maxValue
+                  : 0;
+              const barHeight = valueRatio * barAreaHeight;
+              const y = paddingTop + (barAreaHeight - barHeight);
+
+              const label =
+                mode === "revenue"
+                  ? formatCurrency(p.revenue, currency)
+                  : `${p.orders.toLocaleString()}`;
+              const approxWidth = label.length * 6;
+              const padding = 4;
+              const rectWidth = approxWidth + padding * 2;
+              const rectY = Math.max(4, y - 22);
+              const textY = rectY + 10;
+
+              return (
+                <g>
+                  <rect
+                    x={x - rectWidth / 2}
+                    y={rectY}
+                    width={rectWidth}
+                    height={14}
+                    rx={3}
+                    fill="var(--surface)"
+                    stroke="var(--surface-border)"
+                    strokeWidth={0.5}
+                  />
+                  <text
+                    x={x}
+                    y={textY}
+                    textAnchor="middle"
+                    fontSize="9"
+                    fill="var(--foreground)"
+                  >
+                    {label}
+                  </text>
+                </g>
+              );
+            })()
+          )}
+          {points.map((p, idx) => {
+            const step =
+              points.length > 12
+                ? Math.ceil(points.length / 6)
+                : 1;
+            const isLast = idx === points.length - 1;
+            if (idx % step !== 0 && !isLast) {
+              return null;
+            }
+
+            const x =
+              paddingX +
+              idx * bucketWidth +
+              bucketWidth / 2;
+            const label = p.date.slice(5); // MM-DD
+
+            return (
+              <text
+                key={`${p.date}-label`}
+                x={x}
+                y={height - 2}
+                textAnchor="middle"
+                fontSize="8"
+                fill="currentColor"
+              >
+                {label}
+              </text>
+            );
+          })}
+        </svg>
+      )}
+    </div>
+  );
+}
 
 function formatCurrency(amount: number, currency: string) {
   try {

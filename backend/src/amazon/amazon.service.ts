@@ -149,6 +149,115 @@ export class AmazonService {
     }
   }
 
+  async getSalesTimeSeries(
+    userId: string,
+    range?: { start?: string; end?: string },
+  ) {
+    let credentials: SpApiCredentials;
+
+    try {
+      credentials = await this.getAmazonCredentialsForUser(userId);
+    } catch (error) {
+      if (error instanceof NotFoundException) {
+        throw error;
+      }
+      throw error;
+    }
+    const spapiFlag = this.configService.get<string>('SPAPI_USE_SANDBOX');
+    const useSandbox =
+      spapiFlag === undefined ? true : spapiFlag === 'true';
+
+    let data = (await (async () => {
+      // In sandbox, if no explicit range is requested, fall back to the
+      // documented TEST_CASE_200 behavior for richer demo data.
+      if (useSandbox && !range?.start && !range?.end) {
+        return this.spApiClient.getOrders(credentials);
+      }
+
+      const now = new Date();
+      const defaultStart = new Date(
+        now.getTime() - 30 * 24 * 60 * 60 * 1000,
+      );
+
+      const startDate = range?.start ? new Date(range.start) : defaultStart;
+      const endDate = range?.end ? new Date(range.end) : now;
+
+      const createdAfterIso = startDate.toISOString().split('.')[0] + 'Z';
+      const createdBeforeIso = endDate.toISOString().split('.')[0] + 'Z';
+
+      return this.spApiClient.getOrders(credentials, {
+        createdAfter: createdAfterIso,
+        createdBefore: createdBeforeIso,
+      });
+    })()) as {
+      payload?: {
+        Orders?: Array<{
+          PurchaseDate?: string;
+          OrderTotal?: { Amount?: string; CurrencyCode?: string };
+        }>;
+      };
+    };
+
+    const orders = data.payload?.Orders ?? [];
+
+    const byDate = new Map<
+      string,
+      { revenue: number; orders: number }
+    >();
+
+    for (const order of orders) {
+      if (!order.PurchaseDate) continue;
+      const d = new Date(order.PurchaseDate);
+      if (Number.isNaN(d.getTime())) continue;
+      const key = d.toISOString().slice(0, 10); // YYYY-MM-DD
+
+      const amount = parseFloat(order.OrderTotal?.Amount ?? '0');
+      const safeAmount = Number.isNaN(amount) ? 0 : amount;
+
+      const existing = byDate.get(key) ?? { revenue: 0, orders: 0 };
+      existing.revenue += safeAmount;
+      existing.orders += 1;
+      byDate.set(key, existing);
+    }
+
+    const currency =
+      orders[0]?.OrderTotal?.CurrencyCode ??
+      (orders.length > 0 ? 'USD' : 'USD');
+
+    let points = Array.from(byDate.entries())
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([date, value]) => ({
+        date,
+        revenue: value.revenue,
+        orders: value.orders,
+      }));
+
+    // In sandbox mode, if we still ended up with very few points, synthesize
+    // a richer 30-day demo series so the chart looks meaningful.
+    if (useSandbox && !range?.start && !range?.end && points.length < 5) {
+      const days = 30;
+      const now = new Date();
+      const base = 500;
+
+      points = Array.from({ length: days }).map((_, idx) => {
+        const d = new Date(
+          now.getTime() - (days - 1 - idx) * 24 * 60 * 60 * 1000,
+        );
+        const date = d.toISOString().slice(0, 10);
+        const seasonal = Math.sin((idx / days) * Math.PI * 2);
+        const revenueRaw = base + seasonal * 200 + idx * 15;
+        const revenue = Math.max(0, Math.round(revenueRaw));
+        const orders = Math.max(1, Math.round(revenue / 50));
+        return { date, revenue, orders };
+      });
+    }
+
+    return {
+      currency,
+      points,
+    };
+  }
+
   /**
    * Example method that calls the SP-API client (sandbox for now).
    * This uses the Sellers API "getMarketplaceParticipations" shape.

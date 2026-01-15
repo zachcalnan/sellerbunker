@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import * as https from 'https';
 import * as crypto from 'crypto';
 
@@ -23,6 +24,13 @@ export interface SpApiCredentials {
  */
 @Injectable()
 export class AmazonSpApiClient {
+  private readonly useSandbox: boolean;
+
+  constructor(private readonly configService: ConfigService) {
+    // Default to sandbox unless explicitly disabled
+    const flag = this.configService.get<string>('SPAPI_USE_SANDBOX');
+    this.useSandbox = flag === undefined ? true : flag === 'true';
+  }
   /**
    * Example wrapper for the Sellers API: getMarketplaceParticipations.
    */
@@ -58,23 +66,18 @@ export class AmazonSpApiClient {
 
     // For the static sandbox, CreatedAfter and MarketplaceIds must match
     // the documented test case or you'll get InvalidInput.
-    const isSandbox = true; // this client always uses sandbox host for now
+    const isSandbox = this.useSandbox;
 
     const query: Record<string, unknown> = {};
 
-    if (isSandbox) {
+    if (isSandbox && !createdAfter && !createdBefore && !orderStatuses) {
+      // Default sandbox test case if no explicit range is requested
       query.CreatedAfter = 'TEST_CASE_200';
       query.MarketplaceIds = ['ATVPDKIKX0DER'];
     } else {
-      const now = new Date();
-      const thirtyDaysAgo = new Date(
-        now.getTime() - 30 * 24 * 60 * 60 * 1000,
-      );
-
-      const createdAfterIso =
-        createdAfter ?? thirtyDaysAgo.toISOString().split('.')[0] + 'Z';
-
-      query.CreatedAfter = createdAfterIso;
+      if (createdAfter) {
+        query.CreatedAfter = createdAfter;
+      }
       if (createdBefore) {
         query.CreatedBefore = createdBefore;
       }
@@ -137,7 +140,7 @@ export class AmazonSpApiClient {
   ): Promise<unknown> {
     const accessToken = await this.getLwaAccessToken(credentials);
 
-    const host = this.getSandboxHostForRegion(credentials.region);
+    const host = this.getHostForRegion(credentials.region, this.useSandbox);
     const region = this.mapRegionToAwsRegion(credentials.region);
     const service = 'execute-api';
 
@@ -276,6 +279,25 @@ export class AmazonSpApiClient {
       default:
         return 'sandbox.sellingpartnerapi-na.amazon.com';
     }
+  }
+
+  private getProdHostForRegion(region: SpApiRegion): string {
+    switch (region) {
+      case 'na':
+        return 'sellingpartnerapi-na.amazon.com';
+      case 'eu':
+        return 'sellingpartnerapi-eu.amazon.com';
+      case 'fe':
+        return 'sellingpartnerapi-fe.amazon.com';
+      default:
+        return 'sellingpartnerapi-na.amazon.com';
+    }
+  }
+
+  private getHostForRegion(region: SpApiRegion, sandbox: boolean): string {
+    return sandbox
+      ? this.getSandboxHostForRegion(region)
+      : this.getProdHostForRegion(region);
   }
 
   private mapRegionToAwsRegion(region: SpApiRegion): string {
