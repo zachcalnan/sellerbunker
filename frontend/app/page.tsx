@@ -145,8 +145,7 @@ export default function Home() {
               Seller Dashboard Overview
             </h1>
             <p className="mt-1 text-sm text-[var(--muted-foreground)]">
-              High-level metrics for your connected marketplaces. Data is
-              currently sourced from the Amazon SP-API sandbox.
+              High-level metrics for your connected marketplaces.
             </p>
           </div>
           <div className="mt-4 flex flex-col items-start gap-3 md:mt-0 md:flex-row md:items-center md:gap-4">
@@ -213,23 +212,23 @@ export default function Home() {
         ) : null}
 
         {summary && (
-          <section className="rounded-2xl border border-[var(--surface-border)] bg-[var(--surface)] p-6 shadow-[0_18px_60px_-40px_rgba(15,23,42,1)]">
-            <div className="mb-6 flex items-center justify-between">
+          <section className="rounded-none border-0 bg-transparent p-0 shadow-none md:rounded-2xl md:border md:border-[var(--surface-border)] md:bg-[var(--surface)] md:p-6 md:shadow-[0_18px_60px_-40px_rgba(15,23,42,1)]">
+            <div className="mb-4 flex items-center justify-between">
               <h2 className="text-sm font-medium uppercase tracking-[0.2em] text-[var(--muted-foreground)]">
                 Performance Snapshot
               </h2>
               <span className="text-xs text-[var(--muted-foreground)]">
-                Last 30 days
+              Last 30 days
               </span>
             </div>
 
-            <div className="grid gap-6 md:grid-cols-4">
+            <div className="grid gap-4 md:grid-cols-4">
               {cards.map((card) => (
                 <DonutCard key={card.label} {...card} />
               ))}
             </div>
 
-            <div className="mt-8 grid gap-4 md:grid-cols-4">
+            <div className="mt-4 grid gap-4 md:grid-cols-4">
               {kpiCards.map((card) => (
                 <KpiCard key={card.label} {...card} />
               ))}
@@ -326,13 +325,11 @@ function SalesTrend({
     points.length > 0
       ? points.reduce(
           (m, p) =>
-            Math.max(
-              m,
-              mode === "revenue" ? p.revenue : p.orders
-            ),
+            Math.max(m, mode === "revenue" ? p.revenue : p.orders),
           0
         )
       : 0;
+  const allZero = points.length > 0 && maxValue === 0;
 
   const width = 400;
   const height = 140;
@@ -347,7 +344,7 @@ function SalesTrend({
   const barWidth = bucketWidth * 0.6;
 
   return (
-    <div className="mt-8 rounded-xl bg-[var(--surface-muted)] p-4 ring-1 ring-[var(--surface-border)]">
+    <div className="mt-4 rounded-xl bg-[var(--surface-muted)] p-4 ring-1 ring-[var(--surface-border)]">
       <div className="mb-3 flex items-center justify-between">
         <div>
           <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
@@ -359,13 +356,18 @@ function SalesTrend({
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <div className="inline-flex rounded-full bg-[var(--surface)] p-0.5 text-[10px] ring-1 ring-[var(--surface-border)]">
+          <div className="relative inline-flex rounded-full bg-[var(--surface)] p-0.5 text-[10px] ring-1 ring-[var(--surface-border)]">
+            <div
+              className={`absolute inset-y-0 left-0 w-1/2 rounded-full bg-[var(--foreground)] transition-transform duration-200 ${
+                mode === "orders" ? "translate-x-full" : "translate-x-0"
+              }`}
+            />
             <button
               type="button"
               onClick={() => setMode("revenue")}
-              className={`px-2 py-0.5 rounded-full ${
+              className={`relative z-10 px-2 py-0.5 rounded-full ${
                 mode === "revenue"
-                  ? "bg-[var(--foreground)] text-[var(--background)]"
+                  ? "text-[var(--background)]"
                   : "text-[var(--muted-foreground)]"
               } cursor-pointer`}
             >
@@ -374,9 +376,9 @@ function SalesTrend({
             <button
               type="button"
               onClick={() => setMode("orders")}
-              className={`px-2 py-0.5 rounded-full ${
+              className={`relative z-10 px-2 py-0.5 rounded-full ${
                 mode === "orders"
-                  ? "bg-[var(--foreground)] text-[var(--background)]"
+                  ? "text-[var(--background)]"
                   : "text-[var(--muted-foreground)]"
               } cursor-pointer`}
             >
@@ -393,12 +395,12 @@ function SalesTrend({
       {error && (
         <p className="text-[11px] text-red-600">{error}</p>
       )}
-      {!error && points.length === 0 && !loading && (
+      {!error && (points.length === 0 || allZero) && !loading && (
         <p className="text-[11px] text-[var(--muted-foreground)]">
           No orders found for the selected period yet.
         </p>
       )}
-      {points.length > 0 && (
+      {points.length > 0 && !allZero && (
         <svg
           viewBox={`0 0 ${width} ${height}`}
           className="mt-2 h-40 w-full"
@@ -533,7 +535,8 @@ function SalesTrend({
               paddingX +
               idx * bucketWidth +
               bucketWidth / 2;
-            const label = p.date.slice(5); // MM-DD
+            const [, month, day] = p.date.split("-"); // YYYY-MM-DD
+            const label = `${day}-${month}`; // DD-MM
 
             return (
               <text

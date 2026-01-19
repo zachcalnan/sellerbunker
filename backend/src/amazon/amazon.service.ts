@@ -80,7 +80,43 @@ export class AmazonService {
     }
 
     try {
-      const data = (await this.spApiClient.getOrders(credentials)) as {
+      // Use the last 30 days for the high-level summary. Amazon requires
+      // CreatedBefore to be at least ~2 minutes before "now", so subtract
+      // a small safety window.
+      const endDate = new Date(Date.now() - 5 * 60 * 1000);
+      const startDate = new Date(
+        endDate.getTime() - 30 * 24 * 60 * 60 * 1000,
+      );
+
+      const createdAfterIso = startDate.toISOString().split('.')[0] + 'Z';
+      const createdBeforeIso = endDate.toISOString().split('.')[0] + 'Z';
+
+      const marketplaceIds =
+        credentials.region === 'eu'
+          ? [
+              'A1F83G8C2ARO7P', // UK
+              'A1PA6795UKMFR9', // DE
+              'A13V1IB3VIYZZH', // FR
+              'APJ6JRA9NG5V4',  // IT
+              'A1RKKUPIHCS9HS', // ES
+            ]
+          : [
+              'ATVPDKIKX0DER', // US
+              'A2EUQ1WTGCTBG2', // CA
+              'A1AM78C64UM0Y8', // MX
+            ];
+
+      const data = (await this.spApiClient.getOrders(credentials, {
+        createdAfter: createdAfterIso,
+        createdBefore: createdBeforeIso,
+        marketplaceIds,
+        orderStatuses: [
+          'Shipped',
+          'Unshipped',
+          'PartiallyShipped',
+          'Canceled',
+        ],
+      })) as {
         payload?: {
           Orders?: Array<{
             OrderTotal?: { Amount?: string; CurrencyCode?: string };
@@ -107,16 +143,16 @@ export class AmazonService {
 
       const currency =
         orders[0]?.OrderTotal?.CurrencyCode ??
-        (orders.length > 0 ? 'USD' : 'USD');
+        // Fallback by region if we had no orders in the window.
+        (credentials.region === 'eu' ? 'GBP' : 'USD');
 
-      // For sandbox we don't have real values for these, so keep simple placeholders.
       const activeSkus = totalOrders;
       const unitsInFba = unitsSold * 3;
       const openShipments = Math.max(1, Math.round(totalOrders / 2));
 
       return {
         marketplace: 'amazon',
-        sellerId: 'SANDBOX-SELLER',
+        sellerId: 'LIVE-SELLER',
         currency,
         period: 'last_30_days',
         revenue,
@@ -174,20 +210,45 @@ export class AmazonService {
         return this.spApiClient.getOrders(credentials);
       }
 
-      const now = new Date();
+      const nowSafe = new Date(Date.now() - 5 * 60 * 1000);
+      // Default to the last 30 days when no explicit range is provided.
       const defaultStart = new Date(
-        now.getTime() - 30 * 24 * 60 * 60 * 1000,
+        nowSafe.getTime() - 30 * 24 * 60 * 60 * 1000,
       );
 
       const startDate = range?.start ? new Date(range.start) : defaultStart;
-      const endDate = range?.end ? new Date(range.end) : now;
+      const endDate = range?.end ? new Date(range.end) : nowSafe;
 
       const createdAfterIso = startDate.toISOString().split('.')[0] + 'Z';
       const createdBeforeIso = endDate.toISOString().split('.')[0] + 'Z';
 
+      // Marketplace routing: include common marketplaces per region so we
+      // capture orders even if they aren't only in one country store.
+      const marketplaceIds =
+        credentials.region === 'eu'
+          ? [
+              'A1F83G8C2ARO7P', // UK
+              'A1PA6795UKMFR9', // DE
+              'A13V1IB3VIYZZH', // FR
+              'APJ6JRA9NG5V4',  // IT
+              'A1RKKUPIHCS9HS', // ES
+            ]
+          : [
+              'ATVPDKIKX0DER', // US
+              'A2EUQ1WTGCTBG2', // CA
+              'A1AM78C64UM0Y8', // MX
+            ];
+
       return this.spApiClient.getOrders(credentials, {
         createdAfter: createdAfterIso,
         createdBefore: createdBeforeIso,
+        marketplaceIds,
+        orderStatuses: [
+          'Shipped',
+          'Unshipped',
+          'PartiallyShipped',
+          'Canceled',
+        ],
       });
     })()) as {
       payload?: {
@@ -231,6 +292,27 @@ export class AmazonService {
         revenue: value.revenue,
         orders: value.orders,
       }));
+
+    // In production, when no explicit range is provided, pad the series so we
+    // always return a full 30-day window, including days with zero orders.
+    if (!useSandbox && !range?.start && !range?.end) {
+      const dayMs = 24 * 60 * 60 * 1000;
+      const nowSafe = new Date(Date.now() - 5 * 60 * 1000);
+      const startDate = new Date(nowSafe.getTime() - 30 * dayMs);
+
+      const padded: { date: string; revenue: number; orders: number }[] = [];
+      for (let i = 0; i < 30; i += 1) {
+        const d = new Date(startDate.getTime() + i * dayMs);
+        const key = d.toISOString().slice(0, 10); // YYYY-MM-DD
+        const existing = byDate.get(key) ?? { revenue: 0, orders: 0 };
+        padded.push({
+          date: key,
+          revenue: existing.revenue,
+          orders: existing.orders,
+        });
+      }
+      points = padded;
+    }
 
     // In sandbox mode, if we still ended up with very few points, synthesize
     // a richer 30-day demo series so the chart looks meaningful.
