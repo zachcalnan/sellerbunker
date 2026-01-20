@@ -25,9 +25,9 @@ export default function RootLayout({
         <body className="antialiased">
           <header className="flex h-16 items-center justify-end gap-4 border-b border-[var(--surface-border)] bg-[var(--surface)] px-4">
             <SignedOut>
-              <SignInButton />
+              <SignInButton className="cursor-pointer" />
               <SignUpButton>
-                <button className="rounded-full bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500">
+                <button className="cursor-pointer rounded-full bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500">
                   Sign up
                 </button>
               </SignUpButton>
