@@ -23,22 +23,28 @@ export default function RootLayout({
     <ClerkProvider>
       <html lang="en">
         <body className="antialiased">
-          <header className="flex h-16 items-center justify-end gap-4 border-b border-[var(--surface-border)] bg-[var(--surface)] px-4">
-            <SignedOut>
-              <SignInButton>
-                <button className="cursor-pointer text-sm font-medium">
-                  Sign in
-                </button>
-              </SignInButton>
-              <SignUpButton>
-                <button className="cursor-pointer rounded-full bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500">
-                  Sign up
-                </button>
-              </SignUpButton>
-            </SignedOut>
-            <SignedIn>
-              <UserButton afterSignOutUrl="/" />
-            </SignedIn>
+          <header className="flex h-16 items-center justify-between gap-4 border-b border-[var(--surface-border)] bg-[var(--surface)] px-4">
+            <div>
+              <span className="font-bold">SELLER</span>
+              <span>BUNKER</span>
+            </div>
+            <div className="flex gap-4">
+              <SignedOut>
+                <SignInButton>
+                  <button className="cursor-pointer text-sm font-medium">
+                    Sign in
+                  </button>
+                </SignInButton>
+                <SignUpButton>
+                  <button className="cursor-pointer rounded-full bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500">
+                    Sign up
+                  </button>
+                </SignUpButton>
+              </SignedOut>
+              <SignedIn>
+                <UserButton afterSignOutUrl="/" />
+              </SignedIn>
+            </div>
           </header>
           {children}
         </body>
