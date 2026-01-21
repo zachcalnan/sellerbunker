@@ -24,10 +24,10 @@ export default function RootLayout({
       <html lang="en">
         <body className="antialiased">
           <header className="flex h-16 items-center justify-between gap-4 border-b border-[var(--surface-border)] bg-[var(--surface)] px-4">
-            <div>
+            <a className="cursor-pointer" href="/">
               <span className="font-bold">SELLER</span>
               <span>BUNKER</span>
-            </div>
+            </a>
             <div className="flex gap-4">
               <SignedOut>
                 <SignInButton>
