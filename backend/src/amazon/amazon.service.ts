@@ -352,10 +352,25 @@ export class AmazonService {
   async syncRecentOrdersToDb(userId: string): Promise<void> {
     const credentials = await this.getAmazonCredentialsForUser(userId);
 
+    const account = await this.prisma.sellerAccount.findUnique({
+      where: {
+        userId_marketplace: {
+          userId,
+          marketplace: 'amazon',
+        },
+      },
+    });
+
     const nowSafe = new Date(Date.now() - 5 * 60 * 1000);
-    const startDate = new Date(
+    const defaultStart = new Date(
       nowSafe.getTime() - 30 * 24 * 60 * 60 * 1000,
     );
+
+    // Use incremental sync cursor when available; fall back to the last 30 days.
+    const startDate =
+      account && (account as any).ordersLastSyncedAt
+        ? ((account as any).ordersLastSyncedAt as Date)
+        : defaultStart;
 
     const createdAfterIso = startDate.toISOString().split('.')[0] + 'Z';
     const createdBeforeIso = nowSafe.toISOString().split('.')[0] + 'Z';
@@ -405,6 +420,22 @@ export class AmazonService {
     );
 
     if (orders.length === 0) {
+      // Still advance the cursor so we don't keep re-querying the same window.
+      if (!account) {
+        return;
+      }
+      await this.prisma.sellerAccount.update({
+        where: {
+          userId_marketplace: {
+            userId,
+            marketplace: 'amazon',
+          },
+        },
+        // Cast to any until Prisma types are regenerated with ordersLastSyncedAt.
+        data: {
+          ordersLastSyncedAt: nowSafe,
+        } as any,
+      });
       return;
     }
 
@@ -489,6 +520,20 @@ export class AmazonService {
         },
       });
     }
+
+    // Update sync cursor for this seller.
+    await this.prisma.sellerAccount.update({
+      where: {
+        userId_marketplace: {
+          userId,
+          marketplace: 'amazon',
+        },
+      },
+      // Cast to any until Prisma types are regenerated with ordersLastSyncedAt.
+      data: {
+        ordersLastSyncedAt: nowSafe,
+      } as any,
+    });
   }
 
   /**
