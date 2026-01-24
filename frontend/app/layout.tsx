@@ -17,11 +17,11 @@ export default function RootLayout({
 }>) {
   const themeScript = `
 (function() {
-  var theme = 'light';
+  var theme = 'dark';
   try {
     var stored = localStorage.getItem('theme');
     if (stored === 'dark' || stored === 'light') theme = stored;
-    else if (window.matchMedia('(prefers-color-scheme: dark)').matches) theme = 'dark';
+    else if (window.matchMedia('(prefers-color-scheme: light)').matches) theme = 'light';
   } catch (e) {}
   document.documentElement.dataset.theme = theme;
 })();
