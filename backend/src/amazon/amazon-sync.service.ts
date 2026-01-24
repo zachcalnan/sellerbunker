@@ -1,10 +1,27 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, OnModuleInit } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 
 @Injectable()
-export class AmazonSyncService {
+export class AmazonSyncService implements OnModuleInit {
   constructor(@InjectQueue('amazon-sync') private readonly queue: Queue) {}
+
+  /**
+   * Configure periodic batch sync when the module starts.
+   * This enqueues a repeatable job that will run every 10 minutes.
+   */
+  async onModuleInit(): Promise<void> {
+    await this.queue.add(
+      'orders-batch-sync',
+      {},
+      {
+        repeat: {
+          every: 10 * 60 * 1000, // 10 minutes
+        },
+        jobId: 'orders-batch-sync',
+      },
+    );
+  }
 
   /**
    * Enqueue a full background sync for a given user.

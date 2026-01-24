@@ -537,6 +537,159 @@ export class AmazonService {
   }
 
   /**
+   * Batch background sync: run recent-order sync for all active Amazon sellers.
+   * Intended to be triggered periodically by a BullMQ repeatable job.
+   */
+  async syncRecentOrdersForAllSellers(): Promise<void> {
+    const accounts = await this.prisma.sellerAccount.findMany({
+      where: {
+        marketplace: 'amazon',
+        isActive: true,
+      },
+      select: {
+        userId: true,
+      },
+    });
+
+    for (const { userId } of accounts) {
+      try {
+        console.log(
+          '[AmazonService.syncRecentOrdersForAllSellers] syncing user',
+          { userId },
+        );
+        await this.syncRecentOrdersToDb(userId);
+      } catch (err) {
+        console.error(
+          '[AmazonService.syncRecentOrdersForAllSellers] failed for user',
+          { userId, err },
+        );
+      }
+    }
+  }
+
+  /**
+   * Recompute daily KPI aggregates for a user from the raw Order table.
+   * For now we populate only the core metrics needed for the dashboard and
+   * leave the cost/fee fields as zero until those sources are wired.
+   */
+  async recomputeDailyKpiSummary(userId: string): Promise<void> {
+    const nowSafe = new Date(Date.now() - 5 * 60 * 1000);
+    const startDate = new Date(
+      nowSafe.getTime() - 30 * 24 * 60 * 60 * 1000,
+    );
+
+    const orders = await this.prisma.order.findMany({
+      where: {
+        userId,
+        marketplace: 'amazon',
+        orderDate: {
+          gte: startDate,
+          lte: nowSafe,
+        },
+      },
+    });
+
+    const byKey = new Map<
+      string,
+      {
+        date: string;
+        marketplace: string;
+        fulfilmentChannel: string;
+        revenue: number;
+        unitsSold: number;
+        ordersCount: number;
+      }
+    >();
+
+    for (const order of orders) {
+      const d = order.orderDate;
+      const dateStr = d.toISOString().slice(0, 10); // YYYY-MM-DD
+      const marketplace = order.marketplace;
+      const fulfilmentChannel = 'UNKNOWN';
+      const key = `${dateStr}|${marketplace}|${fulfilmentChannel}`;
+
+      const existing =
+        byKey.get(key) ??
+        {
+          date: dateStr,
+          marketplace,
+          fulfilmentChannel,
+          revenue: 0,
+          unitsSold: 0,
+          ordersCount: 0,
+        };
+
+      const itemPriceNum = Number(order.itemPrice);
+      const quantityNum = order.quantity;
+
+      existing.revenue += itemPriceNum * quantityNum;
+      existing.unitsSold += quantityNum;
+      existing.ordersCount += 1;
+
+      byKey.set(key, existing);
+    }
+
+    for (const value of byKey.values()) {
+      const date = new Date(value.date);
+
+      await (this.prisma as any).aggDailyKpiSummary.upsert({
+        where: {
+          userId_marketplace_fulfilmentChannel_date: {
+            userId,
+            marketplace: value.marketplace,
+            fulfilmentChannel: value.fulfilmentChannel,
+            date,
+          },
+        },
+        update: {
+          revenue: value.revenue,
+          unitsSold: value.unitsSold,
+          ordersCount: value.ordersCount,
+          amazonFeesTotal: 0,
+          refundsTotal: 0,
+          cogsTotal: 0,
+          prepFeesTotal: 0,
+          shippingCostsTotal: 0,
+          advertisingTotal: 0,
+          vatOnAmazonFeesTotal: 0,
+          vatEstimateTotal: 0,
+          softwareSubsTotal: 0,
+          otherSubsTotal: 0,
+          vatTotal: 0,
+          otherCostsTotal: 0,
+          profit: 0,
+          roiPct: 0,
+          marginPct: 0,
+        },
+        create: {
+          userId,
+          marketplace: value.marketplace,
+          fulfilmentChannel: value.fulfilmentChannel,
+          date,
+          revenue: value.revenue,
+          unitsSold: value.unitsSold,
+          ordersCount: value.ordersCount,
+          amazonFeesTotal: 0,
+          refundsTotal: 0,
+          cogsTotal: 0,
+          prepFeesTotal: 0,
+          shippingCostsTotal: 0,
+          advertisingTotal: 0,
+          vatOnAmazonFeesTotal: 0,
+          vatEstimateTotal: 0,
+          softwareSubsTotal: 0,
+          otherSubsTotal: 0,
+          vatTotal: 0,
+          otherCostsTotal: 0,
+          profit: 0,
+          roiPct: 0,
+          marginPct: 0,
+        },
+      });
+    }
+  }
+
+  /**
    * Example method that calls the SP-API client (sandbox for now).
    * This uses the Sellers API "getMarketplaceParticipations" shape.
    */

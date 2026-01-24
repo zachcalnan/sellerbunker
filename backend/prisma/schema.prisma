@@ -111,3 +111,38 @@ model Inventory {
   @@index([userId])
   @@map("inventory")
 }
+
+// Daily KPI aggregates for fast dashboard reads
+model AggDailyKpiSummary {
+  id                 String   @id @default(uuid())
+  userId             String   @map("user_id")
+  marketplace        String
+  fulfilmentChannel  String   @map("fulfilment_channel")
+  date               DateTime @map("date")
+
+  revenue            Decimal  @db.Decimal(14, 2)
+  unitsSold          Int
+  ordersCount        Int      @map("orders_count")
+  amazonFeesTotal    Decimal  @map("amazon_fees_total") @db.Decimal(14, 2)
+  refundsTotal       Decimal  @map("refunds_total") @db.Decimal(14, 2)
+  cogsTotal          Decimal  @map("cogs_total") @db.Decimal(14, 2)
+  prepFeesTotal      Decimal  @map("prep_fees_total") @db.Decimal(14, 2)
+  shippingCostsTotal Decimal  @map("shipping_costs_total") @db.Decimal(14, 2)
+  advertisingTotal   Decimal  @map("advertising_total") @db.Decimal(14, 2)
+  vatOnAmazonFeesTotal Decimal @map("vat_on_amazon_fees_total") @db.Decimal(14, 2)
+  vatEstimateTotal   Decimal  @map("vat_estimate_total") @db.Decimal(14, 2)
+  softwareSubsTotal  Decimal  @map("software_subs_total") @db.Decimal(14, 2)
+  otherSubsTotal     Decimal  @map("other_subs_total") @db.Decimal(14, 2)
+  vatTotal           Decimal  @map("vat_total") @db.Decimal(14, 2)
+  otherCostsTotal    Decimal  @map("other_costs_total") @db.Decimal(14, 2)
+  profit             Decimal  @db.Decimal(14, 2)
+  roiPct             Decimal  @map("roi_pct") @db.Decimal(7, 4)
+  marginPct          Decimal  @map("margin_pct") @db.Decimal(7, 4)
+
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  @@unique([userId, marketplace, fulfilmentChannel, date])
+  @@index([userId])
+  @@map("agg_daily_kpi_summary")
+}
