@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "@clerk/themes/shadcn.css";
 
 :root {
   --background: #f8fafc;
@@ -33,10 +34,36 @@
     "Liberation Mono", "Courier New", monospace;
 }
 
+html {
+  scroll-padding-top: 5rem;
+}
+
 body {
   background: var(--background);
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
+}
+
+/* UserButton popover: light mode */
+.cl-userButtonPopoverCard {
+  background: #ffffff !important;
+}
+.cl-userButtonPopoverCard * {
+  color: #0f172a !important;
+}
+.cl-userButtonPopoverCard button:hover {
+  background: rgba(0, 0, 0, 0.06) !important;
+}
+
+/* UserButton popover: dark mode */
+[data-theme="dark"] .cl-userButtonPopoverCard {
+  background: #000000 !important;
+}
+[data-theme="dark"] .cl-userButtonPopoverCard * {
+  color: #e5e7eb !important;
+}
+[data-theme="dark"] .cl-userButtonPopoverCard button:hover {
+  background: rgba(255, 255, 255, 0.1) !important;
 }
 
 
