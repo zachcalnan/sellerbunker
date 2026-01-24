@@ -133,6 +133,17 @@ export class AmazonController {
     });
   }
 
+  /**
+   * Dev-only helper: recompute the last 30 days of daily KPI aggregates
+   * for the authenticated user from existing Order rows.
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Post('dev/recompute-kpi')
+  async devRecomputeKpi(@Req() req: { user: { userId: string } }) {
+    await this.amazonService.recomputeDailyKpiSummary(req.user.userId);
+    return { status: 'recomputed' };
+  }
+
   @Get('sandbox/marketplaces')
   async getSandboxMarketplaces(@Req() req: { user: { userId: string } }) {
     // Example endpoint that proxies the SP-API Sellers "getMarketplaceParticipations"

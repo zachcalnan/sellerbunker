@@ -67,122 +67,85 @@ export class AmazonService {
   async getAccountSummary(userId: string) {
     let credentials: SpApiCredentials;
 
-    // If the user has not linked an Amazon account yet, surface a 404 back to the client.
+    // Ensure the user has a linked Amazon account; preserve existing 404 behavior.
     try {
       credentials = await this.getAmazonCredentialsForUser(userId);
     } catch (error) {
       if (error instanceof NotFoundException) {
-        // "Amazon account not linked" or "credentials incomplete" should not fall back to demo data
         throw error;
       }
-      // For any other unexpected error getting credentials, also bubble up.
       throw error;
     }
 
-    try {
-      // Use the last 30 days for the high-level summary. Amazon requires
-      // CreatedBefore to be at least ~2 minutes before "now", so subtract
-      // a small safety window.
-      const endDate = new Date(Date.now() - 5 * 60 * 1000);
-      const startDate = new Date(
-        endDate.getTime() - 30 * 24 * 60 * 60 * 1000,
-      );
+    const nowSafe = new Date(Date.now() - 5 * 60 * 1000);
+    const startDate = new Date(
+      nowSafe.getTime() - 30 * 24 * 60 * 60 * 1000,
+    );
 
-      const createdAfterIso = startDate.toISOString().split('.')[0] + 'Z';
-      const createdBeforeIso = endDate.toISOString().split('.')[0] + 'Z';
+    const rows = await (this.prisma as any).aggDailyKpiSummary.findMany({
+      where: {
+        userId,
+        marketplace: 'amazon',
+        date: {
+          gte: startDate,
+          lte: nowSafe,
+        },
+      },
+    });
 
-      const marketplaceIds =
-        credentials.region === 'eu'
-          ? [
-              'A1F83G8C2ARO7P', // UK
-              'A1PA6795UKMFR9', // DE
-              'A13V1IB3VIYZZH', // FR
-              'APJ6JRA9NG5V4',  // IT
-              'A1RKKUPIHCS9HS', // ES
-            ]
-          : [
-              'ATVPDKIKX0DER', // US
-              'A2EUQ1WTGCTBG2', // CA
-              'A1AM78C64UM0Y8', // MX
-            ];
-
-      const data = (await this.spApiClient.getOrders(credentials, {
-        createdAfter: createdAfterIso,
-        createdBefore: createdBeforeIso,
-        marketplaceIds,
-        orderStatuses: [
-          'Shipped',
-          'Unshipped',
-          'PartiallyShipped',
-          'Canceled',
-        ],
-      })) as {
-        payload?: {
-          Orders?: Array<{
-            OrderTotal?: { Amount?: string; CurrencyCode?: string };
-            NumberOfItemsShipped?: number;
-            NumberOfItemsUnshipped?: number;
-            MarketplaceId?: string;
-          }>;
-        };
-      };
-
-      const orders = data.payload?.Orders ?? [];
-
-      const totalOrders = orders.length;
-      const revenue = orders.reduce((sum, order) => {
-        const amount = parseFloat(order.OrderTotal?.Amount ?? '0');
-        return sum + (isNaN(amount) ? 0 : amount);
-      }, 0);
-
-      const unitsSold = orders.reduce((sum, order) => {
-        const shipped = order.NumberOfItemsShipped ?? 0;
-        const unshipped = order.NumberOfItemsUnshipped ?? 0;
-        return sum + shipped + unshipped;
-      }, 0);
-
-      const currency =
-        orders[0]?.OrderTotal?.CurrencyCode ??
-        // Fallback by region if we had no orders in the window.
-        (credentials.region === 'eu' ? 'GBP' : 'USD');
-
-      const activeSkus = totalOrders;
-      const unitsInFba = unitsSold * 3;
-      const openShipments = Math.max(1, Math.round(totalOrders / 2));
-
+    if (!rows.length) {
+      // No aggregates yet for this user; return a zeroed summary rather than demo data.
+      const currency = credentials.region === 'eu' ? 'GBP' : 'USD';
       return {
         marketplace: 'amazon',
         sellerId: 'LIVE-SELLER',
         currency,
         period: 'last_30_days',
-        revenue,
-        profitMargin: 0.28,
-        unitsSold,
-        adSpend: revenue * 0.25,
-        totalOrders,
-        activeSkus,
-        unitsInFba,
-        openShipments,
-        generatedAt: new Date().toISOString(),
-      };
-    } catch {
-      // Fallback to static demo values only if the SP-API call itself fails.
-      return {
-        marketplace: 'amazon',
-        sellerId: 'DEMO-SELLER-123',
-        currency: 'USD',
-        period: 'last_30_days',
-        revenue: 24300,
-        profitMargin: 0.28,
-        unitsSold: 3240,
-        adSpend: 6100,
-        totalOrders: 4812,
-        activeSkus: 186,
-        unitsInFba: 9430,
-        openShipments: 17,
+        revenue: 0,
+        profitMargin: 0,
+        unitsSold: 0,
+        adSpend: 0,
+        totalOrders: 0,
+        activeSkus: 0,
+        unitsInFba: 0,
+        openShipments: 0,
         generatedAt: new Date().toISOString(),
       };
     }
+
+    const revenue = rows.reduce(
+      (sum: number, row: any) => sum + Number(row.revenue),
+      0,
+    );
+    const unitsSold = rows.reduce(
+      (sum: number, row: any) => sum + row.unitsSold,
+      0,
+    );
+    const totalOrders = rows.reduce(
+      (sum: number, row: any) => sum + row.ordersCount,
+      0,
+    );
+
+    const currency = credentials.region === 'eu' ? 'GBP' : 'USD';
+    const activeSkus = totalOrders; // simple placeholder until per-SKU aggregates exist
+    const unitsInFba = unitsSold * 3; // same placeholder logic as before
+    const openShipments = Math.max(1, Math.round(totalOrders / 2));
+
+    return {
+      marketplace: 'amazon',
+      sellerId: 'LIVE-SELLER',
+      currency,
+      period: 'last_30_days',
+      revenue,
+      profitMargin: 0.28,
+      unitsSold,
+      adSpend: revenue * 0.25,
+      totalOrders,
+      activeSkus,
+      unitsInFba,
+      openShipments,
+      generatedAt: new Date().toISOString(),
+    };
   }
 
   async getSalesTimeSeries(
@@ -199,91 +162,51 @@ export class AmazonService {
       }
       throw error;
     }
-    const spapiFlag = this.configService.get<string>('SPAPI_USE_SANDBOX');
-    const useSandbox =
-      spapiFlag === undefined ? true : spapiFlag === 'true';
 
-    let data = (await (async () => {
-      // In sandbox, if no explicit range is requested, fall back to the
-      // documented TEST_CASE_200 behavior for richer demo data.
-      if (useSandbox && !range?.start && !range?.end) {
-        return this.spApiClient.getOrders(credentials);
-      }
+    const nowSafe = new Date(Date.now() - 5 * 60 * 1000);
+    const defaultStart = new Date(
+      nowSafe.getTime() - 30 * 24 * 60 * 60 * 1000,
+    );
 
-      const nowSafe = new Date(Date.now() - 5 * 60 * 1000);
-      // Default to the last 30 days when no explicit range is provided.
-      const defaultStart = new Date(
-        nowSafe.getTime() - 30 * 24 * 60 * 60 * 1000,
-      );
+    const startDate = range?.start ? new Date(range.start) : defaultStart;
+    const endDate = range?.end ? new Date(range.end) : nowSafe;
 
-      const startDate = range?.start ? new Date(range.start) : defaultStart;
-      const endDate = range?.end ? new Date(range.end) : nowSafe;
-
-      const createdAfterIso = startDate.toISOString().split('.')[0] + 'Z';
-      const createdBeforeIso = endDate.toISOString().split('.')[0] + 'Z';
-
-      // Marketplace routing: include common marketplaces per region so we
-      // capture orders even if they aren't only in one country store.
-      const marketplaceIds =
-        credentials.region === 'eu'
-          ? [
-              'A1F83G8C2ARO7P', // UK
-              'A1PA6795UKMFR9', // DE
-              'A13V1IB3VIYZZH', // FR
-              'APJ6JRA9NG5V4',  // IT
-              'A1RKKUPIHCS9HS', // ES
-            ]
-          : [
-              'ATVPDKIKX0DER', // US
-              'A2EUQ1WTGCTBG2', // CA
-              'A1AM78C64UM0Y8', // MX
-            ];
-
-      return this.spApiClient.getOrders(credentials, {
-        createdAfter: createdAfterIso,
-        createdBefore: createdBeforeIso,
-        marketplaceIds,
-        orderStatuses: [
-          'Shipped',
-          'Unshipped',
-          'PartiallyShipped',
-          'Canceled',
-        ],
-      });
-    })()) as {
-      payload?: {
-        Orders?: Array<{
-          PurchaseDate?: string;
-          OrderTotal?: { Amount?: string; CurrencyCode?: string };
-        }>;
-      };
-    };
-
-    const orders = data.payload?.Orders ?? [];
+    const ordersFromDb = await this.prisma.order.findMany({
+      where: {
+        userId,
+        marketplace: 'amazon',
+        orderDate: {
+          gte: startDate,
+          lte: endDate,
+        },
+      },
+      select: {
+        orderDate: true,
+        itemPrice: true,
+        quantity: true,
+      },
+    });
 
     const byDate = new Map<
       string,
       { revenue: number; orders: number }
     >();
 
-    for (const order of orders) {
-      if (!order.PurchaseDate) continue;
-      const d = new Date(order.PurchaseDate);
-      if (Number.isNaN(d.getTime())) continue;
+    for (const order of ordersFromDb) {
+      const d = order.orderDate;
       const key = d.toISOString().slice(0, 10); // YYYY-MM-DD
 
-      const amount = parseFloat(order.OrderTotal?.Amount ?? '0');
-      const safeAmount = Number.isNaN(amount) ? 0 : amount;
+      const itemPriceNum = Number(order.itemPrice);
+      const quantityNum = order.quantity;
+      const revenueForOrder = itemPriceNum * quantityNum;
 
       const existing = byDate.get(key) ?? { revenue: 0, orders: 0 };
-      existing.revenue += safeAmount;
+      existing.revenue += revenueForOrder;
       existing.orders += 1;
       byDate.set(key, existing);
     }
 
-    const currency =
-      orders[0]?.OrderTotal?.CurrencyCode ??
-      (orders.length > 0 ? 'USD' : 'USD');
+    const currency = credentials.region === 'eu' ? 'GBP' : 'USD';
 
     let points = Array.from(byDate.entries())
       .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
@@ -293,16 +216,13 @@ export class AmazonService {
         orders: value.orders,
       }));
 
-    // In production, when no explicit range is provided, pad the series so we
-    // always return a full 30-day window, including days with zero orders.
-    if (!useSandbox && !range?.start && !range?.end) {
+    // If no explicit range is provided, pad to a full 30-day window so charts
+    // always have consistent length.
+    if (!range?.start && !range?.end) {
       const dayMs = 24 * 60 * 60 * 1000;
-      const nowSafe = new Date(Date.now() - 5 * 60 * 1000);
-      const startDate = new Date(nowSafe.getTime() - 30 * dayMs);
-
       const padded: { date: string; revenue: number; orders: number }[] = [];
       for (let i = 0; i < 30; i += 1) {
-        const d = new Date(startDate.getTime() + i * dayMs);
+        const d = new Date(defaultStart.getTime() + i * dayMs);
         const key = d.toISOString().slice(0, 10); // YYYY-MM-DD
         const existing = byDate.get(key) ?? { revenue: 0, orders: 0 };
         padded.push({
@@ -312,26 +232,6 @@ export class AmazonService {
         });
       }
       points = padded;
-    }
-
-    // In sandbox mode, if we still ended up with very few points, synthesize
-    // a richer 30-day demo series so the chart looks meaningful.
-    if (useSandbox && !range?.start && !range?.end && points.length < 5) {
-      const days = 30;
-      const now = new Date();
-      const base = 500;
-
-      points = Array.from({ length: days }).map((_, idx) => {
-        const d = new Date(
-          now.getTime() - (days - 1 - idx) * 24 * 60 * 60 * 1000,
-        );
-        const date = d.toISOString().slice(0, 10);
-        const seasonal = Math.sin((idx / days) * Math.PI * 2);
-        const revenueRaw = base + seasonal * 200 + idx * 15;
-        const revenue = Math.max(0, Math.round(revenueRaw));
-        const orders = Math.max(1, Math.round(revenue / 50));
-        return { date, revenue, orders };
-      });
     }
 
     return {
@@ -421,21 +321,21 @@ export class AmazonService {
 
     if (orders.length === 0) {
       // Still advance the cursor so we don't keep re-querying the same window.
-      if (!account) {
-        return;
-      }
-      await this.prisma.sellerAccount.update({
-        where: {
-          userId_marketplace: {
-            userId,
-            marketplace: 'amazon',
+      if (account) {
+        await this.prisma.sellerAccount.update({
+          where: {
+            userId_marketplace: {
+              userId,
+              marketplace: 'amazon',
+            },
           },
-        },
-        // Cast to any until Prisma types are regenerated with ordersLastSyncedAt.
-        data: {
-          ordersLastSyncedAt: nowSafe,
-        } as any,
-      });
+          // Cast to any until Prisma types are regenerated with ordersLastSyncedAt.
+          data: {
+            ordersLastSyncedAt: nowSafe,
+          } as any,
+        });
+      }
+      // No new data -> skip recomputing aggregates to avoid unnecessary work.
       return;
     }
 
@@ -534,6 +434,17 @@ export class AmazonService {
         ordersLastSyncedAt: nowSafe,
       } as any,
     });
+
+    // Recompute daily KPI aggregates for this user based on the latest orders.
+    try {
+      await this.recomputeDailyKpiSummary(userId);
+    } catch (err) {
+      // Non-fatal: log and continue; raw orders are still persisted.
+      console.error(
+        '[AmazonService.syncRecentOrdersToDb] failed to recompute daily KPI summary',
+        { userId, err },
+      );
+    }
   }
 
   /**
