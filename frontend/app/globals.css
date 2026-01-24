@@ -4,20 +4,24 @@
   --background: #f8fafc;
   --foreground: #0f172a;
   --surface: #ffffff;
-  --surface-muted: #f1f5f9;
   --surface-border: #e2e8f0;
   --muted-foreground: #64748b;
   --chart-track: #e2e8f0;
+  --nav-active-gradient: linear-gradient(135deg, rgb(38, 210, 226) 30%, rgb(2, 242, 170) 100%);
+  --nav-active-border: rgb(2, 242, 170);
+  --nav-active-text: #0f172a;
 }
 
 [data-theme="dark"] {
-  --background: #020617;
+  --background: #000000;
   --foreground: #e5e7eb;
-  --surface: #020617;
-  --surface-muted: #020617;
-  --surface-border: #1f2937;
+  --surface: #0a0a0a;
+  --surface-border: #262626;
   --muted-foreground: #94a3b8;
-  --chart-track: #111827;
+  --chart-track: #171717;
+  --nav-active-gradient: linear-gradient(135deg, rgb(38, 210, 226) 30%, rgb(2, 242, 170) 100%);
+  --nav-active-border: rgb(2, 242, 170);
+  --nav-active-text: #0f172a;
 }
 
 @theme inline {

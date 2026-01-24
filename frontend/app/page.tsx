@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from "react";
 import { useAuth, SignedIn, SignedOut } from "@clerk/nextjs";
-import { ThemeToggle } from "../components/theme-toggle";
 
 type AccountSummary = {
   marketplace: string;
@@ -139,36 +138,9 @@ export default function Home() {
   return (
     <div className="min-h-screen bg-[var(--background)] text-[var(--foreground)]">
       <main className="mx-auto flex min-h-screen max-w-6xl flex-col gap-10 px-6 py-10">
-        <header className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-          <div>
-            <h1 className="text-2xl font-semibold tracking-tight md:text-3xl">
-              Seller Dashboard Overview
-            </h1>
-            <p className="mt-1 text-sm text-[var(--muted-foreground)]">
-              High-level metrics for your connected marketplaces.
-            </p>
-          </div>
-          <div className="mt-4 flex flex-col items-start gap-3 md:mt-0 md:flex-row md:items-center md:gap-4">
-            <div className="flex items-center gap-3">
-              <ThemeToggle />
-              <span className="inline-flex items-center gap-2 rounded-full bg-[var(--surface-muted)] px-3 py-1 text-xs font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--surface-border)]">
-                <span
-                  className={`inline-flex h-2 w-2 rounded-full ${
-                    isSignedIn ? "bg-emerald-400" : "bg-amber-400"
-                  }`}
-                />
-                {isSignedIn
-                  ? summary
-                    ? "Authenticated with Clerk (Amazon account connected)"
-                    : "Authenticated with Clerk — connect Amazon to see live data"
-                  : "Please sign in (top-right) to load live data"}
-              </span>
-            </div>
-          </div>
-        </header>
 
         {loading && (
-          <div className="rounded-xl border border-[var(--surface-border)] bg-[var(--surface-muted)] px-4 py-3 text-xs text-[var(--muted-foreground)]">
+          <div className="rounded-xl border border-[var(--surface-border)] bg-transparent px-4 py-3 text-xs text-[var(--muted-foreground)]">
             Loading account summary...
           </div>
         )}
@@ -212,7 +184,7 @@ export default function Home() {
         ) : null}
 
         {summary && (
-          <section className="rounded-none border-0 bg-transparent p-0 shadow-none md:rounded-2xl md:border md:border-[var(--surface-border)] md:bg-[var(--surface)] md:p-6 md:shadow-[0_18px_60px_-40px_rgba(15,23,42,1)]">
+          <section>
             <div className="mb-4 flex items-center justify-between">
               <h2 className="text-sm font-medium uppercase tracking-[0.2em] text-[var(--muted-foreground)]">
                 Performance Snapshot
@@ -344,7 +316,7 @@ function SalesTrend({
   const barWidth = bucketWidth * 0.6;
 
   return (
-    <div className="mt-4 rounded-xl bg-[var(--surface-muted)] p-4 ring-1 ring-[var(--surface-border)]">
+    <div className="mt-4 rounded-xl bg-transparent p-4 ring-1 ring-[var(--surface-border)]">
       <div className="mb-3 flex items-center justify-between">
         <div>
           <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
@@ -461,7 +433,7 @@ function SalesTrend({
                   y={y}
                   width={barWidth}
                   height={barHeight}
-                  fill={hoveredIndex === idx ? "#4F46E5" : "#A5B4FC"}
+                  fill={hoveredIndex === idx ? "rgb(2, 242, 170)" : "rgba(2, 242, 170, 0.5)"}
                   rx={2}
                   className="cursor-pointer"
                   onMouseEnter={() => setHoveredIndex(idx)}
@@ -576,7 +548,7 @@ function DonutCard({ label, value, percentage, color }: DonutCardProps) {
   const offset = circumference * (1 - clamped / 100);
 
   return (
-    <div className="flex flex-col items-center gap-4 rounded-xl bg-[var(--surface-muted)] p-4 ring-1 ring-[var(--surface-border)]">
+    <div className="flex flex-col items-center gap-4 rounded-xl bg-transparent p-4 ring-1 ring-[var(--surface-border)]">
       <div className="relative flex h-32 w-32 items-center justify-center">
         <svg
           viewBox="0 0 120 120"
@@ -623,7 +595,7 @@ function DonutCard({ label, value, percentage, color }: DonutCardProps) {
 
 function KpiCard({ label, value, helper }: KpiCardProps) {
   return (
-    <div className="flex flex-col justify-between rounded-xl bg-[var(--surface-muted)] p-4 ring-1 ring-[var(--surface-border)]">
+    <div className="flex flex-col justify-between rounded-xl bg-transparent p-4 ring-1 ring-[var(--surface-border)]">
       <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
         {label}
       </p>

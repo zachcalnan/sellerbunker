@@ -1,13 +1,9 @@
 import type { Metadata } from "next";
-import {
-  ClerkProvider,
-  SignedIn,
-  SignedOut,
-  SignInButton,
-  SignUpButton,
-  UserButton,
-} from "@clerk/nextjs";
+import { ClerkProvider } from "@clerk/nextjs";
 import "./globals.css";
+import { Sidebar } from "@/components/sidebar";
+import { MobileNav } from "@/components/mobile-nav";
+import { Topbar } from "@/components/topbar";
 
 export const metadata: Metadata = {
   title: "Seller Dashboard",
@@ -19,34 +15,35 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const themeScript = `
+(function() {
+  var theme = 'light';
+  try {
+    var stored = localStorage.getItem('theme');
+    if (stored === 'dark' || stored === 'light') theme = stored;
+    else if (window.matchMedia('(prefers-color-scheme: dark)').matches) theme = 'dark';
+  } catch (e) {}
+  document.documentElement.dataset.theme = theme;
+})();
+`;
+
   return (
     <ClerkProvider>
-      <html lang="en">
+      <html lang="en" suppressHydrationWarning>
+        <head>
+          <script
+            dangerouslySetInnerHTML={{ __html: themeScript }}
+          />
+        </head>
         <body className="antialiased">
-          <header className="flex h-16 items-center justify-between gap-4 border-b border-[var(--surface-border)] bg-[var(--surface)] px-4">
-            <a className="cursor-pointer" href="/">
-              <span className="font-bold">SELLER</span>
-              <span>BUNKER</span>
-            </a>
-            <div className="flex gap-4">
-              <SignedOut>
-                <SignInButton>
-                  <button className="cursor-pointer text-sm font-medium">
-                    Sign in
-                  </button>
-                </SignInButton>
-                <SignUpButton>
-                  <button className="cursor-pointer rounded-full bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500">
-                    Sign up
-                  </button>
-                </SignUpButton>
-              </SignedOut>
-              <SignedIn>
-                <UserButton afterSignOutUrl="/" />
-              </SignedIn>
-            </div>
-          </header>
-          {children}
+          <MobileNav />
+          <div className="hidden md:fixed md:inset-y-0 md:left-0 md:z-10 md:flex md:w-56">
+            <Sidebar />
+          </div>
+          <main className="flex min-h-screen flex-col md:pl-56">
+            <Topbar />
+            <div className="min-h-0 flex-1">{children}</div>
+          </main>
         </body>
       </html>
     </ClerkProvider>
