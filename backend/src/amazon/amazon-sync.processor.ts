@@ -31,12 +31,11 @@ export class AmazonSyncProcessor extends WorkerHost {
     if (job.name === 'full-sync') {
       const { userId } = job.data;
 
-      // Trigger a sales time-series fetch as a first background task.
-      // This exercises SP-API access in a worker without blocking HTTP.
-       console.log('[AmazonSyncProcessor] Starting full-sync for user', {
+      // Trigger a background sync of recent orders into Prisma.
+      console.log('[AmazonSyncProcessor] Starting full-sync for user', {
         userId,
       });
-      await this.amazonService.getSalesTimeSeries(userId);
+      await this.amazonService.syncRecentOrdersToDb(userId);
       console.log('[AmazonSyncProcessor] Finished full-sync for user', {
         userId,
       });

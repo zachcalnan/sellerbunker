@@ -104,6 +104,22 @@ export class AmazonController {
     return this.amazonService.getAccountSummary(req.user.userId);
   }
 
+  /**
+   * Manually trigger a background Amazon full-sync for the authenticated user.
+   * Example: POST /api/amazon/sync
+   *
+   * Security:
+   * - Protected by ClerkAuthGuard so only logged-in users can call it.
+   * - Uses the userId from the Clerk session; the client cannot choose
+   *   an arbitrary userId to sync.
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Post('sync')
+  async syncNow(@Req() req: { user: { userId: string } }) {
+    await this.amazonSyncService.enqueueFullSync(req.user.userId);
+    return { status: 'queued' };
+  }
+
   @UseGuards(ClerkAuthGuard)
   @Get('sales/timeseries')
   getSalesTimeSeries(

@@ -17,12 +17,19 @@ export class AmazonSyncService {
       'full-sync',
       { userId },
       {
-        removeOnComplete: true,
-        attempts: 3,
+        // retries if Amazon/SP-API fails
+        attempts: 5,
         backoff: {
           type: 'exponential',
-          delay: 1000,
+          delay: 5000,
         },
+
+        // keep Redis clean
+        removeOnComplete: true,
+        removeOnFail: 500,
+
+        // dedupe: prevent multiple concurrent full-syncs per user
+        jobId: `full-sync-${userId}`,
       },
     );
   }

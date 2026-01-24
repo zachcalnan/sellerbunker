@@ -341,6 +341,157 @@ export class AmazonService {
   }
 
   /**
+   * Background sync: fetch recent Amazon orders for this user and persist them
+   * into the generic Order/Product tables via Prisma.
+   *
+   * For now we:
+   * - pull roughly the last 30 days of orders (similar window to the summary)
+   * - map them into a single aggregate "AMAZON_GENERIC" product per user
+   * - upsert one Order row per AmazonOrderId
+   */
+  async syncRecentOrdersToDb(userId: string): Promise<void> {
+    const credentials = await this.getAmazonCredentialsForUser(userId);
+
+    const nowSafe = new Date(Date.now() - 5 * 60 * 1000);
+    const startDate = new Date(
+      nowSafe.getTime() - 30 * 24 * 60 * 60 * 1000,
+    );
+
+    const createdAfterIso = startDate.toISOString().split('.')[0] + 'Z';
+    const createdBeforeIso = nowSafe.toISOString().split('.')[0] + 'Z';
+
+    const marketplaceIds =
+      credentials.region === 'eu'
+        ? [
+            'A1F83G8C2ARO7P', // UK
+            'A1PA6795UKMFR9', // DE
+            'A13V1IB3VIYZZH', // FR
+            'APJ6JRA9NG5V4', // IT
+            'A1RKKUPIHCS9HS', // ES
+          ]
+        : [
+            'ATVPDKIKX0DER', // US
+            'A2EUQ1WTGCTBG2', // CA
+            'A1AM78C64UM0Y8', // MX
+          ];
+
+    type SpApiOrder = {
+      AmazonOrderId?: string;
+      PurchaseDate?: string;
+      LatestShipDate?: string;
+      EarliestShipDate?: string;
+      OrderTotal?: { Amount?: string; CurrencyCode?: string };
+      NumberOfItemsShipped?: number;
+      NumberOfItemsUnshipped?: number;
+    };
+
+    const data = (await this.spApiClient.getOrders(credentials, {
+      createdAfter: createdAfterIso,
+      createdBefore: createdBeforeIso,
+      marketplaceIds,
+      orderStatuses: ['Shipped', 'Unshipped', 'PartiallyShipped', 'Canceled'],
+    })) as {
+      payload?: {
+        Orders?: SpApiOrder[];
+      };
+    };
+
+    const orders = data.payload?.Orders ?? [];
+
+    console.log(
+      '[AmazonService.syncRecentOrdersToDb] fetched orders:',
+      orders.length,
+      { userId },
+    );
+
+    if (orders.length === 0) {
+      return;
+    }
+
+    // For now, attach all synced orders to a single aggregate product per user.
+    const aggregateSku = 'AMAZON_GENERIC';
+    const aggregateProduct = await this.prisma.product.upsert({
+      where: {
+        userId_sku: {
+          userId,
+          sku: aggregateSku,
+        },
+      },
+      update: {},
+      create: {
+        userId,
+        sku: aggregateSku,
+        title: 'Amazon Sales (Aggregate)',
+      },
+    });
+
+    for (const order of orders) {
+      const amazonOrderId = order.AmazonOrderId;
+      if (!amazonOrderId) {
+        // Skip orders without a stable ID.
+        // eslint-disable-next-line no-continue
+        continue;
+      }
+
+      const rawTotal = parseFloat(order.OrderTotal?.Amount ?? '0');
+      const totalAmount = Number.isNaN(rawTotal) ? 0 : rawTotal;
+
+      const quantityRaw =
+        (order.NumberOfItemsShipped ?? 0) +
+        (order.NumberOfItemsUnshipped ?? 0);
+      const quantity = quantityRaw > 0 ? quantityRaw : 1;
+
+      const itemPrice =
+        quantity > 0 ? Number((totalAmount / quantity).toFixed(2)) : totalAmount;
+
+      const orderDateStr =
+        order.PurchaseDate ??
+        order.LatestShipDate ??
+        order.EarliestShipDate ??
+        nowSafe.toISOString();
+      const orderDate = new Date(orderDateStr);
+      if (Number.isNaN(orderDate.getTime())) {
+        // eslint-disable-next-line no-continue
+        continue;
+      }
+
+      await this.prisma.order.upsert({
+        where: {
+          orderId_marketplace: {
+            orderId: amazonOrderId,
+            marketplace: 'amazon',
+          },
+        },
+        update: {
+          userId,
+          productId: aggregateProduct.id,
+          sku: aggregateSku,
+          quantity,
+          itemPrice,
+          fees: {},
+          totalProfit: null,
+          rawResponse: order,
+          orderDate,
+        },
+        create: {
+          userId,
+          productId: aggregateProduct.id,
+          orderId: amazonOrderId,
+          marketplace: 'amazon',
+          sku: aggregateSku,
+          asin: null,
+          quantity,
+          itemPrice,
+          fees: {},
+          totalProfit: null,
+          rawResponse: order,
+          orderDate,
+        },
+      });
+    }
+  }
+
+  /**
    * Example method that calls the SP-API client (sandbox for now).
    * This uses the Sellers API "getMarketplaceParticipations" shape.
    */
