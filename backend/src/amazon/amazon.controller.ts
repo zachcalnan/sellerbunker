@@ -9,13 +9,19 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import type { Response } from 'express';
+import { ConfigService } from '@nestjs/config';
 import { AmazonService } from './amazon.service';
 import { LinkAmazonAccountDto } from './dto/link-amazon-account.dto';
 import { ClerkAuthGuard } from '../auth/clerk-auth.guard';
+import { AmazonSyncService } from './amazon-sync.service';
 
 @Controller('amazon')
 export class AmazonController {
-  constructor(private readonly amazonService: AmazonService) {}
+  constructor(
+    private readonly amazonService: AmazonService,
+    private readonly amazonSyncService: AmazonSyncService,
+    private readonly configService: ConfigService,
+  ) {}
 
   /**
    * Starts the Amazon Seller Central consent flow.
@@ -55,9 +61,28 @@ export class AmazonController {
         state,
       });
 
-      return res.send(
-        'Your Amazon account is now linked. You can close this tab and return to the dashboard.',
-      );
+      // Kick off an initial background sync for this user so their dashboard
+      // can start populating without blocking the OAuth callback response.
+      try {
+        const decoded = Buffer.from(state, 'base64url').toString('utf8');
+        const { userId } = JSON.parse(decoded) as { userId?: string };
+        if (userId) {
+          console.log(
+            '[AmazonController] Enqueuing initial full-sync after OAuth',
+            { userId },
+          );
+          await this.amazonSyncService.enqueueFullSync(userId);
+        }
+      } catch (syncErr) {
+        // Non-fatal: logging is enough, the link itself has already succeeded.
+        console.error('Failed to enqueue initial Amazon sync', syncErr);
+      }
+
+      const frontendUrl =
+        this.configService.get<string>('FRONTEND_URL') ||
+        'http://localhost:3000';
+
+      return res.redirect(frontendUrl);
     } catch (e) {
       console.error('OAUTH CALLBACK ERROR:', e);
       return res.status(500).send('OAuth callback failed');
