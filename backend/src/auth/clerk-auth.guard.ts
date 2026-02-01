@@ -37,9 +37,26 @@ export class ClerkAuthGuard implements CanActivate {
       });
     }
 
-    req.user = { userId: user.id, email: user.email };
+    const activeOrgId = await this.usersService.ensureActiveOrg(
+      user.id,
+      user.email,
+    );
+
+    const headerOrgIdRaw =
+      (req.headers['x-org-id'] as string | undefined) ??
+      (req.headers['x-organization-id'] as string | undefined);
+    const headerOrgId = headerOrgIdRaw?.trim();
+
+    let orgId = activeOrgId;
+    if (headerOrgId) {
+      const ok = await this.usersService.isOrgMember(user.id, headerOrgId);
+      if (!ok) {
+        throw new UnauthorizedException('Not a member of requested org');
+      }
+      orgId = headerOrgId;
+    }
+
+    req.user = { userId: user.id, email: user.email, orgId };
     return true;
   }
 }
-
-

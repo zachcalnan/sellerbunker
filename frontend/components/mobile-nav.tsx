@@ -35,6 +35,41 @@ function DashboardIcon({ className }: { className?: string }) {
   );
 }
 
+function CostOfGoodsIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 512 512"
+      fill="currentColor"
+      className={className}
+      aria-hidden
+      focusable="false"
+    >
+      <path d="M128 96l0-16c0-44.2 86-80 192-80S512 35.8 512 80l0 16c0 30.6-41.3 57.2-102 70.7-2.4-2.8-4.9-5.5-7.4-8-15.5-15.3-35.5-26.9-56.4-35.5-41.9-17.5-96.5-27.1-154.2-27.1-21.9 0-43.3 1.4-63.8 4.1-.2-1.3-.2-2.7-.2-4.1zM432 353l0-46.2c15.1-3.9 29.3-8.5 42.2-13.9 13.2-5.5 26.1-12.2 37.8-20.3l0 15.4c0 26.8-31.5 50.5-80 65zm0-96l0-33c0-4.5-.4-8.8-1-13 15.5-3.9 30-8.6 43.2-14.2s26.1-12.2 37.8-20.3l0 15.4c0 26.8-31.5 50.5-80 65zM0 240l0-16c0-44.2 86-80 192-80s192 35.8 192 80l0 16c0 44.2-86 80-192 80S0 284.2 0 240zm384 96c0 44.2-86 80-192 80S0 380.2 0 336l0-15.4c11.6 8.1 24.5 14.7 37.8 20.3 41.9 17.5 96.5 27.1 154.2 27.1s112.3-9.7 154.2-27.1c13.2-5.5 26.1-12.2 37.8-20.3l0 15.4zm0 80.6l0 15.4c0 44.2-86 80-192 80S0 476.2 0 432l0-15.4c11.6 8.1 24.5 14.7 37.8 20.3 41.9 17.5 96.5 27.1 154.2 27.1s112.3-9.7 154.2-27.1c13.2-5.5 26.1-12.2 37.8-20.3z" />
+    </svg>
+  );
+}
+
+function InventoryIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <path d="M21 8a2 2 0 0 0-1.2-1.84l-7-3a2 2 0 0 0-1.6 0l-7 3A2 2 0 0 0 3 8v8a2 2 0 0 0 1.2 1.84l7 3a2 2 0 0 0 1.6 0l7-3A2 2 0 0 0 21 16Z" />
+      <path d="M3.3 7.2 12 11l8.7-3.8" />
+      <path d="M12 22V11" />
+    </svg>
+  );
+}
+
 function BurgerIcon({ className }: { className?: string }) {
   return (
     <svg
@@ -78,6 +113,7 @@ export function MobileNav() {
   const { user } = useUser();
   const email = user?.primaryEmailAddress?.emailAddress ?? null;
   const [amazonConnected, setAmazonConnected] = useState<boolean | null>(null);
+  const [connectingAmazon, setConnectingAmazon] = useState(false);
 
   useEffect(() => {
     if (!isSignedIn) {
@@ -101,6 +137,25 @@ export function MobileNav() {
       cancelled = true;
     };
   }, [isSignedIn, getToken]);
+
+  const connectAmazon = async () => {
+    if (!isSignedIn) return;
+    setConnectingAmazon(true);
+    try {
+      const token = await getToken({ template: "backend" });
+      if (!token) return;
+      const res = await fetch(`${BASE_URL}/api/amazon/connect?region=EU`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) return;
+      const data = (await res.json()) as { url?: string };
+      if (data?.url) {
+        window.open(data.url, "_blank", "noopener,noreferrer");
+      }
+    } finally {
+      setConnectingAmazon(false);
+    }
+  };
 
   useEffect(() => {
     setOpen(false);
@@ -174,6 +229,32 @@ export function MobileNav() {
                 Dashboard
               </Link>
 
+              <Link
+                href="/cost-of-goods"
+                className={`flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium no-underline transition-colors ${
+                  pathname === "/cost-of-goods"
+                    ? "bg-[rgb(2,242,170)] text-black"
+                    : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
+                }`}
+                onClick={() => setOpen(false)}
+              >
+                <CostOfGoodsIcon className="h-4 w-4 shrink-0" />
+                Cost of Goods
+              </Link>
+
+              <Link
+                href="/inventory"
+                className={`flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium no-underline transition-colors ${
+                  pathname === "/inventory"
+                    ? "bg-[rgb(2,242,170)] text-black"
+                    : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
+                }`}
+                onClick={() => setOpen(false)}
+              >
+                <InventoryIcon className="h-4 w-4 shrink-0" />
+                Inventory
+              </Link>
+
               <div className="my-2 h-px bg-[var(--surface-border)]" />
 
               <div className="flex flex-wrap items-center gap-2">
@@ -190,15 +271,27 @@ export function MobileNav() {
                       isSignedIn ? "bg-emerald-400" : "bg-amber-400"
                     }`}
                   />
-                  <span className="truncate">
-                    {isSignedIn
-                      ? amazonConnected === true
-                        ? "Amazon connected"
-                        : amazonConnected === false
-                          ? "Connect Amazon for data"
+                  {isSignedIn && amazonConnected === false ? (
+                    <button
+                      type="button"
+                      onClick={connectAmazon}
+                      disabled={connectingAmazon}
+                      className="cursor-pointer truncate text-left hover:underline disabled:cursor-not-allowed disabled:opacity-60"
+                      title="Connect Amazon for data"
+                    >
+                      {connectingAmazon
+                        ? "Opening Amazon…"
+                        : "Connect Amazon for data"}
+                    </button>
+                  ) : (
+                    <span className="truncate">
+                      {isSignedIn
+                        ? amazonConnected === true
+                          ? "Amazon connected"
                           : "Authenticated"
-                      : "Sign in for data"}
-                  </span>
+                        : "Sign in for data"}
+                    </span>
+                  )}
                 </div>
 
                 <SignedOut>

@@ -32,5 +32,3 @@ export class LinkAmazonAccountDto {
   @IsOptional()
   awsRoleArn?: string;
 }
-
-

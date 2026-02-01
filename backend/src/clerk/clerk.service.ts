@@ -46,11 +46,8 @@ export class ClerkService {
 
       return { clerkUserId, email: email ?? '' };
     } catch (err) {
-      // eslint-disable-next-line no-console
       console.error('Clerk verifyToken error:', err);
       throw new UnauthorizedException('Invalid Clerk token');
     }
   }
 }
-
-

@@ -8,5 +8,3 @@ import { ClerkService } from './clerk.service';
   exports: [ClerkService],
 })
 export class ClerkModule {}
-
-

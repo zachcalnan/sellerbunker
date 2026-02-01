@@ -17,15 +17,49 @@ model User {
   email         String   @unique
   passwordHash  String   @map("password_hash")
   name          String?
+  activeOrgId   String?  @map("active_org_id")
   createdAt     DateTime @default(now()) @map("created_at")
   updatedAt     DateTime @updatedAt @map("updated_at")
+
+  activeOrg Organization? @relation("ActiveOrg", fields: [activeOrgId], references: [id])
+  orgMemberships OrganizationMembership[]
 
   sellerAccounts SellerAccount[]
   products       Product[]
   orders         Order[]
+  orderItems     OrderItem[]
   inventory      Inventory[]
 
   @@map("users")
+}
+
+model Organization {
+  id        String   @id @default(uuid())
+  name      String
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  members   OrganizationMembership[]
+  usersWithActiveOrg User[] @relation("ActiveOrg")
+
+  @@map("organizations")
+}
+
+model OrganizationMembership {
+  id        String   @id @default(uuid())
+  orgId     String   @map("org_id")
+  userId    String   @map("user_id")
+  role      String   @default("member") // "owner" | "member"
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  org  Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  user User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([orgId, userId])
+  @@index([userId])
+  @@index([orgId])
+  @@map("organization_memberships")
 }
 
 // Seller accounts connected to marketplaces (Amazon, eBay, etc.)
@@ -61,6 +95,7 @@ model Product {
 
   user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   orders   Order[]
+  orderItems OrderItem[]
   inventory Inventory?
 
   @@unique([userId, sku])
@@ -89,12 +124,56 @@ model Order {
 
   user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
   product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  orderItems OrderItem[]
 
   @@unique([orderId, marketplace])
   @@index([userId])
   @@index([userId, orderDate])
   @@index([productId])
   @@map("orders")
+}
+
+// Order items (line items) for accurate per-product analytics
+model OrderItem {
+  id          String   @id @default(uuid())
+  userId      String   @map("user_id")
+  orderDbId   String   @map("order_db_id")
+  productId   String   @map("product_id")
+
+  // Marketplace identifiers
+  marketplace String   // 'amazon' | 'ebay' | etc.
+  orderId     String   @map("order_id") // Marketplace order ID (e.g. AmazonOrderId)
+  orderItemId String   @map("order_item_id") // Marketplace order item ID
+
+  sku         String
+  asin        String?
+
+  quantity    Int      @default(1)
+
+  // Amounts are totals for this line item (not per-unit)
+  revenueTotal        Decimal  @map("revenue_total") @db.Decimal(14, 2)
+  shippingChargedTotal Decimal @map("shipping_charged_total") @db.Decimal(14, 2)
+  taxChargedTotal     Decimal  @map("tax_charged_total") @db.Decimal(14, 2)
+  amazonFeesTotal     Decimal  @map("amazon_fees_total") @db.Decimal(14, 2)
+
+  // Nullable until the seller provides COGS; when null, profit is unknown.
+  cogsTotal  Decimal? @map("cogs_total") @db.Decimal(14, 2)
+  profit     Decimal? @map("profit") @db.Decimal(14, 2)
+
+  rawResponse Json?   @map("raw_response")
+  orderDate   DateTime @map("order_date")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  order   Order   @relation(fields: [orderDbId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([orderDbId, orderItemId])
+  @@index([userId])
+  @@index([userId, orderDate])
+  @@index([productId])
+  @@map("order_items")
 }
 
 // Inventory levels

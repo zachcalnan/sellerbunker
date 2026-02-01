@@ -1,8 +1,13 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { AmazonSpApiClient, SpApiCredentials, SpApiRegion } from './sp-api.client';
+import {
+  AmazonSpApiClient,
+  SpApiCredentials,
+  SpApiRegion,
+} from './sp-api.client';
 import { PrismaService } from '../prisma/prisma.service';
 import { LinkAmazonAccountDto } from './dto/link-amazon-account.dto';
+import { UsersService } from '../users/users.service';
 
 @Injectable()
 export class AmazonService {
@@ -10,7 +15,159 @@ export class AmazonService {
     private readonly spApiClient: AmazonSpApiClient,
     private readonly prisma: PrismaService,
     private readonly configService: ConfigService,
+    private readonly usersService: UsersService,
   ) {}
+
+  private async getOrgMemberUserIds(orgId: string): Promise<string[]> {
+    return this.usersService.getOrgMemberUserIds(orgId);
+  }
+
+  private async getAmazonCredentialsForOrg(
+    orgId: string,
+    preferredUserId?: string,
+  ): Promise<SpApiCredentials> {
+    const userIds = await this.getOrgMemberUserIds(orgId);
+
+    // Prefer the currently-authenticated user's connection if present.
+    // This avoids "findFirst picks a different org member's stale creds" issues.
+    const preferred =
+      preferredUserId && userIds.includes(preferredUserId)
+        ? await this.prisma.sellerAccount.findUnique({
+            where: {
+              userId_marketplace: {
+                userId: preferredUserId,
+                marketplace: 'amazon',
+              },
+            },
+          })
+        : null;
+
+    const account =
+      preferred ??
+      (await this.prisma.sellerAccount.findFirst({
+        where: { userId: { in: userIds }, marketplace: 'amazon' },
+        orderBy: { updatedAt: 'desc' },
+      }));
+    if (!account) {
+      throw new NotFoundException(
+        'Amazon account not linked. Please link your Amazon account first.',
+      );
+    }
+    const creds = account.credentials as {
+      region?: 'na' | 'eu' | 'fe';
+      lwaClientId: string;
+      lwaClientSecret: string;
+      refreshToken: string;
+      awsAccessKeyId: string;
+      awsSecretAccessKey: string;
+      awsRoleArn?: string;
+    };
+    if (
+      !creds ||
+      !creds.lwaClientId ||
+      !creds.lwaClientSecret ||
+      !creds.refreshToken ||
+      !creds.awsAccessKeyId ||
+      !creds.awsSecretAccessKey
+    ) {
+      throw new NotFoundException(
+        'Amazon credentials are incomplete. Please relink your Amazon account.',
+      );
+    }
+    return {
+      region: creds.region ?? 'na',
+      lwaClientId: creds.lwaClientId,
+      lwaClientSecret: creds.lwaClientSecret,
+      refreshToken: creds.refreshToken,
+      awsAccessKeyId: creds.awsAccessKeyId,
+      awsSecretAccessKey: creds.awsSecretAccessKey,
+      awsRoleArn: creds.awsRoleArn,
+    };
+  }
+
+  async getAmazonConnectionDebug(orgId: string, preferredUserId: string) {
+    const userIds = await this.getOrgMemberUserIds(orgId);
+
+    const preferredAccount = userIds.includes(preferredUserId)
+      ? await this.prisma.sellerAccount.findUnique({
+          where: {
+            userId_marketplace: {
+              userId: preferredUserId,
+              marketplace: 'amazon',
+            },
+          },
+          select: {
+            id: true,
+            userId: true,
+            marketplace: true,
+            sellerId: true,
+            isActive: true,
+            credentials: true,
+            updatedAt: true,
+            createdAt: true,
+          },
+        })
+      : null;
+
+    const fallbackAccount = await this.prisma.sellerAccount.findFirst({
+      where: { userId: { in: userIds }, marketplace: 'amazon' },
+      orderBy: { updatedAt: 'desc' },
+      select: {
+        id: true,
+        userId: true,
+        marketplace: true,
+        sellerId: true,
+        isActive: true,
+        credentials: true,
+        updatedAt: true,
+        createdAt: true,
+      },
+    });
+
+    const pick = preferredAccount ?? fallbackAccount;
+    const region =
+      (pick?.credentials as any)?.region ??
+      (pick?.credentials as any)?.Region ??
+      null;
+
+    return {
+      orgId,
+      preferredUserId,
+      orgUserIds: userIds,
+      selectedUserId: pick?.userId ?? null,
+      selectedSellerAccountId: pick?.id ?? null,
+      selectedSellerId: pick?.sellerId ?? null,
+      selectedRegion: region,
+      preferredAccount: preferredAccount
+        ? {
+            id: preferredAccount.id,
+            userId: preferredAccount.userId,
+            sellerId: preferredAccount.sellerId,
+            isActive: preferredAccount.isActive,
+            region:
+              (preferredAccount.credentials as any)?.region ??
+              (preferredAccount.credentials as any)?.Region ??
+              null,
+            updatedAt: preferredAccount.updatedAt,
+            createdAt: preferredAccount.createdAt,
+          }
+        : null,
+      fallbackAccount: fallbackAccount
+        ? {
+            id: fallbackAccount.id,
+            userId: fallbackAccount.userId,
+            sellerId: fallbackAccount.sellerId,
+            isActive: fallbackAccount.isActive,
+            region:
+              (fallbackAccount.credentials as any)?.region ??
+              (fallbackAccount.credentials as any)?.Region ??
+              null,
+            updatedAt: fallbackAccount.updatedAt,
+            createdAt: fallbackAccount.createdAt,
+          }
+        : null,
+    };
+  }
 
   private async getAmazonCredentialsForUser(
     userId: string,
@@ -64,12 +221,12 @@ export class AmazonService {
     };
   }
 
-  async getAccountSummary(userId: string) {
+  async getAccountSummary(orgId: string, preferredUserId?: string) {
     let credentials: SpApiCredentials;
 
     // Ensure the user has a linked Amazon account; preserve existing 404 behavior.
     try {
-      credentials = await this.getAmazonCredentialsForUser(userId);
+      credentials = await this.getAmazonCredentialsForOrg(orgId, preferredUserId);
     } catch (error) {
       if (error instanceof NotFoundException) {
         throw error;
@@ -78,13 +235,12 @@ export class AmazonService {
     }
 
     const nowSafe = new Date(Date.now() - 5 * 60 * 1000);
-    const startDate = new Date(
-      nowSafe.getTime() - 30 * 24 * 60 * 60 * 1000,
-    );
+    const startDate = new Date(nowSafe.getTime() - 30 * 24 * 60 * 60 * 1000);
 
+    const userIds = await this.getOrgMemberUserIds(orgId);
     const rows = await (this.prisma as any).aggDailyKpiSummary.findMany({
       where: {
-        userId,
+        userId: { in: userIds },
         marketplace: 'amazon',
         date: {
           gte: startDate,
@@ -94,7 +250,6 @@ export class AmazonService {
     });
 
     if (!rows.length) {
-      // No aggregates yet for this user; return a zeroed summary rather than demo data.
       const currency = credentials.region === 'eu' ? 'GBP' : 'USD';
       return {
         marketplace: 'amazon',
@@ -109,6 +264,7 @@ export class AmazonService {
         activeSkus: 0,
         unitsInFba: 0,
         openShipments: 0,
+        hasCostData: false,
         generatedAt: new Date().toISOString(),
       };
     }
@@ -125,11 +281,68 @@ export class AmazonService {
       (sum: number, row: any) => sum + row.ordersCount,
       0,
     );
+    const adSpend = rows.reduce(
+      (sum: number, row: any) => sum + Number(row.advertisingTotal ?? 0),
+      0,
+    );
+
+    // Compute profit from OrderItem + COGS (immediate, even if COGS was added after the last order sync).
+    // This also supports multi-SKU orders because it's line-item based.
+    const orderItems = await (this.prisma as any).orderItem.findMany({
+      where: {
+        userId: { in: userIds },
+        marketplace: 'amazon',
+        orderDate: { gte: startDate, lte: nowSafe },
+      },
+      select: {
+        profit: true,
+        revenueTotal: true,
+        taxChargedTotal: true,
+        amazonFeesTotal: true,
+        quantity: true,
+        product: {
+          select: {
+            costOfGoods: true,
+          },
+        },
+      },
+    });
+
+    let totalProfit = 0;
+    let hasProfitData = false;
+    for (const it of orderItems) {
+      const existingProfit =
+        it.profit == null ? null : Number(it.profit);
+      if (existingProfit != null && !Number.isNaN(existingProfit)) {
+        totalProfit += existingProfit;
+        hasProfitData = true;
+        continue;
+      }
+
+      const cogsPerUnit =
+        it.product?.costOfGoods == null ? null : Number(it.product.costOfGoods);
+      if (cogsPerUnit == null || Number.isNaN(cogsPerUnit)) {
+        continue;
+      }
+
+      const revenueTotal = Number(it.revenueTotal ?? 0);
+      const taxChargedTotal = Number(it.taxChargedTotal ?? 0);
+      const amazonFeesTotal = Number(it.amazonFeesTotal ?? 0);
+      const qty = Number(it.quantity ?? 0);
+      const cogsTotal = cogsPerUnit * (Number.isFinite(qty) && qty > 0 ? qty : 1);
+
+      const computed = revenueTotal - taxChargedTotal - cogsTotal + amazonFeesTotal;
+      if (!Number.isNaN(computed)) {
+        totalProfit += computed;
+        hasProfitData = true;
+      }
+    }
 
     const currency = credentials.region === 'eu' ? 'GBP' : 'USD';
-    const activeSkus = totalOrders; // simple placeholder until per-SKU aggregates exist
-    const unitsInFba = unitsSold * 3; // same placeholder logic as before
-    const openShipments = Math.max(1, Math.round(totalOrders / 2));
+    // "hasCostData" means we can calculate profit (we found at least one line item with COGS).
+    // Note: profit can legitimately sum to 0, so we must not use "totalProfit !== 0" here.
+    const hasCostData = hasProfitData || adSpend !== 0;
+    const profitMargin = hasCostData && revenue > 0 ? totalProfit / revenue : 0;
 
     return {
       marketplace: 'amazon',
@@ -137,25 +350,27 @@ export class AmazonService {
       currency,
       period: 'last_30_days',
       revenue,
-      profitMargin: 0.28,
+      profitMargin,
       unitsSold,
-      adSpend: revenue * 0.25,
+      adSpend,
       totalOrders,
-      activeSkus,
-      unitsInFba,
-      openShipments,
+      activeSkus: 0,
+      unitsInFba: 0,
+      openShipments: 0,
+      hasCostData,
       generatedAt: new Date().toISOString(),
     };
   }
 
   async getSalesTimeSeries(
-    userId: string,
+    orgId: string,
     range?: { start?: string; end?: string },
+    preferredUserId?: string,
   ) {
     let credentials: SpApiCredentials;
 
     try {
-      credentials = await this.getAmazonCredentialsForUser(userId);
+      credentials = await this.getAmazonCredentialsForOrg(orgId, preferredUserId);
     } catch (error) {
       if (error instanceof NotFoundException) {
         throw error;
@@ -164,16 +379,15 @@ export class AmazonService {
     }
 
     const nowSafe = new Date(Date.now() - 5 * 60 * 1000);
-    const defaultStart = new Date(
-      nowSafe.getTime() - 30 * 24 * 60 * 60 * 1000,
-    );
+    const defaultStart = new Date(nowSafe.getTime() - 30 * 24 * 60 * 60 * 1000);
 
     const startDate = range?.start ? new Date(range.start) : defaultStart;
     const endDate = range?.end ? new Date(range.end) : nowSafe;
 
+    const userIds = await this.getOrgMemberUserIds(orgId);
     const ordersFromDb = await this.prisma.order.findMany({
       where: {
-        userId,
+        userId: { in: userIds },
         marketplace: 'amazon',
         orderDate: {
           gte: startDate,
@@ -187,10 +401,7 @@ export class AmazonService {
       },
     });
 
-    const byDate = new Map<
-      string,
-      { revenue: number; orders: number }
-    >();
+    const byDate = new Map<string, { revenue: number; orders: number }>();
 
     for (const order of ordersFromDb) {
       const d = order.orderDate;
@@ -262,9 +473,7 @@ export class AmazonService {
     });
 
     const nowSafe = new Date(Date.now() - 5 * 60 * 1000);
-    const defaultStart = new Date(
-      nowSafe.getTime() - 30 * 24 * 60 * 60 * 1000,
-    );
+    const defaultStart = new Date(nowSafe.getTime() - 30 * 24 * 60 * 60 * 1000);
 
     // Use incremental sync cursor when available; fall back to the last 30 days.
     const startDate =
@@ -339,28 +548,74 @@ export class AmazonService {
       return;
     }
 
-    // For now, attach all synced orders to a single aggregate product per user.
-    const aggregateSku = 'AMAZON_GENERIC';
-    const aggregateProduct = await this.prisma.product.upsert({
+    // Best-effort product mapping:
+    // - If the order contains exactly one SellerSKU, attach the Order to that Product.
+    // - If multiple SKUs, attach to a synthetic "AMAZON_MULTI" Product.
+    // - If we can't determine SKUs, attach to a synthetic "AMAZON_GENERIC" Product.
+    const genericSku = 'AMAZON_GENERIC';
+    const genericProduct = await this.prisma.product.upsert({
       where: {
         userId_sku: {
           userId,
-          sku: aggregateSku,
+          sku: genericSku,
         },
       },
       update: {},
       create: {
         userId,
-        sku: aggregateSku,
-        title: 'Amazon Sales (Aggregate)',
+        sku: genericSku,
+        title: 'Amazon Sales (Generic)',
       },
     });
+
+    const multiSku = 'AMAZON_MULTI';
+    const multiProduct = await this.prisma.product.upsert({
+      where: {
+        userId_sku: {
+          userId,
+          sku: multiSku,
+        },
+      },
+      update: {},
+      create: {
+        userId,
+        sku: multiSku,
+        title: 'Amazon Sales (Multi-SKU)',
+      },
+    });
+
+    // Helper: recursively sum CurrencyAmount values under a given key name (e.g. FeeAmount).
+    const sumCurrencyAmountsByKey = (
+      input: unknown,
+      keyName: string,
+    ): number => {
+      if (input == null) return 0;
+      if (Array.isArray(input)) {
+        return input.reduce(
+          (sum, item) => sum + sumCurrencyAmountsByKey(item, keyName),
+          0,
+        );
+      }
+      if (typeof input !== 'object') return 0;
+
+      let total = 0;
+      for (const [k, v] of Object.entries(input as Record<string, unknown>)) {
+        if (k === keyName && v && typeof v === 'object') {
+          const amt = (v as any).CurrencyAmount;
+          const n = Number(amt ?? 0);
+          if (!Number.isNaN(n)) total += n;
+        } else {
+          total += sumCurrencyAmountsByKey(v, keyName);
+        }
+      }
+      return total;
+    };
 
     for (const order of orders) {
       const amazonOrderId = order.AmazonOrderId;
       if (!amazonOrderId) {
         // Skip orders without a stable ID.
-        // eslint-disable-next-line no-continue
+
         continue;
       }
 
@@ -368,12 +623,13 @@ export class AmazonService {
       const totalAmount = Number.isNaN(rawTotal) ? 0 : rawTotal;
 
       const quantityRaw =
-        (order.NumberOfItemsShipped ?? 0) +
-        (order.NumberOfItemsUnshipped ?? 0);
-      const quantity = quantityRaw > 0 ? quantityRaw : 1;
+        (order.NumberOfItemsShipped ?? 0) + (order.NumberOfItemsUnshipped ?? 0);
+      let quantity = quantityRaw > 0 ? quantityRaw : 1;
 
       const itemPrice =
-        quantity > 0 ? Number((totalAmount / quantity).toFixed(2)) : totalAmount;
+        quantity > 0
+          ? Number((totalAmount / quantity).toFixed(2))
+          : totalAmount;
 
       const orderDateStr =
         order.PurchaseDate ??
@@ -382,43 +638,338 @@ export class AmazonService {
         nowSafe.toISOString();
       const orderDate = new Date(orderDateStr);
       if (Number.isNaN(orderDate.getTime())) {
-        // eslint-disable-next-line no-continue
         continue;
       }
 
-      await this.prisma.order.upsert({
+      // Best-effort enrichment: order-items (tax/shipping charged) + finances (fees).
+      // If calls fail (missing role, sandbox limitations, etc.), we keep totals at zero.
+      let taxChargedTotal = 0;
+      let shippingChargedTotal = 0;
+      let amazonFeesTotal = 0;
+      let orderItems: any[] = [];
+
+      try {
+        const itemsRes = (await this.spApiClient.getOrderItems(
+          credentials,
+          amazonOrderId,
+        )) as any;
+        orderItems = itemsRes?.payload?.OrderItems ?? [];
+        // Sum ItemTax and ShippingPrice where present
+        for (const item of orderItems) {
+          const itemTaxAmt = Number(item?.ItemTax?.Amount ?? 0);
+          if (!Number.isNaN(itemTaxAmt)) taxChargedTotal += itemTaxAmt;
+          const shipAmt = Number(item?.ShippingPrice?.Amount ?? 0);
+          if (!Number.isNaN(shipAmt)) shippingChargedTotal += shipAmt;
+        }
+
+        // Prefer item-level quantity when available.
+        const qtyFromItems = orderItems.reduce(
+          (sum: number, item: any) => sum + Number(item?.QuantityOrdered ?? 0),
+          0,
+        );
+        if (qtyFromItems > 0) {
+          quantity = qtyFromItems;
+        }
+      } catch (err) {
+        // Non-fatal; leave zeros.
+        console.warn(
+          '[AmazonService.syncRecentOrdersToDb] getOrderItems failed',
+          {
+            userId,
+            amazonOrderId,
+            err,
+          },
+        );
+      }
+
+      // Parse fees from Finances API into per-item allocations when possible.
+      const feeByOrderItemId = new Map<string, number>();
+      const feeBySku = new Map<string, number>();
+
+      const addFee = (
+        map: Map<string, number>,
+        key: string,
+        amount: number,
+      ) => {
+        if (!key) return;
+        const prev = map.get(key) ?? 0;
+        map.set(key, prev + amount);
+      };
+
+      const sumFeeComponentList = (list: any[] | undefined): number => {
+        if (!Array.isArray(list)) return 0;
+        return list.reduce((sum, fc) => {
+          const n = Number(fc?.FeeAmount?.CurrencyAmount ?? 0);
+          return Number.isNaN(n) ? sum : sum + n;
+        }, 0);
+      };
+
+      try {
+        const finRes = (await this.spApiClient.listFinancialEventsByOrderId(
+          credentials,
+          amazonOrderId,
+          { maxResultsPerPage: 100 },
+        )) as any;
+        // Sum all FeeAmount CurrencyAmount occurrences (usually negative for fees).
+        amazonFeesTotal = sumCurrencyAmountsByKey(finRes, 'FeeAmount');
+
+        const events = finRes?.payload?.FinancialEvents ?? {};
+        const shipmentLists = [
+          ...(events?.ShipmentEventList ?? []),
+          ...(events?.RefundEventList ?? []),
+          ...(events?.ChargebackEventList ?? []),
+          ...(events?.GuaranteeClaimEventList ?? []),
+        ];
+
+        for (const ev of shipmentLists) {
+          const items = ev?.ShipmentItemList ?? [];
+          for (const si of items) {
+            const fee =
+              sumFeeComponentList(si?.ItemFeeList) +
+              sumFeeComponentList(si?.ItemFeeAdjustmentList);
+            const orderItemId = si?.OrderItemId as string | undefined;
+            const sku = si?.SellerSKU as string | undefined;
+            if (fee !== 0) {
+              if (orderItemId) addFee(feeByOrderItemId, orderItemId, fee);
+              if (sku) addFee(feeBySku, sku, fee);
+            }
+          }
+        }
+      } catch (err) {
+        // Non-fatal; leave zeros.
+        console.warn(
+          '[AmazonService.syncRecentOrdersToDb] listFinancialEventsByOrderId failed',
+          { userId, amazonOrderId, err },
+        );
+      }
+
+      // Determine the product/SKU to associate with this order (order-level; line-items handled below).
+      let selectedSku = genericSku;
+      let selectedAsin: string | null = null;
+      let selectedProduct = genericProduct;
+
+      const skus = orderItems
+        .map((item: any) => item?.SellerSKU)
+        .filter(Boolean) as string[];
+      const uniqueSkus = Array.from(new Set(skus));
+      if (uniqueSkus.length === 1) {
+        selectedSku = uniqueSkus[0];
+        const asinFromItem =
+          (orderItems[0]?.ASIN as string | undefined) ??
+          (orderItems[0]?.Asin as string | undefined);
+        selectedAsin = asinFromItem ?? null;
+        const titleFromItemRaw = orderItems[0]?.Title;
+        const titleFromItem =
+          typeof titleFromItemRaw === 'string' && titleFromItemRaw.trim()
+            ? titleFromItemRaw.trim()
+            : null;
+
+        selectedProduct = await this.prisma.product.upsert({
+          where: {
+            userId_sku: {
+              userId,
+              sku: selectedSku,
+            },
+          },
+          update: {
+            asin: selectedAsin ?? undefined,
+            title: titleFromItem ?? undefined,
+          },
+          create: {
+            userId,
+            sku: selectedSku,
+            asin: selectedAsin,
+            title: titleFromItem,
+          },
+        });
+      } else if (uniqueSkus.length > 1) {
+        selectedSku = multiSku;
+        selectedProduct = multiProduct;
+      }
+
+      // Compute profit only when we have COGS. We subtract taxes charged (VAT) if available,
+      // and include Amazon fees when available. Shipping charged is tracked but not treated
+      // as cost here (we don't have actual shipping cost yet).
+      const cogsPerUnit = selectedProduct.costOfGoods
+        ? Number(selectedProduct.costOfGoods)
+        : null;
+      const cogsTotal = cogsPerUnit != null ? cogsPerUnit * quantity : null;
+      const computedTotalProfit =
+        cogsTotal != null
+          ? totalAmount - taxChargedTotal - cogsTotal + amazonFeesTotal
+          : null;
+
+      const feesJson = {
+        source: 'spapi',
+        taxChargedTotal,
+        shippingChargedTotal,
+        amazonFeesTotal,
+        itemSkus: uniqueSkus,
+        // Keep rawResponse separate; avoid storing large payloads here.
+        computedAt: new Date().toISOString(),
+      };
+
+      const updateData: any = {
+        userId,
+        productId: selectedProduct.id,
+        sku: selectedSku,
+        quantity,
+        itemPrice,
+        fees: feesJson,
+        rawResponse: order,
+        orderDate,
+        asin: selectedAsin,
+      };
+      if (computedTotalProfit != null) {
+        updateData.totalProfit = Number(computedTotalProfit.toFixed(2));
+      }
+
+      const createData: any = {
+        userId,
+        productId: selectedProduct.id,
+        orderId: amazonOrderId,
+        marketplace: 'amazon',
+        sku: selectedSku,
+        asin: selectedAsin,
+        quantity,
+        itemPrice,
+        fees: feesJson,
+        rawResponse: order,
+        orderDate,
+        totalProfit:
+          computedTotalProfit != null
+            ? Number(computedTotalProfit.toFixed(2))
+            : null,
+      };
+
+      const persistedOrder = await this.prisma.order.upsert({
         where: {
           orderId_marketplace: {
             orderId: amazonOrderId,
             marketplace: 'amazon',
           },
         },
-        update: {
-          userId,
-          productId: aggregateProduct.id,
-          sku: aggregateSku,
-          quantity,
-          itemPrice,
-          fees: {},
-          totalProfit: null,
-          rawResponse: order,
-          orderDate,
-        },
-        create: {
-          userId,
-          productId: aggregateProduct.id,
-          orderId: amazonOrderId,
-          marketplace: 'amazon',
-          sku: aggregateSku,
-          asin: null,
-          quantity,
-          itemPrice,
-          fees: {},
-          totalProfit: null,
-          rawResponse: order,
-          orderDate,
-        },
+        update: updateData,
+        create: createData,
       });
+
+      // Persist accurate line items for per-product profitability.
+      // If we don't have orderItems (e.g. call failed), we skip creating OrderItem rows.
+      if (orderItems.length > 0) {
+        // Compute total item revenue for proportional allocations when needed.
+        const itemRevenues = orderItems.map((it: any) => {
+          const revenue = Number(it?.ItemPrice?.Amount ?? 0);
+          return Number.isNaN(revenue) ? 0 : revenue;
+        });
+        const totalItemRevenue = itemRevenues.reduce((a, b) => a + b, 0);
+
+        for (let idx = 0; idx < orderItems.length; idx++) {
+          const it = orderItems[idx];
+          const orderItemId = String(it?.OrderItemId ?? '');
+          const sku = String(it?.SellerSKU ?? '');
+          const asin = (it?.ASIN as string | undefined) ?? null;
+          const titleRaw = it?.Title;
+          const itemTitle =
+            typeof titleRaw === 'string' && titleRaw.trim()
+              ? titleRaw.trim()
+              : null;
+
+          const qty = Number(it?.QuantityOrdered ?? 0);
+          const quantityOrdered = qty > 0 ? qty : 1;
+
+          const revenueTotal = itemRevenues[idx] ?? 0;
+          const shippingCharged = Number(it?.ShippingPrice?.Amount ?? 0);
+          const taxCharged = Number(it?.ItemTax?.Amount ?? 0);
+
+          // Per-item fee allocation:
+          // - Prefer Finances item-level fees by OrderItemId.
+          // - Fall back to SKU mapping.
+          // - Otherwise allocate proportionally by revenue.
+          let itemFees = 0;
+          if (orderItemId && feeByOrderItemId.has(orderItemId)) {
+            itemFees = feeByOrderItemId.get(orderItemId) ?? 0;
+          } else if (sku && feeBySku.has(sku)) {
+            itemFees = feeBySku.get(sku) ?? 0;
+          } else if (totalItemRevenue > 0 && amazonFeesTotal !== 0) {
+            itemFees = (revenueTotal / totalItemRevenue) * amazonFeesTotal;
+          }
+
+          // Attach to a real product for this SKU.
+          const itemProduct = sku
+            ? await this.prisma.product.upsert({
+                where: { userId_sku: { userId, sku } },
+                update: {
+                  asin: asin ?? undefined,
+                  title: itemTitle ?? undefined,
+                },
+                create: { userId, sku, asin, title: itemTitle },
+              })
+            : genericProduct;
+
+          const cogsPerUnit = itemProduct.costOfGoods
+            ? Number(itemProduct.costOfGoods)
+            : null;
+          const cogsTotal =
+            cogsPerUnit != null ? cogsPerUnit * quantityOrdered : null;
+          const profit =
+            cogsTotal != null
+              ? revenueTotal - taxCharged - cogsTotal + itemFees
+              : null;
+
+          await (this.prisma as any).orderItem.upsert({
+            where: {
+              orderDbId_orderItemId: {
+                orderDbId: persistedOrder.id,
+                orderItemId,
+              },
+            },
+            update: {
+              userId,
+              productId: itemProduct.id,
+              marketplace: 'amazon',
+              orderId: amazonOrderId,
+              sku: sku || genericSku,
+              asin,
+              quantity: quantityOrdered,
+              revenueTotal,
+              shippingChargedTotal: Number.isNaN(shippingCharged)
+                ? 0
+                : shippingCharged,
+              taxChargedTotal: Number.isNaN(taxCharged) ? 0 : taxCharged,
+              amazonFeesTotal: Number.isNaN(itemFees)
+                ? 0
+                : Number(itemFees.toFixed(2)),
+              cogsTotal,
+              profit: profit != null ? Number(profit.toFixed(2)) : null,
+              rawResponse: it,
+              orderDate,
+            },
+            create: {
+              userId,
+              orderDbId: persistedOrder.id,
+              productId: itemProduct.id,
+              marketplace: 'amazon',
+              orderId: amazonOrderId,
+              orderItemId,
+              sku: sku || genericSku,
+              asin,
+              quantity: quantityOrdered,
+              revenueTotal,
+              shippingChargedTotal: Number.isNaN(shippingCharged)
+                ? 0
+                : shippingCharged,
+              taxChargedTotal: Number.isNaN(taxCharged) ? 0 : taxCharged,
+              amazonFeesTotal: Number.isNaN(itemFees)
+                ? 0
+                : Number(itemFees.toFixed(2)),
+              cogsTotal,
+              profit: profit != null ? Number(profit.toFixed(2)) : null,
+              rawResponse: it,
+              orderDate,
+            },
+          });
+        }
+      }
     }
 
     // Update sync cursor for this seller.
@@ -480,14 +1031,12 @@ export class AmazonService {
 
   /**
    * Recompute daily KPI aggregates for a user from the raw Order table.
-   * For now we populate only the core metrics needed for the dashboard and
-   * leave the cost/fee fields as zero until those sources are wired.
+   * Revenue, units, orders: from itemPrice × quantity. Profit: summed from
+   * Order.totalProfit when present; cost/fee fields stay zero until wired.
    */
   async recomputeDailyKpiSummary(userId: string): Promise<void> {
     const nowSafe = new Date(Date.now() - 5 * 60 * 1000);
-    const startDate = new Date(
-      nowSafe.getTime() - 30 * 24 * 60 * 60 * 1000,
-    );
+    const startDate = new Date(nowSafe.getTime() - 30 * 24 * 60 * 60 * 1000);
 
     const orders = await this.prisma.order.findMany({
       where: {
@@ -497,6 +1046,13 @@ export class AmazonService {
           gte: startDate,
           lte: nowSafe,
         },
+      },
+      select: {
+        orderDate: true,
+        marketplace: true,
+        itemPrice: true,
+        quantity: true,
+        totalProfit: true,
       },
     });
 
@@ -509,6 +1065,7 @@ export class AmazonService {
         revenue: number;
         unitsSold: number;
         ordersCount: number;
+        profit: number;
       }
     >();
 
@@ -519,16 +1076,15 @@ export class AmazonService {
       const fulfilmentChannel = 'UNKNOWN';
       const key = `${dateStr}|${marketplace}|${fulfilmentChannel}`;
 
-      const existing =
-        byKey.get(key) ??
-        {
-          date: dateStr,
-          marketplace,
-          fulfilmentChannel,
-          revenue: 0,
-          unitsSold: 0,
-          ordersCount: 0,
-        };
+      const existing = byKey.get(key) ?? {
+        date: dateStr,
+        marketplace,
+        fulfilmentChannel,
+        revenue: 0,
+        unitsSold: 0,
+        ordersCount: 0,
+        profit: 0,
+      };
 
       const itemPriceNum = Number(order.itemPrice);
       const quantityNum = order.quantity;
@@ -536,6 +1092,7 @@ export class AmazonService {
       existing.revenue += itemPriceNum * quantityNum;
       existing.unitsSold += quantityNum;
       existing.ordersCount += 1;
+      existing.profit += Number(order.totalProfit ?? 0);
 
       byKey.set(key, existing);
     }
@@ -568,7 +1125,7 @@ export class AmazonService {
           otherSubsTotal: 0,
           vatTotal: 0,
           otherCostsTotal: 0,
-          profit: 0,
+          profit: value.profit,
           roiPct: 0,
           marginPct: 0,
         },
@@ -592,12 +1149,1062 @@ export class AmazonService {
           otherSubsTotal: 0,
           vatTotal: 0,
           otherCostsTotal: 0,
-          profit: 0,
+          profit: value.profit,
           roiPct: 0,
           marginPct: 0,
         },
       });
     }
+  }
+
+  /**
+   * Dev-only: set totalProfit on an order belonging to the user, then recompute
+   * daily KPIs. Use this to test the profit pipeline (e.g. seed a few orders
+   * with profit, then refresh the dashboard).
+   */
+  async setOrderProfit(
+    userId: string,
+    orderId: string,
+    totalProfit: number,
+  ): Promise<{ updated: number }> {
+    const result = await this.prisma.order.updateMany({
+      where: {
+        userId,
+        orderId,
+        marketplace: 'amazon',
+      },
+      data: { totalProfit },
+    });
+    if (result.count === 0) {
+      throw new NotFoundException(
+        `Order ${orderId} not found or not owned by user`,
+      );
+    }
+    await this.recomputeDailyKpiSummary(userId);
+    return { updated: result.count };
+  }
+
+  async getTopProfitableProducts(orgId: string, limit = 10) {
+    const nowSafe = new Date(Date.now() - 5 * 60 * 1000);
+    const startDate = new Date(nowSafe.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const userIds = await this.getOrgMemberUserIds(orgId);
+
+    // Use OrderItem rows for accurate per-product totals.
+    const rows = await (this.prisma as any).orderItem.groupBy({
+      by: ['productId'],
+      where: {
+        userId: { in: userIds },
+        marketplace: 'amazon',
+        orderDate: { gte: startDate, lte: nowSafe },
+        // Only rank by profit where we actually have profit computed
+        profit: { not: null },
+      },
+      _sum: {
+        revenueTotal: true,
+        profit: true,
+        quantity: true,
+      },
+      _count: {
+        _all: true,
+      },
+      orderBy: {
+        _sum: { profit: 'desc' },
+      },
+      take: limit,
+    });
+
+    const productIds = rows.map((r: any) => r.productId);
+    const products = await this.prisma.product.findMany({
+      where: { id: { in: productIds } },
+      select: { id: true, sku: true, asin: true, title: true, imageUrl: true },
+    });
+    const byId = new Map(products.map((p) => [p.id, p]));
+
+    return rows.map((r: any) => {
+      const p = byId.get(r.productId);
+      return {
+        productId: r.productId,
+        sku: p?.sku ?? null,
+        asin: p?.asin ?? null,
+        title: p?.title ?? null,
+        imageUrl: p?.imageUrl ?? null,
+        units: Number(r._sum?.quantity ?? 0),
+        revenue: Number(r._sum?.revenueTotal ?? 0),
+        profit: Number(r._sum?.profit ?? 0),
+        // Profit margin for this product over the window
+        marginPct:
+          Number(r._sum?.revenueTotal ?? 0) > 0
+            ? Number(r._sum?.profit ?? 0) / Number(r._sum?.revenueTotal ?? 0)
+            : 0,
+        lineItemsCount: r._count?._all ?? 0,
+      };
+    });
+  }
+
+  async listProducts(orgId: string) {
+    const userIds = await this.getOrgMemberUserIds(orgId);
+    const products = await this.prisma.product.findMany({
+      where: { userId: { in: userIds } },
+      orderBy: [{ updatedAt: 'desc' }],
+      select: {
+        id: true,
+        sku: true,
+        asin: true,
+        title: true,
+        imageUrl: true,
+        costOfGoods: true,
+        updatedAt: true,
+      },
+    });
+    return products.map((p) => ({
+      ...p,
+      costOfGoods: p.costOfGoods == null ? null : Number(p.costOfGoods),
+    }));
+  }
+
+  async updateProductCostOfGoods(
+    orgId: string,
+    productId: string,
+    costOfGoods: number | null,
+  ) {
+    const userIds = await this.getOrgMemberUserIds(orgId);
+    const result = await this.prisma.product.updateMany({
+      where: { id: productId, userId: { in: userIds } },
+      data: { costOfGoods },
+    });
+    if (result.count === 0) {
+      throw new NotFoundException('Product not found in org');
+    }
+    const updated = await this.prisma.product.findFirst({
+      where: { id: productId, userId: { in: userIds } },
+      select: {
+        id: true,
+        userId: true,
+        sku: true,
+        asin: true,
+        title: true,
+        imageUrl: true,
+        costOfGoods: true,
+        updatedAt: true,
+      },
+    });
+    if (!updated) {
+      throw new NotFoundException('Product not found in org');
+    }
+
+    // Profit freshness:
+    // If COGS changes, recompute profit for existing OrderItem rows for this product.
+    // This ensures dashboards and "top profitable products" update immediately without
+    // requiring a re-sync of Amazon orders.
+    try {
+      const nowSafe = new Date(Date.now() - 5 * 60 * 1000);
+      const startDate = new Date(nowSafe.getTime() - 365 * 24 * 60 * 60 * 1000);
+
+      const cogsPerUnit =
+        updated.costOfGoods == null ? null : Number(updated.costOfGoods);
+
+      const orderItems = await (this.prisma as any).orderItem.findMany({
+        where: {
+          userId: updated.userId,
+          productId: updated.id,
+          marketplace: 'amazon',
+          orderDate: { gte: startDate, lte: nowSafe },
+        },
+        select: {
+          id: true,
+          orderDbId: true,
+          quantity: true,
+          revenueTotal: true,
+          taxChargedTotal: true,
+          amazonFeesTotal: true,
+        },
+      });
+
+      const orderDbIds = new Set<string>();
+
+      for (const it of orderItems) {
+        orderDbIds.add(it.orderDbId);
+
+        const qty = Number(it.quantity ?? 0);
+        const safeQty = Number.isFinite(qty) && qty > 0 ? qty : 1;
+
+        const revenueTotal = Number(it.revenueTotal ?? 0);
+        const taxChargedTotal = Number(it.taxChargedTotal ?? 0);
+        const amazonFeesTotal = Number(it.amazonFeesTotal ?? 0);
+
+        const cogsTotal =
+          cogsPerUnit == null || Number.isNaN(cogsPerUnit)
+            ? null
+            : cogsPerUnit * safeQty;
+
+        const profit =
+          cogsTotal == null
+            ? null
+            : revenueTotal - taxChargedTotal - cogsTotal + amazonFeesTotal;
+
+        await (this.prisma as any).orderItem.update({
+          where: { id: it.id },
+          data: {
+            cogsTotal: cogsTotal == null ? null : Number(cogsTotal.toFixed(2)),
+            profit: profit == null ? null : Number(profit.toFixed(2)),
+          },
+        });
+      }
+
+      // Update Order.totalProfit for affected orders:
+      // set to sum(profit) only when *all* items in the order have profit computed; otherwise null.
+      for (const orderDbId of orderDbIds) {
+        const items = await (this.prisma as any).orderItem.findMany({
+          where: { orderDbId },
+          select: { profit: true },
+        });
+        const profits = items.map((x: any) =>
+          x.profit == null ? null : Number(x.profit),
+        );
+        const allKnown = profits.length > 0 && profits.every((p) => p != null);
+        const total =
+          allKnown
+            ? profits.reduce((sum, p) => sum + Number(p ?? 0), 0)
+            : null;
+
+        await this.prisma.order.update({
+          where: { id: orderDbId },
+          data: { totalProfit: total == null ? null : Number(total.toFixed(2)) },
+        });
+      }
+
+      // Refresh daily aggregates for this user so any KPI-based screens stay in sync.
+      await this.recomputeDailyKpiSummary(updated.userId);
+    } catch (err) {
+      // Non-fatal: COGS update succeeded; profit recompute can be retried later.
+      console.warn('[AmazonService.updateProductCostOfGoods] profit recompute failed', {
+        productId: updated.id,
+        err,
+      });
+    }
+
+    return {
+      ...updated,
+      costOfGoods:
+        updated.costOfGoods == null ? null : Number(updated.costOfGoods),
+    };
+  }
+
+  async listInventory(orgId: string) {
+    const userIds = await this.getOrgMemberUserIds(orgId);
+    const rows = await this.prisma.product.findMany({
+      where: { userId: { in: userIds } },
+      orderBy: [{ updatedAt: 'desc' }],
+      select: {
+        id: true,
+        sku: true,
+        asin: true,
+        title: true,
+        imageUrl: true,
+        updatedAt: true,
+        inventory: {
+          select: {
+            currentQty: true,
+            updatedAt: true,
+          },
+        },
+      },
+    });
+
+    return rows.map((p) => ({
+      productId: p.id,
+      sku: p.sku,
+      asin: p.asin,
+      title: p.title,
+      imageUrl: p.imageUrl,
+      productUpdatedAt: p.updatedAt,
+      fbaFulfillableQty: p.inventory?.currentQty ?? null,
+      inventoryUpdatedAt: p.inventory?.updatedAt ?? null,
+    }));
+  }
+
+  /**
+   * Fetch FBA inventory summaries from SP-API and upsert Inventory rows
+   * for products we already know about in this org (matched by SKU).
+   */
+  async syncFbaInventory(orgId: string, preferredUserId?: string) {
+    const credentials = await this.getAmazonCredentialsForOrg(orgId, preferredUserId);
+    const userIds = await this.getOrgMemberUserIds(orgId);
+
+    const products = await this.prisma.product.findMany({
+      where: { userId: { in: userIds } },
+      select: { id: true, userId: true, sku: true },
+    });
+    const bySku = new Map<string, { id: string; userId: string }>();
+    for (const p of products) {
+      if (!bySku.has(p.sku)) bySku.set(p.sku, { id: p.id, userId: p.userId });
+    }
+
+    let marketplaceIds =
+      credentials.region === 'eu'
+        ? [
+            'A1F83G8C2ARO7P', // UK
+            'A1PA6795UKMFR9', // DE
+            'A13V1IB3VIYZZH', // FR
+            'APJ6JRA9NG5V4', // IT
+            'A1RKKUPIHCS9HS', // ES
+          ]
+        : ['ATVPDKIKX0DER']; // US
+
+    // Attempt to fetch actual participations (best-effort).
+    try {
+      const res = (await this.spApiClient.getMarketplaceParticipations(
+        credentials,
+      )) as any;
+      const payload = res?.payload ?? res?.Payload ?? res ?? {};
+      const list: any[] = payload?.payload ?? payload?.Payload ?? payload ?? [];
+      const ids = Array.isArray(list)
+        ? list
+            .map((p) => p?.marketplace?.id ?? p?.Marketplace?.Id ?? null)
+            .filter((v): v is string => typeof v === 'string' && v.length > 0)
+        : [];
+      if (ids.length) {
+        marketplaceIds = Array.from(new Set(ids));
+      }
+    } catch {
+      // ignore; fall back to region defaults
+    }
+
+    let marketplacesProcessed = 0;
+    let inventorySummariesSeen = 0;
+    let matchedSkus = 0;
+    let upsertedInventoryRows = 0;
+    let skippedUnknownSku = 0;
+    const marketplaceErrors: Array<{ marketplaceId: string; error: string }> = [];
+    let marketplacesWithSuccessfulResponse = 0;
+
+    try {
+      for (const marketplaceId of marketplaceIds) {
+        marketplacesProcessed += 1;
+        let nextToken: string | undefined = undefined;
+
+        // Paginate until exhausted
+        while (true) {
+          let res: any;
+          try {
+            res = (await this.spApiClient.getFbaInventorySummaries(credentials, {
+              marketplaceId,
+              details: true,
+              nextToken,
+            })) as any;
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            // If a single marketplace is denied, skip it and continue trying others.
+            if (
+              msg.includes('/fba/inventory/v1/summaries') &&
+              msg.includes('(403)') &&
+              msg.toLowerCase().includes('access to requested resource is denied')
+            ) {
+              marketplaceErrors.push({ marketplaceId, error: msg });
+              break;
+            }
+            throw e;
+          }
+
+          // If we got here, this marketplace returned a 2xx response at least once.
+          if (nextToken === undefined) {
+            marketplacesWithSuccessfulResponse += 1;
+          }
+
+          const payload = res?.payload ?? res?.Payload ?? res ?? {};
+          const summaries: any[] =
+            payload?.inventorySummaries ??
+            payload?.InventorySummaries ??
+            payload?.summaries ??
+            [];
+
+          inventorySummariesSeen += summaries.length;
+
+          for (const s of summaries) {
+            const sku: string | undefined =
+              s?.sellerSku ?? s?.SellerSku ?? s?.sellerSKU ?? s?.SellerSKU;
+            if (!sku) continue;
+
+            const match = bySku.get(sku);
+            if (!match) {
+              skippedUnknownSku += 1;
+              continue;
+            }
+
+            matchedSkus += 1;
+
+            const qtyRaw =
+              s?.inventoryDetails?.fulfillableQuantity ??
+              s?.inventoryDetails?.fulfillable ??
+              s?.inventoryDetails?.afnFulfillableQuantity ??
+              s?.totalQuantity ??
+              s?.TotalQuantity ??
+              0;
+            const qty = Math.max(0, Number(qtyRaw) || 0);
+
+            await this.prisma.inventory.upsert({
+              where: { productId: match.id },
+              update: {
+                userId: match.userId,
+                currentQty: qty,
+              },
+              create: {
+                userId: match.userId,
+                productId: match.id,
+                currentQty: qty,
+              },
+            });
+            upsertedInventoryRows += 1;
+          }
+
+          const token: string | undefined =
+            payload?.nextToken ??
+            payload?.NextToken ??
+            payload?.next_token ??
+            undefined;
+
+          if (!token) break;
+          nextToken = token;
+        }
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (
+        msg.includes('/fba/inventory/v1/summaries') &&
+        msg.includes('(403)') &&
+        msg.toLowerCase().includes('access to requested resource is denied')
+      ) {
+        throw new ForbiddenException(
+          'Amazon denied access to FBA Inventory. Enable the SP-API role "Product Listing" or "Amazon Fulfillment" for your app, then re-authorize your seller account and try again.',
+        );
+      }
+      throw e;
+    }
+
+    // If every marketplace was denied, raise the friendly forbidden error.
+    if (marketplacesWithSuccessfulResponse === 0 && marketplaceErrors.length > 0) {
+      throw new ForbiddenException(
+        'Amazon denied access to FBA Inventory. Enable the SP-API role "Product Listing" or "Amazon Fulfillment" for your app, then re-authorize your seller account and try again.',
+      );
+    }
+
+    // Ensure all known products have an Inventory row after a successful sync.
+    // This prevents "—" for SKUs that simply weren't returned in the summaries.
+    if (marketplacesWithSuccessfulResponse > 0) {
+      for (const p of products) {
+        await this.prisma.inventory.upsert({
+          where: { productId: p.id },
+          update: { userId: p.userId, currentQty: 0 },
+          create: { userId: p.userId, productId: p.id, currentQty: 0 },
+        });
+      }
+    }
+
+    return {
+      region: credentials.region,
+      marketplacesProcessed,
+      marketplacesWithSuccessfulResponse,
+      inventorySummariesSeen,
+      matchedSkus,
+      upsertedInventoryRows,
+      skippedUnknownSku,
+      marketplaceErrorsCount: marketplaceErrors.length,
+    };
+  }
+
+  /**
+   * Dev-only: populate OrderItem rows for existing Orders (last 30 days).
+   * Useful when Orders were already synced before OrderItem existed, or when
+   * a sync run fetches 0 new orders (cursor advanced) and therefore doesn't
+   * call getOrderItems/Finances again.
+   */
+  async backfillOrderItems(userId: string, days = 30) {
+    const credentials = await this.getAmazonCredentialsForUser(userId);
+
+    const nowSafe = new Date(Date.now() - 5 * 60 * 1000);
+    const startDate = new Date(nowSafe.getTime() - days * 24 * 60 * 60 * 1000);
+
+    const orders = await this.prisma.order.findMany({
+      where: {
+        userId,
+        marketplace: 'amazon',
+        orderDate: { gte: startDate, lte: nowSafe },
+      },
+      select: {
+        id: true, // DB id
+        orderId: true, // marketplace order id
+        orderDate: true,
+      },
+      orderBy: { orderDate: 'desc' },
+    });
+
+    let processedOrders = 0;
+    let upsertedItems = 0;
+    let skippedNoItems = 0;
+
+    for (const ord of orders) {
+      const amazonOrderId = ord.orderId;
+      let orderItems: any[] = [];
+
+      try {
+        const itemsRes = (await this.spApiClient.getOrderItems(
+          credentials,
+          amazonOrderId,
+        )) as any;
+        orderItems = itemsRes?.payload?.OrderItems ?? [];
+      } catch (err) {
+        console.warn(
+          '[AmazonService.backfillOrderItems] getOrderItems failed',
+          {
+            userId,
+            amazonOrderId,
+            err,
+          },
+        );
+        orderItems = [];
+      }
+
+      if (orderItems.length === 0) {
+        skippedNoItems += 1;
+        continue;
+      }
+
+      // Best-effort fees from Finances; fall back to 0 / proportional allocation.
+      let amazonFeesTotal = 0;
+      const feeByOrderItemId = new Map<string, number>();
+      const feeBySku = new Map<string, number>();
+      const addFee = (
+        map: Map<string, number>,
+        key: string,
+        amount: number,
+      ) => {
+        if (!key) return;
+        map.set(key, (map.get(key) ?? 0) + amount);
+      };
+      const sumFeeComponentList = (list: any[] | undefined): number => {
+        if (!Array.isArray(list)) return 0;
+        return list.reduce((sum, fc) => {
+          const n = Number(fc?.FeeAmount?.CurrencyAmount ?? 0);
+          return Number.isNaN(n) ? sum : sum + n;
+        }, 0);
+      };
+
+      try {
+        const finRes = (await this.spApiClient.listFinancialEventsByOrderId(
+          credentials,
+          amazonOrderId,
+          { maxResultsPerPage: 100 },
+        )) as any;
+
+        const sumCurrencyAmountsByKey = (
+          input: unknown,
+          keyName: string,
+        ): number => {
+          if (input == null) return 0;
+          if (Array.isArray(input)) {
+            return input.reduce(
+              (sum, item) => sum + sumCurrencyAmountsByKey(item, keyName),
+              0,
+            );
+          }
+          if (typeof input !== 'object') return 0;
+          let total = 0;
+          for (const [k, v] of Object.entries(
+            input as Record<string, unknown>,
+          )) {
+            if (k === keyName && v && typeof v === 'object') {
+              const amt = (v as any).CurrencyAmount;
+              const n = Number(amt ?? 0);
+              if (!Number.isNaN(n)) total += n;
+            } else {
+              total += sumCurrencyAmountsByKey(v, keyName);
+            }
+          }
+          return total;
+        };
+
+        amazonFeesTotal = sumCurrencyAmountsByKey(finRes, 'FeeAmount');
+
+        const events = finRes?.payload?.FinancialEvents ?? {};
+        const shipmentLists = [
+          ...(events?.ShipmentEventList ?? []),
+          ...(events?.RefundEventList ?? []),
+          ...(events?.ChargebackEventList ?? []),
+          ...(events?.GuaranteeClaimEventList ?? []),
+        ];
+        for (const ev of shipmentLists) {
+          const items = ev?.ShipmentItemList ?? [];
+          for (const si of items) {
+            const fee =
+              sumFeeComponentList(si?.ItemFeeList) +
+              sumFeeComponentList(si?.ItemFeeAdjustmentList);
+            const orderItemId = si?.OrderItemId as string | undefined;
+            const sku = si?.SellerSKU as string | undefined;
+            if (fee !== 0) {
+              if (orderItemId) addFee(feeByOrderItemId, orderItemId, fee);
+              if (sku) addFee(feeBySku, sku, fee);
+            }
+          }
+        }
+      } catch (err) {
+        console.warn(
+          '[AmazonService.backfillOrderItems] listFinancialEventsByOrderId failed',
+          { userId, amazonOrderId, err },
+        );
+      }
+
+      const itemRevenues = orderItems.map((it: any) => {
+        const revenue = Number(it?.ItemPrice?.Amount ?? 0);
+        return Number.isNaN(revenue) ? 0 : revenue;
+      });
+      const totalItemRevenue = itemRevenues.reduce((a, b) => a + b, 0);
+
+      for (let idx = 0; idx < orderItems.length; idx++) {
+        const it = orderItems[idx];
+        const orderItemId = String(it?.OrderItemId ?? '');
+        const sku = String(it?.SellerSKU ?? '');
+        const asin = (it?.ASIN as string | undefined) ?? null;
+        const titleRaw = it?.Title;
+        const itemTitle =
+          typeof titleRaw === 'string' && titleRaw.trim()
+            ? titleRaw.trim()
+            : null;
+
+        const qty = Number(it?.QuantityOrdered ?? 0);
+        const quantityOrdered = qty > 0 ? qty : 1;
+
+        const revenueTotal = itemRevenues[idx] ?? 0;
+        const shippingCharged = Number(it?.ShippingPrice?.Amount ?? 0);
+        const taxCharged = Number(it?.ItemTax?.Amount ?? 0);
+
+        let itemFees = 0;
+        if (orderItemId && feeByOrderItemId.has(orderItemId)) {
+          itemFees = feeByOrderItemId.get(orderItemId) ?? 0;
+        } else if (sku && feeBySku.has(sku)) {
+          itemFees = feeBySku.get(sku) ?? 0;
+        } else if (totalItemRevenue > 0 && amazonFeesTotal !== 0) {
+          itemFees = (revenueTotal / totalItemRevenue) * amazonFeesTotal;
+        }
+
+        const itemProduct = sku
+          ? await this.prisma.product.upsert({
+              where: { userId_sku: { userId, sku } },
+              update: {
+                asin: asin ?? undefined,
+                title: itemTitle ?? undefined,
+              },
+              create: { userId, sku, asin, title: itemTitle },
+            })
+          : await this.prisma.product.upsert({
+              where: { userId_sku: { userId, sku: 'AMAZON_GENERIC' } },
+              update: {},
+              create: {
+                userId,
+                sku: 'AMAZON_GENERIC',
+                title: 'Amazon Sales (Generic)',
+              },
+            });
+
+        const cogsPerUnit = itemProduct.costOfGoods
+          ? Number(itemProduct.costOfGoods)
+          : null;
+        const cogsTotal =
+          cogsPerUnit != null ? cogsPerUnit * quantityOrdered : null;
+        const profit =
+          cogsTotal != null
+            ? revenueTotal - taxCharged - cogsTotal + itemFees
+            : null;
+
+        await (this.prisma as any).orderItem.upsert({
+          where: {
+            orderDbId_orderItemId: {
+              orderDbId: ord.id,
+              orderItemId,
+            },
+          },
+          update: {
+            userId,
+            productId: itemProduct.id,
+            marketplace: 'amazon',
+            orderId: amazonOrderId,
+            sku: sku || 'AMAZON_GENERIC',
+            asin,
+            quantity: quantityOrdered,
+            revenueTotal,
+            shippingChargedTotal: Number.isNaN(shippingCharged)
+              ? 0
+              : shippingCharged,
+            taxChargedTotal: Number.isNaN(taxCharged) ? 0 : taxCharged,
+            amazonFeesTotal: Number.isNaN(itemFees)
+              ? 0
+              : Number(itemFees.toFixed(2)),
+            cogsTotal,
+            profit: profit != null ? Number(profit.toFixed(2)) : null,
+            rawResponse: it,
+            orderDate: ord.orderDate,
+          },
+          create: {
+            userId,
+            orderDbId: ord.id,
+            productId: itemProduct.id,
+            marketplace: 'amazon',
+            orderId: amazonOrderId,
+            orderItemId,
+            sku: sku || 'AMAZON_GENERIC',
+            asin,
+            quantity: quantityOrdered,
+            revenueTotal,
+            shippingChargedTotal: Number.isNaN(shippingCharged)
+              ? 0
+              : shippingCharged,
+            taxChargedTotal: Number.isNaN(taxCharged) ? 0 : taxCharged,
+            amazonFeesTotal: Number.isNaN(itemFees)
+              ? 0
+              : Number(itemFees.toFixed(2)),
+            cogsTotal,
+            profit: profit != null ? Number(profit.toFixed(2)) : null,
+            rawResponse: it,
+            orderDate: ord.orderDate,
+          },
+        });
+        upsertedItems += 1;
+      }
+
+      processedOrders += 1;
+    }
+
+    return {
+      days,
+      startDate: startDate.toISOString(),
+      endDate: nowSafe.toISOString(),
+      processedOrders,
+      upsertedItems,
+      skippedNoItems,
+      totalOrders: orders.length,
+    };
+  }
+
+  async backfillProductTitles(
+    orgId: string,
+    limit = 50,
+    preferredUserId?: string,
+  ) {
+    const credentials = await this.getAmazonCredentialsForOrg(orgId, preferredUserId);
+
+    const unwrapPayload = (input: any): any => {
+      // Some SP-API client libs wrap responses as { payload: {...} } or even { payload: { payload: {...} } }.
+      // Normalize that so our parsing logic is robust.
+      let cur = input;
+      for (let i = 0; i < 5; i += 1) {
+        if (cur && typeof cur === 'object') {
+          if (cur.payload != null) {
+            cur = cur.payload;
+            continue;
+          }
+          if (cur.Payload != null) {
+            cur = cur.Payload;
+            continue;
+          }
+        }
+        break;
+      }
+      return cur ?? {};
+    };
+
+    // Prefer the seller's actual marketplace participations; titles are marketplace-scoped.
+    // If we query the wrong marketplace ID, Catalog Items often returns 200 with empty summaries.
+    let marketplaceIds =
+      credentials.region === 'eu'
+        ? [
+            'A1F83G8C2ARO7P', // UK
+            'A1PA6795UKMFR9', // DE
+            'A13V1IB3VIYZZH', // FR
+            'APJ6JRA9NG5V4', // IT
+            'A1RKKUPIHCS9HS', // ES
+          ]
+        : ['ATVPDKIKX0DER']; // US
+
+    try {
+      const res = (await this.spApiClient.getMarketplaceParticipations(
+        credentials,
+      )) as any;
+      const wrapper = res?.payload ?? res?.Payload ?? res ?? null;
+      const list = Array.isArray(wrapper)
+        ? wrapper
+        : (wrapper?.payload ?? wrapper?.Payload ?? null);
+      const ids = Array.isArray(list)
+        ? list
+            .map((p: any) => p?.marketplace?.id ?? p?.Marketplace?.Id ?? null)
+            .filter((v: any) => typeof v === 'string' && v.length > 0)
+        : [];
+      if (ids.length) {
+        marketplaceIds = Array.from(new Set(ids));
+      }
+    } catch {
+      // ignore; fall back to region defaults
+    }
+
+    // Titles are marketplace-scoped, and the returned list order can be arbitrary.
+    // Prefer the seller's primary marketplace(s) first to avoid filling titles
+    // with (valid) but unexpected languages from other marketplaces.
+    const preferredOrder =
+      credentials.region === 'eu'
+        ? [
+            'A1F83G8C2ARO7P', // UK
+            'A1PA6795UKMFR9', // DE
+            'A13V1IB3VIYZZH', // FR
+            'APJ6JRA9NG5V4', // IT
+            'A1RKKUPIHCS9HS', // ES
+          ]
+        : [
+            'ATVPDKIKX0DER', // US
+            'A2EUQ1WTGCTBG2', // CA
+            'A1AM78C64UM0Y8', // MX
+          ];
+    const preferredIndex = new Map(preferredOrder.map((id, idx) => [id, idx]));
+    marketplaceIds = [...marketplaceIds].sort((a, b) => {
+      const ai = preferredIndex.get(a) ?? Number.MAX_SAFE_INTEGER;
+      const bi = preferredIndex.get(b) ?? Number.MAX_SAFE_INTEGER;
+      if (ai !== bi) return ai - bi;
+      return a.localeCompare(b);
+    });
+
+    const userIds = await this.getOrgMemberUserIds(orgId);
+
+    const products = await this.prisma.product.findMany({
+      where: {
+        userId: { in: userIds },
+        asin: { not: null },
+        OR: [{ title: null }, { imageUrl: null }],
+      },
+      take: limit,
+      orderBy: { updatedAt: 'desc' },
+      select: { id: true, asin: true, title: true, imageUrl: true },
+    });
+
+    let updated = 0;
+    let skipped = 0;
+    const errors: { asin: string; error: string }[] = [];
+    const skippedSamples: Array<{
+      asin: string;
+      marketplacesTried: number;
+      sawSummaries: boolean;
+      sawAttributes: boolean;
+    }> = [];
+
+    for (const p of products) {
+      const asin = p.asin ?? '';
+      if (!asin) {
+        skipped += 1;
+        continue;
+      }
+      try {
+        const pickString = (v: unknown): string | null =>
+          typeof v === 'string' && v.trim() ? v.trim() : null;
+
+        const pickAttrTitle = (v: unknown): string | null => {
+          if (typeof v === 'string' && v.trim()) return v.trim();
+          if (Array.isArray(v)) {
+            for (const item of v) {
+              if (typeof item === 'string' && item.trim()) return item.trim();
+              const maybeValue = (item as any)?.value ?? (item as any)?.Value;
+              if (typeof maybeValue === 'string' && maybeValue.trim()) {
+                return maybeValue.trim();
+              }
+            }
+          }
+          const maybeValue = (v as any)?.value ?? (v as any)?.Value;
+          if (typeof maybeValue === 'string' && maybeValue.trim())
+            return maybeValue.trim();
+          return null;
+        };
+
+        const titleFromSummaries = (
+          summaries: unknown,
+          marketplaceId: string,
+        ): string | null => {
+          if (!Array.isArray(summaries) || summaries.length === 0) return null;
+
+          // Prefer a summary matching the marketplaceId, otherwise fall back to the first summary.
+          const matching =
+            summaries.find((s: any) => s?.marketplaceId === marketplaceId) ??
+            summaries.find((s: any) => s?.MarketplaceId === marketplaceId) ??
+            summaries[0];
+
+          return (
+            pickString(matching?.itemName) ??
+            pickString(matching?.item_name) ??
+            pickString(matching?.itemTitle) ??
+            pickString(matching?.item_title) ??
+            pickString(matching?.title) ??
+            null
+          );
+        };
+
+        const titleFromAttributes = (
+          attributes: unknown,
+          marketplaceId: string,
+        ): string | null => {
+          if (!attributes || typeof attributes !== 'object') return null;
+
+          const attr = attributes as any;
+          const candidates =
+            attr.item_name ??
+            attr.itemName ??
+            attr.item_title ??
+            attr.itemTitle ??
+            attr.product_title ??
+            attr.productTitle ??
+            attr.title ??
+            null;
+
+          // Many attributes are arrays of objects including marketplace_id + value.
+          if (Array.isArray(candidates)) {
+            const matching =
+              candidates.find((x: any) => x?.marketplace_id === marketplaceId) ??
+              candidates.find((x: any) => x?.marketplaceId === marketplaceId) ??
+              candidates[0];
+            return pickAttrTitle(matching);
+          }
+
+          return pickAttrTitle(candidates);
+        };
+
+        const imageFromPayload = (
+          payload: any,
+          marketplaceId: string,
+        ): string | null => {
+          const images = payload?.images ?? payload?.Images ?? null;
+          if (!Array.isArray(images) || images.length === 0) return null;
+
+          const matching =
+            images.find((x: any) => x?.marketplaceId === marketplaceId) ??
+            images.find((x: any) => x?.marketplace_id === marketplaceId) ??
+            images[0];
+
+          const list: any[] =
+            matching?.images ??
+            matching?.Images ??
+            matching?.imageSet ??
+            matching?.ImageSet ??
+            [];
+          if (!Array.isArray(list) || list.length === 0) return null;
+
+          const pick =
+            list.find((img: any) => String(img?.variant ?? '').toUpperCase() === 'MAIN') ??
+            list.find((img: any) => String(img?.Variant ?? '').toUpperCase() === 'MAIN') ??
+            list[0];
+
+          const url =
+            pick?.link ??
+            pick?.Link ??
+            pick?.url ??
+            pick?.URL ??
+            pick?.uri ??
+            pick?.URI ??
+            null;
+          return typeof url === 'string' && url.trim() ? url.trim() : null;
+        };
+
+        let title: string | null = null;
+        let imageUrl: string | null = null;
+        let sawSummaries = false;
+        let sawAttributes = false;
+        for (const marketplaceId of marketplaceIds) {
+          let res: any;
+          try {
+            res = (await this.spApiClient.getCatalogItem(
+              credentials,
+              asin,
+              [marketplaceId],
+            )) as any;
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            // Catalog Items frequently returns a per-marketplace NOT_FOUND even when the ASIN exists
+            // in another marketplace. Treat that as a normal miss and continue trying.
+            if (
+              msg.includes('/catalog/2022-04-01/items/') &&
+              msg.includes('(404)') &&
+              msg.toLowerCase().includes('not found in marketplace')
+            ) {
+              continue;
+            }
+            throw e;
+          }
+          const payload = unwrapPayload(res);
+
+          const summaries = payload?.summaries ?? payload?.Summaries ?? null;
+          const summaryCandidates: unknown[] = Array.isArray(summaries)
+            ? summaries
+            : [];
+          if (summaryCandidates.length) sawSummaries = true;
+
+          const attrs = payload?.attributes ?? payload?.Attributes ?? null;
+          if (attrs && typeof attrs === 'object') sawAttributes = true;
+
+          if (!title) {
+            title =
+              titleFromSummaries(summaryCandidates, marketplaceId) ??
+              titleFromAttributes(attrs, marketplaceId);
+          }
+          if (!imageUrl) {
+            imageUrl = imageFromPayload(payload, marketplaceId);
+          }
+
+          if (title && imageUrl) break;
+        }
+
+        // If we couldn't find either title or image, there's nothing to update.
+        if (!title && !imageUrl) {
+          skipped += 1;
+          if (skippedSamples.length < 5) {
+            skippedSamples.push({
+              asin,
+              marketplacesTried: marketplaceIds.length,
+              sawSummaries,
+              sawAttributes,
+            });
+          }
+          continue;
+        }
+
+        const data: any = {};
+        if (p.title == null && title) data.title = title;
+        if (p.imageUrl == null && imageUrl) data.imageUrl = imageUrl;
+
+        if (Object.keys(data).length === 0) {
+          skipped += 1;
+          continue;
+        }
+
+        await this.prisma.product.update({ where: { id: p.id }, data });
+        updated += 1;
+      } catch (e) {
+        errors.push({
+          asin,
+          error: e instanceof Error ? e.message : 'error',
+        });
+      }
+    }
+
+    return {
+      requested: products.length,
+      updated,
+      skipped,
+      errorsCount: errors.length,
+      errors: errors.slice(0, 10),
+      skippedSamples,
+    };
+  }
+
+  async devGetCatalogItem(
+    orgId: string,
+    preferredUserId: string,
+    asin: string,
+    marketplaceId: string,
+  ) {
+    const credentials = await this.getAmazonCredentialsForOrg(orgId, preferredUserId);
+    return this.spApiClient.getCatalogItem(credentials, asin, [marketplaceId]);
   }
 
   /**
@@ -682,12 +2289,17 @@ export class AmazonService {
    * Builds the Amazon Seller Central consent URL for a given user and region.
    * The user is encoded into the state payload so we can resolve them on callback.
    */
-  async getAmazonConnectUrl(userId: string, regionCode: string): Promise<string> {
+  async getAmazonConnectUrl(
+    userId: string,
+    regionCode: string,
+  ): Promise<string> {
     const applicationId = this.configService.get<string>('AMAZON_APP_ID');
     const redirectUri = this.configService.get<string>('AMAZON_REDIRECT_URI');
 
     if (!applicationId || !redirectUri) {
-      throw new Error('AMAZON_APP_ID and AMAZON_REDIRECT_URI must be configured');
+      throw new Error(
+        'AMAZON_APP_ID and AMAZON_REDIRECT_URI must be configured',
+      );
     }
 
     const baseUrl = this.getSellerCentralBaseUrl(regionCode);
@@ -696,7 +2308,9 @@ export class AmazonService {
       userId,
       region: regionCode,
     };
-    const state = Buffer.from(JSON.stringify(statePayload)).toString('base64url');
+    const state = Buffer.from(JSON.stringify(statePayload)).toString(
+      'base64url',
+    );
 
     const url = new URL('/apps/authorize/consent', baseUrl);
     url.searchParams.set('application_id', applicationId);
@@ -727,13 +2341,17 @@ export class AmazonService {
     const redirectUri = this.configService.get<string>('AMAZON_REDIRECT_URI');
     const lwaClientId = this.configService.get<string>('LWA_CLIENT_ID');
     const lwaClientSecret = this.configService.get<string>('LWA_CLIENT_SECRET');
-    const awsAccessKeyId = this.configService.get<string>('AWS_ACCESS_KEY_ID') ?? '';
+    const awsAccessKeyId =
+      this.configService.get<string>('AWS_ACCESS_KEY_ID') ?? '';
     const awsSecretAccessKey =
       this.configService.get<string>('AWS_SECRET_ACCESS_KEY') ?? '';
-    const awsRoleArn = this.configService.get<string>('AWS_ROLE_ARN') ?? undefined;
+    const awsRoleArn =
+      this.configService.get<string>('AWS_ROLE_ARN') ?? undefined;
 
     if (!redirectUri || !lwaClientId || !lwaClientSecret) {
-      throw new Error('LWA_CLIENT_ID, LWA_CLIENT_SECRET and AMAZON_REDIRECT_URI must be configured');
+      throw new Error(
+        'LWA_CLIENT_ID, LWA_CLIENT_SECRET and AMAZON_REDIRECT_URI must be configured',
+      );
     }
 
     // Exchange the auth code for a refresh token

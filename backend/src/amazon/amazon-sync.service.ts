@@ -51,4 +51,3 @@ export class AmazonSyncService implements OnModuleInit {
     );
   }
 }
-

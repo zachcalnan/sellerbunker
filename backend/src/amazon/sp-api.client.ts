@@ -31,6 +31,10 @@ export class AmazonSpApiClient {
     const flag = this.configService.get<string>('SPAPI_USE_SANDBOX');
     this.useSandbox = flag === undefined ? true : flag === 'true';
   }
+
+  getDebugConfig() {
+    return { useSandbox: this.useSandbox };
+  }
   /**
    * Example wrapper for the Sellers API: getMarketplaceParticipations.
    */
@@ -90,6 +94,111 @@ export class AmazonSpApiClient {
     return this.signedSpApiRequest(credentials, {
       method: 'GET',
       path: '/orders/v0/orders',
+      query,
+    });
+  }
+
+  /**
+   * Orders API v0: getOrderItems
+   * GET /orders/v0/orders/{orderId}/orderItems
+   *
+   * Used to fetch item-level prices, taxes, and shipping charges.
+   */
+  async getOrderItems(
+    credentials: SpApiCredentials,
+    orderId: string,
+    params?: { nextToken?: string },
+  ) {
+    const query: Record<string, unknown> = {};
+    if (params?.nextToken) {
+      query.NextToken = params.nextToken;
+    }
+    return this.signedSpApiRequest(credentials, {
+      method: 'GET',
+      path: `/orders/v0/orders/${encodeURIComponent(orderId)}/orderItems`,
+      query,
+    });
+  }
+
+  /**
+   * Finances API v0: listFinancialEventsByOrderId
+   * GET /finances/v0/orders/{orderId}/financialEvents
+   *
+   * Used to fetch Amazon fee components (FBA/referral/etc) and tax-withholding info.
+   */
+  async listFinancialEventsByOrderId(
+    credentials: SpApiCredentials,
+    orderId: string,
+    params?: { maxResultsPerPage?: number; nextToken?: string },
+  ) {
+    const query: Record<string, unknown> = {};
+    if (params?.maxResultsPerPage) {
+      query.MaxResultsPerPage = params.maxResultsPerPage;
+    }
+    if (params?.nextToken) {
+      query.NextToken = params.nextToken;
+    }
+    return this.signedSpApiRequest(credentials, {
+      method: 'GET',
+      path: `/finances/v0/orders/${encodeURIComponent(orderId)}/financialEvents`,
+      query,
+    });
+  }
+
+  /**
+   * Catalog Items API v2022-04-01: getCatalogItem
+   * GET /catalog/2022-04-01/items/{asin}
+   *
+   * Used to backfill product titles (via summaries.itemName).
+   */
+  async getCatalogItem(
+    credentials: SpApiCredentials,
+    asin: string,
+    marketplaceIds: string[],
+  ) {
+    return this.signedSpApiRequest(credentials, {
+      method: 'GET',
+      path: `/catalog/2022-04-01/items/${encodeURIComponent(asin)}`,
+      query: {
+        // Catalog Items uses comma-delimited query params for lists.
+        marketplaceIds: marketplaceIds.join(','),
+        includedData: 'summaries,attributes,images',
+      },
+    });
+  }
+
+  /**
+   * FBA Inventory API v1: getInventorySummaries
+   * GET /fba/inventory/v1/summaries
+   *
+   * Used to fetch FBA inventory quantities (fulfillable, inbound, reserved, etc).
+   */
+  async getFbaInventorySummaries(
+    credentials: SpApiCredentials,
+    params: {
+      marketplaceId: string;
+      details?: boolean;
+      nextToken?: string;
+      startDateTime?: string;
+      sellerSku?: string;
+      sellerSkus?: string[];
+    },
+  ) {
+    const query: Record<string, unknown> = {
+      granularityType: 'Marketplace',
+      granularityId: params.marketplaceId,
+      marketplaceIds: [params.marketplaceId],
+    };
+
+    if (params.details !== undefined) query.details = params.details;
+    if (params.nextToken) query.nextToken = params.nextToken;
+    if (params.startDateTime) query.startDateTime = params.startDateTime;
+    if (params.sellerSku) query.sellerSku = params.sellerSku;
+    if (params.sellerSkus?.length) query.sellerSkus = params.sellerSkus;
+
+    return this.signedSpApiRequest(credentials, {
+      method: 'GET',
+      path: '/fba/inventory/v1/summaries',
       query,
     });
   }
@@ -221,6 +330,12 @@ export class AmazonSpApiClient {
 
     if (!response.body) {
       return null;
+    }
+
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw new Error(
+        `SP-API request failed: ${options.method} ${options.path} (${response.statusCode}) ${response.body}`,
+      );
     }
 
     try {
@@ -358,4 +473,3 @@ export class AmazonSpApiClient {
     });
   }
 }
-

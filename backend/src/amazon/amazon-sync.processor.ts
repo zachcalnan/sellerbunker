@@ -21,7 +21,9 @@ export class AmazonSyncProcessor extends WorkerHost {
    * - persist them via Prisma
    * - compute and cache aggregates for the dashboard
    */
-  async process(job: Job<AmazonSyncJobData | Record<string, never>>): Promise<void> {
+  async process(
+    job: Job<AmazonSyncJobData | Record<string, never>>,
+  ): Promise<void> {
     console.log('[AmazonSyncProcessor] Received job', {
       id: job.id,
       name: job.name,
@@ -40,10 +42,13 @@ export class AmazonSyncProcessor extends WorkerHost {
         userId,
       });
     } else if (job.name === 'orders-batch-sync') {
-      console.log('[AmazonSyncProcessor] Starting batch orders sync for all sellers');
+      console.log(
+        '[AmazonSyncProcessor] Starting batch orders sync for all sellers',
+      );
       await this.amazonService.syncRecentOrdersForAllSellers();
-      console.log('[AmazonSyncProcessor] Finished batch orders sync for all sellers');
+      console.log(
+        '[AmazonSyncProcessor] Finished batch orders sync for all sellers',
+      );
     }
   }
 }
-

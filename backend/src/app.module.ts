@@ -9,6 +9,7 @@ import { AmazonModule } from './amazon/amazon.module';
 import { AuthModule } from './auth/auth.module';
 import { UsersModule } from './users/users.module';
 import { ClerkModule } from './clerk/clerk.module';
+import { OrgsModule } from './orgs/orgs.module';
 
 @Module({
   imports: [
@@ -32,6 +33,7 @@ import { ClerkModule } from './clerk/clerk.module';
     RedisModule,
     AmazonModule,
     UsersModule,
+    OrgsModule,
     AuthModule,
     ClerkModule,
   ],

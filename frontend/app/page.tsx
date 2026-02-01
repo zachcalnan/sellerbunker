@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import Link from "next/link";
+import { type ReactNode, useEffect, useState } from "react";
 import { useAuth, SignedIn, SignedOut } from "@clerk/nextjs";
 
 type AccountSummary = {
@@ -16,6 +17,7 @@ type AccountSummary = {
   activeSkus: number;
   unitsInFba: number;
   openShipments: number;
+  hasCostData?: boolean;
   generatedAt: string;
 };
 
@@ -82,31 +84,61 @@ export default function Home() {
 
   const effectiveCurrency = summary?.currency ?? "USD";
 
+  const profit =
+    summary != null
+      ? summary.revenue * summary.profitMargin
+      : 0;
+  const roiPct =
+    summary != null && summary.adSpend > 0
+      ? (profit / summary.adSpend) * 100
+      : 0;
+
+  const hasCostData = summary?.hasCostData ?? false;
+  const showCogsNotice = summary != null && summary.totalOrders > 0 && !hasCostData;
+
   const cards = summary
     ? [
         {
-          label: "Revenue (30d)",
-          value: formatCurrency(summary.revenue, effectiveCurrency),
-          percentage: 72,
-          color: "#4F46E5",
-        },
-        {
-          label: "Profit Margin",
-          value: `${Math.round(summary.profitMargin * 100)}%`,
-          percentage: Math.round(summary.profitMargin * 100),
+          label: "Profit",
+          value: hasCostData ? formatCurrency(profit, effectiveCurrency, 2) : "—",
+          percentage: hasCostData ? Math.round(summary.profitMargin * 100) : 0,
           color: "#10B981",
+          centerLine1: hasCostData ? formatCurrency(profit, effectiveCurrency, 2) : "—",
+          centerLine2: "Profit on Sales",
+          centerLine3: hasCostData ? `${(summary.profitMargin * 100).toFixed(1)}%` : "—",
+          note: showCogsNotice ? (
+            <span>
+              Set{" "}
+              <Link
+                href="/cost-of-goods"
+                className="underline underline-offset-2"
+              >
+                COGS
+              </Link>{" "}
+              to calculate profit.
+            </span>
+          ) : null,
         },
         {
-          label: "Units Sold",
+          label: "Sales",
+          value: formatCurrency(summary.revenue, effectiveCurrency),
+          percentage: 0,
+          color: "#4F46E5",
+          hidePercentage: true,
+        },
+        {
+          label: "Units",
           value: summary.unitsSold.toLocaleString(),
-          percentage: 54,
+          percentage: 0,
           color: "#F97316",
+          hidePercentage: true,
         },
         {
-          label: "Ad Spend",
-          value: formatCurrency(summary.adSpend, effectiveCurrency),
-          percentage: 41,
+          label: "ROI",
+          value: hasCostData ? `${Math.round(roiPct)}%` : "—",
+          percentage: hasCostData ? Math.min(100, Math.round(roiPct)) : 0,
           color: "#EC4899",
+          hidePercentage: !hasCostData,
         },
       ]
     : [];
@@ -224,6 +256,14 @@ type DonutCardProps = {
   value: string;
   percentage: number;
   color: string;
+  /** Override center: line 1 (amount, biggest), line 2 ("Profit on Sales"), line 3 (percent) */
+  centerLine1?: string;
+  centerLine2?: string;
+  centerLine3?: string;
+  /** Optional helper note shown under the label (e.g. when a metric requires setup). */
+  note?: ReactNode;
+  /** When true, show only value (no %); ring stays empty. Use for metrics without a meaningful %. */
+  hidePercentage?: boolean;
 };
 
 type KpiCardProps = {
@@ -529,27 +569,42 @@ function SalesTrend({
   );
 }
 
-function formatCurrency(amount: number, currency: string) {
+function formatCurrency(amount: number, currency: string, decimals = 0) {
   try {
     return new Intl.NumberFormat("en-US", {
       style: "currency",
       currency,
-      maximumFractionDigits: 0,
+      minimumFractionDigits: decimals,
+      maximumFractionDigits: decimals,
     }).format(amount);
   } catch {
     return `$${amount.toLocaleString()}`;
   }
 }
 
-function DonutCard({ label, value, percentage, color }: DonutCardProps) {
-  const radius = 52;
+function DonutCard({
+  label,
+  value,
+  percentage,
+  color,
+  centerLine1,
+  centerLine2,
+  centerLine3,
+  note,
+  hidePercentage,
+}: DonutCardProps) {
+  const radius = 54;
+  const strokeWidth = 6;
   const circumference = 2 * Math.PI * radius;
   const clamped = Math.max(0, Math.min(100, percentage));
   const offset = circumference * (1 - clamped / 100);
+  const useCustomCenter =
+    centerLine1 != null && centerLine2 != null && centerLine3 != null;
+  const valueOnly = hidePercentage === true;
 
   return (
-    <div className="flex flex-col items-center gap-4 rounded-xl bg-transparent p-4 ring-1 ring-[var(--surface-border)]">
-      <div className="relative flex h-32 w-32 items-center justify-center">
+    <div className="flex flex-col items-center gap-4 rounded-xl bg-transparent p-4">
+      <div className="relative flex h-36 w-36 items-center justify-center">
         <svg
           viewBox="0 0 120 120"
           className="h-full w-full -rotate-90 text-[var(--chart-track)]"
@@ -559,7 +614,7 @@ function DonutCard({ label, value, percentage, color }: DonutCardProps) {
             cy="60"
             r={radius}
             stroke="currentColor"
-            strokeWidth="12"
+            strokeWidth={strokeWidth}
             fill="none"
           />
           <circle
@@ -567,7 +622,7 @@ function DonutCard({ label, value, percentage, color }: DonutCardProps) {
             cy="60"
             r={radius}
             stroke={color}
-            strokeWidth="12"
+            strokeWidth={strokeWidth}
             strokeLinecap="round"
             fill="none"
             style={{
@@ -577,18 +632,47 @@ function DonutCard({ label, value, percentage, color }: DonutCardProps) {
             }}
           />
         </svg>
-        <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
-          <span className="text-sm font-semibold text-[var(--foreground)]">
-            {value}
-          </span>
-          <span className="mt-0.5 text-[10px] uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
-            {clamped.toFixed(0)}%
-          </span>
+        <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-0.5 text-center">
+          {useCustomCenter ? (
+            <>
+              <span className="text-lg font-semibold leading-tight text-[var(--foreground)]">
+                {centerLine1}
+              </span>
+              <span className="text-[10px] text-[var(--muted-foreground)]">
+                {centerLine2}
+              </span>
+              <span
+                className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-normal"
+                style={{
+                  backgroundColor: `${color}20`,
+                  color,
+                }}
+              >
+                {centerLine3}
+              </span>
+            </>
+          ) : (
+            <>
+              <span className="text-sm font-semibold text-[var(--foreground)]">
+                {value}
+              </span>
+              {!valueOnly && (
+                <span className="mt-0.5 text-[10px] uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
+                  {clamped.toFixed(0)}%
+                </span>
+              )}
+            </>
+          )}
         </div>
       </div>
-      <p className="text-center text-xs font-medium text-[var(--muted-foreground)]">
-        {label}
-      </p>
+      <div className="flex flex-col items-center gap-1 text-center">
+        <p className="text-xs font-medium text-[var(--muted-foreground)]">
+          {label}
+        </p>
+        {note ? (
+          <p className="text-[11px] text-[var(--muted-foreground)]">{note}</p>
+        ) : null}
+      </div>
     </div>
   );
 }

@@ -17,4 +17,3 @@ export class AuthController {
     return this.authService.login(dto.email, dto.password);
   }
 }
-

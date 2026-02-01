@@ -30,11 +30,50 @@ function DashboardIcon({ className }: { className?: string }) {
   );
 }
 
+function CostOfGoodsIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 512 512"
+      fill="currentColor"
+      className={className}
+      aria-hidden
+      focusable="false"
+    >
+      <path d="M128 96l0-16c0-44.2 86-80 192-80S512 35.8 512 80l0 16c0 30.6-41.3 57.2-102 70.7-2.4-2.8-4.9-5.5-7.4-8-15.5-15.3-35.5-26.9-56.4-35.5-41.9-17.5-96.5-27.1-154.2-27.1-21.9 0-43.3 1.4-63.8 4.1-.2-1.3-.2-2.7-.2-4.1zM432 353l0-46.2c15.1-3.9 29.3-8.5 42.2-13.9 13.2-5.5 26.1-12.2 37.8-20.3l0 15.4c0 26.8-31.5 50.5-80 65zm0-96l0-33c0-4.5-.4-8.8-1-13 15.5-3.9 30-8.6 43.2-14.2s26.1-12.2 37.8-20.3l0 15.4c0 26.8-31.5 50.5-80 65zM0 240l0-16c0-44.2 86-80 192-80s192 35.8 192 80l0 16c0 44.2-86 80-192 80S0 284.2 0 240zm384 96c0 44.2-86 80-192 80S0 380.2 0 336l0-15.4c11.6 8.1 24.5 14.7 37.8 20.3 41.9 17.5 96.5 27.1 154.2 27.1s112.3-9.7 154.2-27.1c13.2-5.5 26.1-12.2 37.8-20.3l0 15.4zm0 80.6l0 15.4c0 44.2-86 80-192 80S0 476.2 0 432l0-15.4c11.6 8.1 24.5 14.7 37.8 20.3 41.9 17.5 96.5 27.1 154.2 27.1s112.3-9.7 154.2-27.1c13.2-5.5 26.1-12.2 37.8-20.3z" />
+    </svg>
+  );
+}
+
+function InventoryIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <path d="M21 8a2 2 0 0 0-1.2-1.84l-7-3a2 2 0 0 0-1.6 0l-7 3A2 2 0 0 0 3 8v8a2 2 0 0 0 1.2 1.84l7 3a2 2 0 0 0 1.6 0l7-3A2 2 0 0 0 21 16Z" />
+      <path d="M3.3 7.2 12 11l8.7-3.8" />
+      <path d="M12 22V11" />
+    </svg>
+  );
+}
+
 const NAV_ITEMS: {
   label: string;
   href: string;
   icon?: typeof DashboardIcon;
-}[] = [{ label: "Dashboard", href: "/", icon: DashboardIcon }];
+}[] = [
+  { label: "Dashboard", href: "/", icon: DashboardIcon },
+  { label: "Cost of Goods", href: "/cost-of-goods", icon: CostOfGoodsIcon },
+  { label: "Inventory", href: "/inventory", icon: InventoryIcon },
+];
 
 const BASE_URL =
   process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
@@ -45,6 +84,7 @@ export function Sidebar() {
   const email = user?.primaryEmailAddress?.emailAddress ?? null;
   const pathname = usePathname();
   const [amazonConnected, setAmazonConnected] = useState<boolean | null>(null);
+  const [connectingAmazon, setConnectingAmazon] = useState(false);
 
   useEffect(() => {
     if (!isSignedIn) {
@@ -69,15 +109,36 @@ export function Sidebar() {
     };
   }, [isSignedIn, getToken]);
 
+  const connectAmazon = async () => {
+    if (!isSignedIn) return;
+    setConnectingAmazon(true);
+    try {
+      const token = await getToken({ template: "backend" });
+      if (!token) return;
+      const res = await fetch(`${BASE_URL}/api/amazon/connect?region=EU`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) return;
+      const data = (await res.json()) as { url?: string };
+      if (data?.url) {
+        window.open(data.url, "_blank", "noopener,noreferrer");
+      }
+    } finally {
+      setConnectingAmazon(false);
+    }
+  };
+
   return (
     <aside className="flex h-screen w-full flex-col border-r border-[var(--surface-border)] bg-[var(--surface)]">
       <div className="flex shrink-0 flex-col gap-1 px-4 py-5">
         <Link
           href="/"
-          className="font-semibold tracking-tight text-[var(--foreground)] no-underline hover:opacity-80"
+          className="flex items-center gap-2 font-semibold tracking-tight text-[var(--foreground)] no-underline hover:opacity-80"
         >
-          <span className="font-bold">SELLER</span>
-          <span className="font-normal">BUNKER</span>
+          <span>
+            <span className="font-bold">SELLER</span>
+            <span className="font-normal">BUNKER</span>
+          </span>
         </Link>
       </div>
       <nav className="flex shrink-0 flex-col gap-0.5 px-2" aria-label="Main">
@@ -110,15 +171,25 @@ export function Sidebar() {
                 isSignedIn ? "bg-emerald-400" : "bg-amber-400"
               }`}
             />
-            <span className="truncate">
-              {isSignedIn
-                ? amazonConnected === true
-                  ? "Amazon connected"
-                  : amazonConnected === false
-                    ? "Connect Amazon for data"
+            {isSignedIn && amazonConnected === false ? (
+              <button
+                type="button"
+                onClick={connectAmazon}
+                disabled={connectingAmazon}
+                className="cursor-pointer truncate text-left hover:underline disabled:cursor-not-allowed disabled:opacity-60"
+                title="Connect Amazon for data"
+              >
+                {connectingAmazon ? "Opening Amazon…" : "Connect Amazon for data"}
+              </button>
+            ) : (
+              <span className="truncate">
+                {isSignedIn
+                  ? amazonConnected === true
+                    ? "Amazon connected"
                     : "Authenticated"
-                : "Sign in for data"}
-            </span>
+                  : "Sign in for data"}
+              </span>
+            )}
           </div>
           <SignedOut>
             <SignInButton>
