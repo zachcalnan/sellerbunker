@@ -216,44 +216,56 @@ export function MobileNav() {
               </button>
             </div>
             <nav className="flex min-h-0 flex-1 flex-col gap-1 overflow-auto p-4">
-              <Link
-                href="/"
-                className={`flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium no-underline transition-colors ${
-                  pathname === "/"
-                    ? "bg-[rgb(2,242,170)] text-black"
-                    : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
-                }`}
-                onClick={() => setOpen(false)}
-              >
-                <DashboardIcon className="h-4 w-4 shrink-0" />
-                Dashboard
-              </Link>
+              <SignedOut>
+                <Link
+                  href="/"
+                  className="flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium no-underline transition-colors text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
+                  onClick={() => setOpen(false)}
+                >
+                  Home
+                </Link>
+              </SignedOut>
 
-              <Link
-                href="/cost-of-goods"
-                className={`flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium no-underline transition-colors ${
-                  pathname === "/cost-of-goods"
-                    ? "bg-[rgb(2,242,170)] text-black"
-                    : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
-                }`}
-                onClick={() => setOpen(false)}
-              >
-                <CostOfGoodsIcon className="h-4 w-4 shrink-0" />
-                Cost of Goods
-              </Link>
+              <SignedIn>
+                <Link
+                  href="/"
+                  className={`flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium no-underline transition-colors ${
+                    pathname === "/"
+                      ? "bg-[rgb(2,242,170)] text-black"
+                      : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
+                  }`}
+                  onClick={() => setOpen(false)}
+                >
+                  <DashboardIcon className="h-4 w-4 shrink-0" />
+                  Dashboard
+                </Link>
 
-              <Link
-                href="/inventory"
-                className={`flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium no-underline transition-colors ${
-                  pathname === "/inventory"
-                    ? "bg-[rgb(2,242,170)] text-black"
-                    : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
-                }`}
-                onClick={() => setOpen(false)}
-              >
-                <InventoryIcon className="h-4 w-4 shrink-0" />
-                Inventory
-              </Link>
+                <Link
+                  href="/cost-of-goods"
+                  className={`flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium no-underline transition-colors ${
+                    pathname === "/cost-of-goods"
+                      ? "bg-[rgb(2,242,170)] text-black"
+                      : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
+                  }`}
+                  onClick={() => setOpen(false)}
+                >
+                  <CostOfGoodsIcon className="h-4 w-4 shrink-0" />
+                  Cost of Goods
+                </Link>
+
+                <Link
+                  href="/inventory"
+                  className={`flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium no-underline transition-colors ${
+                    pathname === "/inventory"
+                      ? "bg-[rgb(2,242,170)] text-black"
+                      : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
+                  }`}
+                  onClick={() => setOpen(false)}
+                >
+                  <InventoryIcon className="h-4 w-4 shrink-0" />
+                  Inventory
+                </Link>
+              </SignedIn>
 
               <div className="my-2 h-px bg-[var(--surface-border)]" />
 

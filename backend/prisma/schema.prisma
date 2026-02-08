@@ -29,6 +29,7 @@ model User {
   orders         Order[]
   orderItems     OrderItem[]
   inventory      Inventory[]
+  purchases      Purchase[]
 
   @@map("users")
 }
@@ -97,6 +98,7 @@ model Product {
   orders   Order[]
   orderItems OrderItem[]
   inventory Inventory?
+  purchases Purchase[]
 
   @@unique([userId, sku])
   @@index([userId])
@@ -126,7 +128,8 @@ model Order {
   product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
   orderItems OrderItem[]
 
-  @@unique([orderId, marketplace])
+  // NOTE: must be scoped by userId to avoid cross-tenant order clobbering.
+  @@unique([userId, orderId, marketplace])
   @@index([userId])
   @@index([userId, orderDate])
   @@index([productId])
@@ -189,6 +192,43 @@ model Inventory {
 
   @@index([userId])
   @@map("inventory")
+}
+
+// Purchases / inbound costs ledger (manual entry)
+model Purchase {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  productId String   @map("product_id")
+
+  fulfilment  String @default("Amazon")
+  supplier    String?
+  supplierLink String? @map("supplier_link")
+  bundleSize   Int     @default(1) @map("bundle_size")
+  purchaseDate DateTime @map("purchase_date")
+  orderNumber  String?  @map("order_number")
+  shipmentId   String?  @map("shipment_id")
+
+  qtyPurchased Int @default(0) @map("qty_purchased")
+  qtyDelivered Int @default(0) @map("qty_delivered")
+
+  currency          String  @default("GBP")
+  vatRatePct        Decimal @default(0) @map("vat_rate_pct") @db.Decimal(7, 4)
+  unitCostIncVat    Decimal @default(0) @map("unit_cost_inc_vat") @db.Decimal(14, 2)
+  deliveryCostIncVat Decimal @default(0) @map("delivery_cost_inc_vat") @db.Decimal(14, 2)
+  prepCostIncVat    Decimal @default(0) @map("prep_cost_inc_vat") @db.Decimal(14, 2)
+  totalCostIncVat   Decimal @default(0) @map("total_cost_inc_vat") @db.Decimal(14, 2)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([userId, purchaseDate])
+  @@index([productId])
+  @@index([shipmentId])
+  @@map("purchases")
 }
 
 // Daily KPI aggregates for fast dashboard reads

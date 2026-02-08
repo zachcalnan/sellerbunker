@@ -24,6 +24,7 @@ export function LanguageSelector() {
     if (typeof window === "undefined") return;
     const stored = window.localStorage.getItem(STORAGE_KEY) as LangCode | null;
     if (stored && LANGUAGES.some((l) => l.code === stored)) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setLang(stored);
     }
     setMounted(true);

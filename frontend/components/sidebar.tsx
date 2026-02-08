@@ -142,25 +142,25 @@ export function Sidebar() {
         </Link>
       </div>
       <nav className="flex shrink-0 flex-col gap-0.5 px-2" aria-label="Main">
-        {NAV_ITEMS.map(({ label, href, icon: Icon }) => {
-          const isActive = pathname === href;
-          return (
-            <Link
-              key={href}
-              href={href}
-              className={`flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium no-underline transition-colors ${
-                isActive
-                  ? "bg-[rgb(2,242,170)] text-black"
-                  : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
-              }`}
-            >
-              {Icon ? (
-                <Icon className="h-4 w-4 shrink-0" />
-              ) : null}
-              {label}
-            </Link>
-          );
-        })}
+        <SignedIn>
+          {NAV_ITEMS.map(({ label, href, icon: Icon }) => {
+            const isActive = pathname === href;
+            return (
+              <Link
+                key={href}
+                href={href}
+                className={`flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium no-underline transition-colors ${
+                  isActive
+                    ? "bg-[rgb(2,242,170)] text-black"
+                    : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
+                }`}
+              >
+                {Icon ? <Icon className="h-4 w-4 shrink-0" /> : null}
+                {label}
+              </Link>
+            );
+          })}
+        </SignedIn>
       </nav>
       <div className="min-h-0 flex-1" aria-hidden="true" />
       <div className="flex shrink-0 flex-col gap-3 border-t border-[var(--surface-border)] px-4 py-4">

@@ -2,7 +2,8 @@
 
 import Link from "next/link";
 import { type ReactNode, useEffect, useState } from "react";
-import { useAuth, SignedIn, SignedOut } from "@clerk/nextjs";
+import { useAuth } from "@clerk/nextjs";
+import { useRouter, useSearchParams } from "next/navigation";
 
 type AccountSummary = {
   marketplace: string;
@@ -14,6 +15,8 @@ type AccountSummary = {
   unitsSold: number;
   adSpend: number;
   totalOrders: number;
+  orderItemsOrdersCount?: number;
+  orderItemsCoveragePct?: number;
   activeSkus: number;
   unitsInFba: number;
   openShipments: number;
@@ -37,9 +40,74 @@ export default function Home() {
     process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
 
   const { isSignedIn, getToken } = useAuth();
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const startParam = searchParams.get("start");
+  const endParam = searchParams.get("end");
+
+  const [rangePreset, setRangePreset] = useState<
+    "today" | "7d" | "30d" | "custom"
+  >("30d");
+  const [customStart, setCustomStart] = useState<string>("");
+  const [customEnd, setCustomEnd] = useState<string>("");
   const [summary, setSummary] = useState<AccountSummary | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [missingCogsCount, setMissingCogsCount] = useState<number | null>(null);
+
+  const toDateOnly = (d: Date) => d.toISOString().slice(0, 10);
+  const today = new Date();
+  const defaultEnd = toDateOnly(today);
+  const defaultStart30 = toDateOnly(
+    new Date(today.getTime() - 29 * 24 * 60 * 60 * 1000),
+  );
+
+  const effectiveStart = startParam ?? defaultStart30;
+  const effectiveEnd = endParam ?? defaultEnd;
+
+  const rangeLabel =
+    rangePreset === "today"
+      ? "Today"
+      : rangePreset === "7d"
+        ? "Last 7 days"
+        : rangePreset === "30d"
+          ? "Last 30 days"
+          : "Custom";
+
+  useEffect(() => {
+    // Initialize preset based on URL (or defaults)
+    const start = effectiveStart;
+    const end = effectiveEnd;
+
+    const isSame = (a: string, b: string) => a === b;
+    const endIsToday = isSame(end, defaultEnd);
+    const startIsToday = isSame(start, defaultEnd);
+    const startIs7 = isSame(
+      start,
+      toDateOnly(new Date(today.getTime() - 6 * 24 * 60 * 60 * 1000)),
+    );
+    const startIs30 = isSame(start, defaultStart30);
+
+    if (startParam || endParam) {
+      if (startIsToday && endIsToday) setRangePreset("today");
+      else if (startIs7 && endIsToday) setRangePreset("7d");
+      else if (startIs30 && endIsToday) setRangePreset("30d");
+      else setRangePreset("custom");
+    } else {
+      setRangePreset("30d");
+    }
+
+    setCustomStart(start);
+    setCustomEnd(end);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [startParam, endParam]);
+
+  const setRangeInUrl = (start: string, end: string) => {
+    const next = new URLSearchParams(searchParams.toString());
+    next.set("start", start);
+    next.set("end", end);
+    router.replace(`/?${next.toString()}`);
+  };
 
   useEffect(() => {
     if (!isSignedIn) {
@@ -53,11 +121,18 @@ export default function Home() {
 
       try {
         const token = await getToken({ template: "backend" });
-        const res = await fetch(`${baseUrl}/api/amazon/account/summary`, {
+        const res = await fetch(
+          `${baseUrl}/api/amazon/account/summary?` +
+            new URLSearchParams({
+              start: effectiveStart,
+              end: effectiveEnd,
+            }).toString(),
+          {
           headers: {
             Authorization: `Bearer ${token}`,
           },
-        });
+          },
+        );
 
         if (!res.ok) {
           const message =
@@ -80,7 +155,41 @@ export default function Home() {
     };
 
     fetchSummary();
-  }, [isSignedIn, getToken, baseUrl]);
+  }, [isSignedIn, getToken, baseUrl, effectiveStart, effectiveEnd]);
+
+  useEffect(() => {
+    if (!isSignedIn) {
+      setMissingCogsCount(null);
+      return;
+    }
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const token = await getToken({ template: "backend" });
+        if (!token) return;
+
+        const res = await fetch(
+          `${baseUrl}/api/amazon/cost-of-goods/missing?` +
+            new URLSearchParams({
+              start: effectiveStart,
+              end: effectiveEnd,
+            }).toString(),
+          { headers: { Authorization: `Bearer ${token}` } },
+        );
+        if (!res.ok) return;
+
+        const data = (await res.json()) as { missingSkusCount?: number };
+        if (!cancelled) setMissingCogsCount(Number(data.missingSkusCount ?? 0));
+      } catch {
+        if (!cancelled) setMissingCogsCount(null);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isSignedIn, getToken, baseUrl, effectiveStart, effectiveEnd]);
 
   const effectiveCurrency = summary?.currency ?? "USD";
 
@@ -95,6 +204,14 @@ export default function Home() {
 
   const hasCostData = summary?.hasCostData ?? false;
   const showCogsNotice = summary != null && summary.totalOrders > 0 && !hasCostData;
+  const showMissingCogs = (missingCogsCount ?? 0) > 0;
+  const orderItemsCoveragePct = summary?.orderItemsCoveragePct ?? 1;
+  const orderItemsOrdersCount = summary?.orderItemsOrdersCount ?? null;
+  const showLineItemBackfillNotice =
+    summary != null &&
+    summary.totalOrders > 0 &&
+    Number.isFinite(orderItemsCoveragePct) &&
+    orderItemsCoveragePct < 0.95;
 
   const cards = summary
     ? [
@@ -106,11 +223,43 @@ export default function Home() {
           centerLine1: hasCostData ? formatCurrency(profit, effectiveCurrency, 2) : "—",
           centerLine2: "Profit on Sales",
           centerLine3: hasCostData ? `${(summary.profitMargin * 100).toFixed(1)}%` : "—",
-          note: showCogsNotice ? (
+          note: showLineItemBackfillNotice ? (
+            <span>
+              Still backfilling SKU line items{" "}
+              {orderItemsOrdersCount != null ? (
+                <span className="font-medium text-[var(--foreground)]">
+                  ({orderItemsOrdersCount}/{summary.totalOrders})
+                </span>
+              ) : null}
+              . Profit / missing-COGS may be incomplete.
+            </span>
+          ) : showMissingCogs ? (
+            <span>
+              COGS missing for{" "}
+              <span className="font-medium text-[var(--foreground)]">
+                {missingCogsCount}
+              </span>{" "}
+              SKU{missingCogsCount === 1 ? "" : "s"}.{" "}
+              <Link
+                href={`/cost-of-goods?${new URLSearchParams({
+                  missing: "1",
+                  start: effectiveStart,
+                  end: effectiveEnd,
+                }).toString()}`}
+                className="underline underline-offset-2"
+              >
+                Fix now
+              </Link>
+              .
+            </span>
+          ) : showCogsNotice ? (
             <span>
               Set{" "}
               <Link
-                href="/cost-of-goods"
+                href={`/cost-of-goods?${new URLSearchParams({
+                  start: effectiveStart,
+                  end: effectiveEnd,
+                }).toString()}`}
                 className="underline underline-offset-2"
               >
                 COGS
@@ -221,9 +370,65 @@ export default function Home() {
               <h2 className="text-sm font-medium uppercase tracking-[0.2em] text-[var(--muted-foreground)]">
                 Performance Snapshot
               </h2>
-              <span className="text-xs text-[var(--muted-foreground)]">
-              Last 30 days
-              </span>
+              <div className="flex flex-wrap items-center justify-end gap-2 text-xs text-[var(--muted-foreground)]">
+                <select
+                  value={rangePreset}
+                  onChange={(e) => {
+                    const v = e.target.value as
+                      | "today"
+                      | "7d"
+                      | "30d"
+                      | "custom";
+                    setRangePreset(v);
+                    if (v === "custom") return;
+                    const end = defaultEnd;
+                    const start =
+                      v === "today"
+                        ? defaultEnd
+                        : v === "7d"
+                          ? toDateOnly(
+                              new Date(
+                                today.getTime() - 6 * 24 * 60 * 60 * 1000,
+                              ),
+                            )
+                          : defaultStart30;
+                    setRangeInUrl(start, end);
+                  }}
+                  className="h-8 cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-xs text-[var(--foreground)] outline-none"
+                >
+                  <option value="today">Today</option>
+                  <option value="7d">Last 7 days</option>
+                  <option value="30d">Last 30 days</option>
+                  <option value="custom">Custom</option>
+                </select>
+                {rangePreset === "custom" ? (
+                  <>
+                    <input
+                      type="date"
+                      value={customStart}
+                      onChange={(e) => setCustomStart(e.target.value)}
+                      className="h-8 rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-xs text-[var(--foreground)] outline-none"
+                    />
+                    <span>→</span>
+                    <input
+                      type="date"
+                      value={customEnd}
+                      onChange={(e) => setCustomEnd(e.target.value)}
+                      className="h-8 rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-xs text-[var(--foreground)] outline-none"
+                    />
+                    <button
+                      type="button"
+                      className="h-8 cursor-pointer rounded-lg bg-[rgb(2,242,170)] px-3 text-xs font-medium text-black"
+                      onClick={() => {
+                        if (!customStart || !customEnd) return;
+                        setRangeInUrl(customStart, customEnd);
+                      }}
+                    >
+                      Apply
+                    </button>
+                  </>
+                ) : null}
+              </div>
             </div>
 
             <div className="grid gap-4 md:grid-cols-4">
@@ -243,6 +448,9 @@ export default function Home() {
               isSignedIn={isSignedIn}
               getToken={getToken}
               currency={effectiveCurrency}
+              start={effectiveStart}
+              end={effectiveEnd}
+              label={rangeLabel}
             />
           </section>
         )}
@@ -277,6 +485,9 @@ type SalesTrendProps = {
   isSignedIn: boolean | undefined;
   getToken: (args: { template?: string }) => Promise<string | null>;
   currency: string;
+  start: string;
+  end: string;
+  label: string;
 };
 
 function SalesTrend({
@@ -284,6 +495,9 @@ function SalesTrend({
   isSignedIn,
   getToken,
   currency,
+  start,
+  end,
+  label,
 }: SalesTrendProps) {
   const [sales, setSales] = useState<SalesSeries | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -303,11 +517,15 @@ function SalesTrend({
 
       try {
         const token = await getToken({ template: "backend" });
-        const res = await fetch(`${baseUrl}/api/amazon/sales/timeseries`, {
-          headers: {
-            Authorization: `Bearer ${token}`,
+        const res = await fetch(
+          `${baseUrl}/api/amazon/sales/timeseries?` +
+            new URLSearchParams({ start, end }).toString(),
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
           },
-        });
+        );
 
         if (!res.ok) {
           setError("Failed to load sales trend.");
@@ -326,7 +544,7 @@ function SalesTrend({
     };
 
     fetchSales();
-  }, [isSignedIn, getToken, baseUrl, setSales, setError]);
+  }, [isSignedIn, getToken, baseUrl, start, end]);
 
   if (!sales && !loading && !error) {
     return null;
@@ -363,7 +581,7 @@ function SalesTrend({
             Sales Trend
           </p>
           <p className="mt-0.5 text-[11px] text-[var(--muted-foreground)]">
-            Last 30 days ·{" "}
+            {label} ·{" "}
             {mode === "revenue" ? currency : "Orders"}
           </p>
         </div>
