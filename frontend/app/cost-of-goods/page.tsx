@@ -1,10 +1,8 @@
 "use client";
 
-export const dynamic = "force-dynamic";
-
 import { RedirectToSignIn, SignedIn, SignedOut, useAuth } from "@clerk/nextjs";
 import { useSearchParams } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 
 type ProductRow = {
   id: string;
@@ -33,7 +31,7 @@ type CostEntryRow = {
   product: ProductRow;
 };
 
-export default function CostOfGoodsPage() {
+function CostOfGoodsInner() {
   const baseUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
   const { isSignedIn, getToken } = useAuth();
   const searchParams = useSearchParams();
@@ -1384,6 +1382,20 @@ export default function CostOfGoodsPage() {
         </div>
       </SignedIn>
     </div>
+  );
+}
+
+export default function CostOfGoodsPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="mx-auto max-w-6xl px-6 py-10 text-sm text-[var(--muted-foreground)]">
+          Loading…
+        </div>
+      }
+    >
+      <CostOfGoodsInner />
+    </Suspense>
   );
 }
 

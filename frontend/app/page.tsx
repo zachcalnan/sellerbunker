@@ -1,9 +1,7 @@
 "use client";
 
-export const dynamic = "force-dynamic";
-
 import Link from "next/link";
-import { type ReactNode, useEffect, useState } from "react";
+import { Suspense, type ReactNode, useEffect, useState } from "react";
 import { useAuth } from "@clerk/nextjs";
 import { useRouter, useSearchParams } from "next/navigation";
 
@@ -37,7 +35,7 @@ type SalesSeries = {
   points: SalesPoint[];
 };
 
-export default function Home() {
+function HomeInner() {
   const baseUrl =
     process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
 
@@ -458,6 +456,20 @@ export default function Home() {
         )}
       </main>
     </div>
+  );
+}
+
+export default function Home() {
+  return (
+    <Suspense
+      fallback={
+        <div className="mx-auto max-w-6xl px-6 py-10 text-sm text-[var(--muted-foreground)]">
+          Loading…
+        </div>
+      }
+    >
+      <HomeInner />
+    </Suspense>
   );
 }
 
