@@ -21,6 +21,7 @@ export function ThemeToggle() {
     }
 
     document.documentElement.dataset.theme = initial;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setTheme(initial);
     setMounted(true);
   }, []);

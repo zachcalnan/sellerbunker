@@ -15,6 +15,8 @@ import type { Response } from 'express';
 import { ConfigService } from '@nestjs/config';
 import { AmazonService } from './amazon.service';
 import { LinkAmazonAccountDto } from './dto/link-amazon-account.dto';
+import { CreatePurchaseDto } from './dto/create-purchase.dto';
+import { UpdatePurchaseDto } from './dto/update-purchase.dto';
 import { ClerkAuthGuard } from '../auth/clerk-auth.guard';
 import { AmazonSyncService } from './amazon-sync.service';
 
@@ -103,8 +105,16 @@ export class AmazonController {
 
   @UseGuards(ClerkAuthGuard)
   @Get('account/summary')
-  getAccountSummary(@Req() req: { user: { orgId: string; userId: string } }) {
-    return this.amazonService.getAccountSummary(req.user.orgId, req.user.userId);
+  getAccountSummary(
+    @Req() req: { user: { orgId: string; userId: string } },
+    @Query('start') start?: string,
+    @Query('end') end?: string,
+  ) {
+    return this.amazonService.getAccountSummary(
+      req.user.orgId,
+      req.user.userId,
+      { start, end },
+    );
   }
 
   /**
@@ -118,9 +128,40 @@ export class AmazonController {
    */
   @UseGuards(ClerkAuthGuard)
   @Post('sync')
-  async syncNow(@Req() req: { user: { userId: string } }) {
+  async syncNow(
+    @Req() req: { user: { userId: string } },
+    @Query('days') days?: string,
+    @Query('ignoreCursor') ignoreCursor?: string,
+  ) {
+    const n = Number(days ?? 30);
+    const safeDays = Number.isFinite(n) ? Math.max(1, Math.min(365, n)) : 30;
+    const direct =
+      ignoreCursor === '1' || ignoreCursor === 'true' || ignoreCursor === 'yes';
+
+    if (direct) {
+      await this.amazonService.syncRecentOrdersToDb(req.user.userId, {
+        ignoreCursor: true,
+        days: safeDays,
+      });
+      return { status: 'synced', mode: 'direct', days: safeDays };
+    }
+
     await this.amazonSyncService.enqueueFullSync(req.user.userId);
     return { status: 'queued' };
+  }
+
+  /**
+   * Dev-friendly alias for POST /api/amazon/sync (allows triggering from browser).
+   * Example: GET /api/amazon/sync?ignoreCursor=1&days=30
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Get('sync')
+  async syncNowGet(
+    @Req() req: { user: { userId: string } },
+    @Query('days') days?: string,
+    @Query('ignoreCursor') ignoreCursor?: string,
+  ) {
+    return this.syncNow(req, days, ignoreCursor);
   }
 
   @UseGuards(ClerkAuthGuard)
@@ -345,6 +386,104 @@ export class AmazonController {
   }
 
   /**
+   * Cost of Goods (ledger): list inbound cost entries.
+   * Example: GET /api/amazon/cost-of-goods/entries?query=...&take=50&skip=0
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Get('cost-of-goods/entries')
+  async listCostOfGoodsEntries(
+    @Req() req: { user: { orgId: string } },
+    @Query('query') query?: string,
+    @Query('take') take?: string,
+    @Query('skip') skip?: string,
+  ) {
+    const takeN = Number(take ?? 50);
+    const skipN = Number(skip ?? 0);
+    const safeTake = Number.isFinite(takeN)
+      ? Math.max(1, Math.min(200, takeN))
+      : 50;
+    const safeSkip = Number.isFinite(skipN) ? Math.max(0, skipN) : 0;
+    return this.amazonService.listPurchases(req.user.orgId, {
+      query: query ?? '',
+      take: safeTake,
+      skip: safeSkip,
+    });
+  }
+
+  /**
+   * Cost of Goods (ledger): create inbound cost entry.
+   * Example: POST /api/amazon/cost-of-goods/entries
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Post('cost-of-goods/entries')
+  async createCostOfGoodsEntry(
+    @Req() req: { user: { orgId: string; userId: string } },
+    @Body() dto: CreatePurchaseDto,
+  ) {
+    return this.amazonService.createPurchase(
+      req.user.orgId,
+      req.user.userId,
+      dto,
+    );
+  }
+
+  /**
+   * Cost of Goods (ledger): update inbound cost entry.
+   * Example: PATCH /api/amazon/cost-of-goods/entries/:entryId
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Patch('cost-of-goods/entries/:entryId')
+  async updateCostOfGoodsEntry(
+    @Req() req: { user: { orgId: string; userId: string } },
+    @Param('entryId') entryId: string,
+    @Body() dto: UpdatePurchaseDto,
+  ) {
+    return this.amazonService.updatePurchase(
+      req.user.orgId,
+      req.user.userId,
+      entryId,
+      dto,
+    );
+  }
+
+  /**
+   * Cost of Goods (ledger): seed entries from existing Product.costOfGoods.
+   * This is a convenience for migrating from the old per-SKU COGS editor.
+   *
+   * Example: POST /api/amazon/cost-of-goods/seed-from-products
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Post('cost-of-goods/seed-from-products')
+  async seedCostOfGoodsFromProducts(@Req() req: { user: { orgId: string } }) {
+    return this.amazonService.seedCostOfGoodsEntriesFromProducts(
+      req.user.orgId,
+    );
+  }
+
+  /**
+   * Cost of Goods: list SKUs that appear in orders but still have no COGS.
+   * Range defaults to last 30 days when start/end are omitted.
+   *
+   * Example: GET /api/amazon/cost-of-goods/missing?start=...&end=...&limit=50
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Get('cost-of-goods/missing')
+  async listMissingCostOfGoods(
+    @Req() req: { user: { orgId: string } },
+    @Query('start') start?: string,
+    @Query('end') end?: string,
+    @Query('limit') limit?: string,
+  ) {
+    const n = Number(limit ?? 25);
+    const safeLimit = Number.isFinite(n) ? Math.max(1, Math.min(100, n)) : 25;
+    return this.amazonService.listMissingCostOfGoods(req.user.orgId, {
+      start,
+      end,
+      limit: safeLimit,
+    });
+  }
+
+  /**
    * Dev-only: show which Amazon sellerAccount is being used for this org,
    * plus whether SP-API is configured for sandbox.
    *
@@ -352,11 +491,14 @@ export class AmazonController {
    */
   @UseGuards(ClerkAuthGuard)
   @Get('dev/connection')
-  async devAmazonConnection(@Req() req: { user: { orgId: string; userId: string } }) {
+  async devAmazonConnection(
+    @Req() req: { user: { orgId: string; userId: string } },
+  ) {
     return {
       spapi: (this.amazonService as any).spApiClient.getDebugConfig?.() ?? null,
       amazonAppId: this.configService.get<string>('AMAZON_APP_ID') ?? null,
-      amazonRedirectUri: this.configService.get<string>('AMAZON_REDIRECT_URI') ?? null,
+      amazonRedirectUri:
+        this.configService.get<string>('AMAZON_REDIRECT_URI') ?? null,
       connection: await this.amazonService.getAmazonConnectionDebug(
         req.user.orgId,
         req.user.userId,

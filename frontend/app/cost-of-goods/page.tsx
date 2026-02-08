@@ -1,6 +1,7 @@
 "use client";
 
-import { useAuth, SignedIn, SignedOut, SignInButton } from "@clerk/nextjs";
+import { RedirectToSignIn, SignedIn, SignedOut, useAuth } from "@clerk/nextjs";
+import { useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 
 type ProductRow = {
@@ -9,150 +10,506 @@ type ProductRow = {
   asin: string | null;
   title: string | null;
   imageUrl: string | null;
-  costOfGoods: number | null;
-  updatedAt: string;
 };
 
-const SYSTEM_SKUS = new Set(["AMAZON_GENERIC", "AMAZON_MULTI"]);
+type CostEntryRow = {
+  id: string;
+  fulfilment: string;
+  supplier: string | null;
+  supplierLink?: string | null;
+  bundleSize?: number | null;
+  purchaseDate: string;
+  shipmentId: string | null;
+  qtyPurchased: number;
+  qtyDelivered: number;
+  currency: string;
+  vatRatePct: number;
+  unitCostIncVat: number;
+  deliveryCostIncVat: number;
+  prepCostIncVat: number;
+  totalCostIncVat: number;
+  product: ProductRow;
+};
 
 export default function CostOfGoodsPage() {
   const baseUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
   const { isSignedIn, getToken } = useAuth();
+  const searchParams = useSearchParams();
+  const missingParamOn = searchParams.get("missing") === "1";
+  const [missingOnly, setMissingOnly] = useState(missingParamOn);
+  const startParam = searchParams.get("start");
+  const endParam = searchParams.get("end");
 
+  const [entries, setEntries] = useState<CostEntryRow[]>([]);
   const [products, setProducts] = useState<ProductRow[]>([]);
-  const [draft, setDraft] = useState<Record<string, string>>({});
+  const [entriesTotal, setEntriesTotal] = useState<number>(0);
+  const [take, setTake] = useState(10);
+  const [skip, setSkip] = useState(0);
+  const [missing, setMissing] = useState<
+    {
+      productId: string;
+      sku: string;
+      asin: string | null;
+      title: string | null;
+      imageUrl: string | null;
+      revenue: number;
+      units: number;
+      lineItems: number;
+    }[]
+  >([]);
+  const [missingCount, setMissingCount] = useState<number | null>(null);
+
   const [loading, setLoading] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [saveNotice, setSaveNotice] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [seeding, setSeeding] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [showSystem, setShowSystem] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+
   const [query, setQuery] = useState("");
+  const [showForm, setShowForm] = useState(false);
+  const [editingEntry, setEditingEntry] = useState<CostEntryRow | null>(null);
+  const currencyOptions = ["GBP", "EUR", "USD", "CAD", "MXN", "BRL", "AUD", "AED"] as const;
+  const isCurrencyOption = (
+    v: string,
+  ): v is (typeof currencyOptions)[number] =>
+    (currencyOptions as readonly string[]).includes(v);
+  const [productPickerQuery, setProductPickerQuery] = useState("");
+
+  type VatMode = "inc" | "ex";
+  const [unitVatMode, setUnitVatMode] = useState<VatMode>("inc");
+  const [deliveryVatMode, setDeliveryVatMode] = useState<VatMode>("inc");
+  const [prepVatMode, setPrepVatMode] = useState<VatMode>("inc");
+  const [unitCostExVat, setUnitCostExVat] = useState("");
+  const [deliveryCostExVat, setDeliveryCostExVat] = useState("");
+  const [prepCostExVat, setPrepCostExVat] = useState("");
+
+  const [form, setForm] = useState({
+    productId: "",
+    fulfilment: "Amazon",
+    supplier: "",
+    supplierLink: "",
+    bundleSize: "1",
+    purchaseDate: new Date().toISOString().slice(0, 10), // YYYY-MM-DD
+    shipmentId: "",
+    qtyPurchased: "0",
+    qtyDelivered: "0",
+    currency: "GBP",
+    vatRatePct: "0",
+    unitCostIncVat: "",
+    deliveryCostIncVat: "0",
+    prepCostIncVat: "0",
+  });
+
+  const resetNewEntryForm = (productId?: string) => {
+    setForm({
+      productId: productId ?? "",
+      fulfilment: "Amazon",
+      supplier: "",
+      supplierLink: "",
+      bundleSize: "1",
+      purchaseDate: new Date().toISOString().slice(0, 10),
+      shipmentId: "",
+      qtyPurchased: "0",
+      qtyDelivered: "0",
+      currency: "GBP",
+      vatRatePct: "0",
+      unitCostIncVat: "",
+      deliveryCostIncVat: "0",
+      prepCostIncVat: "0",
+    });
+  };
+
+  const load = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const token = await getToken({ template: "backend" });
+      if (!token) throw new Error("Not authenticated.");
+
+      const missingQs = new URLSearchParams();
+      if (startParam) missingQs.set("start", startParam);
+      if (endParam) missingQs.set("end", endParam);
+      missingQs.set("limit", "50");
+
+      const [entriesRes, productsRes, missingRes] = await Promise.all([
+        fetch(
+          `${baseUrl}/api/amazon/cost-of-goods/entries?` +
+            new URLSearchParams({
+              query,
+              take: String(take),
+              skip: String(skip),
+            }).toString(),
+          {
+          headers: { Authorization: `Bearer ${token}` },
+          },
+        ),
+        fetch(`${baseUrl}/api/amazon/products`, {
+          headers: { Authorization: `Bearer ${token}` },
+        }),
+        fetch(`${baseUrl}/api/amazon/cost-of-goods/missing?${missingQs.toString()}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        }),
+      ]);
+
+      if (!entriesRes.ok) throw new Error("Failed to load cost entries.");
+      if (!productsRes.ok) throw new Error("Failed to load products.");
+      if (!missingRes.ok) throw new Error("Failed to load missing COGS.");
+
+      const entriesData = (await entriesRes.json()) as
+        | CostEntryRow[]
+        | { total?: number; items?: CostEntryRow[] };
+      const productsData = (await productsRes.json()) as ProductRow[];
+      const missingData = (await missingRes.json()) as {
+        missingSkusCount?: number;
+        items?: {
+          productId: string;
+          sku: string;
+          asin: string | null;
+          title: string | null;
+          imageUrl: string | null;
+          revenue: number;
+          units: number;
+          lineItems: number;
+        }[];
+      };
+      if (Array.isArray(entriesData)) {
+        setEntries(entriesData);
+        setEntriesTotal(entriesData.length);
+      } else {
+        setEntries(Array.isArray(entriesData.items) ? entriesData.items : []);
+        setEntriesTotal(Number(entriesData.total ?? 0));
+      }
+      setProducts(productsData);
+      setMissing(Array.isArray(missingData.items) ? missingData.items : []);
+      setMissingCount(
+        typeof missingData.missingSkusCount === "number"
+          ? missingData.missingSkusCount
+          : null,
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Error");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const canPrev = skip > 0;
+  const canNext = skip + entries.length < entriesTotal;
+  const prevPage = () => setSkip((s) => Math.max(0, s - take));
+  const nextPage = () => setSkip((s) => s + take);
+
+  const vatPct = Number(form.vatRatePct ?? 0) || 0;
+  const vatMult = 1 + vatPct / 100;
+  const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
+  const incFromEx = (ex: number) => round2(ex * vatMult);
+  const exFromInc = (inc: number) => (vatMult === 0 ? round2(inc) : round2(inc / vatMult));
+
+  const selectedProduct = useMemo(() => {
+    const id = form.productId;
+    if (!id) return null;
+    return products.find((p) => p.id === id) ?? null;
+  }, [products, form.productId]);
+
+  const filteredProductsForPicker = useMemo(() => {
+    const q = productPickerQuery.trim().toLowerCase();
+    if (!q) return products.slice(0, 30);
+    return products
+      .filter((p) => {
+        const sku = p.sku ?? "";
+        const asin = p.asin ?? "";
+        const title = p.title ?? "";
+        return (
+          sku.toLowerCase().includes(q) ||
+          asin.toLowerCase().includes(q) ||
+          title.toLowerCase().includes(q)
+        );
+      })
+      .slice(0, 30);
+  }, [products, productPickerQuery]);
+
+  useEffect(() => {
+    if (!showForm) return;
+
+    // Reset VAT input helpers each time modal opens.
+    setUnitVatMode("inc");
+    setDeliveryVatMode("inc");
+    setPrepVatMode("inc");
+    setUnitCostExVat("");
+    setDeliveryCostExVat("");
+    setPrepCostExVat("");
+    setProductPickerQuery("");
+
+    if (!editingEntry) return;
+
+    setForm({
+      productId: editingEntry.product.id,
+      fulfilment: editingEntry.fulfilment ?? "Amazon",
+      supplier: editingEntry.supplier ?? "",
+      supplierLink: editingEntry.supplierLink ?? "",
+      bundleSize: String(editingEntry.bundleSize ?? 1),
+      purchaseDate: new Date(editingEntry.purchaseDate).toISOString().slice(0, 10),
+      shipmentId: editingEntry.shipmentId ?? "",
+      qtyPurchased: String(editingEntry.qtyPurchased ?? 0),
+      qtyDelivered: String(editingEntry.qtyDelivered ?? 0),
+      currency: editingEntry.currency ?? "GBP",
+      vatRatePct: String(editingEntry.vatRatePct ?? 0),
+      unitCostIncVat: String(editingEntry.unitCostIncVat ?? 0),
+      deliveryCostIncVat: String(editingEntry.deliveryCostIncVat ?? 0),
+      prepCostIncVat: String(editingEntry.prepCostIncVat ?? 0),
+    });
+  }, [showForm, editingEntry]);
+
+  useEffect(() => {
+    if (!showForm) return;
+
+    if (unitVatMode === "ex") {
+      const ex = Number(unitCostExVat ?? 0) || 0;
+      if (ex > 0) {
+        setForm((prev) => ({ ...prev, unitCostIncVat: String(incFromEx(ex)) }));
+      }
+    }
+    if (deliveryVatMode === "ex") {
+      const ex = Number(deliveryCostExVat ?? 0) || 0;
+      if (ex > 0) {
+        setForm((prev) => ({
+          ...prev,
+          deliveryCostIncVat: String(incFromEx(ex)),
+        }));
+      }
+    }
+    if (prepVatMode === "ex") {
+      const ex = Number(prepCostExVat ?? 0) || 0;
+      if (ex > 0) {
+        setForm((prev) => ({ ...prev, prepCostIncVat: String(incFromEx(ex)) }));
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    showForm,
+    vatPct,
+    unitVatMode,
+    deliveryVatMode,
+    prepVatMode,
+    unitCostExVat,
+    deliveryCostExVat,
+    prepCostExVat,
+  ]);
 
   useEffect(() => {
     if (!isSignedIn) {
+      setEntries([]);
       setProducts([]);
-      setDraft({});
       setError(null);
       return;
     }
 
     let cancelled = false;
     (async () => {
-      setLoading(true);
-      setError(null);
       try {
-        const token = await getToken({ template: "backend" });
-        const res = await fetch(`${baseUrl}/api/amazon/products`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (!res.ok) {
-          throw new Error("Failed to load products.");
-        }
-        const data = (await res.json()) as ProductRow[];
-        if (cancelled) return;
-        setProducts(data);
-        const initial: Record<string, string> = {};
-        for (const p of data) {
-          initial[p.id] =
-            p.costOfGoods == null ? "" : String(p.costOfGoods);
-        }
-        setDraft(initial);
-      } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : "Error");
+        await load();
       } finally {
-        if (!cancelled) setLoading(false);
+        if (cancelled) return;
       }
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [isSignedIn, getToken, baseUrl]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isSignedIn, getToken, baseUrl, startParam, endParam, query, take, skip]);
 
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    return products.filter((p) => {
-      if (!showSystem && SYSTEM_SKUS.has(p.sku)) return false;
-      if (!q) return true;
-      return (
-        p.sku.toLowerCase().includes(q) ||
-        (p.asin ?? "").toLowerCase().includes(q) ||
-        (p.title ?? "").toLowerCase().includes(q)
-      );
-    });
-  }, [products, query, showSystem]);
+  useEffect(() => {
+    setMissingOnly(missingParamOn);
+  }, [missingParamOn]);
 
-  const normalizeDraftToNumber = (raw: string): number | null => {
-    const trimmed = (raw ?? "").trim();
-    if (trimmed.length === 0) return null;
-    const n = Number(trimmed);
-    return Number.isFinite(n) && n >= 0 ? n : null;
-  };
+  useEffect(() => {
+    if (!showForm) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setShowForm(false);
+        setEditingEntry(null);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [showForm]);
 
-  const dirtyIds = useMemo(() => {
-    const dirty: string[] = [];
-    for (const p of products) {
-      const current = p.costOfGoods == null ? null : Number(p.costOfGoods);
-      const next = normalizeDraftToNumber(draft[p.id] ?? "");
-      if (current !== next) dirty.push(p.id);
-    }
-    return dirty;
-  }, [products, draft]);
+  const filtered = useMemo(() => entries, [entries]);
 
-  const saveAll = async () => {
-    if (dirtyIds.length === 0) return;
+  const filteredWithMissingToggle = useMemo(() => {
+    if (!missingOnly) return filtered;
+    const missingIds = new Set(missing.map((m) => m.productId));
+    return filtered.filter((e) => missingIds.has(e.product.id));
+  }, [filtered, missingOnly, missing]);
 
-    setSaving(true);
+  const createEntry = async () => {
+    setCreating(true);
     setError(null);
-    setSaveNotice(null);
+    setNotice(null);
     try {
       const token = await getToken({ template: "backend" });
       if (!token) throw new Error("Not authenticated.");
 
-      const updates = await Promise.all(
-        dirtyIds.map(async (productId) => {
-          const costOfGoods = normalizeDraftToNumber(draft[productId] ?? "");
-          const res = await fetch(
-            `${baseUrl}/api/amazon/products/${productId}/cost-of-goods`,
-            {
-              method: "PATCH",
-              headers: {
-                Authorization: `Bearer ${token}`,
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({ costOfGoods }),
-            },
-          );
+      const payload = {
+        productId: form.productId,
+        fulfilment: form.fulfilment.trim() || "Amazon",
+        supplier: form.supplier.trim() || undefined,
+        supplierLink: form.supplierLink.trim() || undefined,
+        bundleSize: Math.max(1, Number(form.bundleSize ?? 1) || 1),
+        purchaseDate: new Date(form.purchaseDate).toISOString(),
+        shipmentId: form.shipmentId.trim() || undefined,
+        qtyPurchased: Number(form.qtyPurchased ?? 0) || 0,
+        qtyDelivered: Number(form.qtyDelivered ?? 0) || 0,
+        currency: form.currency.trim() || "GBP",
+        vatRatePct: round2(Number(form.vatRatePct ?? 0) || 0),
+        unitCostIncVat: round2(Number(form.unitCostIncVat ?? 0) || 0),
+        deliveryCostIncVat: round2(Number(form.deliveryCostIncVat ?? 0) || 0),
+        prepCostIncVat: round2(Number(form.prepCostIncVat ?? 0) || 0),
+      };
 
-          if (!res.ok) {
-            const msg = await res.text();
-            throw new Error(
-              msg || `Failed to save COGS for product ${productId}`,
-            );
-          }
+      if (!payload.productId) throw new Error('Pick a SKU.');
+      if (!Number.isFinite(payload.unitCostIncVat) || payload.unitCostIncVat <= 0) {
+        throw new Error("Enter a unit cost (inc VAT).");
+      }
 
-          return (await res.json()) as ProductRow;
-        }),
+      const res = await fetch(`${baseUrl}/api/amazon/cost-of-goods/entries`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      });
+
+      if (!res.ok) {
+        const msg = await res.text();
+        throw new Error(msg || "Failed to create entry.");
+      }
+
+      await res.json();
+      setNotice("Saved.");
+      setShowForm(false);
+      setEditingEntry(null);
+      setForm((prev) => ({
+        ...prev,
+        supplier: "",
+        supplierLink: "",
+        bundleSize: "1",
+        shipmentId: "",
+        qtyPurchased: "0",
+        qtyDelivered: "0",
+        unitCostIncVat: "",
+        deliveryCostIncVat: "0",
+        prepCostIncVat: "0",
+      }));
+      setSkip(0);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to create entry.");
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const updateEntry = async () => {
+    if (!editingEntry) return;
+    setCreating(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const token = await getToken({ template: "backend" });
+      if (!token) throw new Error("Not authenticated.");
+
+      const payload = {
+        fulfilment: form.fulfilment.trim() || "Amazon",
+        supplier: form.supplier.trim() || undefined,
+        supplierLink: form.supplierLink.trim() || undefined,
+        bundleSize: Math.max(1, Number(form.bundleSize ?? 1) || 1),
+        purchaseDate: new Date(form.purchaseDate).toISOString(),
+        shipmentId: form.shipmentId.trim() || undefined,
+        qtyPurchased: Number(form.qtyPurchased ?? 0) || 0,
+        qtyDelivered: Number(form.qtyDelivered ?? 0) || 0,
+        currency: form.currency.trim() || "GBP",
+        vatRatePct: round2(Number(form.vatRatePct ?? 0) || 0),
+        unitCostIncVat: round2(Number(form.unitCostIncVat ?? 0) || 0),
+        deliveryCostIncVat: round2(Number(form.deliveryCostIncVat ?? 0) || 0),
+        prepCostIncVat: round2(Number(form.prepCostIncVat ?? 0) || 0),
+      };
+
+      if (!Number.isFinite(payload.unitCostIncVat) || payload.unitCostIncVat <= 0) {
+        throw new Error("Enter a unit cost (inc VAT).");
+      }
+
+      const res = await fetch(
+        `${baseUrl}/api/amazon/cost-of-goods/entries/${editingEntry.id}`,
+        {
+          method: "PATCH",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(payload),
+        },
       );
 
-      setProducts((prev) => {
-        const byId = new Map(updates.map((u) => [u.id, u]));
-        return prev.map((p) => byId.get(p.id) ?? p);
-      });
+      if (!res.ok) {
+        const msg = await res.text();
+        throw new Error(msg || "Failed to update entry.");
+      }
 
-      setDraft((prev) => {
-        const next = { ...prev };
-        for (const u of updates) {
-          next[u.id] = u.costOfGoods == null ? "" : String(u.costOfGoods);
-        }
-        return next;
-      });
-
-      setSaveNotice(`Saved ${updates.length} SKU${updates.length === 1 ? "" : "s"}.`);
+      setNotice("Saved.");
+      setShowForm(false);
+      setEditingEntry(null);
+      await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to save.");
+      setError(e instanceof Error ? e.message : "Failed to update entry.");
     } finally {
-      setSaving(false);
+      setCreating(false);
+    }
+  };
+
+  const beginEdit = (entry: CostEntryRow) => {
+    setError(null);
+    setNotice(null);
+    setEditingEntry(entry);
+    setShowForm(true);
+  };
+
+  const seedFromExisting = async () => {
+    setSeeding(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const token = await getToken({ template: "backend" });
+      if (!token) throw new Error("Not authenticated.");
+      const res = await fetch(
+        `${baseUrl}/api/amazon/cost-of-goods/seed-from-products`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+        },
+      );
+      if (!res.ok) {
+        const msg = await res.text();
+        throw new Error(msg || "Failed to import existing COGS.");
+      }
+      const result = (await res.json()) as {
+        seeded?: number;
+        skippedExisting?: number;
+        considered?: number;
+      };
+      setNotice(
+        `Imported ${Number(result.seeded ?? 0)} entries` +
+          (result.skippedExisting
+            ? ` (skipped ${Number(result.skippedExisting)} existing)`
+            : "") +
+          ".",
+      );
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to import existing COGS.");
+    } finally {
+      setSeeding(false);
     }
   };
 
@@ -160,101 +517,723 @@ export default function CostOfGoodsPage() {
     <div className="mx-auto max-w-6xl px-6 py-10">
       <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
         <div>
-          <h1 className="flex items-center gap-2 text-2xl font-semibold text-[var(--foreground)]">
+          <h1 className="text-2xl font-semibold text-[var(--foreground)]">
             Cost of Goods
           </h1>
           <p className="mt-1 text-sm text-[var(--muted-foreground)]">
-            Set per-unit COGS per SKU. Profit is only calculated when COGS is present.
+            Log inbound cost entries per SKU (unit, delivery, prep, VAT). Profit uses the latest entry per SKU.
           </p>
         </div>
-        <div className="flex items-center gap-3">
-          <label className="flex items-center gap-2 text-sm text-[var(--muted-foreground)]">
+        <div className="flex w-full flex-col gap-3 sm:w-auto">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
             <input
-              type="checkbox"
-              checked={showSystem}
-              onChange={(e) => setShowSystem(e.target.checked)}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search SKU / ASIN / title / shipment / supplier…"
+              className="w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none sm:w-80"
             />
-            Show system SKUs
-          </label>
-          <input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search SKU / ASIN / title…"
-            className="w-72 max-w-[70vw] rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
-          />
+            <button
+              type="button"
+              onClick={() => {
+                if (showForm) {
+                  setShowForm(false);
+                  setEditingEntry(null);
+                  return;
+                }
+                setEditingEntry(null);
+                resetNewEntryForm();
+                setShowForm(true);
+              }}
+              className="cursor-pointer rounded-lg bg-[rgb(2,242,170)] px-3 py-2 text-sm font-medium text-black"
+            >
+              {showForm ? "Close" : "Add entry"}
+            </button>
+          </div>
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <label className="flex items-center gap-2 text-xs text-[var(--muted-foreground)]">
+              <input
+                type="checkbox"
+                checked={missingOnly}
+                onChange={(e) => setMissingOnly(e.target.checked)}
+              />
+              Show only SKUs needing COGS
+            </label>
+            <div className="flex flex-wrap items-center gap-3 text-xs text-[var(--muted-foreground)]">
+              <label className="flex items-center gap-2">
+                <span>Items per page:</span>
+                <select
+                  value={take}
+                  onChange={(e) => {
+                    setTake(Number(e.target.value));
+                    setSkip(0);
+                  }}
+                  className="h-8 rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-xs text-[var(--foreground)] outline-none"
+                >
+                  {[10, 25, 50, 100].map((n) => (
+                    <option key={n} value={n}>
+                      {n}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <span>
+                {entriesTotal > 0
+                  ? `${skip + 1} - ${Math.min(skip + entries.length, entriesTotal)} of ${entriesTotal}`
+                  : "0 - 0 of 0"}
+              </span>
+            </div>
+          </div>
         </div>
       </div>
 
       <SignedOut>
-        <div className="rounded-xl border border-[var(--surface-border)] bg-transparent p-4 text-sm text-[var(--muted-foreground)]">
-          <div className="mb-3">Sign in to manage Cost of Goods.</div>
-          <SignInButton>
-            <button className="cursor-pointer rounded-lg bg-[rgb(2,242,170)] px-3 py-2 text-sm font-medium text-black">
-              Sign in
-            </button>
-          </SignInButton>
-        </div>
+        <RedirectToSignIn />
       </SignedOut>
 
       <SignedIn>
+        {notice ? (
+          <div className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+            {notice}
+          </div>
+        ) : null}
         {error ? (
           <div className="mb-4 rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-700">
             {error}
           </div>
         ) : null}
-        {saveNotice ? (
-          <div className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
-            {saveNotice}
+
+        {missingOnly ? (
+          <div className="mb-4 rounded-xl bg-transparent p-4 ring-1 ring-[var(--surface-border)]">
+            <div className="flex flex-col gap-1">
+              <div className="text-sm font-medium text-[var(--foreground)]">
+                SKUs needing COGS
+              </div>
+              <div className="text-xs text-[var(--muted-foreground)]">
+                {missingCount == null
+                  ? "Loading…"
+                  : missingCount === 0
+                    ? "All good — none missing in this period."
+                    : `Missing for ${missingCount} SKU${missingCount === 1 ? "" : "s"} in this period.`}
+              </div>
+            </div>
+
+            {missing.length > 0 ? (
+              <div className="mt-4 grid gap-3 md:grid-cols-2">
+                {missing.map((m) => (
+                  <div
+                    key={m.productId}
+                    className="flex items-start gap-3 rounded-lg border border-[var(--surface-border)] bg-[var(--surface)] p-3"
+                  >
+                    <div className="h-10 w-10 overflow-hidden rounded-md bg-[var(--surface)] ring-1 ring-[var(--surface-border)]">
+                      {m.imageUrl ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img
+                          src={m.imageUrl}
+                          alt=""
+                          className="h-full w-full object-cover"
+                          loading="lazy"
+                        />
+                      ) : null}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-sm font-medium text-[var(--foreground)]">
+                        {m.title ?? "—"}
+                      </div>
+                      <div className="mt-0.5 text-xs text-[var(--muted-foreground)]">
+                        <span className="font-mono">{m.sku}</span>
+                        {m.asin ? ` · ${m.asin}` : ""}
+                        {" · "}
+                        {m.units.toLocaleString()} units
+                        {" · "}
+                        £{m.revenue.toFixed(2)}
+                      </div>
+                      <div className="mt-2">
+                        <button
+                          type="button"
+                          className="cursor-pointer rounded-lg bg-[rgb(2,242,170)] px-3 py-2 text-xs font-medium text-black"
+                          onClick={() => {
+                            setEditingEntry(null);
+                            setShowForm(true);
+                            resetNewEntryForm(m.productId);
+                          }}
+                        >
+                          Add entry
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : null}
           </div>
         ) : null}
 
-        <div className="mb-4 flex items-center justify-end">
-          <button
-            type="button"
-            onClick={saveAll}
-            disabled={saving || dirtyIds.length === 0}
-            className="cursor-pointer rounded-lg bg-[rgb(2,242,170)] px-4 py-2 text-sm font-medium text-black disabled:cursor-not-allowed disabled:opacity-60"
+        {showForm ? (
+          <div
+            className="fixed inset-0 z-50 flex cursor-pointer items-start justify-center bg-black/40 backdrop-blur-sm p-4 md:items-center"
+            role="dialog"
+            aria-modal="true"
+            onMouseDown={(e) => {
+              if (e.target === e.currentTarget) {
+                setShowForm(false);
+                setEditingEntry(null);
+              }
+            }}
           >
-            {saving
-              ? "Saving…"
-              : dirtyIds.length === 0
-                ? "Saved"
-                : `Save changes (${dirtyIds.length})`}
-          </button>
-        </div>
+            <div className="w-full max-w-3xl cursor-default overflow-hidden rounded-xl bg-[var(--background)] text-[var(--foreground)] ring-1 ring-[var(--surface-border)]">
+              <div className="flex items-center justify-between gap-4 border-b border-[var(--surface-border)] bg-[var(--surface)] px-4 py-3">
+                <div className="min-w-0">
+                  {selectedProduct ? (
+                    <div className="flex min-w-0 items-center gap-3">
+                      <div className="aspect-square h-9 w-9 shrink-0 overflow-hidden rounded-md bg-[var(--surface)] ring-1 ring-[var(--surface-border)]">
+                        {selectedProduct.imageUrl ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img
+                            src={selectedProduct.imageUrl}
+                            alt=""
+                            className="h-full w-full object-cover object-center"
+                            loading="lazy"
+                            referrerPolicy="no-referrer"
+                          />
+                        ) : null}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="truncate text-sm font-medium text-[var(--foreground)]">
+                          {selectedProduct.title ?? selectedProduct.sku}
+                        </div>
+                        <div className="truncate text-xs text-[var(--muted-foreground)]">
+                          <span className="font-mono">
+                            SKU: {selectedProduct.sku}
+                          </span>
+                          {selectedProduct.asin ? ` · ASIN: ${selectedProduct.asin}` : ""}
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="text-sm font-medium">
+                      {editingEntry ? "Edit cost entry" : "Add cost entry"}
+                    </div>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  aria-label="Close"
+                  className="cursor-pointer rounded-md p-2 text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5"
+                  onClick={() => {
+                    setShowForm(false);
+                    setEditingEntry(null);
+                  }}
+                >
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    className="h-5 w-5"
+                    aria-hidden="true"
+                  >
+                    <path d="M18 6 6 18" />
+                    <path d="M6 6 18 18" />
+                  </svg>
+                </button>
+              </div>
+
+              <div className="max-h-[80vh] overflow-auto p-4">
+                <div className="grid gap-3 md:grid-cols-3">
+                  {!selectedProduct ? (
+                    <div className="md:col-span-3">
+                      <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                        Product
+                      </label>
+                      <div className="mt-1 rounded-lg border border-[var(--surface-border)] bg-transparent p-3">
+                        <input
+                          value={productPickerQuery}
+                          onChange={(e) => setProductPickerQuery(e.target.value)}
+                          placeholder="Search SKU / ASIN / title…"
+                          className="w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
+                        />
+                        <div className="mt-2 max-h-56 overflow-auto rounded-lg border border-[var(--surface-border)]">
+                          {filteredProductsForPicker.length === 0 ? (
+                            <div className="px-3 py-3 text-sm text-[var(--muted-foreground)]">
+                              No products found.
+                            </div>
+                          ) : (
+                            filteredProductsForPicker.map((p) => (
+                              <button
+                                key={p.id}
+                                type="button"
+                                className="flex w-full cursor-pointer items-center gap-3 px-3 py-2 text-left hover:bg-[var(--foreground)]/5"
+                                onClick={() => setForm((prev) => ({ ...prev, productId: p.id }))}
+                              >
+                                <div className="aspect-square h-8 w-8 shrink-0 overflow-hidden rounded-md bg-[var(--surface)] ring-1 ring-[var(--surface-border)]">
+                                  {p.imageUrl ? (
+                                    // eslint-disable-next-line @next/next/no-img-element
+                                    <img
+                                      src={p.imageUrl}
+                                      alt=""
+                                      className="h-full w-full object-cover object-center"
+                                      loading="lazy"
+                                      referrerPolicy="no-referrer"
+                                    />
+                                  ) : null}
+                                </div>
+                                <div className="min-w-0 flex-1">
+                                  <div className="truncate text-sm font-medium text-[var(--foreground)]">
+                                    {p.title ?? p.sku}
+                                  </div>
+                                  <div className="truncate text-xs text-[var(--muted-foreground)]">
+                                    <span className="font-mono">SKU: {p.sku}</span>
+                                    {p.asin ? ` · ASIN: ${p.asin}` : ""}
+                                  </div>
+                                </div>
+                              </button>
+                            ))
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
+
+              <div>
+                <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                  Purchase date
+                </label>
+                <input
+                  type="date"
+                  value={form.purchaseDate}
+                  onChange={(e) =>
+                    setForm((prev) => ({ ...prev, purchaseDate: e.target.value }))
+                  }
+                  className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                  Fulfilment
+                </label>
+                <input
+                  value={form.fulfilment}
+                  onChange={(e) =>
+                    setForm((prev) => ({ ...prev, fulfilment: e.target.value }))
+                  }
+                  placeholder="Amazon / FBM / etc"
+                  className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                  Shipment ID
+                </label>
+                <input
+                  value={form.shipmentId}
+                  onChange={(e) =>
+                    setForm((prev) => ({ ...prev, shipmentId: e.target.value }))
+                  }
+                  placeholder="e.g. FBA15..."
+                  className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                  Bundle size
+                </label>
+                <input
+                  inputMode="numeric"
+                  value={form.bundleSize}
+                  onChange={(e) =>
+                    setForm((prev) => ({ ...prev, bundleSize: e.target.value }))
+                  }
+                  className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                  Qty purchased
+                </label>
+                <input
+                  inputMode="numeric"
+                  value={form.qtyPurchased}
+                  onChange={(e) =>
+                    setForm((prev) => ({ ...prev, qtyPurchased: e.target.value }))
+                  }
+                  className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                  Qty delivered
+                </label>
+                <input
+                  inputMode="numeric"
+                  value={form.qtyDelivered}
+                  onChange={(e) =>
+                    setForm((prev) => ({ ...prev, qtyDelivered: e.target.value }))
+                  }
+                  className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
+                />
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between gap-3">
+                  <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                    Unit
+                  </label>
+                  <div className="inline-flex overflow-hidden rounded-md ring-1 ring-[var(--surface-border)]">
+                    <button
+                      type="button"
+                      className={[
+                        "cursor-pointer px-2 py-1 text-[11px]",
+                        unitVatMode === "inc"
+                          ? "bg-[var(--surface)] text-[var(--foreground)]"
+                          : "text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5",
+                      ].join(" ")}
+                      onClick={() => {
+                        setUnitVatMode("inc");
+                        setUnitCostExVat("");
+                      }}
+                    >
+                      Inc VAT
+                    </button>
+                    <button
+                      type="button"
+                      className={[
+                        "cursor-pointer px-2 py-1 text-[11px]",
+                        unitVatMode === "ex"
+                          ? "bg-[var(--surface)] text-[var(--foreground)]"
+                          : "text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5",
+                      ].join(" ")}
+                      onClick={() => {
+                        setUnitVatMode("ex");
+                        const inc = Number(form.unitCostIncVat ?? 0) || 0;
+                        setUnitCostExVat(inc > 0 ? String(exFromInc(inc)) : "");
+                      }}
+                    >
+                      Ex VAT
+                    </button>
+                  </div>
+                </div>
+                <input
+                  inputMode="decimal"
+                  value={unitVatMode === "inc" ? form.unitCostIncVat : unitCostExVat}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    if (unitVatMode === "inc") {
+                      setForm((prev) => ({ ...prev, unitCostIncVat: v }));
+                      return;
+                    }
+                    setUnitCostExVat(v);
+                    const ex = Number(v ?? 0) || 0;
+                    setForm((prev) => ({ ...prev, unitCostIncVat: ex > 0 ? String(incFromEx(ex)) : "" }));
+                  }}
+                  placeholder={unitVatMode === "inc" ? "e.g. 12.34" : "e.g. 10.28"}
+                  className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
+                />
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between gap-3">
+                  <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                    Delivery
+                  </label>
+                  <div className="inline-flex overflow-hidden rounded-md ring-1 ring-[var(--surface-border)]">
+                    <button
+                      type="button"
+                      className={[
+                        "cursor-pointer px-2 py-1 text-[11px]",
+                        deliveryVatMode === "inc"
+                          ? "bg-[var(--surface)] text-[var(--foreground)]"
+                          : "text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5",
+                      ].join(" ")}
+                      onClick={() => {
+                        setDeliveryVatMode("inc");
+                        setDeliveryCostExVat("");
+                      }}
+                    >
+                      Inc VAT
+                    </button>
+                    <button
+                      type="button"
+                      className={[
+                        "cursor-pointer px-2 py-1 text-[11px]",
+                        deliveryVatMode === "ex"
+                          ? "bg-[var(--surface)] text-[var(--foreground)]"
+                          : "text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5",
+                      ].join(" ")}
+                      onClick={() => {
+                        setDeliveryVatMode("ex");
+                        const inc = Number(form.deliveryCostIncVat ?? 0) || 0;
+                        setDeliveryCostExVat(inc > 0 ? String(exFromInc(inc)) : "");
+                      }}
+                    >
+                      Ex VAT
+                    </button>
+                  </div>
+                </div>
+                <input
+                  inputMode="decimal"
+                  value={
+                    deliveryVatMode === "inc" ? form.deliveryCostIncVat : deliveryCostExVat
+                  }
+                  placeholder="Per unit"
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    if (deliveryVatMode === "inc") {
+                      setForm((prev) => ({ ...prev, deliveryCostIncVat: v }));
+                      return;
+                    }
+                    setDeliveryCostExVat(v);
+                    const ex = Number(v ?? 0) || 0;
+                    setForm((prev) => ({
+                      ...prev,
+                      deliveryCostIncVat: ex > 0 ? String(incFromEx(ex)) : "0",
+                    }));
+                  }}
+                  className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
+                />
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between gap-3">
+                  <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                    Prep
+                  </label>
+                  <div className="inline-flex overflow-hidden rounded-md ring-1 ring-[var(--surface-border)]">
+                    <button
+                      type="button"
+                      className={[
+                        "cursor-pointer px-2 py-1 text-[11px]",
+                        prepVatMode === "inc"
+                          ? "bg-[var(--surface)] text-[var(--foreground)]"
+                          : "text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5",
+                      ].join(" ")}
+                      onClick={() => {
+                        setPrepVatMode("inc");
+                        setPrepCostExVat("");
+                      }}
+                    >
+                      Inc VAT
+                    </button>
+                    <button
+                      type="button"
+                      className={[
+                        "cursor-pointer px-2 py-1 text-[11px]",
+                        prepVatMode === "ex"
+                          ? "bg-[var(--surface)] text-[var(--foreground)]"
+                          : "text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5",
+                      ].join(" ")}
+                      onClick={() => {
+                        setPrepVatMode("ex");
+                        const inc = Number(form.prepCostIncVat ?? 0) || 0;
+                        setPrepCostExVat(inc > 0 ? String(exFromInc(inc)) : "");
+                      }}
+                    >
+                      Ex VAT
+                    </button>
+                  </div>
+                </div>
+                <input
+                  inputMode="decimal"
+                  value={prepVatMode === "inc" ? form.prepCostIncVat : prepCostExVat}
+                  placeholder="Per unit"
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    if (prepVatMode === "inc") {
+                      setForm((prev) => ({ ...prev, prepCostIncVat: v }));
+                      return;
+                    }
+                    setPrepCostExVat(v);
+                    const ex = Number(v ?? 0) || 0;
+                    setForm((prev) => ({ ...prev, prepCostIncVat: ex > 0 ? String(incFromEx(ex)) : "0" }));
+                  }}
+                  className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                  VAT rate (%)
+                </label>
+                <input
+                  inputMode="decimal"
+                  value={form.vatRatePct}
+                  onChange={(e) =>
+                    setForm((prev) => ({ ...prev, vatRatePct: e.target.value }))
+                  }
+                  className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                  Currency
+                </label>
+                <select
+                  value={form.currency}
+                  onChange={(e) =>
+                    setForm((prev) => ({ ...prev, currency: e.target.value }))
+                  }
+                  className="mt-1 w-full cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
+                >
+                  {currencyOptions.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                  {form.currency && !isCurrencyOption(form.currency) ? (
+                    <option value={form.currency}>{form.currency}</option>
+                  ) : null}
+                </select>
+              </div>
+
+              <div className="md:col-span-3">
+                <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                  Supplier
+                </label>
+                <input
+                  value={form.supplier}
+                  onChange={(e) =>
+                    setForm((prev) => ({ ...prev, supplier: e.target.value }))
+                  }
+                  placeholder="Optional"
+                  className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
+                />
+              </div>
+
+              <div className="md:col-span-3">
+                <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                  Supplier link
+                </label>
+                <input
+                  value={form.supplierLink}
+                  onChange={(e) =>
+                    setForm((prev) => ({ ...prev, supplierLink: e.target.value }))
+                  }
+                  placeholder="https://… (optional)"
+                  className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
+                />
+              </div>
+            </div>
+
+                <div className="mt-4 flex justify-end">
+                  <button
+                    type="button"
+                    onClick={editingEntry ? updateEntry : createEntry}
+                    disabled={creating}
+                    className="cursor-pointer rounded-lg bg-[rgb(2,242,170)] px-4 py-2 text-sm font-medium text-black disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {creating ? "Saving…" : editingEntry ? "Save changes" : "Save"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : null}
 
         <div className="overflow-hidden rounded-xl ring-1 ring-[var(--surface-border)]">
-          <div className="hidden md:grid grid-cols-[44px_1.2fr_1fr_2fr_1fr_auto] gap-3 bg-[var(--surface)] px-4 py-3 text-xs font-medium uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
-            <div />
-            <div>SKU</div>
-            <div>ASIN</div>
-            <div>Title</div>
-            <div>COGS (per unit)</div>
-            <div />
-          </div>
-
           {loading ? (
             <div className="px-4 py-6 text-sm text-[var(--muted-foreground)]">
               Loading…
             </div>
-          ) : filtered.length === 0 ? (
+          ) : filteredWithMissingToggle.length === 0 ? (
             <div className="px-4 py-6 text-sm text-[var(--muted-foreground)]">
-              No products found.
+              <div>No entries found.</div>
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingEntry(null);
+                    resetNewEntryForm();
+                    setShowForm(true);
+                  }}
+                  className="cursor-pointer rounded-lg bg-[rgb(2,242,170)] px-3 py-2 text-sm font-medium text-black"
+                >
+                  Add entry
+                </button>
+                <button
+                  type="button"
+                  onClick={seedFromExisting}
+                  disabled={seeding}
+                  className="cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/5 disabled:cursor-not-allowed disabled:opacity-60"
+                  title="Create ledger entries from existing per-SKU COGS values"
+                >
+                  {seeding ? "Importing…" : "Import existing COGS"}
+                </button>
+              </div>
             </div>
           ) : (
             <div className="divide-y divide-[var(--surface-border)] bg-transparent">
-              {filtered.map((p) => {
-                const isSystem = SYSTEM_SKUS.has(p.sku);
+              <div className="flex flex-wrap items-center justify-between gap-3 bg-[var(--surface)] px-4 py-3 text-xs text-[var(--muted-foreground)]">
+                <span>
+                  {entriesTotal > 0
+                    ? `${skip + 1} - ${Math.min(skip + entries.length, entriesTotal)} of ${entriesTotal}`
+                    : "0 - 0 of 0"}
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={prevPage}
+                    disabled={!canPrev}
+                    className="cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-1.5 text-xs font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/5 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    Prev
+                  </button>
+                  <button
+                    type="button"
+                    onClick={nextPage}
+                    disabled={!canNext}
+                    className="cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-1.5 text-xs font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/5 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
+
+              {/* Desktop header */}
+              <div className="hidden md:grid grid-cols-[2.2fr_0.8fr_1fr_1.2fr_0.6fr_0.6fr_0.8fr_0.8fr_0.8fr_1fr] gap-3 bg-[var(--surface)] px-4 py-3 text-xs font-medium uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
+                <div>Product</div>
+                <div>Fulfilment</div>
+                <div>Supplier</div>
+                <div>Costs (per unit)</div>
+                <div>Curr</div>
+                <div>VAT</div>
+                <div>Date</div>
+                <div className="text-right">Purchased</div>
+                <div className="text-right">Delivered</div>
+                <div>Shipment</div>
+              </div>
+
+              {filteredWithMissingToggle.map((p) => {
+                const title = p.product?.title ?? p.product?.sku ?? "—";
+                const sku = p.product?.sku ?? "—";
+                const asin = p.product?.asin ?? "—";
+                const date = p.purchaseDate
+                  ? new Date(p.purchaseDate).toLocaleDateString()
+                  : "—";
+
+                const money = (n: number) => formatCurrency(n, p.currency);
+
                 return (
                   <>
                     {/* Mobile card */}
-                    <div key={`${p.id}-mobile`} className="md:hidden px-4 py-3">
+                    <div
+                      key={`${p.id}-m`}
+                      className="cursor-pointer md:hidden px-4 py-3 hover:bg-[var(--foreground)]/5"
+                      onClick={() => beginEdit(p)}
+                    >
                       <div className="flex items-start gap-3">
                         <div className="flex h-11 w-11 items-center justify-center">
-                          {p.imageUrl ? (
+                          {p.product?.imageUrl ? (
                             <img
-                              src={p.imageUrl}
-                              alt={p.title ?? p.sku}
+                              src={p.product.imageUrl}
+                              alt={title}
                               className="h-11 w-11 rounded-md object-cover ring-1 ring-[var(--surface-border)]"
                               loading="lazy"
                               referrerPolicy="no-referrer"
@@ -265,87 +1244,135 @@ export default function CostOfGoodsPage() {
                         </div>
                         <div className="min-w-0 flex-1">
                           <div className="truncate text-sm font-medium text-[var(--foreground)]">
-                            {p.title ?? p.sku}
+                            {title}
                           </div>
                           <div className="mt-0.5 truncate text-xs text-[var(--muted-foreground)]">
-                            SKU {p.sku} · ASIN {p.asin ?? "—"}
+                            SKU {sku} · ASIN {asin}
                           </div>
-                          {isSystem ? (
-                            <div className="mt-1 text-xs text-[var(--muted-foreground)]">
-                              System SKU
+                          <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
+                            <div className="text-[var(--muted-foreground)]">
+                              Total{" "}
+                              <span className="font-medium text-[var(--foreground)]">
+                                {money(p.totalCostIncVat)}
+                              </span>
                             </div>
-                          ) : null}
-
-                          <div className="mt-3">
-                            <div className="mb-1 text-[11px] font-medium uppercase tracking-[0.12em] text-[var(--muted-foreground)]">
-                              COGS (per unit)
+                            <div className="text-[var(--muted-foreground)]">
+                              Unit{" "}
+                              <span className="font-medium text-[var(--foreground)]">
+                                {money(p.unitCostIncVat)}
+                              </span>
                             </div>
-                            <input
-                              value={draft[p.id] ?? ""}
-                              onChange={(e) =>
-                                setDraft((prev) => ({
-                                  ...prev,
-                                  [p.id]: e.target.value,
-                                }))
-                              }
-                              inputMode="decimal"
-                              placeholder="e.g. 3.25"
-                              className="w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
-                            />
+                            <div className="text-[var(--muted-foreground)]">
+                              Delivery{" "}
+                              <span className="font-medium text-[var(--foreground)]">
+                                {money(p.deliveryCostIncVat)}
+                              </span>
+                            </div>
+                            <div className="text-[var(--muted-foreground)]">
+                              Prep{" "}
+                              <span className="font-medium text-[var(--foreground)]">
+                                {money(p.prepCostIncVat)}
+                              </span>
+                            </div>
+                          </div>
+                          <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[var(--muted-foreground)]">
+                            <span>
+                              {p.fulfilment || "Amazon"} · VAT {p.vatRatePct}%
+                            </span>
+                            <span>{date}</span>
+                            <span>
+                              {p.qtyPurchased}/{p.qtyDelivered} units
+                            </span>
+                            {p.bundleSize && p.bundleSize > 1 ? (
+                              <span>Bundle ×{p.bundleSize}</span>
+                            ) : null}
+                            {p.shipmentId ? <span>{p.shipmentId}</span> : null}
                           </div>
                         </div>
                       </div>
                     </div>
 
-                    {/* Desktop table row */}
+                    {/* Desktop row */}
                     <div
-                      key={`${p.id}-desktop`}
-                      className="hidden md:grid grid-cols-[44px_1.2fr_1fr_2fr_1fr_auto] items-center gap-3 px-4 py-3"
+                      key={`${p.id}-d`}
+                      className="hidden cursor-pointer md:grid grid-cols-[2.2fr_0.8fr_1fr_1.2fr_0.6fr_0.6fr_0.8fr_0.8fr_0.8fr_1fr] items-center gap-3 px-4 py-3 hover:bg-[var(--foreground)]/5"
+                      onClick={() => beginEdit(p)}
                     >
-                      <div className="flex items-center justify-center">
-                        {p.imageUrl ? (
-                          <img
-                            src={p.imageUrl}
-                            alt={p.title ?? p.sku}
-                            className="h-9 w-9 rounded-md object-cover ring-1 ring-[var(--surface-border)]"
-                            loading="lazy"
-                            referrerPolicy="no-referrer"
-                          />
-                        ) : (
-                          <div className="h-9 w-9 rounded-md bg-[var(--surface)] ring-1 ring-[var(--surface-border)]" />
-                        )}
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-3">
+                          <div className="flex h-9 w-9 items-center justify-center">
+                            {p.product?.imageUrl ? (
+                              <img
+                                src={p.product.imageUrl}
+                                alt={title}
+                                className="h-9 w-9 rounded-md object-cover ring-1 ring-[var(--surface-border)]"
+                                loading="lazy"
+                                referrerPolicy="no-referrer"
+                              />
+                            ) : (
+                              <div className="h-9 w-9 rounded-md bg-[var(--surface)] ring-1 ring-[var(--surface-border)]" />
+                            )}
+                          </div>
+                          <div className="min-w-0">
+                            <div className="truncate text-sm font-medium text-[var(--foreground)]">
+                              {title}
+                            </div>
+                            <div className="truncate text-xs text-[var(--muted-foreground)]">
+                              SKU {sku} · ASIN {asin}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="truncate text-sm text-[var(--muted-foreground)]">
+                        {p.fulfilment || "Amazon"}
                       </div>
                       <div className="min-w-0">
-                        <div className="truncate text-sm font-medium text-[var(--foreground)]">
-                          {p.sku}
+                        <div className="truncate text-sm text-[var(--muted-foreground)]">
+                          {p.supplier ?? "—"}
                         </div>
-                        {isSystem ? (
-                          <div className="mt-0.5 text-xs text-[var(--muted-foreground)]">
-                            System SKU
-                          </div>
+                        {p.supplierLink ? (
+                          <a
+                            href={p.supplierLink}
+                            target="_blank"
+                            rel="noreferrer"
+                            onClick={(e) => e.stopPropagation()}
+                            className="mt-0.5 inline-block truncate text-xs text-[var(--muted-foreground)] underline underline-offset-2 hover:text-[var(--foreground)]"
+                          >
+                            {p.supplierLink}
+                          </a>
                         ) : null}
                       </div>
-                      <div className="truncate text-sm text-[var(--muted-foreground)]">
-                        {p.asin ?? "—"}
+                      <div className="text-xs text-[var(--muted-foreground)]">
+                        <div>
+                          Total{" "}
+                          <span className="font-medium text-[var(--foreground)]">
+                            {money(p.totalCostIncVat)}
+                          </span>
+                        </div>
+                        <div>
+                          Unit {money(p.unitCostIncVat)} · Delivery{" "}
+                          {money(p.deliveryCostIncVat)} · Prep{" "}
+                          {money(p.prepCostIncVat)}
+                        </div>
+                      </div>
+                      <div className="text-sm text-[var(--muted-foreground)]">
+                        {p.currency}
+                      </div>
+                      <div className="text-sm text-[var(--muted-foreground)]">
+                        {p.vatRatePct}%
+                      </div>
+                      <div className="text-sm text-[var(--muted-foreground)]">
+                        {date}
+                      </div>
+                      <div className="text-right text-sm font-medium text-[var(--foreground)]">
+                        {p.qtyPurchased}
+                      </div>
+                      <div className="text-right text-sm font-medium text-[var(--foreground)]">
+                        {p.qtyDelivered}
                       </div>
                       <div className="truncate text-sm text-[var(--muted-foreground)]">
-                        {p.title ?? "—"}
+                        {p.shipmentId ?? "—"}
                       </div>
-                      <div>
-                        <input
-                          value={draft[p.id] ?? ""}
-                          onChange={(e) =>
-                            setDraft((prev) => ({
-                              ...prev,
-                              [p.id]: e.target.value,
-                            }))
-                          }
-                          inputMode="decimal"
-                          placeholder="e.g. 3.25"
-                          className="w-40 rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
-                        />
-                      </div>
-                      <div className="flex justify-end" />
                     </div>
                   </>
                 );
@@ -356,5 +1383,18 @@ export default function CostOfGoodsPage() {
       </SignedIn>
     </div>
   );
+}
+
+function formatCurrency(amount: number, currency: string) {
+  try {
+    return new Intl.NumberFormat("en-GB", {
+      style: "currency",
+      currency,
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }).format(amount);
+  } catch {
+    return `£${amount.toFixed(2)}`;
+  }
 }
 
