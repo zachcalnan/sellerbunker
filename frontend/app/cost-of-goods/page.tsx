@@ -36,7 +36,9 @@ function CostOfGoodsInner() {
   const { isSignedIn, getToken } = useAuth();
   const searchParams = useSearchParams();
   const missingParamOn = searchParams.get("missing") === "1";
-  const [missingOnly, setMissingOnly] = useState(missingParamOn);
+  const [cogsFilter, setCogsFilter] = useState<"missing" | "complete" | "all">(
+  "missing",
+);
   const startParam = searchParams.get("start");
   const endParam = searchParams.get("end");
 
@@ -319,8 +321,10 @@ function CostOfGoodsInner() {
   }, [isSignedIn, getToken, baseUrl, startParam, endParam, query, take, skip]);
 
   useEffect(() => {
-    setMissingOnly(missingParamOn);
-  }, [missingParamOn]);
+  if (missingParamOn) {
+    setCogsFilter("missing");
+  }
+}, [missingParamOn]);
 
   useEffect(() => {
     if (!showForm) return;
@@ -337,10 +341,21 @@ function CostOfGoodsInner() {
   const filtered = useMemo(() => entries, [entries]);
 
   const filteredWithMissingToggle = useMemo(() => {
-    if (!missingOnly) return filtered;
     const missingIds = new Set(missing.map((m) => m.productId));
-    return filtered.filter((e) => missingIds.has(e.product.id));
-  }, [filtered, missingOnly, missing]);
+
+return filtered.filter((e) => {
+  if (cogsFilter === "missing") {
+    return missingIds.has(e.product.id);
+  }
+
+  if (cogsFilter === "complete") {
+    return !missingIds.has(e.product.id);
+  }
+
+  return true; // "all"
+});
+}, [filtered, cogsFilter, missing]);
+
 
   const createEntry = async () => {
     setCreating(true);
@@ -550,14 +565,60 @@ function CostOfGoodsInner() {
             </button>
           </div>
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <label className="flex items-center gap-2 text-xs text-[var(--muted-foreground)]">
-              <input
-                type="checkbox"
-                checked={missingOnly}
-                onChange={(e) => setMissingOnly(e.target.checked)}
-              />
-              Show only SKUs needing COGS
-            </label>
+            <div className="flex items-center gap-2 text-xs text-[var(--muted-foreground)]">
+  <span className="sr-only">COGS filter</span>
+
+  <div className="inline-flex overflow-hidden rounded-lg border border-[var(--surface-border)]">
+    <button
+      type="button"
+      onClick={() => {
+        setCogsFilter("missing");
+        setSkip(0);
+      }}
+      className={[
+        "px-3 py-1 text-xs",
+        cogsFilter === "missing"
+          ? "bg-[rgb(2,242,170)] text-black"
+          : "bg-transparent text-[var(--foreground)]",
+      ].join(" ")}
+    >
+      Missing
+    </button>
+
+    <button
+      type="button"
+      onClick={() => {
+        setCogsFilter("complete");
+        setSkip(0);
+      }}
+      className={[
+        "px-3 py-1 text-xs border-l border-[var(--surface-border)]",
+        cogsFilter === "complete"
+          ? "bg-[rgb(2,242,170)] text-black"
+          : "bg-transparent text-[var(--foreground)]",
+      ].join(" ")}
+    >
+      Complete
+    </button>
+
+    <button
+      type="button"
+      onClick={() => {
+        setCogsFilter("all");
+        setSkip(0);
+      }}
+      className={[
+        "px-3 py-1 text-xs border-l border-[var(--surface-border)]",
+        cogsFilter === "all"
+          ? "bg-[rgb(2,242,170)] text-black"
+          : "bg-transparent text-[var(--foreground)]",
+      ].join(" ")}
+    >
+      All
+    </button>
+  </div>
+</div>
+
             <div className="flex flex-wrap items-center gap-3 text-xs text-[var(--muted-foreground)]">
               <label className="flex items-center gap-2">
                 <span>Items per page:</span>
@@ -602,7 +663,7 @@ function CostOfGoodsInner() {
           </div>
         ) : null}
 
-        {missingOnly ? (
+        {cogsFilter === "missing" ? (
           <div className="mb-4 rounded-xl bg-transparent p-4 ring-1 ring-[var(--surface-border)]">
             <div className="flex flex-col gap-1">
               <div className="text-sm font-medium text-[var(--foreground)]">
