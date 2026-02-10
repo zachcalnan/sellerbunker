@@ -860,8 +860,8 @@ return filtered.filter((e) => {
 
               <div>
                 <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
-                  Purchase date
-                </label>
+  Shipment tracked date
+</label>
                 <input
                   type="date"
                   value={form.purchaseDate}
