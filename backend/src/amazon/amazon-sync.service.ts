@@ -21,6 +21,18 @@ export class AmazonSyncService implements OnModuleInit {
         jobId: 'orders-batch-sync',
       },
     );
+
+    await this.queue.add(
+  'inventory-batch-sync',
+  {},
+  {
+    repeat: {
+      every: 2 * 60 * 60 * 1000, // 2 hours
+    },
+    jobId: 'inventory-batch-sync',
+  },
+);
+
   }
 
   /**

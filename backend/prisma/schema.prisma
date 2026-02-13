@@ -1,6 +1,3 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -10,52 +7,49 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// User/Seller model
 model User {
-  id            String   @id @default(uuid())
-  clerkId       String?  @unique
-  email         String   @unique
-  passwordHash  String   @map("password_hash")
-  name          String?
-  activeOrgId   String?  @map("active_org_id")
-  createdAt     DateTime @default(now()) @map("created_at")
-  updatedAt     DateTime @updatedAt @map("updated_at")
-
-  activeOrg Organization? @relation("ActiveOrg", fields: [activeOrgId], references: [id])
-  orgMemberships OrganizationMembership[]
-
-  sellerAccounts SellerAccount[]
-  products       Product[]
-  orders         Order[]
-  orderItems     OrderItem[]
+  id             String                   @id @default(uuid())
+  email          String                   @unique
+  passwordHash   String                   @map("password_hash")
+  name           String?
+  createdAt      DateTime                 @default(now()) @map("created_at")
+  updatedAt      DateTime                 @updatedAt @map("updated_at")
+  clerkId        String?                  @unique
+  activeOrgId    String?                  @map("active_org_id")
+  inventoryByMarketplace InventoryByMarketplace[]
   inventory      Inventory[]
+  orderItems     OrderItem[]
+  orders         Order[]
+  orgMemberships OrganizationMembership[]
+  products       Product[]
   purchases      Purchase[]
+  sellerAccounts SellerAccount[]
+  activeOrg      Organization?            @relation("ActiveOrg", fields: [activeOrgId], references: [id])
 
   @@map("users")
 }
 
 model Organization {
-  id        String   @id @default(uuid())
-  name      String
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
-
-  members   OrganizationMembership[]
-  usersWithActiveOrg User[] @relation("ActiveOrg")
+  id                     String                   @id @default(uuid())
+  name                   String
+  createdAt              DateTime                 @default(now()) @map("created_at")
+  updatedAt              DateTime                 @updatedAt @map("updated_at")
+  lastFbaInventorySyncAt DateTime?
+  members                OrganizationMembership[]
+  usersWithActiveOrg     User[]                   @relation("ActiveOrg")
 
   @@map("organizations")
 }
 
 model OrganizationMembership {
-  id        String   @id @default(uuid())
-  orgId     String   @map("org_id")
-  userId    String   @map("user_id")
-  role      String   @default("member") // "owner" | "member"
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
-
-  org  Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  user User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id        String       @id @default(uuid())
+  orgId     String       @map("org_id")
+  userId    String       @map("user_id")
+  role      String       @default("member")
+  createdAt DateTime     @default(now()) @map("created_at")
+  updatedAt DateTime     @updatedAt @map("updated_at")
+  org       Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([orgId, userId])
   @@index([userId])
@@ -63,42 +57,39 @@ model OrganizationMembership {
   @@map("organization_memberships")
 }
 
-// Seller accounts connected to marketplaces (Amazon, eBay, etc.)
 model SellerAccount {
-  id                 String   @id @default(uuid())
-  userId             String   @map("user_id")
-  marketplace        String   // 'amazon' | 'ebay' | 'walmart' | 'etsy'
-  sellerId           String?  @map("seller_id") // Marketplace seller ID
-  credentials        Json     // Encrypted tokens, refresh tokens, etc.
-  isActive           Boolean  @default(true) @map("is_active")
+  id                 String    @id @default(uuid())
+  userId             String    @map("user_id")
+  marketplace        String
+  sellerId           String?   @map("seller_id")
+  credentials        Json
+  isActive           Boolean   @default(true) @map("is_active")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
   ordersLastSyncedAt DateTime? @map("orders_last_synced_at")
-  createdAt          DateTime @default(now()) @map("created_at")
-  updatedAt          DateTime @updatedAt @map("updated_at")
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user               User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, marketplace])
-  @@map("seller_accounts")
   @@index([userId])
+  @@map("seller_accounts")
 }
 
-// Products/SKUs
 model Product {
-  id          String   @id @default(uuid())
-  userId      String   @map("user_id")
+  id          String      @id @default(uuid())
+  userId      String      @map("user_id")
   sku         String
-  asin        String?  // Amazon ASIN
+  asin        String?
   title       String?
-  imageUrl    String?  @map("image_url")
-  costOfGoods Decimal? @map("cost_of_goods") @db.Decimal(10, 2)
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
-
-  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  orders   Order[]
-  orderItems OrderItem[]
-  inventory Inventory?
-  purchases Purchase[]
+  imageUrl    String?     @map("image_url")
+  costOfGoods Decimal?    @map("cost_of_goods") @db.Decimal(10, 2)
+  createdAt   DateTime    @default(now()) @map("created_at")
+  updatedAt   DateTime    @updatedAt @map("updated_at")
+  inventory   Inventory?
+  inventoryByMarketplace InventoryByMarketplace[]
+  orderItems  OrderItem[]
+  orders      Order[]
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  purchases   Purchase[]
 
   @@unique([userId, sku])
   @@index([userId])
@@ -106,29 +97,26 @@ model Product {
   @@map("products")
 }
 
-// Orders from marketplaces
 model Order {
-  id              String   @id @default(uuid())
-  userId          String   @map("user_id")
-  productId       String   @map("product_id")
-  orderId         String   @map("order_id") // Marketplace order ID
-  marketplace     String   // 'amazon' | 'ebay' | etc.
-  sku             String
-  asin            String?
-  quantity        Int      @default(1)
-  itemPrice       Decimal  @map("item_price") @db.Decimal(10, 2)
-  fees            Json     // FBA fees, referral fees, etc.
-  totalProfit     Decimal? @map("total_profit") @db.Decimal(10, 2)
-  rawResponse     Json?    @map("raw_response") // Full API response
-  orderDate       DateTime @map("order_date")
-  createdAt       DateTime @default(now()) @map("created_at")
-  updatedAt       DateTime @updatedAt @map("updated_at")
+  id          String      @id @default(uuid())
+  userId      String      @map("user_id")
+  productId   String      @map("product_id")
+  orderId     String      @map("order_id")
+  marketplace String
+  sku         String
+  asin        String?
+  quantity    Int         @default(1)
+  itemPrice   Decimal     @map("item_price") @db.Decimal(10, 2)
+  fees        Json
+  totalProfit Decimal?    @map("total_profit") @db.Decimal(10, 2)
+  rawResponse Json?       @map("raw_response")
+  orderDate   DateTime    @map("order_date")
+  createdAt   DateTime    @default(now()) @map("created_at")
+  updatedAt   DateTime    @updatedAt @map("updated_at")
+  orderItems  OrderItem[]
+  product     Product     @relation(fields: [productId], references: [id], onDelete: Cascade)
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
-  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
-  orderItems OrderItem[]
-
-  // NOTE: must be scoped by userId to avoid cross-tenant order clobbering.
   @@unique([userId, orderId, marketplace])
   @@index([userId])
   @@index([userId, orderDate])
@@ -136,41 +124,30 @@ model Order {
   @@map("orders")
 }
 
-// Order items (line items) for accurate per-product analytics
 model OrderItem {
-  id          String   @id @default(uuid())
-  userId      String   @map("user_id")
-  orderDbId   String   @map("order_db_id")
-  productId   String   @map("product_id")
-
-  // Marketplace identifiers
-  marketplace String   // 'amazon' | 'ebay' | etc.
-  orderId     String   @map("order_id") // Marketplace order ID (e.g. AmazonOrderId)
-  orderItemId String   @map("order_item_id") // Marketplace order item ID
-
-  sku         String
-  asin        String?
-
-  quantity    Int      @default(1)
-
-  // Amounts are totals for this line item (not per-unit)
-  revenueTotal        Decimal  @map("revenue_total") @db.Decimal(14, 2)
-  shippingChargedTotal Decimal @map("shipping_charged_total") @db.Decimal(14, 2)
-  taxChargedTotal     Decimal  @map("tax_charged_total") @db.Decimal(14, 2)
-  amazonFeesTotal     Decimal  @map("amazon_fees_total") @db.Decimal(14, 2)
-
-  // Nullable until the seller provides COGS; when null, profit is unknown.
-  cogsTotal  Decimal? @map("cogs_total") @db.Decimal(14, 2)
-  profit     Decimal? @map("profit") @db.Decimal(14, 2)
-
-  rawResponse Json?   @map("raw_response")
-  orderDate   DateTime @map("order_date")
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
-
-  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
-  order   Order   @relation(fields: [orderDbId], references: [id], onDelete: Cascade)
-  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  id                   String   @id @default(uuid())
+  userId               String   @map("user_id")
+  orderDbId            String   @map("order_db_id")
+  productId            String   @map("product_id")
+  marketplace          String
+  orderId              String   @map("order_id")
+  orderItemId          String   @map("order_item_id")
+  sku                  String
+  asin                 String?
+  quantity             Int      @default(1)
+  revenueTotal         Decimal  @map("revenue_total") @db.Decimal(14, 2)
+  shippingChargedTotal Decimal  @map("shipping_charged_total") @db.Decimal(14, 2)
+  taxChargedTotal      Decimal  @map("tax_charged_total") @db.Decimal(14, 2)
+  amazonFeesTotal      Decimal  @map("amazon_fees_total") @db.Decimal(14, 2)
+  cogsTotal            Decimal? @map("cogs_total") @db.Decimal(14, 2)
+  profit               Decimal? @map("profit") @db.Decimal(14, 2)
+  rawResponse          Json?    @map("raw_response")
+  orderDate            DateTime @map("order_date")
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @updatedAt @map("updated_at")
+  order                Order    @relation(fields: [orderDbId], references: [id], onDelete: Cascade)
+  product              Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  user                 User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([orderDbId, orderItemId])
   @@index([userId])
@@ -179,13 +156,24 @@ model OrderItem {
   @@map("order_items")
 }
 
-// Inventory levels
 model Inventory {
   id         String   @id @default(uuid())
   userId     String   @map("user_id")
   productId  String   @unique @map("product_id")
-  currentQty Int      @default(0) @map("current_qty")
-  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  // ===== Aggregated totals =====
+  currentQty Int @default(0) @map("current_qty")
+
+  // ===== Core FBA statuses =====
+  fulfillableQty   Int @default(0) @map("fulfillable_qty")
+  inboundQty       Int @default(0) @map("inbound_qty")
+  reservedQty      Int @default(0) @map("reserved_qty")
+  researchingQty   Int @default(0) @map("researching_qty")
+  unfulfillableQty Int @default(0) @map("unfulfillable_qty")
+
+  rawJson   Json?  @map("raw_json") 
+
+  updatedAt DateTime @updatedAt @map("updated_at")
 
   user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
   product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
@@ -194,35 +182,58 @@ model Inventory {
   @@map("inventory")
 }
 
-// Purchases / inbound costs ledger (manual entry)
-model Purchase {
-  id        String   @id @default(uuid())
-  userId    String   @map("user_id")
-  productId String   @map("product_id")
 
-  fulfilment  String @default("Amazon")
-  supplier    String?
-  supplierLink String? @map("supplier_link")
-  bundleSize   Int     @default(1) @map("bundle_size")
-  purchaseDate DateTime @map("purchase_date")
-  orderNumber  String?  @map("order_number")
-  shipmentId   String?  @map("shipment_id")
+// Inventory levels by marketplace (FBA breakdown)
+model InventoryByMarketplace {
+  id            String   @id @default(uuid())
+  userId        String   @map("user_id")
+  productId     String   @map("product_id")
+  marketplaceId String   @map("marketplace_id")
 
-  qtyPurchased Int @default(0) @map("qty_purchased")
-  qtyDelivered Int @default(0) @map("qty_delivered")
+  fulfillableQty   Int @default(0) @map("fulfillable_qty")
+  inboundQty       Int @default(0) @map("inbound_qty")
+  reservedQty      Int @default(0) @map("reserved_qty")
+  researchingQty   Int @default(0) @map("researching_qty")
+  unfulfillableQty Int @default(0) @map("unfulfillable_qty")
 
-  currency          String  @default("GBP")
-  vatRatePct        Decimal @default(0) @map("vat_rate_pct") @db.Decimal(7, 4)
-  unitCostIncVat    Decimal @default(0) @map("unit_cost_inc_vat") @db.Decimal(14, 2)
-  deliveryCostIncVat Decimal @default(0) @map("delivery_cost_inc_vat") @db.Decimal(14, 2)
-  prepCostIncVat    Decimal @default(0) @map("prep_cost_inc_vat") @db.Decimal(14, 2)
-  totalCostIncVat   Decimal @default(0) @map("total_cost_inc_vat") @db.Decimal(14, 2)
+  currentQty Int @default(0) @map("current_qty")
 
-  createdAt DateTime @default(now()) @map("created_at")
+  rawJson Json? @map("raw_json")
+
   updatedAt DateTime @updatedAt @map("updated_at")
 
   user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
   product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([productId, marketplaceId])
+  @@index([userId])
+  @@map("inventory_by_marketplace")
+}
+
+
+model Purchase {
+  id                 String   @id @default(uuid())
+  userId             String   @map("user_id")
+  productId          String   @map("product_id")
+  fulfilment         String   @default("Amazon")
+  supplier           String?
+  purchaseDate       DateTime @map("purchase_date")
+  orderNumber        String?  @map("order_number")
+  shipmentId         String?  @map("shipment_id")
+  qtyPurchased       Int      @default(0) @map("qty_purchased")
+  qtyDelivered       Int      @default(0) @map("qty_delivered")
+  currency           String   @default("GBP")
+  vatRatePct         Decimal  @default(0) @map("vat_rate_pct") @db.Decimal(7, 4)
+  unitCostIncVat     Decimal  @default(0) @map("unit_cost_inc_vat") @db.Decimal(14, 2)
+  deliveryCostIncVat Decimal  @default(0) @map("delivery_cost_inc_vat") @db.Decimal(14, 2)
+  prepCostIncVat     Decimal  @default(0) @map("prep_cost_inc_vat") @db.Decimal(14, 2)
+  totalCostIncVat    Decimal  @default(0) @map("total_cost_inc_vat") @db.Decimal(14, 2)
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+  supplierLink       String?  @map("supplier_link")
+  bundleSize         Int      @default(1) @map("bundle_size")
+  product            Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  user               User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@index([userId, purchaseDate])
@@ -231,35 +242,32 @@ model Purchase {
   @@map("purchases")
 }
 
-// Daily KPI aggregates for fast dashboard reads
 model AggDailyKpiSummary {
-  id                 String   @id @default(uuid())
-  userId             String   @map("user_id")
-  marketplace        String
-  fulfilmentChannel  String   @map("fulfilment_channel")
-  date               DateTime @map("date")
-
-  revenue            Decimal  @db.Decimal(14, 2)
-  unitsSold          Int
-  ordersCount        Int      @map("orders_count")
-  amazonFeesTotal    Decimal  @map("amazon_fees_total") @db.Decimal(14, 2)
-  refundsTotal       Decimal  @map("refunds_total") @db.Decimal(14, 2)
-  cogsTotal          Decimal  @map("cogs_total") @db.Decimal(14, 2)
-  prepFeesTotal      Decimal  @map("prep_fees_total") @db.Decimal(14, 2)
-  shippingCostsTotal Decimal  @map("shipping_costs_total") @db.Decimal(14, 2)
-  advertisingTotal   Decimal  @map("advertising_total") @db.Decimal(14, 2)
-  vatOnAmazonFeesTotal Decimal @map("vat_on_amazon_fees_total") @db.Decimal(14, 2)
-  vatEstimateTotal   Decimal  @map("vat_estimate_total") @db.Decimal(14, 2)
-  softwareSubsTotal  Decimal  @map("software_subs_total") @db.Decimal(14, 2)
-  otherSubsTotal     Decimal  @map("other_subs_total") @db.Decimal(14, 2)
-  vatTotal           Decimal  @map("vat_total") @db.Decimal(14, 2)
-  otherCostsTotal    Decimal  @map("other_costs_total") @db.Decimal(14, 2)
-  profit             Decimal  @db.Decimal(14, 2)
-  roiPct             Decimal  @map("roi_pct") @db.Decimal(7, 4)
-  marginPct          Decimal  @map("margin_pct") @db.Decimal(7, 4)
-
-  createdAt          DateTime @default(now()) @map("created_at")
-  updatedAt          DateTime @updatedAt @map("updated_at")
+  id                   String   @id @default(uuid())
+  userId               String   @map("user_id")
+  marketplace          String
+  fulfilmentChannel    String   @map("fulfilment_channel")
+  date                 DateTime @map("date")
+  revenue              Decimal  @db.Decimal(14, 2)
+  unitsSold            Int
+  ordersCount          Int      @map("orders_count")
+  amazonFeesTotal      Decimal  @map("amazon_fees_total") @db.Decimal(14, 2)
+  refundsTotal         Decimal  @map("refunds_total") @db.Decimal(14, 2)
+  cogsTotal            Decimal  @map("cogs_total") @db.Decimal(14, 2)
+  prepFeesTotal        Decimal  @map("prep_fees_total") @db.Decimal(14, 2)
+  shippingCostsTotal   Decimal  @map("shipping_costs_total") @db.Decimal(14, 2)
+  advertisingTotal     Decimal  @map("advertising_total") @db.Decimal(14, 2)
+  vatOnAmazonFeesTotal Decimal  @map("vat_on_amazon_fees_total") @db.Decimal(14, 2)
+  vatEstimateTotal     Decimal  @map("vat_estimate_total") @db.Decimal(14, 2)
+  softwareSubsTotal    Decimal  @map("software_subs_total") @db.Decimal(14, 2)
+  otherSubsTotal       Decimal  @map("other_subs_total") @db.Decimal(14, 2)
+  vatTotal             Decimal  @map("vat_total") @db.Decimal(14, 2)
+  otherCostsTotal      Decimal  @map("other_costs_total") @db.Decimal(14, 2)
+  profit               Decimal  @db.Decimal(14, 2)
+  roiPct               Decimal  @map("roi_pct") @db.Decimal(7, 4)
+  marginPct            Decimal  @map("margin_pct") @db.Decimal(7, 4)
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @updatedAt @map("updated_at")
 
   @@unique([userId, marketplace, fulfilmentChannel, date])
   @@index([userId])
