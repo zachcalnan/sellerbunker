@@ -37,8 +37,8 @@ function CostOfGoodsInner() {
   const searchParams = useSearchParams();
   const missingParamOn = searchParams.get("missing") === "1";
   const [cogsFilter, setCogsFilter] = useState<"missing" | "complete" | "all">(
-  "missing",
-);
+    "missing",
+  );
   const startParam = searchParams.get("start");
   const endParam = searchParams.get("end");
 
@@ -136,13 +136,13 @@ function CostOfGoodsInner() {
       const [entriesRes, productsRes, missingRes] = await Promise.all([
         fetch(
           `${baseUrl}/api/amazon/cost-of-goods/entries?` +
-            new URLSearchParams({
-              query,
-              take: String(take),
-              skip: String(skip),
-            }).toString(),
+          new URLSearchParams({
+            query,
+            take: String(take),
+            skip: String(skip),
+          }).toString(),
           {
-          headers: { Authorization: `Bearer ${token}` },
+            headers: { Authorization: `Bearer ${token}` },
           },
         ),
         fetch(`${baseUrl}/api/amazon/products`, {
@@ -321,10 +321,10 @@ function CostOfGoodsInner() {
   }, [isSignedIn, getToken, baseUrl, startParam, endParam, query, take, skip]);
 
   useEffect(() => {
-  if (missingParamOn) {
-    setCogsFilter("missing");
-  }
-}, [missingParamOn]);
+    if (missingParamOn) {
+      setCogsFilter("missing");
+    }
+  }, [missingParamOn]);
 
   useEffect(() => {
     if (!showForm) return;
@@ -343,18 +343,18 @@ function CostOfGoodsInner() {
   const filteredWithMissingToggle = useMemo(() => {
     const missingIds = new Set(missing.map((m) => m.productId));
 
-return filtered.filter((e) => {
-  if (cogsFilter === "missing") {
-    return missingIds.has(e.product.id);
-  }
+    return filtered.filter((e) => {
+      if (cogsFilter === "missing") {
+        return missingIds.has(e.product.id);
+      }
 
-  if (cogsFilter === "complete") {
-    return !missingIds.has(e.product.id);
-  }
+      if (cogsFilter === "complete") {
+        return !missingIds.has(e.product.id);
+      }
 
-  return true; // "all"
-});
-}, [filtered, cogsFilter, missing]);
+      return true; // "all"
+    });
+  }, [filtered, cogsFilter, missing]);
 
 
   const createEntry = async () => {
@@ -515,10 +515,10 @@ return filtered.filter((e) => {
       };
       setNotice(
         `Imported ${Number(result.seeded ?? 0)} entries` +
-          (result.skippedExisting
-            ? ` (skipped ${Number(result.skippedExisting)} existing)`
-            : "") +
-          ".",
+        (result.skippedExisting
+          ? ` (skipped ${Number(result.skippedExisting)} existing)`
+          : "") +
+        ".",
       );
       await load();
     } catch (e) {
@@ -566,58 +566,58 @@ return filtered.filter((e) => {
           </div>
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex items-center gap-2 text-xs text-[var(--muted-foreground)]">
-  <span className="sr-only">COGS filter</span>
+              <span className="sr-only">COGS filter</span>
 
-  <div className="inline-flex overflow-hidden rounded-lg border border-[var(--surface-border)]">
-    <button
-      type="button"
-      onClick={() => {
-        setCogsFilter("missing");
-        setSkip(0);
-      }}
-      className={[
-        "px-3 py-1 text-xs",
-        cogsFilter === "missing"
-          ? "bg-[rgb(2,242,170)] text-black"
-          : "bg-transparent text-[var(--foreground)]",
-      ].join(" ")}
-    >
-      Missing
-    </button>
+              <div className="inline-flex overflow-hidden rounded-lg border border-[var(--surface-border)]">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCogsFilter("missing");
+                    setSkip(0);
+                  }}
+                  className={[
+                    "px-3 py-1 text-xs",
+                    cogsFilter === "missing"
+                      ? "bg-[rgb(2,242,170)] text-black"
+                      : "bg-transparent text-[var(--foreground)]",
+                  ].join(" ")}
+                >
+                  Missing
+                </button>
 
-    <button
-      type="button"
-      onClick={() => {
-        setCogsFilter("complete");
-        setSkip(0);
-      }}
-      className={[
-        "px-3 py-1 text-xs border-l border-[var(--surface-border)]",
-        cogsFilter === "complete"
-          ? "bg-[rgb(2,242,170)] text-black"
-          : "bg-transparent text-[var(--foreground)]",
-      ].join(" ")}
-    >
-      Complete
-    </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCogsFilter("complete");
+                    setSkip(0);
+                  }}
+                  className={[
+                    "px-3 py-1 text-xs border-l border-[var(--surface-border)]",
+                    cogsFilter === "complete"
+                      ? "bg-[rgb(2,242,170)] text-black"
+                      : "bg-transparent text-[var(--foreground)]",
+                  ].join(" ")}
+                >
+                  Complete
+                </button>
 
-    <button
-      type="button"
-      onClick={() => {
-        setCogsFilter("all");
-        setSkip(0);
-      }}
-      className={[
-        "px-3 py-1 text-xs border-l border-[var(--surface-border)]",
-        cogsFilter === "all"
-          ? "bg-[rgb(2,242,170)] text-black"
-          : "bg-transparent text-[var(--foreground)]",
-      ].join(" ")}
-    >
-      All
-    </button>
-  </div>
-</div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCogsFilter("all");
+                    setSkip(0);
+                  }}
+                  className={[
+                    "px-3 py-1 text-xs border-l border-[var(--surface-border)]",
+                    cogsFilter === "all"
+                      ? "bg-[rgb(2,242,170)] text-black"
+                      : "bg-transparent text-[var(--foreground)]",
+                  ].join(" ")}
+                >
+                  All
+                </button>
+              </div>
+            </div>
 
             <div className="flex flex-wrap items-center gap-3 text-xs text-[var(--muted-foreground)]">
               <label className="flex items-center gap-2">
@@ -858,330 +858,330 @@ return filtered.filter((e) => {
                     </div>
                   ) : null}
 
-              <div>
-                <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
-  Shipment tracked date
-</label>
-                <input
-                  type="date"
-                  value={form.purchaseDate}
-                  onChange={(e) =>
-                    setForm((prev) => ({ ...prev, purchaseDate: e.target.value }))
-                  }
-                  className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
-                />
-              </div>
+                  <div>
+                    <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                      Purchase date
+                    </label>
+                    <input
+                      type="date"
+                      value={form.purchaseDate}
+                      onChange={(e) =>
+                        setForm((prev) => ({ ...prev, purchaseDate: e.target.value }))
+                      }
+                      className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
+                    />
+                  </div>
 
-              <div>
-                <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
-                  Fulfilment
-                </label>
-                <input
-                  value={form.fulfilment}
-                  onChange={(e) =>
-                    setForm((prev) => ({ ...prev, fulfilment: e.target.value }))
-                  }
-                  placeholder="Amazon / FBM / etc"
-                  className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
-                />
-              </div>
+                  <div>
+                    <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                      Fulfilment
+                    </label>
+                    <input
+                      value={form.fulfilment}
+                      onChange={(e) =>
+                        setForm((prev) => ({ ...prev, fulfilment: e.target.value }))
+                      }
+                      placeholder="Amazon / FBM / etc"
+                      className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
+                    />
+                  </div>
 
-              <div>
-                <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
-                  Shipment ID
-                </label>
-                <input
-                  value={form.shipmentId}
-                  onChange={(e) =>
-                    setForm((prev) => ({ ...prev, shipmentId: e.target.value }))
-                  }
-                  placeholder="e.g. FBA15..."
-                  className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
-                />
-              </div>
+                  <div>
+                    <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                      Shipment ID
+                    </label>
+                    <input
+                      value={form.shipmentId}
+                      onChange={(e) =>
+                        setForm((prev) => ({ ...prev, shipmentId: e.target.value }))
+                      }
+                      placeholder="e.g. FBA15..."
+                      className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
+                    />
+                  </div>
 
-              <div>
-                <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
-                  Bundle size
-                </label>
-                <input
-                  inputMode="numeric"
-                  value={form.bundleSize}
-                  onChange={(e) =>
-                    setForm((prev) => ({ ...prev, bundleSize: e.target.value }))
-                  }
-                  className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
-                />
-              </div>
+                  <div>
+                    <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                      Bundle size
+                    </label>
+                    <input
+                      inputMode="numeric"
+                      value={form.bundleSize}
+                      onChange={(e) =>
+                        setForm((prev) => ({ ...prev, bundleSize: e.target.value }))
+                      }
+                      className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
+                    />
+                  </div>
 
-              <div>
-                <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
-                  Qty purchased
-                </label>
-                <input
-                  inputMode="numeric"
-                  value={form.qtyPurchased}
-                  onChange={(e) =>
-                    setForm((prev) => ({ ...prev, qtyPurchased: e.target.value }))
-                  }
-                  className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
-                />
-              </div>
+                  <div>
+                    <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                      Qty purchased
+                    </label>
+                    <input
+                      inputMode="numeric"
+                      value={form.qtyPurchased}
+                      onChange={(e) =>
+                        setForm((prev) => ({ ...prev, qtyPurchased: e.target.value }))
+                      }
+                      className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
+                    />
+                  </div>
 
-              <div>
-                <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
-                  Qty delivered
-                </label>
-                <input
-                  inputMode="numeric"
-                  value={form.qtyDelivered}
-                  onChange={(e) =>
-                    setForm((prev) => ({ ...prev, qtyDelivered: e.target.value }))
-                  }
-                  className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
-                />
-              </div>
+                  <div>
+                    <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                      Qty delivered
+                    </label>
+                    <input
+                      inputMode="numeric"
+                      value={form.qtyDelivered}
+                      onChange={(e) =>
+                        setForm((prev) => ({ ...prev, qtyDelivered: e.target.value }))
+                      }
+                      className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
+                    />
+                  </div>
 
-              <div>
-                <div className="flex items-center justify-between gap-3">
-                  <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
-                    Unit
-                  </label>
-                  <div className="inline-flex overflow-hidden rounded-md ring-1 ring-[var(--surface-border)]">
-                    <button
-                      type="button"
-                      className={[
-                        "cursor-pointer px-2 py-1 text-[11px]",
-                        unitVatMode === "inc"
-                          ? "bg-[var(--surface)] text-[var(--foreground)]"
-                          : "text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5",
-                      ].join(" ")}
-                      onClick={() => {
-                        setUnitVatMode("inc");
-                        setUnitCostExVat("");
+                  <div>
+                    <div className="flex items-center justify-between gap-3">
+                      <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                        Unit
+                      </label>
+                      <div className="inline-flex overflow-hidden rounded-md ring-1 ring-[var(--surface-border)]">
+                        <button
+                          type="button"
+                          className={[
+                            "cursor-pointer px-2 py-1 text-[11px]",
+                            unitVatMode === "inc"
+                              ? "bg-[var(--surface)] text-[var(--foreground)]"
+                              : "text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5",
+                          ].join(" ")}
+                          onClick={() => {
+                            setUnitVatMode("inc");
+                            setUnitCostExVat("");
+                          }}
+                        >
+                          Inc VAT
+                        </button>
+                        <button
+                          type="button"
+                          className={[
+                            "cursor-pointer px-2 py-1 text-[11px]",
+                            unitVatMode === "ex"
+                              ? "bg-[var(--surface)] text-[var(--foreground)]"
+                              : "text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5",
+                          ].join(" ")}
+                          onClick={() => {
+                            setUnitVatMode("ex");
+                            const inc = Number(form.unitCostIncVat ?? 0) || 0;
+                            setUnitCostExVat(inc > 0 ? String(exFromInc(inc)) : "");
+                          }}
+                        >
+                          Ex VAT
+                        </button>
+                      </div>
+                    </div>
+                    <input
+                      inputMode="decimal"
+                      value={unitVatMode === "inc" ? form.unitCostIncVat : unitCostExVat}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        if (unitVatMode === "inc") {
+                          setForm((prev) => ({ ...prev, unitCostIncVat: v }));
+                          return;
+                        }
+                        setUnitCostExVat(v);
+                        const ex = Number(v ?? 0) || 0;
+                        setForm((prev) => ({ ...prev, unitCostIncVat: ex > 0 ? String(incFromEx(ex)) : "" }));
                       }}
-                    >
-                      Inc VAT
-                    </button>
-                    <button
-                      type="button"
-                      className={[
-                        "cursor-pointer px-2 py-1 text-[11px]",
-                        unitVatMode === "ex"
-                          ? "bg-[var(--surface)] text-[var(--foreground)]"
-                          : "text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5",
-                      ].join(" ")}
-                      onClick={() => {
-                        setUnitVatMode("ex");
-                        const inc = Number(form.unitCostIncVat ?? 0) || 0;
-                        setUnitCostExVat(inc > 0 ? String(exFromInc(inc)) : "");
+                      placeholder={unitVatMode === "inc" ? "e.g. 12.34" : "e.g. 10.28"}
+                      className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <div className="flex items-center justify-between gap-3">
+                      <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                        Delivery
+                      </label>
+                      <div className="inline-flex overflow-hidden rounded-md ring-1 ring-[var(--surface-border)]">
+                        <button
+                          type="button"
+                          className={[
+                            "cursor-pointer px-2 py-1 text-[11px]",
+                            deliveryVatMode === "inc"
+                              ? "bg-[var(--surface)] text-[var(--foreground)]"
+                              : "text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5",
+                          ].join(" ")}
+                          onClick={() => {
+                            setDeliveryVatMode("inc");
+                            setDeliveryCostExVat("");
+                          }}
+                        >
+                          Inc VAT
+                        </button>
+                        <button
+                          type="button"
+                          className={[
+                            "cursor-pointer px-2 py-1 text-[11px]",
+                            deliveryVatMode === "ex"
+                              ? "bg-[var(--surface)] text-[var(--foreground)]"
+                              : "text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5",
+                          ].join(" ")}
+                          onClick={() => {
+                            setDeliveryVatMode("ex");
+                            const inc = Number(form.deliveryCostIncVat ?? 0) || 0;
+                            setDeliveryCostExVat(inc > 0 ? String(exFromInc(inc)) : "");
+                          }}
+                        >
+                          Ex VAT
+                        </button>
+                      </div>
+                    </div>
+                    <input
+                      inputMode="decimal"
+                      value={
+                        deliveryVatMode === "inc" ? form.deliveryCostIncVat : deliveryCostExVat
+                      }
+                      placeholder="Per unit"
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        if (deliveryVatMode === "inc") {
+                          setForm((prev) => ({ ...prev, deliveryCostIncVat: v }));
+                          return;
+                        }
+                        setDeliveryCostExVat(v);
+                        const ex = Number(v ?? 0) || 0;
+                        setForm((prev) => ({
+                          ...prev,
+                          deliveryCostIncVat: ex > 0 ? String(incFromEx(ex)) : "0",
+                        }));
                       }}
+                      className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <div className="flex items-center justify-between gap-3">
+                      <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                        Prep
+                      </label>
+                      <div className="inline-flex overflow-hidden rounded-md ring-1 ring-[var(--surface-border)]">
+                        <button
+                          type="button"
+                          className={[
+                            "cursor-pointer px-2 py-1 text-[11px]",
+                            prepVatMode === "inc"
+                              ? "bg-[var(--surface)] text-[var(--foreground)]"
+                              : "text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5",
+                          ].join(" ")}
+                          onClick={() => {
+                            setPrepVatMode("inc");
+                            setPrepCostExVat("");
+                          }}
+                        >
+                          Inc VAT
+                        </button>
+                        <button
+                          type="button"
+                          className={[
+                            "cursor-pointer px-2 py-1 text-[11px]",
+                            prepVatMode === "ex"
+                              ? "bg-[var(--surface)] text-[var(--foreground)]"
+                              : "text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5",
+                          ].join(" ")}
+                          onClick={() => {
+                            setPrepVatMode("ex");
+                            const inc = Number(form.prepCostIncVat ?? 0) || 0;
+                            setPrepCostExVat(inc > 0 ? String(exFromInc(inc)) : "");
+                          }}
+                        >
+                          Ex VAT
+                        </button>
+                      </div>
+                    </div>
+                    <input
+                      inputMode="decimal"
+                      value={prepVatMode === "inc" ? form.prepCostIncVat : prepCostExVat}
+                      placeholder="Per unit"
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        if (prepVatMode === "inc") {
+                          setForm((prev) => ({ ...prev, prepCostIncVat: v }));
+                          return;
+                        }
+                        setPrepCostExVat(v);
+                        const ex = Number(v ?? 0) || 0;
+                        setForm((prev) => ({ ...prev, prepCostIncVat: ex > 0 ? String(incFromEx(ex)) : "0" }));
+                      }}
+                      className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                      VAT rate (%)
+                    </label>
+                    <input
+                      inputMode="decimal"
+                      value={form.vatRatePct}
+                      onChange={(e) =>
+                        setForm((prev) => ({ ...prev, vatRatePct: e.target.value }))
+                      }
+                      className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                      Currency
+                    </label>
+                    <select
+                      value={form.currency}
+                      onChange={(e) =>
+                        setForm((prev) => ({ ...prev, currency: e.target.value }))
+                      }
+                      className="mt-1 w-full cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
                     >
-                      Ex VAT
-                    </button>
+                      {currencyOptions.map((c) => (
+                        <option key={c} value={c}>
+                          {c}
+                        </option>
+                      ))}
+                      {form.currency && !isCurrencyOption(form.currency) ? (
+                        <option value={form.currency}>{form.currency}</option>
+                      ) : null}
+                    </select>
+                  </div>
+
+                  <div className="md:col-span-3">
+                    <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                      Supplier
+                    </label>
+                    <input
+                      value={form.supplier}
+                      onChange={(e) =>
+                        setForm((prev) => ({ ...prev, supplier: e.target.value }))
+                      }
+                      placeholder="Optional"
+                      className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
+                    />
+                  </div>
+
+                  <div className="md:col-span-3">
+                    <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                      Supplier link
+                    </label>
+                    <input
+                      value={form.supplierLink}
+                      onChange={(e) =>
+                        setForm((prev) => ({ ...prev, supplierLink: e.target.value }))
+                      }
+                      placeholder="https://… (optional)"
+                      className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
+                    />
                   </div>
                 </div>
-                <input
-                  inputMode="decimal"
-                  value={unitVatMode === "inc" ? form.unitCostIncVat : unitCostExVat}
-                  onChange={(e) => {
-                    const v = e.target.value;
-                    if (unitVatMode === "inc") {
-                      setForm((prev) => ({ ...prev, unitCostIncVat: v }));
-                      return;
-                    }
-                    setUnitCostExVat(v);
-                    const ex = Number(v ?? 0) || 0;
-                    setForm((prev) => ({ ...prev, unitCostIncVat: ex > 0 ? String(incFromEx(ex)) : "" }));
-                  }}
-                  placeholder={unitVatMode === "inc" ? "e.g. 12.34" : "e.g. 10.28"}
-                  className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
-                />
-              </div>
-
-              <div>
-                <div className="flex items-center justify-between gap-3">
-                  <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
-                    Delivery
-                  </label>
-                  <div className="inline-flex overflow-hidden rounded-md ring-1 ring-[var(--surface-border)]">
-                    <button
-                      type="button"
-                      className={[
-                        "cursor-pointer px-2 py-1 text-[11px]",
-                        deliveryVatMode === "inc"
-                          ? "bg-[var(--surface)] text-[var(--foreground)]"
-                          : "text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5",
-                      ].join(" ")}
-                      onClick={() => {
-                        setDeliveryVatMode("inc");
-                        setDeliveryCostExVat("");
-                      }}
-                    >
-                      Inc VAT
-                    </button>
-                    <button
-                      type="button"
-                      className={[
-                        "cursor-pointer px-2 py-1 text-[11px]",
-                        deliveryVatMode === "ex"
-                          ? "bg-[var(--surface)] text-[var(--foreground)]"
-                          : "text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5",
-                      ].join(" ")}
-                      onClick={() => {
-                        setDeliveryVatMode("ex");
-                        const inc = Number(form.deliveryCostIncVat ?? 0) || 0;
-                        setDeliveryCostExVat(inc > 0 ? String(exFromInc(inc)) : "");
-                      }}
-                    >
-                      Ex VAT
-                    </button>
-                  </div>
-                </div>
-                <input
-                  inputMode="decimal"
-                  value={
-                    deliveryVatMode === "inc" ? form.deliveryCostIncVat : deliveryCostExVat
-                  }
-                  placeholder="Per unit"
-                  onChange={(e) => {
-                    const v = e.target.value;
-                    if (deliveryVatMode === "inc") {
-                      setForm((prev) => ({ ...prev, deliveryCostIncVat: v }));
-                      return;
-                    }
-                    setDeliveryCostExVat(v);
-                    const ex = Number(v ?? 0) || 0;
-                    setForm((prev) => ({
-                      ...prev,
-                      deliveryCostIncVat: ex > 0 ? String(incFromEx(ex)) : "0",
-                    }));
-                  }}
-                  className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
-                />
-              </div>
-
-              <div>
-                <div className="flex items-center justify-between gap-3">
-                  <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
-                    Prep
-                  </label>
-                  <div className="inline-flex overflow-hidden rounded-md ring-1 ring-[var(--surface-border)]">
-                    <button
-                      type="button"
-                      className={[
-                        "cursor-pointer px-2 py-1 text-[11px]",
-                        prepVatMode === "inc"
-                          ? "bg-[var(--surface)] text-[var(--foreground)]"
-                          : "text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5",
-                      ].join(" ")}
-                      onClick={() => {
-                        setPrepVatMode("inc");
-                        setPrepCostExVat("");
-                      }}
-                    >
-                      Inc VAT
-                    </button>
-                    <button
-                      type="button"
-                      className={[
-                        "cursor-pointer px-2 py-1 text-[11px]",
-                        prepVatMode === "ex"
-                          ? "bg-[var(--surface)] text-[var(--foreground)]"
-                          : "text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5",
-                      ].join(" ")}
-                      onClick={() => {
-                        setPrepVatMode("ex");
-                        const inc = Number(form.prepCostIncVat ?? 0) || 0;
-                        setPrepCostExVat(inc > 0 ? String(exFromInc(inc)) : "");
-                      }}
-                    >
-                      Ex VAT
-                    </button>
-                  </div>
-                </div>
-                <input
-                  inputMode="decimal"
-                  value={prepVatMode === "inc" ? form.prepCostIncVat : prepCostExVat}
-                  placeholder="Per unit"
-                  onChange={(e) => {
-                    const v = e.target.value;
-                    if (prepVatMode === "inc") {
-                      setForm((prev) => ({ ...prev, prepCostIncVat: v }));
-                      return;
-                    }
-                    setPrepCostExVat(v);
-                    const ex = Number(v ?? 0) || 0;
-                    setForm((prev) => ({ ...prev, prepCostIncVat: ex > 0 ? String(incFromEx(ex)) : "0" }));
-                  }}
-                  className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
-                />
-              </div>
-
-              <div>
-                <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
-                  VAT rate (%)
-                </label>
-                <input
-                  inputMode="decimal"
-                  value={form.vatRatePct}
-                  onChange={(e) =>
-                    setForm((prev) => ({ ...prev, vatRatePct: e.target.value }))
-                  }
-                  className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
-                />
-              </div>
-
-              <div>
-                <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
-                  Currency
-                </label>
-                <select
-                  value={form.currency}
-                  onChange={(e) =>
-                    setForm((prev) => ({ ...prev, currency: e.target.value }))
-                  }
-                  className="mt-1 w-full cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
-                >
-                  {currencyOptions.map((c) => (
-                    <option key={c} value={c}>
-                      {c}
-                    </option>
-                  ))}
-                  {form.currency && !isCurrencyOption(form.currency) ? (
-                    <option value={form.currency}>{form.currency}</option>
-                  ) : null}
-                </select>
-              </div>
-
-              <div className="md:col-span-3">
-                <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
-                  Supplier
-                </label>
-                <input
-                  value={form.supplier}
-                  onChange={(e) =>
-                    setForm((prev) => ({ ...prev, supplier: e.target.value }))
-                  }
-                  placeholder="Optional"
-                  className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
-                />
-              </div>
-
-              <div className="md:col-span-3">
-                <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
-                  Supplier link
-                </label>
-                <input
-                  value={form.supplierLink}
-                  onChange={(e) =>
-                    setForm((prev) => ({ ...prev, supplierLink: e.target.value }))
-                  }
-                  placeholder="https://… (optional)"
-                  className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
-                />
-              </div>
-            </div>
 
                 <div className="mt-4 flex justify-end">
                   <button
