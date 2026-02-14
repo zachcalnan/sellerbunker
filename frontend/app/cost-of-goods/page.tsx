@@ -356,6 +356,25 @@ function CostOfGoodsInner() {
     });
   }, [filtered, cogsFilter, missing]);
 
+  const pagingTotal =
+    cogsFilter === "missing"
+      ? typeof missingCount === "number"
+        ? missingCount
+        : missing.length
+      : cogsFilter === "all"
+        ? entriesTotal
+        : filteredWithMissingToggle.length;
+  const pagingStart =
+    pagingTotal > 0 ? (cogsFilter === "all" ? skip + 1 : 1) : 0;
+  const pagingEnd =
+    pagingTotal > 0
+      ? cogsFilter === "all"
+        ? Math.min(skip + entries.length, entriesTotal)
+        : cogsFilter === "missing"
+          ? Math.min(missing.length, pagingTotal)
+          : filteredWithMissingToggle.length
+      : 0;
+
 
   const createEntry = async () => {
     setCreating(true);
@@ -568,7 +587,7 @@ function CostOfGoodsInner() {
             <div className="flex items-center gap-2 text-xs text-[var(--muted-foreground)]">
               <span className="sr-only">COGS filter</span>
 
-              <div className="inline-flex overflow-hidden rounded-lg border border-[var(--surface-border)]">
+              <div className="inline-flex h-8 items-stretch overflow-hidden rounded-lg border border-[var(--surface-border)]">
                 <button
                   type="button"
                   onClick={() => {
@@ -576,7 +595,7 @@ function CostOfGoodsInner() {
                     setSkip(0);
                   }}
                   className={[
-                    "px-3 py-1 text-xs",
+                    "cursor-pointer h-8 px-3 text-xs",
                     cogsFilter === "missing"
                       ? "bg-[rgb(2,242,170)] text-black"
                       : "bg-transparent text-[var(--foreground)]",
@@ -592,7 +611,7 @@ function CostOfGoodsInner() {
                     setSkip(0);
                   }}
                   className={[
-                    "px-3 py-1 text-xs border-l border-[var(--surface-border)]",
+                    "cursor-pointer h-8 px-3 text-xs border-l border-[var(--surface-border)]",
                     cogsFilter === "complete"
                       ? "bg-[rgb(2,242,170)] text-black"
                       : "bg-transparent text-[var(--foreground)]",
@@ -608,7 +627,7 @@ function CostOfGoodsInner() {
                     setSkip(0);
                   }}
                   className={[
-                    "px-3 py-1 text-xs border-l border-[var(--surface-border)]",
+                    "cursor-pointer h-8 px-3 text-xs border-l border-[var(--surface-border)]",
                     cogsFilter === "all"
                       ? "bg-[rgb(2,242,170)] text-black"
                       : "bg-transparent text-[var(--foreground)]",
@@ -620,26 +639,28 @@ function CostOfGoodsInner() {
             </div>
 
             <div className="flex flex-wrap items-center gap-3 text-xs text-[var(--muted-foreground)]">
-              <label className="flex items-center gap-2">
-                <span>Items per page:</span>
-                <select
-                  value={take}
-                  onChange={(e) => {
-                    setTake(Number(e.target.value));
-                    setSkip(0);
-                  }}
-                  className="h-8 rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-xs text-[var(--foreground)] outline-none"
-                >
-                  {[10, 25, 50, 100].map((n) => (
-                    <option key={n} value={n}>
-                      {n}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              {cogsFilter === "all" ? (
+                <label className="flex h-8 items-center gap-2">
+                  <span>Items per page:</span>
+                  <select
+                    value={take}
+                    onChange={(e) => {
+                      setTake(Number(e.target.value));
+                      setSkip(0);
+                    }}
+                    className="h-8 cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-xs text-[var(--foreground)] outline-none"
+                  >
+                    {[10, 25, 50, 100].map((n) => (
+                      <option key={n} value={n}>
+                        {n}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
               <span>
-                {entriesTotal > 0
-                  ? `${skip + 1} - ${Math.min(skip + entries.length, entriesTotal)} of ${entriesTotal}`
+                {pagingTotal > 0
+                  ? `${pagingStart} - ${pagingEnd} of ${pagingTotal}`
                   : "0 - 0 of 0"}
               </span>
             </div>
@@ -726,6 +747,18 @@ function CostOfGoodsInner() {
                 ))}
               </div>
             ) : null}
+
+            <div className="mt-4 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={seedFromExisting}
+                disabled={seeding}
+                className="cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/5 disabled:cursor-not-allowed disabled:opacity-60"
+                title="Create ledger entries from existing per-SKU COGS values"
+              >
+                {seeding ? "Importing…" : "Import existing COGS"}
+              </button>
+            </div>
           </div>
         ) : null}
 
@@ -1198,64 +1231,65 @@ function CostOfGoodsInner() {
           </div>
         ) : null}
 
-        <div className="overflow-hidden rounded-xl ring-1 ring-[var(--surface-border)]">
-          {loading ? (
-            <div className="px-4 py-6 text-sm text-[var(--muted-foreground)]">
-              Loading…
-            </div>
-          ) : filteredWithMissingToggle.length === 0 ? (
-            <div className="px-4 py-6 text-sm text-[var(--muted-foreground)]">
-              <div>No entries found.</div>
-              <div className="mt-3 flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setEditingEntry(null);
-                    resetNewEntryForm();
-                    setShowForm(true);
-                  }}
-                  className="cursor-pointer rounded-lg bg-[rgb(2,242,170)] px-3 py-2 text-sm font-medium text-black"
-                >
-                  Add entry
-                </button>
-                <button
-                  type="button"
-                  onClick={seedFromExisting}
-                  disabled={seeding}
-                  className="cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/5 disabled:cursor-not-allowed disabled:opacity-60"
-                  title="Create ledger entries from existing per-SKU COGS values"
-                >
-                  {seeding ? "Importing…" : "Import existing COGS"}
-                </button>
+        {cogsFilter !== "missing" ? (
+          <div className="overflow-hidden rounded-xl ring-1 ring-[var(--surface-border)]">
+            {loading ? (
+              <div className="px-4 py-6 text-sm text-[var(--muted-foreground)]">
+                Loading…
               </div>
-            </div>
-          ) : (
-            <div className="divide-y divide-[var(--surface-border)] bg-transparent">
-              <div className="flex flex-wrap items-center justify-between gap-3 bg-[var(--surface)] px-4 py-3 text-xs text-[var(--muted-foreground)]">
-                <span>
-                  {entriesTotal > 0
-                    ? `${skip + 1} - ${Math.min(skip + entries.length, entriesTotal)} of ${entriesTotal}`
-                    : "0 - 0 of 0"}
-                </span>
-                <div className="flex items-center gap-2">
+            ) : filteredWithMissingToggle.length === 0 ? (
+              <div className="px-4 py-6 text-sm text-[var(--muted-foreground)]">
+                <div>No entries found.</div>
+                <div className="mt-3 flex flex-wrap items-center gap-2">
                   <button
                     type="button"
-                    onClick={prevPage}
-                    disabled={!canPrev}
-                    className="cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-1.5 text-xs font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/5 disabled:cursor-not-allowed disabled:opacity-60"
+                    onClick={() => {
+                      setEditingEntry(null);
+                      resetNewEntryForm();
+                      setShowForm(true);
+                    }}
+                    className="cursor-pointer rounded-lg bg-[rgb(2,242,170)] px-3 py-2 text-sm font-medium text-black"
                   >
-                    Prev
+                    Add entry
                   </button>
                   <button
                     type="button"
-                    onClick={nextPage}
-                    disabled={!canNext}
-                    className="cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-1.5 text-xs font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/5 disabled:cursor-not-allowed disabled:opacity-60"
+                    onClick={seedFromExisting}
+                    disabled={seeding}
+                    className="cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/5 disabled:cursor-not-allowed disabled:opacity-60"
+                    title="Create ledger entries from existing per-SKU COGS values"
                   >
-                    Next
+                    {seeding ? "Importing…" : "Import existing COGS"}
                   </button>
                 </div>
               </div>
+            ) : (
+              <div className="divide-y divide-[var(--surface-border)] bg-transparent">
+                <div className="flex flex-wrap items-center justify-between gap-3 bg-[var(--surface)] px-4 py-3 text-xs text-[var(--muted-foreground)]">
+                  <span>
+                    {pagingTotal > 0
+                      ? `${pagingStart} - ${pagingEnd} of ${pagingTotal}`
+                      : "0 - 0 of 0"}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={prevPage}
+                      disabled={cogsFilter !== "all" || !canPrev}
+                      className="cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-1.5 text-xs font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/5 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      Prev
+                    </button>
+                    <button
+                      type="button"
+                      onClick={nextPage}
+                      disabled={cogsFilter !== "all" || !canNext}
+                      className="cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-1.5 text-xs font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/5 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      Next
+                    </button>
+                  </div>
+                </div>
 
               {/* Desktop header */}
               <div className="hidden md:grid grid-cols-[2.2fr_0.8fr_1fr_1.2fr_0.6fr_0.6fr_0.8fr_0.8fr_0.8fr_1fr] gap-3 bg-[var(--surface)] px-4 py-3 text-xs font-medium uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
@@ -1268,7 +1302,7 @@ function CostOfGoodsInner() {
                 <div>Date</div>
                 <div className="text-right">Purchased</div>
                 <div className="text-right">Delivered</div>
-                <div>Shipment</div>
+                <div className="text-right">Shipment</div>
               </div>
 
               {filteredWithMissingToggle.map((p) => {
@@ -1290,12 +1324,12 @@ function CostOfGoodsInner() {
                       onClick={() => beginEdit(p)}
                     >
                       <div className="flex items-start gap-3">
-                        <div className="flex h-11 w-11 items-center justify-center">
+                        <div className="flex aspect-square h-11 w-11 shrink-0 items-center justify-center">
                           {p.product?.imageUrl ? (
                             <img
                               src={p.product.imageUrl}
                               alt={title}
-                              className="h-11 w-11 rounded-md object-cover ring-1 ring-[var(--surface-border)]"
+                              className="h-full w-full rounded-md object-cover ring-1 ring-[var(--surface-border)]"
                               loading="lazy"
                               referrerPolicy="no-referrer"
                             />
@@ -1361,12 +1395,12 @@ function CostOfGoodsInner() {
                     >
                       <div className="min-w-0">
                         <div className="flex items-center gap-3">
-                          <div className="flex h-9 w-9 items-center justify-center">
+                          <div className="flex aspect-square h-9 w-9 shrink-0 items-center justify-center">
                             {p.product?.imageUrl ? (
                               <img
                                 src={p.product.imageUrl}
                                 alt={title}
-                                className="h-9 w-9 rounded-md object-cover ring-1 ring-[var(--surface-border)]"
+                                className="h-full w-full rounded-md object-cover ring-1 ring-[var(--surface-border)]"
                                 loading="lazy"
                                 referrerPolicy="no-referrer"
                               />
@@ -1431,16 +1465,17 @@ function CostOfGoodsInner() {
                       <div className="text-right text-sm font-medium text-[var(--foreground)]">
                         {p.qtyDelivered}
                       </div>
-                      <div className="truncate text-sm text-[var(--muted-foreground)]">
+                      <div className="text-right truncate text-sm text-[var(--muted-foreground)]">
                         {p.shipmentId ?? "—"}
                       </div>
                     </div>
                   </>
                 );
               })}
-            </div>
-          )}
-        </div>
+              </div>
+            )}
+          </div>
+        ) : null}
       </SignedIn>
     </div>
   );
