@@ -13,7 +13,9 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U root"]
+      # Without -d, pg_isready defaults to DB name = user ("root"),
+      # but our DB is "sellertoolkit".
+      test: ["CMD-SHELL", "pg_isready -U root -d sellertoolkit"]
       interval: 10s
       timeout: 5s
       retries: 5
