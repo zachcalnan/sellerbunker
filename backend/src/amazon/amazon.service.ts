@@ -1855,29 +1855,58 @@ export class AmazonService {
     const products = await this.prisma.product.findMany({
       where: { userId: { in: userIds } },
       orderBy: [{ updatedAt: 'desc' }],
-      select: { id: true, userId: true, sku: true, updatedAt: true },
+      select: {
+  id: true,
+  userId: true,
+  sku: true,
+  asin: true,
+  updatedAt: true,
+},
     });
     const bySku = new Map<
       string,
       { id: string; userId: string; updatedAt: Date }
     >();
+    const byAsin = new Map<
+  string,
+  { id: string; userId: string; updatedAt: Date }
+>();
     for (const p of products) {
-      const existing = bySku.get(p.sku);
-      if (!existing) {
-        bySku.set(p.sku, { id: p.id, userId: p.userId, updatedAt: p.updatedAt });
-        continue;
-      }
+  const existing = bySku.get(p.sku);
 
-      // Prefer to attach inventory updates to the preferred user if possible,
-      // otherwise keep the most recently updated Product row for this SKU.
-      const preferred =
-        preferredUserId &&
-        existing.userId !== preferredUserId &&
-        p.userId === preferredUserId;
-      if (preferred || p.updatedAt > existing.updatedAt) {
-        bySku.set(p.sku, { id: p.id, userId: p.userId, updatedAt: p.updatedAt });
-      }
+  if (!existing) {
+    bySku.set(p.sku, {
+      id: p.id,
+      userId: p.userId,
+      updatedAt: p.updatedAt,
+    });
+  } else {
+    const preferred =
+      preferredUserId &&
+      existing.userId !== preferredUserId &&
+      p.userId === preferredUserId;
+
+    if (preferred || p.updatedAt > existing.updatedAt) {
+      bySku.set(p.sku, {
+        id: p.id,
+        userId: p.userId,
+        updatedAt: p.updatedAt,
+      });
     }
+  }
+
+  // ✅ ALWAYS RUN — never skipped
+  if (p.asin) {
+    byAsin.set(p.asin, {
+      id: p.id,
+      userId: p.userId,
+      updatedAt: p.updatedAt,
+    });
+  }
+}
+
+
+    
 
     let marketplaceIds =
       credentials.region === 'eu'
@@ -1903,7 +1932,7 @@ export class AmazonService {
             .filter((v): v is string => typeof v === 'string' && v.length > 0)
         : [];
       if (ids.length) {
-        marketplaceIds = Array.from(new Set(ids));
+        marketplaceIds = Array.from(new Set([...marketplaceIds, ...ids]));
       }
     } catch {
       // ignore; fall back to region defaults
@@ -1977,6 +2006,19 @@ export class AmazonService {
             payload?.summaries ??
             [];
 
+            console.log(
+  `FBA summaries page for ${marketplaceId}:`,
+  summaries.length
+);
+
+console.log(
+  `NextToken for ${marketplaceId}:`,
+  payload?.nextToken ??
+  payload?.NextToken ??
+  payload?.next_token ??
+  null
+);
+
           inventorySummariesSeen += summaries.length;
 
           for (const s of summaries) {
@@ -1984,13 +2026,19 @@ export class AmazonService {
               s?.sellerSku ?? s?.SellerSku ?? s?.sellerSKU ?? s?.SellerSKU;
             if (!sku) continue;
 
-            const match = bySku.get(sku);
-            if (!match) {
-              skippedUnknownSku += 1;
-              continue;
-            }
+           let match =
+  bySku.get(sku) ??
+  (s?.asin ? byAsin.get(s.asin) : undefined);
 
-            matchedSkus += 1;
+
+if (!match) {
+  console.log('Unknown SKU from FBA (not imported):', sku);
+  skippedUnknownSku += 1;
+  continue;
+}
+
+matchedSkus += 1;
+
 
             const details = s?.inventoryDetails ?? {};
             const fulfillable = Math.max(
@@ -2038,11 +2086,11 @@ export class AmazonService {
               rawJson: undefined,
             };
 
-            existing.fulfillableQty += fulfillable;
-            existing.inboundQty += inbound;
-            existing.reservedQty += reserved;
-            existing.researchingQty += researching;
-            existing.unfulfillableQty += unfulfillable;
+            existing.fulfillableQty = fulfillable;
+existing.inboundQty = inbound;
+existing.reservedQty = reserved;
+existing.researchingQty = researching;
+existing.unfulfillableQty = unfulfillable;
             existing.rawJson = s; // last seen (best-effort debug; no secrets)
 
             byMarketplaceAndProduct.set(key, existing);
@@ -2510,7 +2558,7 @@ export class AmazonService {
             .filter((v: any) => typeof v === 'string' && v.length > 0)
         : [];
       if (ids.length) {
-        marketplaceIds = Array.from(new Set(ids));
+        marketplaceIds = Array.from(new Set([...marketplaceIds, ...ids]));
       }
     } catch {
       // ignore; fall back to region defaults

@@ -185,10 +185,18 @@ export class AmazonSpApiClient {
     },
   ) {
     const query: Record<string, unknown> = {
-      granularityType: 'Marketplace',
-      granularityId: params.marketplaceId,
-      marketplaceIds: [params.marketplaceId],
-    };
+  granularityType: "Marketplace",
+  granularityId: params.marketplaceId,
+  marketplaceIds: params.marketplaceId,
+  details: true,              // force true
+  
+};
+
+
+if (params.nextToken) {
+  query.nextToken = params.nextToken;
+}
+
 
     if (params.details !== undefined) query.details = params.details;
     if (params.nextToken) query.nextToken = params.nextToken;
