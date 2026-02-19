@@ -604,20 +604,118 @@ export class AmazonService {
     const createdAfterIso = startDate.toISOString().split('.')[0] + 'Z';
     const createdBeforeIso = nowSafe.toISOString().split('.')[0] + 'Z';
 
-    const marketplaceIds =
-      credentials.region === 'eu'
-        ? [
-            'A1F83G8C2ARO7P', // UK
-            'A1PA6795UKMFR9', // DE
-            'A13V1IB3VIYZZH', // FR
-            'APJ6JRA9NG5V4', // IT
-            'A1RKKUPIHCS9HS', // ES
-          ]
-        : [
-            'ATVPDKIKX0DER', // US
-            'A2EUQ1WTGCTBG2', // CA
-            'A1AM78C64UM0Y8', // MX
-          ];
+const marketplaceIds = ['A1F83G8C2ARO7P']; // UK
+
+for (const marketplaceId of marketplaceIds) {
+  console.log('SYNCING MARKETPLACE:', marketplaceId);
+
+ // Inside the for (const marketplaceId of marketplaceIds) loop
+let nextToken: string | undefined = undefined;
+let allSummaries: any[] = [];  // If you need to collect across pages
+
+do {
+  // RATE LIMIT DELAY (keep this to avoid 429s)
+  await new Promise(resolve => setTimeout(resolve, 1200));
+
+  const res: any = await this.spApiClient.getFbaInventorySummaries(
+    credentials,
+    {
+      marketplaceId,
+      details: true,
+      nextToken,
+    },
+  );
+
+  // 🔍 RAW RESPONSE (keep for debugging)
+  console.log('RAW FBA RESPONSE:', JSON.stringify(res, null, 2));
+  console.log('RAW KEYS:', Object.keys(res ?? {}));
+  console.log('PAYLOAD KEYS:', Object.keys(res?.payload ?? {}));
+
+const payload = res?.payload ?? res?.Payload ?? res ?? {};
+
+const summaries =
+  payload?.inventorySummaries ??
+  payload?.InventorySummaries ??
+  payload?.summaries ??
+  [];
+
+  console.log(`[FBA ${marketplaceId}] PAGE COUNT:`, summaries.length);
+
+  allSummaries.push(...summaries);  // Collect if needed for post-processing
+
+  // FIXED: Extract nextToken correctly (handle casing variations if your client lib uses them)
+// FIXED: Extract from top-level res.pagination
+nextToken =
+  res?.pagination?.nextToken ??
+  res?.pagination?.NextToken ??
+  res?.Pagination?.nextToken ??
+  res?.Pagination?.NextToken ??
+  undefined;
+
+  console.log('PAGINATION DEBUG:', JSON.stringify(res?.pagination ?? res?.Pagination ?? {}, null, 2));
+
+
+
+  console.log(`[FBA ${marketplaceId}] NEXT TOKEN:`, nextToken ?? null);
+
+} while (nextToken);
+
+// PROCESS AFTER PAGINATION (your existing code here, e.g., for (const summary of allSummaries) { ... })
+
+  // PROCESS AFTER PAGINATION
+ for (const summary of allSummaries) {
+  const sku = summary.sellerSku;
+
+  const details =
+    summary.inventoryDetails ?? {};
+
+  const fulfillable =
+    details.fulfillableQuantity ?? 0;
+
+  const inbound =
+    (details.inboundWorkingQuantity ?? 0) +
+    (details.inboundShippedQuantity ?? 0) +
+    (details.inboundReceivingQuantity ?? 0);
+
+  console.log(
+    'QTY DEBUG:',
+    { sku, fulfillable, inbound },
+  );
+}
+
+console.log(
+  `FBA SUMMARY (${marketplaceId}) TOTAL SKUS:`,
+  allSummaries.length
+);
+
+console.table(
+  allSummaries.map((s: any) => {
+    const d = s.inventoryDetails ?? {};
+
+    return {
+      sku: s.sellerSku,
+      fulfillable: d.fulfillableQuantity ?? 0,
+      inbound:
+        (d.inboundWorkingQuantity ?? 0) +
+        (d.inboundShippedQuantity ?? 0) +
+        (d.inboundReceivingQuantity ?? 0),
+    };
+  }),
+
+
+  
+);
+
+
+
+
+
+
+}
+
+
+
+
 
     type SpApiOrder = {
       AmazonOrderId?: string;
@@ -1790,7 +1888,9 @@ console.log("CREDENTIALS KEYS:", Object.keys(credentials));
     : [];
 
   if (ids.length) {
-    marketplaceIds = Array.from(new Set(ids));
+   marketplaceIds = Array.from(
+  new Set([...marketplaceIds, ...ids])
+);
   }
 } catch {
   // ignore: fall back to region defaults
@@ -1809,7 +1909,7 @@ console.log("CREDENTIALS KEYS:", Object.keys(credentials));
 
   if (org?.lastFbaInventorySyncAt) {
     const secondsAgo = (now.getTime() - org.lastFbaInventorySyncAt.getTime()) / 1000;
-    if (secondsAgo < 900) {  // 900 = 15 minutes
+    if (secondsAgo < 60) {  // 60 = 1 minute
       console.log(
         `[syncFbaInventory] Skipping - last successful sync was ${Math.round(secondsAgo / 60)} min ago`
       );
@@ -1862,19 +1962,125 @@ try {
   let res: any;
   try {
 
-            res = (await this.spApiClient.getFbaInventorySummaries(
-              credentials,
-              {
-                marketplaceId,
-                details: true,
-                nextToken,
-              },
-            )) as any;
+          res = await this.spApiClient.getFbaInventorySummaries(
+  credentials,
+  {
+    marketplaceId,
+    details: true,
+    nextToken,
+  },
+);
 
-            console.log(
-  'FBA INVENTORY RAW RESPONSE:',
+// 🔍 RAW RESPONSE
+console.log(
+  'RAW FBA RESPONSE:',
   JSON.stringify(res, null, 2)
 );
+
+console.log(
+  'RAW KEYS:',
+  Object.keys(res ?? {})
+);
+
+console.log(
+  'PAYLOAD KEYS:',
+  Object.keys(res?.payload ?? {})
+);
+
+console.log(
+  'TOKEN:',
+  res?.payload?.nextToken
+);
+
+const summaries = res?.payload?.inventorySummaries ?? [];
+
+console.log(
+  `[FBA ${marketplaceId}] PAGE COUNT:`,
+  summaries.length,
+);
+
+console.log(
+  `[FBA ${marketplaceId}] NEXT TOKEN:`,
+  res?.nextToken ?? null,
+);
+
+// PROCESS SKUS
+for (const summary of summaries) {
+ 
+const sellerSku = summary.sellerSku;
+
+// 👇 ADD THIS BLOCK RIGHT HERE
+const details = summary.inventoryDetails ?? {};
+
+const fulfillable =
+  details.fulfillableQuantity ?? 0;
+
+const inbound =
+  (details.inboundWorkingQuantity ?? 0) +
+  (details.inboundShippedQuantity ?? 0) +
+  (details.inboundReceivingQuantity ?? 0);
+
+const reserved =
+  details.reservedQuantity?.totalReservedQuantity ?? 0;
+
+const researching =
+  details.researchingQuantity?.totalResearchingQuantity ?? 0;
+
+const unfulfillable =
+  details.unfulfillableQuantity?.totalUnfulfillableQuantity ?? 0;
+
+// Debug log
+console.log("QTY DEBUG", {
+  sku: sellerSku,
+  fulfillable,
+  inbound,
+  reserved,
+});
+
+
+  console.log('FBA RAW QTY:', sellerSku, {
+    fulfillable,
+    inbound,
+  });
+
+
+
+inventoryBySku.set(sellerSku, {
+  sellerSku,
+  marketplaceId,
+  fulfillable: details.fulfillableQuantity ?? 0,
+
+  inbound:
+    (details.inboundWorkingQuantity ?? 0) +
+    (details.inboundShippedQuantity ?? 0) +
+    (details.inboundReceivingQuantity ?? 0),
+
+  reserved:
+    details.reservedQuantity?.totalReservedQuantity ?? 0,
+
+  researching:
+    details.researchingQuantity?.totalResearchingQuantity ?? 0,
+
+  unfulfillable:
+    details.unfulfillableQuantity?.totalUnfulfillableQuantity ?? 0,
+
+  raw: summary,
+});
+
+}
+
+nextToken =
+  res?.payload?.nextToken ??
+  res?.Payload?.nextToken ??
+  res?.nextToken ??
+  undefined;
+
+// EXIT LOOP
+if (!nextToken) {
+  break;
+}
+
+
           } catch (e: any) {
   console.log("FBA ERROR RAW:", e?.response?.data ?? e);
 
@@ -1922,6 +2128,25 @@ console.log('FBA RESPONSE COUNT:', summaries.length);
   s?.sellerSku ?? s?.SellerSku ?? s?.sellerSKU;
 
 if (!sku) continue;
+
+  const details = s.inventoryDetails ?? {};
+
+  const fulfillable =
+    details.afnFulfillableQuantity ??
+    details.fulfillableQuantity ??
+    0;
+
+  const inbound =
+    (details.afnInboundWorkingQuantity ?? 0) +
+    (details.afnInboundShippedQuantity ?? 0) +
+    (details.afnInboundReceivingQuantity ?? 0);
+
+  console.log('FBA INVENTORY TEST →', {
+    marketplaceId,
+    sku,
+    fulfillable,
+    inbound,
+  });
 
 const key = `${marketplaceId}::${sku}`;
 
@@ -2023,11 +2248,19 @@ try {
       agg.researching +
       agg.unfulfillable;
 
-     await this.prisma.inventoryByMarketplace.upsert({
+      console.log('BY_MKT UPSERT', {
+  sku: agg.sellerSku,
+  aggMarketplace: agg.marketplaceId,
+  whereMarketplace: agg.marketplaceId,
+  fulfillable: agg.fulfillable,
+});
+
+
+    await this.prisma.inventoryByMarketplace.upsert({
   where: {
     productId_marketplaceId: {
       productId: match.id,
-      marketplaceId: agg.marketplaceId,
+      marketplaceId: agg.marketplaceId, // ✅ MUST be agg.marketplaceId
     },
   },
   update: {
@@ -2037,22 +2270,33 @@ try {
     reservedQty: agg.reserved,
     researchingQty: agg.researching,
     unfulfillableQty: agg.unfulfillable,
-    currentQty: totalQty,
-    rawJson: agg,
+    currentQty:
+      agg.fulfillable +
+      agg.inbound +
+      agg.reserved +
+      agg.researching +
+      agg.unfulfillable,
+    rawJson: agg.raw ?? agg, // whichever you store
   },
   create: {
     userId: match.userId,
     productId: match.id,
-    marketplaceId: agg.marketplaceId,
+    marketplaceId: agg.marketplaceId, // ✅ MUST be agg.marketplaceId
     fulfillableQty: agg.fulfillable,
     inboundQty: agg.inbound,
     reservedQty: agg.reserved,
     researchingQty: agg.researching,
     unfulfillableQty: agg.unfulfillable,
-    currentQty: totalQty,
-    rawJson: agg,
+    currentQty:
+      agg.fulfillable +
+      agg.inbound +
+      agg.reserved +
+      agg.researching +
+      agg.unfulfillable,
+    rawJson: agg.raw ?? agg,
   },
 });
+
 
 
     // BUILD TRUE AGGREGATES ACROSS MARKETPLACES
@@ -2093,6 +2337,12 @@ for (const agg of inventoryBySku.values()) {
 
 // SAVE TRUE AGGREGATES
 for (const agg of aggregateBySku.values()) {
+  
+  console.log('FINAL AGG SAVE', {
+  sku: agg.sellerSku,
+  fulfillable: agg.fulfillable,
+});
+
   const match = bySku.get(agg.sellerSku);
   if (!match) continue;
 
@@ -2103,30 +2353,7 @@ for (const agg of aggregateBySku.values()) {
     agg.researching +
     agg.unfulfillable;
 
-  await this.prisma.inventory.upsert({
-    where: { productId: match.id },
-    update: {
-      userId: match.userId,
-      fulfillableQty: agg.fulfillable,
-      inboundQty: agg.inbound,
-      reservedQty: agg.reserved,
-      researchingQty: agg.researching,
-      unfulfillableQty: agg.unfulfillable,
-      currentQty: totalQty,
-      rawJson: agg.raw,
-    },
-    create: {
-      userId: match.userId,
-      productId: match.id,
-      fulfillableQty: agg.fulfillable,
-      inboundQty: agg.inbound,
-      reservedQty: agg.reserved,
-      researchingQty: agg.researching,
-      unfulfillableQty: agg.unfulfillable,
-      currentQty: totalQty,
-      rawJson: agg.raw,
-    },
-  });
+;
 }
 
 } // closes: for (const agg of inventoryBySku.values())
@@ -2473,7 +2700,7 @@ if (org?.lastFbaInventorySyncAt) {
   const secondsAgo =
     (now.getTime() - org.lastFbaInventorySyncAt.getTime()) / 1000;
 
-  if (secondsAgo < 900) {
+  if (secondsAgo < 60) {
     console.log(
       `[syncFbaInventory] Skipping - last successful sync was ${Math.round(
         secondsAgo / 60,

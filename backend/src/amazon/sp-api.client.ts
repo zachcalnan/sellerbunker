@@ -64,7 +64,7 @@ export class AmazonSpApiClient {
     const {
       createdAfter,
       createdBefore,
-      marketplaceIds = ['ATVPDKIKX0DER'], // US marketplace by default
+     marketplaceIds = ['A1F83G8C2ARO7P'], // UK default
       orderStatuses,
     } = params ?? {};
 
@@ -77,7 +77,7 @@ export class AmazonSpApiClient {
     if (isSandbox && !createdAfter && !createdBefore && !orderStatuses) {
       // Default sandbox test case if no explicit range is requested
       query.CreatedAfter = 'TEST_CASE_200';
-      query.MarketplaceIds = ['ATVPDKIKX0DER'];
+      query.MarketplaceIds = ['A1F83G8C2ARO7P'];
     } else {
       if (createdAfter) {
         query.CreatedAfter = createdAfter;
@@ -186,11 +186,17 @@ export class AmazonSpApiClient {
 
   ) {
     
+console.log('MARKETPLACE:', params.marketplaceId);
+console.log('REGION:', credentials.region);
+
+
 const query: Record<string, unknown> = {
   granularityType: "Marketplace",
   granularityId: params.marketplaceId,
   marketplaceIds: params.marketplaceId,
 };
+
+
 
 
     if (params.details !== undefined) query.details = params.details;
@@ -199,6 +205,7 @@ const query: Record<string, unknown> = {
     if (params.sellerSku) query.sellerSku = params.sellerSku;
     if (params.sellerSkus?.length) query.sellerSkus = params.sellerSkus;
 
+    
     return this.signedSpApiRequest(credentials, {
       method: 'GET',
       path: "/fba/inventory/v1/summaries",
