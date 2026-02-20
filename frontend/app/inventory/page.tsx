@@ -43,7 +43,7 @@ export default function InventoryPage() {
     setLoading(true);
     setError(null);
     try {
-      const token = await getToken({ template: "backend" });
+      const token = await getToken();
       const res = await fetch(`${baseUrl}/api/amazon/inventory`, {
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -71,7 +71,7 @@ export default function InventoryPage() {
     setError(null);
     setNotice(null);
     try {
-      const token = await getToken({ template: "backend" });
+      const token = await getToken();
       const res = await fetch(`${baseUrl}/api/amazon/inventory/sync`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}` },
@@ -102,7 +102,7 @@ export default function InventoryPage() {
     setError(null);
     setNotice(null);
     try {
-      const token = await getToken({ template: "backend" });
+      const token = await getToken();
       const res = await fetch(
         `${baseUrl}/api/amazon/dev/backfill-product-titles?limit=200`,
         {
@@ -270,7 +270,7 @@ export default function InventoryPage() {
             <div>SKU</div>
             <div>ASIN</div>
             <div>Title</div>
-            <div className="text-right">FBA</div>
+            <div className="text-right">Available</div>
             <div>Updated</div>
           </div>
 
@@ -286,7 +286,7 @@ export default function InventoryPage() {
             <div className="divide-y divide-[var(--surface-border)] bg-transparent">
               {filtered.map((r) => {
                 const isSystem = SYSTEM_SKUS.has(r.sku);
-                const qty =
+                const Available =
                   r.fbaFulfillableQty == null ? "—" : String(r.fbaFulfillableQty);
                 const marketplaceLine =
                   r.byMarketplace && r.byMarketplace.length > 0
@@ -353,9 +353,9 @@ export default function InventoryPage() {
                           ) : null}
                           <div className="mt-2 flex items-center justify-between gap-3 text-xs">
                             <div className="text-[var(--muted-foreground)]">
-                              FBA{" "}
+                              Available{" "}
                               <span className="font-medium text-[var(--foreground)]">
-                                {qty}
+                                {Available}
                               </span>
                             </div>
                             <div className="truncate text-[var(--muted-foreground)]">
@@ -406,7 +406,7 @@ export default function InventoryPage() {
                         {r.title ?? "—"}
                       </div>
                       <div className="text-right text-sm font-medium text-[var(--foreground)]">
-                        {qty}
+                        {Available}
                       </div>
                       <div className="truncate text-sm text-[var(--muted-foreground)]">
                         {updated}

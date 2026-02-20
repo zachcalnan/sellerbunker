@@ -15,7 +15,7 @@ import { OrgsModule } from './orgs/orgs.module';
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
-      envFilePath: '.env',
+      envFilePath: 'backend/.env',
     }),
     BullModule.forRootAsync({
       useFactory: (config: ConfigService) => {

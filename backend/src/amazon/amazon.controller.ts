@@ -28,6 +28,11 @@ export class AmazonController {
     private readonly configService: ConfigService,
   ) {}
 
+  @Get('ping')
+ping() {
+  return { ok: true };
+}
+
   /**
    * Starts the Amazon Seller Central consent flow.
    * Example: GET /api/amazon/connect?region=EU
@@ -382,9 +387,8 @@ export class AmazonController {
   @UseGuards(ClerkAuthGuard)
   @Post('inventory/sync')
   async syncInventory(@Req() req: { user: { orgId: string; userId: string } }) {
-    return this.amazonService.syncFbaInventory(req.user.orgId, req.user.userId, {
-      force: true,
-    });
+    console.log('SYNC INVENTORY ROUTE HIT');
+    return this.amazonService.syncFbaInventory(req.user.orgId, req.user.userId);
   }
 
   /**

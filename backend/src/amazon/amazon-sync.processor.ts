@@ -17,13 +17,7 @@ export class AmazonSyncProcessor extends WorkerHost {
   }
 
   /**
-   * Basic full-sync processor.
-   *
-   * For now this just calls into the existing AmazonService logic so you can
-   * verify BullMQ is wired up. Later we can evolve this to:
-   * - fetch recent orders from SP-API
-   * - persist them via Prisma
-   * - compute and cache aggregates for the dashboard
+   * Runs when queue job name = inventory-batch-sync
    */
   async process(
     job: Job<AmazonSyncJobData | Record<string, never>>,
@@ -31,43 +25,27 @@ export class AmazonSyncProcessor extends WorkerHost {
     console.log('[AmazonSyncProcessor] Received job', {
       id: job.id,
       name: job.name,
-      data: job.data,
     });
 
-    if (job.name === 'full-sync') {
-      const { userId } = job.data;
+    if (job.name === 'inventory-batch-sync') {
+      console.log('[AmazonSync] Running inventory batch sync');
 
-      // Trigger a background sync of recent orders into Prisma.
-      console.log('[AmazonSyncProcessor] Starting full-sync for user', {
-        userId,
-      });
-      await this.amazonService.syncRecentOrdersToDb(userId);
-      console.log('[AmazonSyncProcessor] Finished full-sync for user', {
-        userId,
-      });
-    } else if (job.name === 'orders-batch-sync') {
-      console.log(
-        '[AmazonSyncProcessor] Starting batch orders sync for all sellers',
-      );
-      await this.amazonService.syncRecentOrdersForAllSellers();
-      console.log(
-        '[AmazonSyncProcessor] Finished batch orders sync for all sellers',
-      );
-    } else if (job.name === 'inventory-batch-sync') {
-      // Best-effort: sync inventory per org using an active Amazon-linked org member.
       const orgs = await this.prisma.organization.findMany({
         select: { id: true },
       });
 
       for (const org of orgs) {
-        const membership = await this.prisma.organizationMembership.findFirst({
-          where: { orgId: org.id },
-          select: { userId: true },
-          orderBy: { updatedAt: 'desc' },
-        });
-        const preferredUserId = membership?.userId;
-        await this.amazonService.syncFbaInventory(org.id, preferredUserId);
+        await this.amazonService.syncFbaInventory(org.id);
       }
+    }
+
+    if (job.name === 'full-sync') {
+      const { userId } = job.data as AmazonSyncJobData;
+      await this.amazonService.syncRecentOrdersToDb(userId);
+    }
+
+    if (job.name === 'orders-batch-sync') {
+      await this.amazonService.syncRecentOrdersForAllSellers();
     }
   }
 }

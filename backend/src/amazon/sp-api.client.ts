@@ -27,9 +27,9 @@ export class AmazonSpApiClient {
   private readonly useSandbox: boolean;
 
   constructor(private readonly configService: ConfigService) {
-    // Default to sandbox unless explicitly disabled
-    const flag = this.configService.get<string>('SPAPI_USE_SANDBOX');
-    this.useSandbox = flag === undefined ? true : flag === 'true';
+  // Disable sandbox unless explicitly enabled
+  const flag = this.configService.get<string>('SPAPI_USE_SANDBOX');
+  this.useSandbox = false; // FORCE PROD
   }
 
   getDebugConfig() {
@@ -64,7 +64,7 @@ export class AmazonSpApiClient {
     const {
       createdAfter,
       createdBefore,
-      marketplaceIds = ['ATVPDKIKX0DER'], // US marketplace by default
+     marketplaceIds = ['A1F83G8C2ARO7P'], // UK default
       orderStatuses,
     } = params ?? {};
 
@@ -77,7 +77,7 @@ export class AmazonSpApiClient {
     if (isSandbox && !createdAfter && !createdBefore && !orderStatuses) {
       // Default sandbox test case if no explicit range is requested
       query.CreatedAfter = 'TEST_CASE_200';
-      query.MarketplaceIds = ['ATVPDKIKX0DER'];
+      query.MarketplaceIds = ['A1F83G8C2ARO7P'];
     } else {
       if (createdAfter) {
         query.CreatedAfter = createdAfter;
@@ -183,12 +183,21 @@ export class AmazonSpApiClient {
       sellerSku?: string;
       sellerSkus?: string[];
     },
+
   ) {
-    const query: Record<string, unknown> = {
-      granularityType: 'Marketplace',
-      granularityId: params.marketplaceId,
-      marketplaceIds: [params.marketplaceId],
-    };
+    
+console.log('MARKETPLACE:', params.marketplaceId);
+console.log('REGION:', credentials.region);
+
+
+const query: Record<string, unknown> = {
+  granularityType: "Marketplace",
+  granularityId: params.marketplaceId,
+  marketplaceIds: params.marketplaceId,
+};
+
+
+
 
     if (params.details !== undefined) query.details = params.details;
     if (params.nextToken) query.nextToken = params.nextToken;
@@ -196,9 +205,10 @@ export class AmazonSpApiClient {
     if (params.sellerSku) query.sellerSku = params.sellerSku;
     if (params.sellerSkus?.length) query.sellerSkus = params.sellerSkus;
 
+    
     return this.signedSpApiRequest(credentials, {
       method: 'GET',
-      path: '/fba/inventory/v1/summaries',
+      path: "/fba/inventory/v1/summaries",
       query,
     });
   }
@@ -256,6 +266,13 @@ export class AmazonSpApiClient {
     const queryString = this.buildQueryString(options.query ?? {});
     const canonicalUri = options.path;
     const canonicalQuerystring = queryString;
+
+    
+console.log("SP-API HOST:", host);
+console.log("SP-API AWS REGION:", region);
+console.log("SP-API ACCESS TOKEN PREFIX:", String(accessToken).slice(0, 12));
+console.log("SP-API ROLE ARN:", credentials.awsRoleArn);
+console.log("SP-API HAS AWS SESSION TOKEN:", Boolean((credentials as any).awsSessionToken));
 
     const now = new Date();
     const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, '');

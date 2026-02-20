@@ -1,3 +1,5 @@
+// test cursor edit
+
 import {
   BadRequestException,
   ForbiddenException,
@@ -81,13 +83,13 @@ export class AmazonService {
       );
     }
     return {
-      region: creds.region ?? 'na',
+      region: 'eu',
       lwaClientId: creds.lwaClientId,
       lwaClientSecret: creds.lwaClientSecret,
       refreshToken: creds.refreshToken,
       awsAccessKeyId: creds.awsAccessKeyId,
       awsSecretAccessKey: creds.awsSecretAccessKey,
-      awsRoleArn: creds.awsRoleArn,
+      awsRoleArn: process.env.AWS_ROLE_ARN,
     };
   }
 
@@ -217,13 +219,13 @@ export class AmazonService {
     }
 
     return {
-      region: creds.region ?? 'na',
+      region: creds.region ?? 'eu',
       lwaClientId: creds.lwaClientId,
       lwaClientSecret: creds.lwaClientSecret,
       refreshToken: creds.refreshToken,
       awsAccessKeyId: creds.awsAccessKeyId,
       awsSecretAccessKey: creds.awsSecretAccessKey,
-      awsRoleArn: creds.awsRoleArn,
+      awsRoleArn: process.env.AWS_ROLE_ARN,
     };
   }
 
@@ -604,20 +606,288 @@ export class AmazonService {
     const createdAfterIso = startDate.toISOString().split('.')[0] + 'Z';
     const createdBeforeIso = nowSafe.toISOString().split('.')[0] + 'Z';
 
-    const marketplaceIds =
-      credentials.region === 'eu'
-        ? [
-            'A1F83G8C2ARO7P', // UK
-            'A1PA6795UKMFR9', // DE
-            'A13V1IB3VIYZZH', // FR
-            'APJ6JRA9NG5V4', // IT
-            'A1RKKUPIHCS9HS', // ES
-          ]
-        : [
-            'ATVPDKIKX0DER', // US
-            'A2EUQ1WTGCTBG2', // CA
-            'A1AM78C64UM0Y8', // MX
-          ];
+    const marketplaceIds = ['A1F83G8C2ARO7P']; // UK
+
+    // Inventory sync lives in syncFbaInventory. Keep this disabled here so order sync
+    // doesn't overwrite/discard richer inventory status rows.
+    if (false) {
+
+
+
+
+
+// ===== SKU -> Product lookup (REQUIRED for upserts) =====
+
+const products = await this.prisma.product.findMany({
+  where: { userId },
+  select: { id: true, userId: true, sku: true },
+});
+
+const bySku = new Map<
+  string,
+  { id: string; userId: string }
+>();
+
+for (const p of products) {
+  if (!bySku.has(p.sku)) {
+    bySku.set(p.sku, {
+      id: p.id,
+      userId: p.userId,
+    });
+  }
+}
+// =================================
+
+
+
+for (const p of products) {
+  if (!bySku.has(p.sku)) bySku.set(p.sku, { id: p.id, userId: p.userId });
+}
+// =======================================================
+
+    const marketplaceIdsForInventory = ['A1F83G8C2ARO7P']; // UK
+
+for (const marketplaceId of marketplaceIdsForInventory) {
+
+  // ✅ Agg MAP
+const inventoryBySku = new Map<
+  string,
+  {
+    sellerSku: string;
+    marketplaceId: string;
+    fulfillable: number;
+    inbound: number;
+  }
+>();
+
+
+  console.log('SYNCING MARKETPLACE:', marketplaceId);
+
+ // Inside the for (const marketplaceId of marketplaceIds) loop
+let nextToken: string | undefined = undefined;
+let allSummaries: any[] = [];  // If you need to collect across pages
+
+do {
+  // RATE LIMIT DELAY (keep this to avoid 429s)
+  await new Promise(resolve => setTimeout(resolve, 1200));
+
+  const res: any = await this.spApiClient.getFbaInventorySummaries(
+    credentials,
+    {
+      marketplaceId,
+      details: true,
+      nextToken,
+    },
+  );
+
+  // 🔍 RAW RESPONSE (keep for debugging)
+  console.log('RAW FBA RESPONSE:', JSON.stringify(res, null, 2));
+  console.log('RAW KEYS:', Object.keys(res ?? {}));
+  console.log('PAYLOAD KEYS:', Object.keys(res?.payload ?? {}));
+
+const payload = res?.payload ?? res?.Payload ?? res ?? {};
+
+const summaries =
+  payload?.inventorySummaries ??
+  payload?.InventorySummaries ??
+  payload?.summaries ??
+  [];
+
+  console.log(`[FBA ${marketplaceId}] PAGE COUNT:`, summaries.length);
+
+  allSummaries.push(...summaries);  // Collect if needed for post-processing
+
+  // FIXED: Extract nextToken correctly (handle casing variations if your client lib uses them)
+// FIXED: Extract from top-level res.pagination
+nextToken =
+  res?.pagination?.nextToken ??
+  res?.pagination?.NextToken ??
+  res?.Pagination?.nextToken ??
+  res?.Pagination?.NextToken ??
+  undefined;
+
+  console.log('PAGINATION DEBUG:', JSON.stringify(res?.pagination ?? res?.Pagination ?? {}, null, 2));
+
+
+
+  console.log(`[FBA ${marketplaceId}] NEXT TOKEN:`, nextToken ?? null);
+
+} while (nextToken);
+
+
+// PROCESS AFTER PAGINATION
+for (const summary of allSummaries) {
+
+    const sku = summary.sellerSku;
+
+const details = summary.inventoryDetails ?? {};
+
+const fulfillable =
+  details.fulfillableQuantity ?? 0;
+
+const inbound =
+  (details.inboundWorkingQuantity ?? 0) +
+  (details.inboundShippedQuantity ?? 0) +
+  (details.inboundReceivingQuantity ?? 0);
+
+const reserved =
+  details.reservedQuantity ??
+  details.reservedCustomerOrdersQuantity ??
+  0;
+
+const researching =
+  details.researchingQuantity ?? 0;
+
+const unfulfillable =
+  details.unfulfillableQuantity ?? 0;
+
+
+  // ✅ KEY BY MARKETPLACE + SKU
+  const key = `${marketplaceId}::${sku}`;
+
+  inventoryBySku.set(key, {
+    sellerSku: sku,
+    marketplaceId,
+    fulfillable,
+    inbound,
+  });
+}
+
+const totalsBySku = new Map<
+  string,
+  {
+    fulfillable: number;
+    inbound: number;
+    reserved: number;
+    researching: number;
+    unfulfillable: number;
+  }
+>();
+
+
+for (const agg of inventoryBySku.values()) {
+
+  const product = bySku.get(agg.sellerSku)!;
+
+  const currentQty =
+    agg.fulfillable + agg.inbound;
+
+  await this.prisma.inventoryByMarketplace.upsert({
+    where: {
+      productId_marketplaceId: {
+        productId: product.id,
+        marketplaceId: agg.marketplaceId,
+      },
+    },
+    update: {
+      userId: product.userId,
+      fulfillableQty: agg.fulfillable,
+      inboundQty: agg.inbound,
+      currentQty,
+    },
+    create: {
+      userId: product.userId,
+      productId: product.id,
+      marketplaceId: agg.marketplaceId,
+      fulfillableQty: agg.fulfillable,
+      inboundQty: agg.inbound,
+      currentQty,
+    },
+  });
+
+  // 👉 Build totals
+ const existing =
+  totalsBySku.get(agg.sellerSku) ?? {
+    fulfillable: 0,
+    inbound: 0,
+    reserved: 0,
+    researching: 0,
+    unfulfillable: 0,
+  };
+
+
+  existing.fulfillable += agg.fulfillable;
+  existing.inbound += agg.inbound;
+
+  totalsBySku.set(agg.sellerSku, existing);
+}
+
+for (const [sku, totals] of totalsBySku) {
+
+  const product = bySku.get(sku)!;
+
+  const currentQty =
+    totals.fulfillable + totals.inbound;
+
+  await this.prisma.inventory.upsert({
+    where: {
+      productId: product.id,
+    },
+    update: {
+      userId: product.userId,
+      fulfillableQty: totals.fulfillable,
+      inboundQty: totals.inbound,
+      reservedQty: totals.reserved,
+      researchingQty: totals.researching,
+      unfulfillableQty: totals.unfulfillable,
+      currentQty,
+    },
+    create: {
+      userId: product.userId,
+      productId: product.id,
+      fulfillableQty: totals.fulfillable,
+      inboundQty: totals.inbound,
+      reservedQty: totals.reserved,
+      researchingQty: totals.researching,
+      unfulfillableQty: totals.unfulfillable,
+      currentQty,
+    },
+  });
+}
+
+
+console.log(
+  `AGGREGATED (${marketplaceId}) COUNT:`,
+  inventoryBySku.size
+);
+
+
+
+console.log(
+  `FBA SUMMARY (${marketplaceId}) TOTAL SKUS:`,
+  allSummaries.length
+);
+
+console.table(
+  allSummaries.map((s: any) => {
+    const d = s.inventoryDetails ?? {};
+
+    return {
+      sku: s.sellerSku,
+      fulfillable: d.fulfillableQuantity ?? 0,
+      inbound:
+        (d.inboundWorkingQuantity ?? 0) +
+        (d.inboundShippedQuantity ?? 0) +
+        (d.inboundReceivingQuantity ?? 0),
+    };
+  }),
+
+
+  
+);
+
+
+
+
+
+
+}
+
+    } // if (false)
+
+
+
+
 
     type SpApiOrder = {
       AmazonOrderId?: string;
@@ -1707,7 +1977,15 @@ export class AmazonService {
       title: string | null;
       imageUrl: string | null;
       updatedAt: Date;
-      inventory: { currentQty: number; updatedAt: Date } | null;
+      inventory: {
+        currentQty: number;
+        fulfillableQty: number;
+        inboundQty: number;
+        reservedQty: number;
+        researchingQty: number;
+        unfulfillableQty: number;
+        updatedAt: Date;
+      } | null;
       inventoryByMarketplace: Array<{
         marketplaceId: string;
         fulfillableQty: number;
@@ -1735,6 +2013,11 @@ export class AmazonService {
         inventory: {
           select: {
             currentQty: true,
+            fulfillableQty: true,
+            inboundQty: true,
+            reservedQty: true,
+            researchingQty: true,
+            unfulfillableQty: true,
             updatedAt: true,
           },
         },
@@ -1805,7 +2088,12 @@ export class AmazonService {
       title: p.title,
       imageUrl: p.imageUrl,
       productUpdatedAt: p.updatedAt,
-      fbaFulfillableQty: p.inventory?.currentQty ?? null,
+      fbaCurrentQty: p.inventory?.currentQty ?? null,
+      fbaFulfillableQty: p.inventory?.fulfillableQty ?? null,
+      fbaInboundQty: p.inventory?.inboundQty ?? null,
+      fbaReservedQty: p.inventory?.reservedQty ?? null,
+      fbaResearchingQty: p.inventory?.researchingQty ?? null,
+      fbaUnfulfillableQty: p.inventory?.unfulfillableQty ?? null,
       inventoryUpdatedAt: p.inventory?.updatedAt ?? null,
       byMarketplace: (p as any).inventoryByMarketplace?.map((m: any) => ({
         marketplaceId: m.marketplaceId,
@@ -1824,60 +2112,68 @@ export class AmazonService {
    * Fetch FBA inventory summaries from SP-API and upsert Inventory rows
    * for products we already know about in this org (matched by SKU).
    */
-  async syncFbaInventory(
-    orgId: string,
-    preferredUserId?: string,
-    opts?: { force?: boolean },
-  ) {
-    const now = new Date();
-    const org = (await this.prisma.organization.findUnique({
-      where: { id: orgId },
-      select: { lastFbaInventorySyncAt: true },
-    } as any)) as { lastFbaInventorySyncAt: Date | null } | null;
-    const last = org?.lastFbaInventorySyncAt ?? null;
-    const secondsAgo =
-      last != null ? (now.getTime() - last.getTime()) / 1000 : null;
-    if (!opts?.force && secondsAgo != null && secondsAgo < 15 * 60) {
-      return {
-        skipped: true,
-        reason: 'cooldown',
-        lastFbaInventorySyncAt: last?.toISOString() ?? null,
-        cooldownSeconds: 15 * 60,
-      };
-    }
-
+  async syncFbaInventory(orgId: string, preferredUserId?: string) {
+    
+     console.log('SYNC START', { orgId, preferredUserId });
+    
     const credentials = await this.getAmazonCredentialsForOrg(
       orgId,
       preferredUserId,
     );
+    
+   console.log('CREDENTIALS LOADED (keys only, no secrets)');
+
     const userIds = await this.getOrgMemberUserIds(orgId);
+    
+    // Get the userId from the account used for credentials
+    const account = preferredUserId && userIds.includes(preferredUserId)
+      ? await this.prisma.sellerAccount.findUnique({
+          where: {
+            userId_marketplace: {
+              userId: preferredUserId,
+              marketplace: 'amazon',
+            },
+          },
+        })
+      : await this.prisma.sellerAccount.findFirst({
+          where: { userId: { in: userIds }, marketplace: 'amazon' },
+          orderBy: { updatedAt: 'desc' },
+        });
+    
+    const ownerUserId = account?.userId ?? preferredUserId ?? userIds[0];
 
     const products = await this.prisma.product.findMany({
       where: { userId: { in: userIds } },
       orderBy: [{ updatedAt: 'desc' }],
-      select: { id: true, userId: true, sku: true, updatedAt: true },
+      select: {
+  id: true,
+  userId: true,
+  sku: true,
+  asin: true,
+  updatedAt: true,
+},
     });
     const bySku = new Map<
       string,
       { id: string; userId: string; updatedAt: Date }
     >();
+    const byAsin = new Map<
+  string,
+  { id: string; userId: string; updatedAt: Date }
+>();
     for (const p of products) {
       const existing = bySku.get(p.sku);
-      if (!existing) {
+      // Prefer an existing Product owned by the seller connection we're syncing.
+      if (!existing || (existing.userId !== ownerUserId && p.userId === ownerUserId)) {
         bySku.set(p.sku, { id: p.id, userId: p.userId, updatedAt: p.updatedAt });
-        continue;
       }
-
-      // Prefer to attach inventory updates to the preferred user if possible,
-      // otherwise keep the most recently updated Product row for this SKU.
-      const preferred =
-        preferredUserId &&
-        existing.userId !== preferredUserId &&
-        p.userId === preferredUserId;
-      if (preferred || p.updatedAt > existing.updatedAt) {
-        bySku.set(p.sku, { id: p.id, userId: p.userId, updatedAt: p.updatedAt });
+      if (p.asin) {
+        byAsin.set(p.asin, { id: p.id, userId: p.userId, updatedAt: p.updatedAt });
       }
     }
+
+
+    
 
     let marketplaceIds =
       credentials.region === 'eu'
@@ -1892,22 +2188,54 @@ export class AmazonService {
 
     // Attempt to fetch actual participations (best-effort).
     try {
-      const res = (await this.spApiClient.getMarketplaceParticipations(
-        credentials,
-      )) as any;
-      const payload = res?.payload ?? res?.Payload ?? res ?? {};
-      const list: any[] = payload?.payload ?? payload?.Payload ?? payload ?? [];
-      const ids = Array.isArray(list)
-        ? list
-            .map((p) => p?.marketplace?.id ?? p?.Marketplace?.Id ?? null)
-            .filter((v): v is string => typeof v === 'string' && v.length > 0)
-        : [];
-      if (ids.length) {
-        marketplaceIds = Array.from(new Set(ids));
-      }
-    } catch {
+  const res = await this.spApiClient.getMarketplaceParticipations(
+    credentials,
+  ) as any;
+
+  console.log(
+    "MARKETPLACE PARTICIPATIONS RAW:",
+    JSON.stringify(res, null, 2)
+  );
+
+  const payload = res?.payload ?? res?.Payload ?? res ?? {};
+  const list: any[] = payload?.payload ?? payload?.Payload ?? payload ?? [];
+
+  const ids = Array.isArray(list)
+    ? list
+        .map((p) => p?.marketplace?.id ?? p?.Marketplace?.Id ?? null)
+        .filter((v) => typeof v === 'string' && v.length > 0)
+    : [];
+
+  if (ids.length) {
+   marketplaceIds = Array.from(
+  new Set([...marketplaceIds, ...ids])
+);
+  }
+} catch {
+  // ignore: fall back to region defaults
+
+
       // ignore; fall back to region defaults
     }
+
+     
+  const now = new Date();
+
+  const org = await this.prisma.organization.findUnique({
+    where: { id: orgId },
+    select: { lastFbaInventorySyncAt: true },
+  });
+
+  if (org?.lastFbaInventorySyncAt) {
+    const secondsAgo = (now.getTime() - org.lastFbaInventorySyncAt.getTime()) / 1000;
+    if (secondsAgo < 60) {  // 60 = 1 minute
+      console.log(
+        `[syncFbaInventory] Skipping - last successful sync was ${Math.round(secondsAgo / 60)} min ago`
+      );
+      return;  // exit function early, no API calls
+    }
+  }
+  // END OF COOLDOWN BLOCK
 
     let marketplacesProcessed = 0;
     let inventorySummariesSeen = 0;
@@ -1915,42 +2243,90 @@ export class AmazonService {
     let skippedUnknownSku = 0;
     const marketplaceErrors: Array<{ marketplaceId: string; error: string }> =
       [];
-    let marketplacesWithSuccessfulResponse = 0;
+    
+      let marketplacesWithSuccessfulResponse = 0;
+      let upsertedInventoryRows = 0;
 
-    const byMarketplaceAndProduct = new Map<
-      string,
-      {
-        userId: string;
-        productId: string;
-        marketplaceId: string;
-        fulfillableQty: number;
-        inboundQty: number;
-        reservedQty: number;
-        researchingQty: number;
-        unfulfillableQty: number;
-        rawJson?: unknown;
-      }
-    >();
+    const inventoryBySku = new Map<
+  string,
+  {
+    sellerSku: string;
+    marketplaceId: string;
+    asin: string | null;
+    fulfillable: number;
+    inbound: number;
+    reserved: number;
+    researching: number;
+    unfulfillable: number;
+    raw: any;
+  }
+>();
 
-    try {
+
+try {
+  console.log("MARKETPLACES TO SYNC:", marketplaceIds);
+
+
+      
       for (const marketplaceId of marketplaceIds) {
         marketplacesProcessed += 1;
         let nextToken: string | undefined = undefined;
 
         // Paginate until exhausted
         while (true) {
-          let res: any;
-          try {
-            res = (await this.spApiClient.getFbaInventorySummaries(
-              credentials,
-              {
-                marketplaceId,
-                details: true,
-                nextToken,
-              },
-            )) as any;
-          } catch (e) {
-            const msg = e instanceof Error ? e.message : String(e);
+
+  // RATE LIMIT DELAY (ADD THIS)
+  await new Promise(resolve => setTimeout(resolve, 1200));
+
+  let res: any;
+  try {
+
+          res = await this.spApiClient.getFbaInventorySummaries(
+  credentials,
+  {
+    marketplaceId,
+    details: true,
+    nextToken,
+  },
+);
+
+// 🔍 RAW RESPONSE
+console.log(
+  'RAW FBA RESPONSE:',
+  JSON.stringify(res, null, 2)
+);
+
+console.log(
+  'RAW KEYS:',
+  Object.keys(res ?? {})
+);
+
+console.log(
+  'PAYLOAD KEYS:',
+  Object.keys(res?.payload ?? {})
+);
+
+console.log(
+  'TOKEN:',
+  res?.payload?.nextToken
+);
+
+const summaries = res?.payload?.inventorySummaries ?? [];
+
+console.log(
+  `[FBA ${marketplaceId}] PAGE COUNT:`,
+  summaries.length,
+);
+
+console.log(
+  `[FBA ${marketplaceId}] NEXT TOKEN:`,
+  res?.nextToken ?? null,
+);
+
+          } catch (e: any) {
+  console.log("FBA ERROR RAW:", e?.response?.data ?? e);
+
+  const msg = e instanceof Error ? e.message : String(e);
             // If a single marketplace is denied, skip it and continue trying others.
             if (
               msg.includes('/fba/inventory/v1/summaries') &&
@@ -1960,7 +2336,16 @@ export class AmazonService {
                 .includes('access to requested resource is denied')
             ) {
               marketplaceErrors.push({ marketplaceId, error: msg });
-              break;
+
+console.log(
+  "AGGREGATED INVENTORY:",
+  Array.from(inventoryBySku.values())
+);
+
+break;
+
+              
+;
             }
             throw e;
           }
@@ -1971,94 +2356,97 @@ export class AmazonService {
           }
 
           const payload = res?.payload ?? res?.Payload ?? res ?? {};
-          const summaries: any[] =
-            payload?.inventorySummaries ??
-            payload?.InventorySummaries ??
-            payload?.summaries ??
-            [];
+          const summaries =
+  payload?.inventorySummaries ??
+  payload?.InventorySummaries ??
+  payload?.summaries ??
+  [];
 
-          inventorySummariesSeen += summaries.length;
+console.log('FBA RESPONSE COUNT:', summaries.length);
+
 
           for (const s of summaries) {
             const sku: string | undefined =
-              s?.sellerSku ?? s?.SellerSku ?? s?.sellerSKU ?? s?.SellerSKU;
-            if (!sku) continue;
+  s?.sellerSku ?? s?.SellerSku ?? s?.sellerSKU;
 
-            const match = bySku.get(sku);
-            if (!match) {
-              skippedUnknownSku += 1;
-              continue;
-            }
+if (!sku) continue;
 
-            matchedSkus += 1;
+  const details = s.inventoryDetails ?? {};
 
-            const details = s?.inventoryDetails ?? {};
-            const fulfillable = Math.max(
-              0,
-              Number(
-                details?.fulfillableQuantity ??
-                  details?.afnFulfillableQuantity ??
-                  details?.fulfillable ??
-                  0,
-              ) || 0,
-            );
-            const inbound = Math.max(
-              0,
-              Number(
-                (details?.inboundWorkingQuantity ?? 0) +
-                  (details?.inboundShippedQuantity ?? 0) +
-                  (details?.inboundReceivingQuantity ?? 0),
-              ) || 0,
-            );
-            const reserved = Math.max(
-              0,
-              Number(details?.reservedQuantity?.totalReservedQuantity ?? 0) || 0,
-            );
-            const researching = Math.max(
-              0,
-              Number(details?.researchingQuantity?.totalResearchingQuantity ?? 0) ||
-                0,
-            );
-            const unfulfillable = Math.max(
-              0,
-              Number(details?.unfulfillableQuantity?.totalUnfulfillableQuantity ?? 0) ||
-                0,
-            );
+  const fulfillable =
+    details.afnFulfillableQuantity ??
+    details.fulfillableQuantity ??
+    0;
 
-            const key = `${match.id}::${marketplaceId}`;
-            const existing = byMarketplaceAndProduct.get(key) ?? {
-              userId: match.userId,
-              productId: match.id,
-              marketplaceId,
-              fulfillableQty: 0,
-              inboundQty: 0,
-              reservedQty: 0,
-              researchingQty: 0,
-              unfulfillableQty: 0,
-              rawJson: undefined,
-            };
+  const inbound =
+    (details.afnInboundWorkingQuantity ?? 0) +
+    (details.afnInboundShippedQuantity ?? 0) +
+    (details.afnInboundReceivingQuantity ?? 0);
 
-            existing.fulfillableQty += fulfillable;
-            existing.inboundQty += inbound;
-            existing.reservedQty += reserved;
-            existing.researchingQty += researching;
-            existing.unfulfillableQty += unfulfillable;
-            existing.rawJson = s; // last seen (best-effort debug; no secrets)
+  console.log('FBA INVENTORY TEST →', {
+    marketplaceId,
+    sku,
+    fulfillable,
+    inbound,
+  });
 
-            byMarketplaceAndProduct.set(key, existing);
+const key = `${marketplaceId}::${sku}`;
+
+const existing = inventoryBySku.get(key) ?? {
+  sellerSku: sku,
+  marketplaceId,
+  asin: (s?.asin ?? s?.ASIN ?? null) as string | null,
+  fulfillable: 0,
+  inbound: 0,
+  reserved: 0,
+  researching: 0,
+  unfulfillable: 0,
+  raw: null as any,
+};
+
+
+existing.fulfillable += fulfillable;
+existing.inbound += inbound;
+existing.reserved += details.reservedQuantity?.totalReservedQuantity ?? 0;
+existing.researching += details.researchingQuantity?.totalResearchingQuantity ?? 0;
+existing.unfulfillable +=
+  details.unfulfillableQuantity?.totalUnfulfillableQuantity ?? 0;
+if (s?.asin != null || s?.ASIN != null) {
+  existing.asin = (s?.asin ?? s?.ASIN ?? null) as string | null;
+}
+existing.raw = s;
+
+inventoryBySku.set(key, existing);
+
+
+            
+            upsertedInventoryRows += 1;
           }
 
+          // SP-API returns next page token at res.pagination.nextToken
           const token: string | undefined =
+            res?.pagination?.nextToken ??
+            res?.pagination?.NextToken ??
             payload?.nextToken ??
             payload?.NextToken ??
-            payload?.next_token ??
+            res?.payload?.nextToken ??
+            res?.payload?.NextToken ??
             undefined;
 
-          if (!token) break;
+          if (!token) {
+            console.log(`[FBA ${marketplaceId}] No more pages; total SKUs in map: ${inventoryBySku.size}`);
+            break;
+          }
           nextToken = token;
+          console.log(`[FBA ${marketplaceId}] Fetching next page`);
         }
       }
+
+
+
     } catch (e) {
+
+ 
       const msg = e instanceof Error ? e.message : String(e);
       if (
         msg.includes('/fba/inventory/v1/summaries') &&
@@ -2071,6 +2459,7 @@ export class AmazonService {
       }
       throw e;
     }
+     
 
     // If every marketplace was denied, raise the friendly forbidden error.
     if (
@@ -2082,111 +2471,174 @@ export class AmazonService {
       );
     }
 
-    if (marketplacesWithSuccessfulResponse > 0) {
-      // Persist marketplace breakdown
-      const totalsByProductId = new Map<string, number>();
-      for (const row of byMarketplaceAndProduct.values()) {
-        const currentQty = Math.max(0, Number(row.fulfillableQty) || 0);
-        totalsByProductId.set(
-          row.productId,
-          (totalsByProductId.get(row.productId) ?? 0) + currentQty,
-        );
 
-        await (this.prisma as any).inventoryByMarketplace.upsert({
-          where: {
-            productId_marketplaceId: {
-              productId: row.productId,
-              marketplaceId: row.marketplaceId,
-            },
-          },
-          update: {
-            userId: row.userId,
-            fulfillableQty: Math.max(0, Math.round(row.fulfillableQty)),
-            inboundQty: Math.max(0, Math.round(row.inboundQty)),
-            reservedQty: Math.max(0, Math.round(row.reservedQty)),
-            researchingQty: Math.max(0, Math.round(row.researchingQty)),
-            unfulfillableQty: Math.max(0, Math.round(row.unfulfillableQty)),
-            currentQty: Math.max(0, Math.round(currentQty)),
-            rawJson: row.rawJson as any,
-          },
-          create: {
-            userId: row.userId,
-            productId: row.productId,
-            marketplaceId: row.marketplaceId,
-            fulfillableQty: Math.max(0, Math.round(row.fulfillableQty)),
-            inboundQty: Math.max(0, Math.round(row.inboundQty)),
-            reservedQty: Math.max(0, Math.round(row.reservedQty)),
-            researchingQty: Math.max(0, Math.round(row.researchingQty)),
-            unfulfillableQty: Math.max(0, Math.round(row.unfulfillableQty)),
-            currentQty: Math.max(0, Math.round(currentQty)),
-            rawJson: row.rawJson as any,
-          },
-        });
-      }
 
-      // Ensure all canonical SKUs have an Inventory row (org-level view is SKU-based).
-      // Note: we *do not* set currentQty here, because totals are written below.
-      const canonicalProducts = Array.from(bySku.values());
-      for (const p of canonicalProducts) {
-        await this.prisma.inventory.upsert({
-          where: { productId: p.id },
-          update: { userId: p.userId },
-          create: { userId: p.userId, productId: p.id, currentQty: 0 },
-        });
-      }
+// SAVE INVENTORY
+// 1) Save per-marketplace rows into InventoryByMarketplace
+// 2) Build true aggregates across marketplaces and save totals into Inventory
+try {
+  for (const row of inventoryBySku.values()) {
+    const sku = row.sellerSku;
+    const product = await this.prisma.product.upsert({
+      where: {
+        userId_sku: {
+          userId: ownerUserId,
+          sku: row.sellerSku,
+        },
+      },
+      update: {
+        asin: row.asin ?? undefined,
+      },
+      create: {
+        userId: ownerUserId,
+        sku: row.sellerSku,
+        asin: row.asin ?? null,
+      },
+    });
+    const match = { id: product.id, userId: product.userId, updatedAt: product.updatedAt };
+    bySku.set(sku, match);
 
-      // Write totals (sum fulfillable across marketplaces)
-      for (const [productId, totalFulfillable] of totalsByProductId.entries()) {
-        await this.prisma.inventory.update({
-          where: { productId },
-          data: { currentQty: Math.max(0, Math.round(totalFulfillable)) },
-        });
-      }
+    const totalQty =
+      row.fulfillable +
+      row.inbound +
+      row.reserved +
+      row.researching +
+      row.unfulfillable;
 
-      // If a SKU is absent from the inventory summaries, Amazon effectively means
-      // "0 fulfillable". Without this, quantities can get stuck > 0 or show as
-      // missing (no row) for newly-added products until they appear in a summary.
-      //
-      // Only do this when *every* marketplace responded successfully, otherwise
-      // "missing from summaries" may just mean "missing marketplace permission".
-      const allMarketplacesSucceeded =
-        marketplaceErrors.length === 0 &&
-        marketplacesWithSuccessfulResponse === marketplaceIds.length;
-      if (allMarketplacesSucceeded) {
-        const seen = new Set(totalsByProductId.keys());
-        for (const p of canonicalProducts) {
-          if (seen.has(p.id)) continue;
-          await this.prisma.inventory.update({
-            where: { productId: p.id },
-            data: { currentQty: 0 },
-          });
-        }
-      }
-
-      // Mark successful sync timestamp (cooldown source of truth)
-      await this.prisma.organization.update({
-        where: { id: orgId },
-        data: { lastFbaInventorySyncAt: now },
-      } as any);
-    }
-
-    return {
-      region: credentials.region,
-      marketplacesProcessed,
-      marketplacesWithSuccessfulResponse,
-      inventorySummariesSeen,
-      matchedSkus,
-      skippedUnknownSku,
-      marketplaceErrorsCount: marketplaceErrors.length,
-    };
+    await this.prisma.inventoryByMarketplace.upsert({
+      where: {
+        productId_marketplaceId: {
+          productId: match.id,
+          marketplaceId: row.marketplaceId,
+        },
+      },
+      update: {
+        userId: match.userId,
+        fulfillableQty: row.fulfillable,
+        inboundQty: row.inbound,
+        reservedQty: row.reserved,
+        researchingQty: row.researching,
+        unfulfillableQty: row.unfulfillable,
+        currentQty: totalQty,
+        rawJson: row.raw ?? row,
+      },
+      create: {
+        userId: match.userId,
+        productId: match.id,
+        marketplaceId: row.marketplaceId,
+        fulfillableQty: row.fulfillable,
+        inboundQty: row.inbound,
+        reservedQty: row.reserved,
+        researchingQty: row.researching,
+        unfulfillableQty: row.unfulfillable,
+        currentQty: totalQty,
+        rawJson: row.raw ?? row,
+      },
+    });
   }
 
-  /**
-   * Dev-only: populate OrderItem rows for existing Orders (last 30 days).
-   * Useful when Orders were already synced before OrderItem existed, or when
-   * a sync run fetches 0 new orders (cursor advanced) and therefore doesn't
-   * call getOrderItems/Finances again.
-   */
+  // Build true aggregates across marketplaces (per SKU)
+  const aggregateBySku = new Map<
+    string,
+    {
+      sellerSku: string;
+      asin: string | null;
+      fulfillable: number;
+      inbound: number;
+      reserved: number;
+      researching: number;
+      unfulfillable: number;
+      raw: any[];
+    }
+  >();
+
+  for (const row of inventoryBySku.values()) {
+    const existing = aggregateBySku.get(row.sellerSku) ?? {
+      sellerSku: row.sellerSku,
+      asin: row.asin ?? null,
+      fulfillable: 0,
+      inbound: 0,
+      reserved: 0,
+      researching: 0,
+      unfulfillable: 0,
+      raw: [],
+    };
+
+    existing.fulfillable += row.fulfillable;
+    existing.inbound += row.inbound;
+    existing.reserved += row.reserved;
+    existing.researching += row.researching;
+    existing.unfulfillable += row.unfulfillable;
+    if (row.asin != null) existing.asin = row.asin;
+    existing.raw.push(row.raw);
+
+    aggregateBySku.set(row.sellerSku, existing);
+  }
+
+  // Save aggregate totals (per SKU) into Inventory
+  for (const agg of aggregateBySku.values()) {
+    const sku = agg.sellerSku;
+    const product = await this.prisma.product.upsert({
+      where: {
+        userId_sku: {
+          userId: ownerUserId,
+          sku: agg.sellerSku,
+        },
+      },
+      update: {
+        asin: agg.asin ?? undefined,
+      },
+      create: {
+        userId: ownerUserId,
+        sku: agg.sellerSku,
+        asin: agg.asin ?? null,
+      },
+    });
+    const match = { id: product.id, userId: product.userId, updatedAt: product.updatedAt };
+    bySku.set(sku, match);
+
+    const totalQty =
+      agg.fulfillable +
+      agg.inbound +
+      agg.reserved +
+      agg.researching +
+      agg.unfulfillable;
+
+    await this.prisma.inventory.upsert({
+      where: {
+        productId: match.id,
+      },
+      update: {
+        userId: match.userId,
+        fulfillableQty: agg.fulfillable,
+        inboundQty: agg.inbound,
+        reservedQty: agg.reserved,
+        researchingQty: agg.researching,
+        unfulfillableQty: agg.unfulfillable,
+        currentQty: totalQty,
+        rawJson: agg.raw,
+      },
+      create: {
+        userId: match.userId,
+        productId: match.id,
+        fulfillableQty: agg.fulfillable,
+        inboundQty: agg.inbound,
+        reservedQty: agg.reserved,
+        researchingQty: agg.researching,
+        unfulfillableQty: agg.unfulfillable,
+        currentQty: totalQty,
+        rawJson: agg.raw,
+      },
+    });
+  }
+} catch (e) {
+  throw e;
+}
+
+} // closes: syncFbaInventory
+
+
+  
   async backfillOrderItems(userId: string, days = 30) {
     const credentials = await this.getAmazonCredentialsForUser(userId);
 
@@ -2483,18 +2935,13 @@ export class AmazonService {
       return cur ?? {};
     };
 
-    // Prefer the seller's actual marketplace participations; titles are marketplace-scoped.
-    // If we query the wrong marketplace ID, Catalog Items often returns 200 with empty summaries.
-    let marketplaceIds =
-      credentials.region === 'eu'
-        ? [
-            'A1F83G8C2ARO7P', // UK
-            'A1PA6795UKMFR9', // DE
-            'A13V1IB3VIYZZH', // FR
-            'APJ6JRA9NG5V4', // IT
-            'A1RKKUPIHCS9HS', // ES
-          ]
-        : ['ATVPDKIKX0DER']; // US
+    // Pull real marketplaces from SP-API
+const participations: any =
+  await this.spApiClient.getMarketplaceParticipations(credentials);
+
+
+// Extract marketplace IDs where seller is active
+let marketplaceIds = ['A1F83G8C2ARO7P']; // UK ONLY
 
     try {
       const res = (await this.spApiClient.getMarketplaceParticipations(
@@ -2510,12 +2957,33 @@ export class AmazonService {
             .filter((v: any) => typeof v === 'string' && v.length > 0)
         : [];
       if (ids.length) {
-        marketplaceIds = Array.from(new Set(ids));
+        marketplaceIds = Array.from(new Set([...marketplaceIds, ...ids]));
       }
     } catch {
       // ignore; fall back to region defaults
     }
+const now = new Date();
 
+const org = await this.prisma.organization.findUnique({
+  where: { id: orgId },
+  select: { lastFbaInventorySyncAt: true },
+});
+
+if (org?.lastFbaInventorySyncAt) {
+  const secondsAgo =
+    (now.getTime() - org.lastFbaInventorySyncAt.getTime()) / 1000;
+
+  if (secondsAgo < 60) {
+    console.log(
+      `[syncFbaInventory] Skipping - last successful sync was ${Math.round(
+        secondsAgo / 60,
+      )} min ago`,
+    );
+    return;
+  }
+}
+
+/* ===== END COOLDOWN BLOCK ===== */
     // Titles are marketplace-scoped, and the returned list order can be arbitrary.
     // Prefer the seller's primary marketplace(s) first to avoid filling titles
     // with (valid) but unexpected languages from other marketplaces.
@@ -2557,6 +3025,12 @@ export class AmazonService {
     let updated = 0;
     let skipped = 0;
     const errors: { asin: string; error: string }[] = [];
+    const updatedProducts: Array<{
+      id: string;
+      asin: string | null;
+      title: string | null;
+      imageUrl: string | null;
+    }> = [];
     const skippedSamples: Array<{
       asin: string;
       marketplacesTried: number;
@@ -2755,6 +3229,12 @@ export class AmazonService {
 
         await this.prisma.product.update({ where: { id: p.id }, data });
         updated += 1;
+        updatedProducts.push({
+          id: p.id,
+          asin: p.asin,
+          title: title ?? p.title,
+          imageUrl: imageUrl ?? p.imageUrl,
+        });
       } catch (e) {
         errors.push({
           asin,
@@ -2770,6 +3250,7 @@ export class AmazonService {
       errorsCount: errors.length,
       errors: errors.slice(0, 10),
       skippedSamples,
+      updatedProducts,
     };
   }
 

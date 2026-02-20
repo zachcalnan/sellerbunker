@@ -30,13 +30,13 @@ model User {
 }
 
 model Organization {
-  id                 String                   @id @default(uuid())
-  name               String
-  createdAt          DateTime                 @default(now()) @map("created_at")
-  updatedAt          DateTime                 @updatedAt @map("updated_at")
-  lastFbaInventorySyncAt DateTime?            @map("last_fba_inventory_sync_at")
-  members            OrganizationMembership[]
-  usersWithActiveOrg User[]                   @relation("ActiveOrg")
+  id                     String                   @id @default(uuid())
+  name                   String
+  createdAt              DateTime                 @default(now()) @map("created_at")
+  updatedAt              DateTime                 @updatedAt @map("updated_at")
+  lastFbaInventorySyncAt DateTime?
+  members                OrganizationMembership[]
+  usersWithActiveOrg     User[]                   @relation("ActiveOrg")
 
   @@map("organizations")
 }
@@ -160,14 +160,28 @@ model Inventory {
   id         String   @id @default(uuid())
   userId     String   @map("user_id")
   productId  String   @unique @map("product_id")
-  currentQty Int      @default(0) @map("current_qty")
-  updatedAt  DateTime @updatedAt @map("updated_at")
-  product    Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
-  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // ===== Aggregated totals =====
+  currentQty Int @default(0) @map("current_qty")
+
+  // ===== Core FBA statuses =====
+  fulfillableQty   Int @default(0) @map("fulfillable_qty")
+  inboundQty       Int @default(0) @map("inbound_qty")
+  reservedQty      Int @default(0) @map("reserved_qty")
+  researchingQty   Int @default(0) @map("researching_qty")
+  unfulfillableQty Int @default(0) @map("unfulfillable_qty")
+
+  rawJson   Json?  @map("raw_json") 
+
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@map("inventory")
 }
+
 
 // Inventory levels by marketplace (FBA breakdown)
 model InventoryByMarketplace {
@@ -181,9 +195,11 @@ model InventoryByMarketplace {
   reservedQty      Int @default(0) @map("reserved_qty")
   researchingQty   Int @default(0) @map("researching_qty")
   unfulfillableQty Int @default(0) @map("unfulfillable_qty")
-  currentQty       Int @default(0) @map("current_qty")
 
-  rawJson   Json?    @map("raw_json")
+  currentQty Int @default(0) @map("current_qty")
+
+  rawJson Json? @map("raw_json")
+
   updatedAt DateTime @updatedAt @map("updated_at")
 
   user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -193,6 +209,7 @@ model InventoryByMarketplace {
   @@index([userId])
   @@map("inventory_by_marketplace")
 }
+
 
 model Purchase {
   id                 String   @id @default(uuid())
