@@ -1700,7 +1700,29 @@ export class AmazonService {
 
   async listInventory(orgId: string) {
     const userIds = await this.getOrgMemberUserIds(orgId);
-    const rows = await this.prisma.product.findMany({
+    type InventoryProductRow = {
+      id: string;
+      sku: string;
+      asin: string | null;
+      title: string | null;
+      imageUrl: string | null;
+      updatedAt: Date;
+      inventory: { currentQty: number; updatedAt: Date } | null;
+      inventoryByMarketplace: Array<{
+        marketplaceId: string;
+        fulfillableQty: number;
+        inboundQty: number;
+        reservedQty: number;
+        researchingQty: number;
+        unfulfillableQty: number;
+        currentQty: number;
+        updatedAt: Date;
+      }>;
+    };
+
+    // Explicitly type the payload so downstream code can safely access `inventory`.
+    // (This also makes the file robust if Prisma Client typings are temporarily stale.)
+    const rows = (await this.prisma.product.findMany({
       where: { userId: { in: userIds } },
       orderBy: [{ updatedAt: 'desc' }],
       select: {
@@ -1716,10 +1738,67 @@ export class AmazonService {
             updatedAt: true,
           },
         },
+        inventoryByMarketplace: {
+          select: {
+            marketplaceId: true,
+            fulfillableQty: true,
+            inboundQty: true,
+            reservedQty: true,
+            researchingQty: true,
+            unfulfillableQty: true,
+            currentQty: true,
+            updatedAt: true,
+          },
+          orderBy: [{ marketplaceId: 'asc' }],
+        },
       },
-    });
+      // Some environments can have temporarily stale Prisma Client typings.
+      // This is a no-op at runtime, but keeps TS happy until typings are refreshed.
+    } as any)) as unknown as InventoryProductRow[];
 
-    return rows.map((p) => ({
+    // Products are currently user-scoped (multiple users can exist in one org),
+    // but Inventory is an org-level screen. If multiple users have the same SKU,
+    // we want one canonical row per SKU; otherwise the UI shows duplicates and
+    // only one of them will have inventory filled in (sync is SKU-keyed).
+    const pickCanonicalForSku = (a: InventoryProductRow, b: InventoryProductRow) => {
+      const aInv = a.inventory?.updatedAt ?? null;
+      const bInv = b.inventory?.updatedAt ?? null;
+
+      // Prefer a row that has inventory data at all.
+      if (aInv && !bInv) return a;
+      if (!aInv && bInv) return b;
+
+      // If both have inventory timestamps, prefer the newest inventory snapshot.
+      if (aInv && bInv) {
+        if (aInv.getTime() !== bInv.getTime()) return aInv > bInv ? a : b;
+      }
+
+      // Prefer the newest product row as a tie-breaker.
+      if (a.updatedAt.getTime() !== b.updatedAt.getTime()) {
+        return a.updatedAt > b.updatedAt ? a : b;
+      }
+
+      // Prefer more enriched metadata (title/asin/image).
+      const score = (p: InventoryProductRow) =>
+        (p.title ? 1 : 0) + (p.asin ? 1 : 0) + (p.imageUrl ? 1 : 0);
+      const sa = score(a);
+      const sb = score(b);
+      if (sa !== sb) return sa > sb ? a : b;
+
+      // Fall back to stable choice.
+      return a;
+    };
+
+    const bySku = new Map<string, InventoryProductRow>();
+    for (const p of rows) {
+      const existing = bySku.get(p.sku);
+      bySku.set(p.sku, existing ? pickCanonicalForSku(existing, p) : p);
+    }
+    const uniqueRows = Array.from(bySku.values()).sort(
+      (a, b) => b.updatedAt.getTime() - a.updatedAt.getTime(),
+    );
+
+    return uniqueRows.map((p) => ({
       productId: p.id,
       sku: p.sku,
       asin: p.asin,
@@ -1728,6 +1807,16 @@ export class AmazonService {
       productUpdatedAt: p.updatedAt,
       fbaFulfillableQty: p.inventory?.currentQty ?? null,
       inventoryUpdatedAt: p.inventory?.updatedAt ?? null,
+      byMarketplace: (p as any).inventoryByMarketplace?.map((m: any) => ({
+        marketplaceId: m.marketplaceId,
+        fulfillableQty: Number(m.fulfillableQty ?? 0),
+        inboundQty: Number(m.inboundQty ?? 0),
+        reservedQty: Number(m.reservedQty ?? 0),
+        researchingQty: Number(m.researchingQty ?? 0),
+        unfulfillableQty: Number(m.unfulfillableQty ?? 0),
+        currentQty: Number(m.currentQty ?? 0),
+        updatedAt: m.updatedAt ?? null,
+      })) ?? [],
     }));
   }
 
@@ -1735,7 +1824,28 @@ export class AmazonService {
    * Fetch FBA inventory summaries from SP-API and upsert Inventory rows
    * for products we already know about in this org (matched by SKU).
    */
-  async syncFbaInventory(orgId: string, preferredUserId?: string) {
+  async syncFbaInventory(
+    orgId: string,
+    preferredUserId?: string,
+    opts?: { force?: boolean },
+  ) {
+    const now = new Date();
+    const org = (await this.prisma.organization.findUnique({
+      where: { id: orgId },
+      select: { lastFbaInventorySyncAt: true },
+    } as any)) as { lastFbaInventorySyncAt: Date | null } | null;
+    const last = org?.lastFbaInventorySyncAt ?? null;
+    const secondsAgo =
+      last != null ? (now.getTime() - last.getTime()) / 1000 : null;
+    if (!opts?.force && secondsAgo != null && secondsAgo < 15 * 60) {
+      return {
+        skipped: true,
+        reason: 'cooldown',
+        lastFbaInventorySyncAt: last?.toISOString() ?? null,
+        cooldownSeconds: 15 * 60,
+      };
+    }
+
     const credentials = await this.getAmazonCredentialsForOrg(
       orgId,
       preferredUserId,
@@ -1744,11 +1854,29 @@ export class AmazonService {
 
     const products = await this.prisma.product.findMany({
       where: { userId: { in: userIds } },
-      select: { id: true, userId: true, sku: true },
+      orderBy: [{ updatedAt: 'desc' }],
+      select: { id: true, userId: true, sku: true, updatedAt: true },
     });
-    const bySku = new Map<string, { id: string; userId: string }>();
+    const bySku = new Map<
+      string,
+      { id: string; userId: string; updatedAt: Date }
+    >();
     for (const p of products) {
-      if (!bySku.has(p.sku)) bySku.set(p.sku, { id: p.id, userId: p.userId });
+      const existing = bySku.get(p.sku);
+      if (!existing) {
+        bySku.set(p.sku, { id: p.id, userId: p.userId, updatedAt: p.updatedAt });
+        continue;
+      }
+
+      // Prefer to attach inventory updates to the preferred user if possible,
+      // otherwise keep the most recently updated Product row for this SKU.
+      const preferred =
+        preferredUserId &&
+        existing.userId !== preferredUserId &&
+        p.userId === preferredUserId;
+      if (preferred || p.updatedAt > existing.updatedAt) {
+        bySku.set(p.sku, { id: p.id, userId: p.userId, updatedAt: p.updatedAt });
+      }
     }
 
     let marketplaceIds =
@@ -1784,11 +1912,25 @@ export class AmazonService {
     let marketplacesProcessed = 0;
     let inventorySummariesSeen = 0;
     let matchedSkus = 0;
-    let upsertedInventoryRows = 0;
     let skippedUnknownSku = 0;
     const marketplaceErrors: Array<{ marketplaceId: string; error: string }> =
       [];
     let marketplacesWithSuccessfulResponse = 0;
+
+    const byMarketplaceAndProduct = new Map<
+      string,
+      {
+        userId: string;
+        productId: string;
+        marketplaceId: string;
+        fulfillableQty: number;
+        inboundQty: number;
+        reservedQty: number;
+        researchingQty: number;
+        unfulfillableQty: number;
+        rawJson?: unknown;
+      }
+    >();
 
     try {
       for (const marketplaceId of marketplaceIds) {
@@ -1850,28 +1992,60 @@ export class AmazonService {
 
             matchedSkus += 1;
 
-            const qtyRaw =
-              s?.inventoryDetails?.fulfillableQuantity ??
-              s?.inventoryDetails?.fulfillable ??
-              s?.inventoryDetails?.afnFulfillableQuantity ??
-              s?.totalQuantity ??
-              s?.TotalQuantity ??
-              0;
-            const qty = Math.max(0, Number(qtyRaw) || 0);
+            const details = s?.inventoryDetails ?? {};
+            const fulfillable = Math.max(
+              0,
+              Number(
+                details?.fulfillableQuantity ??
+                  details?.afnFulfillableQuantity ??
+                  details?.fulfillable ??
+                  0,
+              ) || 0,
+            );
+            const inbound = Math.max(
+              0,
+              Number(
+                (details?.inboundWorkingQuantity ?? 0) +
+                  (details?.inboundShippedQuantity ?? 0) +
+                  (details?.inboundReceivingQuantity ?? 0),
+              ) || 0,
+            );
+            const reserved = Math.max(
+              0,
+              Number(details?.reservedQuantity?.totalReservedQuantity ?? 0) || 0,
+            );
+            const researching = Math.max(
+              0,
+              Number(details?.researchingQuantity?.totalResearchingQuantity ?? 0) ||
+                0,
+            );
+            const unfulfillable = Math.max(
+              0,
+              Number(details?.unfulfillableQuantity?.totalUnfulfillableQuantity ?? 0) ||
+                0,
+            );
 
-            await this.prisma.inventory.upsert({
-              where: { productId: match.id },
-              update: {
-                userId: match.userId,
-                currentQty: qty,
-              },
-              create: {
-                userId: match.userId,
-                productId: match.id,
-                currentQty: qty,
-              },
-            });
-            upsertedInventoryRows += 1;
+            const key = `${match.id}::${marketplaceId}`;
+            const existing = byMarketplaceAndProduct.get(key) ?? {
+              userId: match.userId,
+              productId: match.id,
+              marketplaceId,
+              fulfillableQty: 0,
+              inboundQty: 0,
+              reservedQty: 0,
+              researchingQty: 0,
+              unfulfillableQty: 0,
+              rawJson: undefined,
+            };
+
+            existing.fulfillableQty += fulfillable;
+            existing.inboundQty += inbound;
+            existing.reservedQty += reserved;
+            existing.researchingQty += researching;
+            existing.unfulfillableQty += unfulfillable;
+            existing.rawJson = s; // last seen (best-effort debug; no secrets)
+
+            byMarketplaceAndProduct.set(key, existing);
           }
 
           const token: string | undefined =
@@ -1908,16 +2082,92 @@ export class AmazonService {
       );
     }
 
-    // Ensure all known products have an Inventory row after a successful sync.
-    // This prevents "—" for SKUs that simply weren't returned in the summaries.
     if (marketplacesWithSuccessfulResponse > 0) {
-      for (const p of products) {
+      // Persist marketplace breakdown
+      const totalsByProductId = new Map<string, number>();
+      for (const row of byMarketplaceAndProduct.values()) {
+        const currentQty = Math.max(0, Number(row.fulfillableQty) || 0);
+        totalsByProductId.set(
+          row.productId,
+          (totalsByProductId.get(row.productId) ?? 0) + currentQty,
+        );
+
+        await (this.prisma as any).inventoryByMarketplace.upsert({
+          where: {
+            productId_marketplaceId: {
+              productId: row.productId,
+              marketplaceId: row.marketplaceId,
+            },
+          },
+          update: {
+            userId: row.userId,
+            fulfillableQty: Math.max(0, Math.round(row.fulfillableQty)),
+            inboundQty: Math.max(0, Math.round(row.inboundQty)),
+            reservedQty: Math.max(0, Math.round(row.reservedQty)),
+            researchingQty: Math.max(0, Math.round(row.researchingQty)),
+            unfulfillableQty: Math.max(0, Math.round(row.unfulfillableQty)),
+            currentQty: Math.max(0, Math.round(currentQty)),
+            rawJson: row.rawJson as any,
+          },
+          create: {
+            userId: row.userId,
+            productId: row.productId,
+            marketplaceId: row.marketplaceId,
+            fulfillableQty: Math.max(0, Math.round(row.fulfillableQty)),
+            inboundQty: Math.max(0, Math.round(row.inboundQty)),
+            reservedQty: Math.max(0, Math.round(row.reservedQty)),
+            researchingQty: Math.max(0, Math.round(row.researchingQty)),
+            unfulfillableQty: Math.max(0, Math.round(row.unfulfillableQty)),
+            currentQty: Math.max(0, Math.round(currentQty)),
+            rawJson: row.rawJson as any,
+          },
+        });
+      }
+
+      // Ensure all canonical SKUs have an Inventory row (org-level view is SKU-based).
+      // Note: we *do not* set currentQty here, because totals are written below.
+      const canonicalProducts = Array.from(bySku.values());
+      for (const p of canonicalProducts) {
         await this.prisma.inventory.upsert({
           where: { productId: p.id },
-          update: { userId: p.userId, currentQty: 0 },
+          update: { userId: p.userId },
           create: { userId: p.userId, productId: p.id, currentQty: 0 },
         });
       }
+
+      // Write totals (sum fulfillable across marketplaces)
+      for (const [productId, totalFulfillable] of totalsByProductId.entries()) {
+        await this.prisma.inventory.update({
+          where: { productId },
+          data: { currentQty: Math.max(0, Math.round(totalFulfillable)) },
+        });
+      }
+
+      // If a SKU is absent from the inventory summaries, Amazon effectively means
+      // "0 fulfillable". Without this, quantities can get stuck > 0 or show as
+      // missing (no row) for newly-added products until they appear in a summary.
+      //
+      // Only do this when *every* marketplace responded successfully, otherwise
+      // "missing from summaries" may just mean "missing marketplace permission".
+      const allMarketplacesSucceeded =
+        marketplaceErrors.length === 0 &&
+        marketplacesWithSuccessfulResponse === marketplaceIds.length;
+      if (allMarketplacesSucceeded) {
+        const seen = new Set(totalsByProductId.keys());
+        for (const p of canonicalProducts) {
+          if (seen.has(p.id)) continue;
+          await this.prisma.inventory.update({
+            where: { productId: p.id },
+            data: { currentQty: 0 },
+          });
+        }
+      }
+
+      // Mark successful sync timestamp (cooldown source of truth)
+      await this.prisma.organization.update({
+        where: { id: orgId },
+        data: { lastFbaInventorySyncAt: now },
+      } as any);
     }
 
     return {
@@ -1926,7 +2176,6 @@ export class AmazonService {
       marketplacesWithSuccessfulResponse,
       inventorySummariesSeen,
       matchedSkus,
-      upsertedInventoryRows,
       skippedUnknownSku,
       marketplaceErrorsCount: marketplaceErrors.length,
     };

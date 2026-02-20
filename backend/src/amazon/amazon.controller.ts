@@ -382,7 +382,9 @@ export class AmazonController {
   @UseGuards(ClerkAuthGuard)
   @Post('inventory/sync')
   async syncInventory(@Req() req: { user: { orgId: string; userId: string } }) {
-    return this.amazonService.syncFbaInventory(req.user.orgId, req.user.userId);
+    return this.amazonService.syncFbaInventory(req.user.orgId, req.user.userId, {
+      force: true,
+    });
   }
 
   /**
