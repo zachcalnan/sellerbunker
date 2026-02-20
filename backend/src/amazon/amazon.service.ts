@@ -1,3 +1,5 @@
+// test cursor edit
+
 import {
   BadRequestException,
   ForbiddenException,
@@ -604,9 +606,55 @@ export class AmazonService {
     const createdAfterIso = startDate.toISOString().split('.')[0] + 'Z';
     const createdBeforeIso = nowSafe.toISOString().split('.')[0] + 'Z';
 
-const marketplaceIds = ['A1F83G8C2ARO7P']; // UK
+
+
+
+
+// ===== SKU -> Product lookup (REQUIRED for upserts) =====
+
+const products = await this.prisma.product.findMany({
+  where: { userId },
+  select: { id: true, userId: true, sku: true },
+});
+
+const bySku = new Map<
+  string,
+  { id: string; userId: string }
+>();
+
+for (const p of products) {
+  if (!bySku.has(p.sku)) {
+    bySku.set(p.sku, {
+      id: p.id,
+      userId: p.userId,
+    });
+  }
+}
+// =================================
+
+
+
+for (const p of products) {
+  if (!bySku.has(p.sku)) bySku.set(p.sku, { id: p.id, userId: p.userId });
+}
+// =======================================================
+
+    const marketplaceIds = ['A1F83G8C2ARO7P']; // UK
 
 for (const marketplaceId of marketplaceIds) {
+
+  // ✅ Agg MAP
+const inventoryBySku = new Map<
+  string,
+  {
+    sellerSku: string;
+    marketplaceId: string;
+    fulfillable: number;
+    inbound: number;
+  }
+>();
+
+
   console.log('SYNCING MARKETPLACE:', marketplaceId);
 
  // Inside the for (const marketplaceId of marketplaceIds) loop
@@ -660,28 +708,146 @@ nextToken =
 
 } while (nextToken);
 
-// PROCESS AFTER PAGINATION (your existing code here, e.g., for (const summary of allSummaries) { ... })
 
-  // PROCESS AFTER PAGINATION
- for (const summary of allSummaries) {
-  const sku = summary.sellerSku;
+// PROCESS AFTER PAGINATION
+for (const summary of allSummaries) {
 
-  const details =
-    summary.inventoryDetails ?? {};
+    const sku = summary.sellerSku;
 
-  const fulfillable =
-    details.fulfillableQuantity ?? 0;
+const details = summary.inventoryDetails ?? {};
 
-  const inbound =
-    (details.inboundWorkingQuantity ?? 0) +
-    (details.inboundShippedQuantity ?? 0) +
-    (details.inboundReceivingQuantity ?? 0);
+const fulfillable =
+  details.fulfillableQuantity ?? 0;
 
-  console.log(
-    'QTY DEBUG:',
-    { sku, fulfillable, inbound },
-  );
+const inbound =
+  (details.inboundWorkingQuantity ?? 0) +
+  (details.inboundShippedQuantity ?? 0) +
+  (details.inboundReceivingQuantity ?? 0);
+
+const reserved =
+  details.reservedQuantity ??
+  details.reservedCustomerOrdersQuantity ??
+  0;
+
+const researching =
+  details.researchingQuantity ?? 0;
+
+const unfulfillable =
+  details.unfulfillableQuantity ?? 0;
+
+
+  // ✅ KEY BY MARKETPLACE + SKU
+  const key = `${marketplaceId}::${sku}`;
+
+  inventoryBySku.set(key, {
+    sellerSku: sku,
+    marketplaceId,
+    fulfillable,
+    inbound,
+  });
 }
+
+const totalsBySku = new Map<
+  string,
+  {
+    fulfillable: number;
+    inbound: number;
+    reserved: number;
+    researching: number;
+    unfulfillable: number;
+  }
+>();
+
+
+for (const agg of inventoryBySku.values()) {
+
+  const product = bySku.get(agg.sellerSku);
+  if (!product) continue;
+
+  const currentQty =
+    agg.fulfillable + agg.inbound;
+
+  await this.prisma.inventoryByMarketplace.upsert({
+    where: {
+      productId_marketplaceId: {
+        productId: product.id,
+        marketplaceId: agg.marketplaceId,
+      },
+    },
+    update: {
+      userId: product.userId,
+      fulfillableQty: agg.fulfillable,
+      inboundQty: agg.inbound,
+      currentQty,
+    },
+    create: {
+      userId: product.userId,
+      productId: product.id,
+      marketplaceId: agg.marketplaceId,
+      fulfillableQty: agg.fulfillable,
+      inboundQty: agg.inbound,
+      currentQty,
+    },
+  });
+
+  // 👉 Build totals
+ const existing =
+  totalsBySku.get(agg.sellerSku) ?? {
+    fulfillable: 0,
+    inbound: 0,
+    reserved: 0,
+    researching: 0,
+    unfulfillable: 0,
+  };
+
+
+  existing.fulfillable += agg.fulfillable;
+  existing.inbound += agg.inbound;
+
+  totalsBySku.set(agg.sellerSku, existing);
+}
+
+for (const [sku, totals] of totalsBySku) {
+
+  const product = bySku.get(sku);
+  if (!product) continue;
+
+  const currentQty =
+    totals.fulfillable + totals.inbound;
+
+  await this.prisma.inventory.upsert({
+    where: {
+      productId: product.id,
+    },
+    update: {
+      userId: product.userId,
+      fulfillableQty: totals.fulfillable,
+      inboundQty: totals.inbound,
+      reservedQty: totals.reserved,
+      researchingQty: totals.researching,
+      unfulfillableQty: totals.unfulfillable,
+      currentQty,
+    },
+    create: {
+      userId: product.userId,
+      productId: product.id,
+      fulfillableQty: totals.fulfillable,
+      inboundQty: totals.inbound,
+      reservedQty: totals.reserved,
+      researchingQty: totals.researching,
+      unfulfillableQty: totals.unfulfillable,
+      currentQty,
+    },
+  });
+}
+
+
+console.log(
+  `AGGREGATED (${marketplaceId}) COUNT:`,
+  inventoryBySku.size
+);
+
+
 
 console.log(
   `FBA SUMMARY (${marketplaceId}) TOTAL SKUS:`,
@@ -1846,6 +2012,23 @@ console.table(
 console.log("CREDENTIALS KEYS:", Object.keys(credentials));
 
     const userIds = await this.getOrgMemberUserIds(orgId);
+    
+    // Get the userId from the account used for credentials
+    const account = preferredUserId && userIds.includes(preferredUserId)
+      ? await this.prisma.sellerAccount.findUnique({
+          where: {
+            userId_marketplace: {
+              userId: preferredUserId,
+              marketplace: 'amazon',
+            },
+          },
+        })
+      : await this.prisma.sellerAccount.findFirst({
+          where: { userId: { in: userIds }, marketplace: 'amazon' },
+          orderBy: { updatedAt: 'desc' },
+        });
+    
+    const ownerUserId = account?.userId ?? preferredUserId ?? userIds[0];
 
     const products = await this.prisma.product.findMany({
       where: { userId: { in: userIds } },
@@ -2238,8 +2421,23 @@ inventoryBySku.set(key, existing);
 
 try {
   for (const agg of inventoryBySku.values()) {
-    const match = bySku.get(agg.sellerSku);
-    if (!match) continue;
+    let match = bySku.get(agg.sellerSku);
+    
+    if (!match) {
+      const created = await this.prisma.product.create({
+        data: {
+          sku: agg.sellerSku,
+          userId: ownerUserId,
+        },
+      });
+
+      match = {
+        id: created.id,
+        userId: created.userId,
+      };
+
+      bySku.set(agg.sellerSku, match);
+    }
 
     const totalQty =
       agg.fulfillable +
@@ -2335,6 +2533,7 @@ for (const agg of inventoryBySku.values()) {
 }
 
 
+
 // SAVE TRUE AGGREGATES
 for (const agg of aggregateBySku.values()) {
   
@@ -2343,8 +2542,23 @@ for (const agg of aggregateBySku.values()) {
   fulfillable: agg.fulfillable,
 });
 
-  const match = bySku.get(agg.sellerSku);
-  if (!match) continue;
+  let match = bySku.get(agg.sellerSku);
+  
+  if (!match) {
+    const created = await this.prisma.product.create({
+      data: {
+        sku: agg.sellerSku,
+        userId: ownerUserId,
+      },
+    });
+
+    match = {
+      id: created.id,
+      userId: created.userId,
+    };
+
+    bySku.set(agg.sellerSku, match);
+  }
 
   const totalQty =
     agg.fulfillable +
