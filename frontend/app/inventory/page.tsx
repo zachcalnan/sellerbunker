@@ -1,7 +1,7 @@
 "use client";
 
 import { useAuth, SignedIn, SignedOut, SignInButton } from "@clerk/nextjs";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 
 type InventoryRow = {
   productId: string;
@@ -12,6 +12,16 @@ type InventoryRow = {
   productUpdatedAt: string;
   fbaFulfillableQty: number | null;
   inventoryUpdatedAt: string | null;
+  byMarketplace?: Array<{
+    marketplaceId: string;
+    fulfillableQty: number;
+    inboundQty: number;
+    reservedQty: number;
+    researchingQty: number;
+    unfulfillableQty: number;
+    currentQty: number;
+    updatedAt: string | null;
+  }>;
 };
 
 const SYSTEM_SKUS = new Set(["AMAZON_GENERIC", "AMAZON_MULTI"]);
@@ -278,13 +288,36 @@ export default function InventoryPage() {
                 const isSystem = SYSTEM_SKUS.has(r.sku);
                 const Available =
                   r.fbaFulfillableQty == null ? "—" : String(r.fbaFulfillableQty);
+                const marketplaceLine =
+                  r.byMarketplace && r.byMarketplace.length > 0
+                    ? r.byMarketplace
+                        .filter((m) => (m.fulfillableQty ?? 0) > 0)
+                        .map((m) => {
+                          const short =
+                            m.marketplaceId === "A1F83G8C2ARO7P"
+                              ? "UK"
+                              : m.marketplaceId === "A1PA6795UKMFR9"
+                                ? "DE"
+                                : m.marketplaceId === "A13V1IB3VIYZZH"
+                                  ? "FR"
+                                  : m.marketplaceId === "APJ6JRA9NG5V4"
+                                    ? "IT"
+                                    : m.marketplaceId === "A1RKKUPIHCS9HS"
+                                      ? "ES"
+                                      : m.marketplaceId === "ATVPDKIKX0DER"
+                                        ? "US"
+                                        : m.marketplaceId;
+                          return `${short} ${m.fulfillableQty}`;
+                        })
+                        .join(" · ")
+                    : null;
                 const updated =
                   r.inventoryUpdatedAt == null
                     ? "—"
                     : new Date(r.inventoryUpdatedAt).toLocaleString();
 
                 return (
-                  <>
+                  <Fragment key={r.productId}>
                     {/* Mobile card */}
                     <div key={`${r.productId}-mobile`} className="md:hidden px-4 py-3">
                       <div className="flex items-start gap-3">
@@ -308,6 +341,11 @@ export default function InventoryPage() {
                           <div className="mt-0.5 truncate text-xs text-[var(--muted-foreground)]">
                             SKU {r.sku} · ASIN {r.asin ?? "—"}
                           </div>
+                          {marketplaceLine ? (
+                            <div className="mt-1 truncate text-xs text-[var(--muted-foreground)]">
+                              {marketplaceLine}
+                            </div>
+                          ) : null}
                           {isSystem ? (
                             <div className="mt-1 text-xs text-[var(--muted-foreground)]">
                               System SKU
@@ -350,6 +388,11 @@ export default function InventoryPage() {
                         <div className="truncate text-sm font-medium text-[var(--foreground)]">
                           {r.sku}
                         </div>
+                        {marketplaceLine ? (
+                          <div className="mt-0.5 truncate text-xs text-[var(--muted-foreground)]">
+                            {marketplaceLine}
+                          </div>
+                        ) : null}
                         {isSystem ? (
                           <div className="mt-0.5 text-xs text-[var(--muted-foreground)]">
                             System SKU
@@ -369,7 +412,7 @@ export default function InventoryPage() {
                         {updated}
                       </div>
                     </div>
-                  </>
+                  </Fragment>
                 );
               })}
             </div>
