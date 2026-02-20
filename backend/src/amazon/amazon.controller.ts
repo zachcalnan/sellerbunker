@@ -3,6 +3,7 @@ import {
   Body,
   Controller,
   Get,
+  Logger,
   Param,
   Patch,
   Post,
@@ -22,6 +23,7 @@ import { AmazonSyncService } from './amazon-sync.service';
 
 @Controller('amazon')
 export class AmazonController {
+  private readonly logger = new Logger(AmazonController.name);
   constructor(
     private readonly amazonService: AmazonService,
     private readonly amazonSyncService: AmazonSyncService,
@@ -62,7 +64,9 @@ ping() {
     @Query('state') state: string,
     @Res() res: Response,
   ) {
-    console.log('CALLBACK ROUTE HIT', { code, sellingPartnerId, state });
+    this.logger.log(
+      `OAuth callback received (sellingPartnerId=${sellingPartnerId})`,
+    );
 
     try {
       await this.amazonService.handleOauthCallback({
@@ -77,15 +81,15 @@ ping() {
         const decoded = Buffer.from(state, 'base64url').toString('utf8');
         const { userId } = JSON.parse(decoded) as { userId?: string };
         if (userId) {
-          console.log(
-            '[AmazonController] Enqueuing initial full-sync after OAuth',
-            { userId },
+          this.logger.log(
+            `[AmazonController] Enqueuing initial full-sync after OAuth (userId=${userId})`,
           );
           await this.amazonSyncService.enqueueFullSync(userId);
         }
       } catch (syncErr) {
         // Non-fatal: logging is enough, the link itself has already succeeded.
-        console.error('Failed to enqueue initial Amazon sync', syncErr);
+        const msg = syncErr instanceof Error ? syncErr.message : String(syncErr);
+        this.logger.warn(`Failed to enqueue initial Amazon sync: ${msg}`);
       }
 
       const frontendUrl =
@@ -94,7 +98,8 @@ ping() {
 
       return res.redirect(frontendUrl);
     } catch (e) {
-      console.error('OAUTH CALLBACK ERROR:', e);
+      const msg = e instanceof Error ? e.message : String(e);
+      this.logger.error(`OAuth callback failed: ${msg}`);
       return res.status(500).send('OAuth callback failed');
     }
   }
@@ -387,7 +392,7 @@ ping() {
   @UseGuards(ClerkAuthGuard)
   @Post('inventory/sync')
   async syncInventory(@Req() req: { user: { orgId: string; userId: string } }) {
-    console.log('SYNC INVENTORY ROUTE HIT');
+    this.logger.log(`Manual inventory sync requested (orgId=${req.user.orgId})`);
     return this.amazonService.syncFbaInventory(req.user.orgId, req.user.userId);
   }
 

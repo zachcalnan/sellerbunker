@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as https from 'https';
 import * as crypto from 'crypto';
@@ -25,15 +25,33 @@ export interface SpApiCredentials {
 @Injectable()
 export class AmazonSpApiClient {
   private readonly useSandbox: boolean;
+  private readonly logger = new Logger(AmazonSpApiClient.name);
 
   constructor(private readonly configService: ConfigService) {
-  // Disable sandbox unless explicitly enabled
-  const flag = this.configService.get<string>('SPAPI_USE_SANDBOX');
-  this.useSandbox = false; // FORCE PROD
+    const flag = (this.configService.get<string>('SPAPI_USE_SANDBOX') ?? '').toLowerCase();
+    this.useSandbox = ['1', 'true', 'yes'].includes(flag);
   }
 
   getDebugConfig() {
     return { useSandbox: this.useSandbox };
+  }
+
+  private isDebugEnabled(): boolean {
+    const flag = (this.configService.get<string>('SPAPI_DEBUG_LOGS') ?? '').toLowerCase();
+    return ['1', 'true', 'yes'].includes(flag);
+  }
+
+  private defaultMarketplaceIdsForRegion(region: SpApiRegion): string[] {
+    switch (region) {
+      case 'na':
+        return ['ATVPDKIKX0DER']; // US
+      case 'eu':
+        return ['A1F83G8C2ARO7P']; // UK
+      case 'fe':
+        return ['A1VC38T7YXB528']; // JP
+      default:
+        return ['ATVPDKIKX0DER'];
+    }
   }
   /**
    * Example wrapper for the Sellers API: getMarketplaceParticipations.
@@ -64,9 +82,11 @@ export class AmazonSpApiClient {
     const {
       createdAfter,
       createdBefore,
-     marketplaceIds = ['A1F83G8C2ARO7P'], // UK default
       orderStatuses,
     } = params ?? {};
+
+    const marketplaceIds =
+      params?.marketplaceIds ?? this.defaultMarketplaceIdsForRegion(credentials.region);
 
     // For the static sandbox, CreatedAfter and MarketplaceIds must match
     // the documented test case or you'll get InvalidInput.
@@ -185,27 +205,17 @@ export class AmazonSpApiClient {
     },
 
   ) {
-    
-console.log('MARKETPLACE:', params.marketplaceId);
-console.log('REGION:', credentials.region);
-
-
-const query: Record<string, unknown> = {
-  granularityType: "Marketplace",
-  granularityId: params.marketplaceId,
-  marketplaceIds: params.marketplaceId,
-};
-
-
-
-
+    const query: Record<string, unknown> = {
+      granularityType: 'Marketplace',
+      granularityId: params.marketplaceId,
+      marketplaceIds: params.marketplaceId,
+    };
     if (params.details !== undefined) query.details = params.details;
     if (params.nextToken) query.nextToken = params.nextToken;
     if (params.startDateTime) query.startDateTime = params.startDateTime;
     if (params.sellerSku) query.sellerSku = params.sellerSku;
     if (params.sellerSkus?.length) query.sellerSkus = params.sellerSkus;
 
-    
     return this.signedSpApiRequest(credentials, {
       method: 'GET',
       path: "/fba/inventory/v1/summaries",
@@ -266,13 +276,9 @@ const query: Record<string, unknown> = {
     const queryString = this.buildQueryString(options.query ?? {});
     const canonicalUri = options.path;
     const canonicalQuerystring = queryString;
-
-    
-console.log("SP-API HOST:", host);
-console.log("SP-API AWS REGION:", region);
-console.log("SP-API ACCESS TOKEN PREFIX:", String(accessToken).slice(0, 12));
-console.log("SP-API ROLE ARN:", credentials.awsRoleArn);
-console.log("SP-API HAS AWS SESSION TOKEN:", Boolean((credentials as any).awsSessionToken));
+    if (this.isDebugEnabled()) {
+      this.logger.debug(`SP-API request host=${host} awsRegion=${region}`);
+    }
 
     const now = new Date();
     const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, '');

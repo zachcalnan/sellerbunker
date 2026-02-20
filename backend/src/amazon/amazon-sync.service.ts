@@ -1,9 +1,10 @@
-import { Injectable, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 
 @Injectable()
 export class AmazonSyncService implements OnModuleInit {
+  private readonly logger = new Logger(AmazonSyncService.name);
   constructor(@InjectQueue('amazon-sync') private readonly queue: Queue) {}
 
   /**
@@ -11,28 +12,44 @@ export class AmazonSyncService implements OnModuleInit {
    * This enqueues a repeatable job that will run every 10 minutes.
    */
   async onModuleInit(): Promise<void> {
+    const enabled = (process.env.ENABLE_AMAZON_SYNC_SCHEDULER ?? 'true').toLowerCase();
+    if (!['1', 'true', 'yes'].includes(enabled)) {
+      this.logger.log(
+        'Amazon sync scheduler disabled via ENABLE_AMAZON_SYNC_SCHEDULER',
+      );
+      return;
+    }
+
+    const ordersEveryMs =
+      Number(process.env.AMAZON_ORDERS_SYNC_EVERY_MS) || 10 * 60 * 1000;
+    const inventoryEveryMs =
+      Number(process.env.AMAZON_INVENTORY_SYNC_EVERY_MS) || 2 * 60 * 60 * 1000;
+
     await this.queue.add(
       'orders-batch-sync',
       {},
       {
         repeat: {
-          every: 10 * 60 * 1000, // 10 minutes
+          every: ordersEveryMs,
         },
         jobId: 'orders-batch-sync',
       },
     );
 
     await this.queue.add(
-  'inventory-batch-sync',
-  {},
-  {
-    repeat: {
-      every: 2 * 60 * 60 * 1000, // 2 hours
-    },
-    jobId: 'inventory-batch-sync',
-  },
-);
+      'inventory-batch-sync',
+      {},
+      {
+        repeat: {
+          every: inventoryEveryMs,
+        },
+        jobId: 'inventory-batch-sync',
+      },
+    );
 
+    this.logger.log(
+      `Scheduled Amazon sync jobs (ordersEveryMs=${ordersEveryMs}, inventoryEveryMs=${inventoryEveryMs})`,
+    );
   }
 
   /**
@@ -41,7 +58,7 @@ export class AmazonSyncService implements OnModuleInit {
    * without blocking HTTP requests.
    */
   async enqueueFullSync(userId: string): Promise<void> {
-    console.log('[AmazonSyncService] Enqueuing full-sync job', { userId });
+    this.logger.log(`Enqueuing full-sync job (userId=${userId})`);
     await this.queue.add(
       'full-sync',
       { userId },

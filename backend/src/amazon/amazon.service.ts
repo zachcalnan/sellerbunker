@@ -1,9 +1,8 @@
-// test cursor edit
-
 import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -19,6 +18,7 @@ import { UsersService } from '../users/users.service';
 
 @Injectable()
 export class AmazonService {
+  private readonly logger = new Logger(AmazonService.name);
   constructor(
     private readonly spApiClient: AmazonSpApiClient,
     private readonly prisma: PrismaService,
@@ -83,7 +83,10 @@ export class AmazonService {
       );
     }
     return {
-      region: 'eu',
+      region:
+        creds.region === 'na' || creds.region === 'eu' || creds.region === 'fe'
+          ? creds.region
+          : 'eu',
       lwaClientId: creds.lwaClientId,
       lwaClientSecret: creds.lwaClientSecret,
       refreshToken: creds.refreshToken,
@@ -606,284 +609,10 @@ export class AmazonService {
     const createdAfterIso = startDate.toISOString().split('.')[0] + 'Z';
     const createdBeforeIso = nowSafe.toISOString().split('.')[0] + 'Z';
 
-    const marketplaceIds = ['A1F83G8C2ARO7P']; // UK
+    const marketplaceIds =
+      credentials.region === 'eu' ? ['A1F83G8C2ARO7P'] : ['ATVPDKIKX0DER'];
 
-    // Inventory sync lives in syncFbaInventory. Keep this disabled here so order sync
-    // doesn't overwrite/discard richer inventory status rows.
-    if (false) {
-
-
-
-
-
-// ===== SKU -> Product lookup (REQUIRED for upserts) =====
-
-const products = await this.prisma.product.findMany({
-  where: { userId },
-  select: { id: true, userId: true, sku: true },
-});
-
-const bySku = new Map<
-  string,
-  { id: string; userId: string }
->();
-
-for (const p of products) {
-  if (!bySku.has(p.sku)) {
-    bySku.set(p.sku, {
-      id: p.id,
-      userId: p.userId,
-    });
-  }
-}
-// =================================
-
-
-
-for (const p of products) {
-  if (!bySku.has(p.sku)) bySku.set(p.sku, { id: p.id, userId: p.userId });
-}
-// =======================================================
-
-    const marketplaceIdsForInventory = ['A1F83G8C2ARO7P']; // UK
-
-for (const marketplaceId of marketplaceIdsForInventory) {
-
-  // ✅ Agg MAP
-const inventoryBySku = new Map<
-  string,
-  {
-    sellerSku: string;
-    marketplaceId: string;
-    fulfillable: number;
-    inbound: number;
-  }
->();
-
-
-  console.log('SYNCING MARKETPLACE:', marketplaceId);
-
- // Inside the for (const marketplaceId of marketplaceIds) loop
-let nextToken: string | undefined = undefined;
-let allSummaries: any[] = [];  // If you need to collect across pages
-
-do {
-  // RATE LIMIT DELAY (keep this to avoid 429s)
-  await new Promise(resolve => setTimeout(resolve, 1200));
-
-  const res: any = await this.spApiClient.getFbaInventorySummaries(
-    credentials,
-    {
-      marketplaceId,
-      details: true,
-      nextToken,
-    },
-  );
-
-  // 🔍 RAW RESPONSE (keep for debugging)
-  console.log('RAW FBA RESPONSE:', JSON.stringify(res, null, 2));
-  console.log('RAW KEYS:', Object.keys(res ?? {}));
-  console.log('PAYLOAD KEYS:', Object.keys(res?.payload ?? {}));
-
-const payload = res?.payload ?? res?.Payload ?? res ?? {};
-
-const summaries =
-  payload?.inventorySummaries ??
-  payload?.InventorySummaries ??
-  payload?.summaries ??
-  [];
-
-  console.log(`[FBA ${marketplaceId}] PAGE COUNT:`, summaries.length);
-
-  allSummaries.push(...summaries);  // Collect if needed for post-processing
-
-  // FIXED: Extract nextToken correctly (handle casing variations if your client lib uses them)
-// FIXED: Extract from top-level res.pagination
-nextToken =
-  res?.pagination?.nextToken ??
-  res?.pagination?.NextToken ??
-  res?.Pagination?.nextToken ??
-  res?.Pagination?.NextToken ??
-  undefined;
-
-  console.log('PAGINATION DEBUG:', JSON.stringify(res?.pagination ?? res?.Pagination ?? {}, null, 2));
-
-
-
-  console.log(`[FBA ${marketplaceId}] NEXT TOKEN:`, nextToken ?? null);
-
-} while (nextToken);
-
-
-// PROCESS AFTER PAGINATION
-for (const summary of allSummaries) {
-
-    const sku = summary.sellerSku;
-
-const details = summary.inventoryDetails ?? {};
-
-const fulfillable =
-  details.fulfillableQuantity ?? 0;
-
-const inbound =
-  (details.inboundWorkingQuantity ?? 0) +
-  (details.inboundShippedQuantity ?? 0) +
-  (details.inboundReceivingQuantity ?? 0);
-
-const reserved =
-  details.reservedQuantity ??
-  details.reservedCustomerOrdersQuantity ??
-  0;
-
-const researching =
-  details.researchingQuantity ?? 0;
-
-const unfulfillable =
-  details.unfulfillableQuantity ?? 0;
-
-
-  // ✅ KEY BY MARKETPLACE + SKU
-  const key = `${marketplaceId}::${sku}`;
-
-  inventoryBySku.set(key, {
-    sellerSku: sku,
-    marketplaceId,
-    fulfillable,
-    inbound,
-  });
-}
-
-const totalsBySku = new Map<
-  string,
-  {
-    fulfillable: number;
-    inbound: number;
-    reserved: number;
-    researching: number;
-    unfulfillable: number;
-  }
->();
-
-
-for (const agg of inventoryBySku.values()) {
-
-  const product = bySku.get(agg.sellerSku)!;
-
-  const currentQty =
-    agg.fulfillable + agg.inbound;
-
-  await this.prisma.inventoryByMarketplace.upsert({
-    where: {
-      productId_marketplaceId: {
-        productId: product.id,
-        marketplaceId: agg.marketplaceId,
-      },
-    },
-    update: {
-      userId: product.userId,
-      fulfillableQty: agg.fulfillable,
-      inboundQty: agg.inbound,
-      currentQty,
-    },
-    create: {
-      userId: product.userId,
-      productId: product.id,
-      marketplaceId: agg.marketplaceId,
-      fulfillableQty: agg.fulfillable,
-      inboundQty: agg.inbound,
-      currentQty,
-    },
-  });
-
-  // 👉 Build totals
- const existing =
-  totalsBySku.get(agg.sellerSku) ?? {
-    fulfillable: 0,
-    inbound: 0,
-    reserved: 0,
-    researching: 0,
-    unfulfillable: 0,
-  };
-
-
-  existing.fulfillable += agg.fulfillable;
-  existing.inbound += agg.inbound;
-
-  totalsBySku.set(agg.sellerSku, existing);
-}
-
-for (const [sku, totals] of totalsBySku) {
-
-  const product = bySku.get(sku)!;
-
-  const currentQty =
-    totals.fulfillable + totals.inbound;
-
-  await this.prisma.inventory.upsert({
-    where: {
-      productId: product.id,
-    },
-    update: {
-      userId: product.userId,
-      fulfillableQty: totals.fulfillable,
-      inboundQty: totals.inbound,
-      reservedQty: totals.reserved,
-      researchingQty: totals.researching,
-      unfulfillableQty: totals.unfulfillable,
-      currentQty,
-    },
-    create: {
-      userId: product.userId,
-      productId: product.id,
-      fulfillableQty: totals.fulfillable,
-      inboundQty: totals.inbound,
-      reservedQty: totals.reserved,
-      researchingQty: totals.researching,
-      unfulfillableQty: totals.unfulfillable,
-      currentQty,
-    },
-  });
-}
-
-
-console.log(
-  `AGGREGATED (${marketplaceId}) COUNT:`,
-  inventoryBySku.size
-);
-
-
-
-console.log(
-  `FBA SUMMARY (${marketplaceId}) TOTAL SKUS:`,
-  allSummaries.length
-);
-
-console.table(
-  allSummaries.map((s: any) => {
-    const d = s.inventoryDetails ?? {};
-
-    return {
-      sku: s.sellerSku,
-      fulfillable: d.fulfillableQuantity ?? 0,
-      inbound:
-        (d.inboundWorkingQuantity ?? 0) +
-        (d.inboundShippedQuantity ?? 0) +
-        (d.inboundReceivingQuantity ?? 0),
-    };
-  }),
-
-
-  
-);
-
-
-
-
-
-
-}
-
-    } // if (false)
+    // Inventory sync lives in syncFbaInventory. Keep order sync focused on orders only.
 
 
 
@@ -912,11 +641,14 @@ console.table(
 
     const orders = data.payload?.Orders ?? [];
 
-    console.log(
-      '[AmazonService.syncRecentOrdersToDb] fetched orders:',
-      orders.length,
-      { userId },
+    const debug = ['1', 'true', 'yes'].includes(
+      (this.configService.get<string>('SPAPI_DEBUG_LOGS') ?? '').toLowerCase(),
     );
+    if (debug) {
+      this.logger.debug(
+        `[AmazonService.syncRecentOrdersToDb] fetched orders=${orders.length} (userId=${userId})`,
+      );
+    }
 
     if (orders.length === 0) {
       // Still advance the cursor so we don't keep re-querying the same window.
@@ -1565,9 +1297,9 @@ console.table(
       await this.recomputeDailyKpiSummary(userId);
     } catch (err) {
       // Non-fatal: log and continue; raw orders are still persisted.
-      console.error(
-        '[AmazonService.syncRecentOrdersToDb] failed to recompute daily KPI summary',
-        { userId, err },
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.warn(
+        `[AmazonService.syncRecentOrdersToDb] failed to recompute daily KPI summary (userId=${userId}): ${msg}`,
       );
     }
   }
@@ -1577,6 +1309,9 @@ console.table(
    * Intended to be triggered periodically by a BullMQ repeatable job.
    */
   async syncRecentOrdersForAllSellers(): Promise<void> {
+    const debug = ['1', 'true', 'yes'].includes(
+      (this.configService.get<string>('SPAPI_DEBUG_LOGS') ?? '').toLowerCase(),
+    );
     const accounts = await this.prisma.sellerAccount.findMany({
       where: {
         marketplace: 'amazon',
@@ -1589,15 +1324,16 @@ console.table(
 
     for (const { userId } of accounts) {
       try {
-        console.log(
-          '[AmazonService.syncRecentOrdersForAllSellers] syncing user',
-          { userId },
-        );
+        if (debug) {
+          this.logger.debug(
+            `[AmazonService.syncRecentOrdersForAllSellers] syncing userId=${userId}`,
+          );
+        }
         await this.syncRecentOrdersToDb(userId);
       } catch (err) {
-        console.error(
-          '[AmazonService.syncRecentOrdersForAllSellers] failed for user',
-          { userId, err },
+        const msg = err instanceof Error ? err.message : String(err);
+        this.logger.warn(
+          `[AmazonService.syncRecentOrdersForAllSellers] failed (userId=${userId}): ${msg}`,
         );
       }
     }
@@ -2113,15 +1849,22 @@ console.table(
    * for products we already know about in this org (matched by SKU).
    */
   async syncFbaInventory(orgId: string, preferredUserId?: string) {
-    
-     console.log('SYNC START', { orgId, preferredUserId });
-    
+    const debug = ['1', 'true', 'yes'].includes(
+      (this.configService.get<string>('SPAPI_DEBUG_LOGS') ?? '').toLowerCase(),
+    );
+    const throttleMs =
+      Number(this.configService.get<string>('SPAPI_THROTTLE_MS')) || 1200;
+
+    this.logger.log(
+      `syncFbaInventory start (orgId=${orgId}${
+        preferredUserId ? ', preferredUserId=set' : ''
+      })`,
+    );
+
     const credentials = await this.getAmazonCredentialsForOrg(
       orgId,
       preferredUserId,
     );
-    
-   console.log('CREDENTIALS LOADED (keys only, no secrets)');
 
     const userIds = await this.getOrgMemberUserIds(orgId);
     
@@ -2188,33 +1931,29 @@ console.table(
 
     // Attempt to fetch actual participations (best-effort).
     try {
-  const res = await this.spApiClient.getMarketplaceParticipations(
-    credentials,
-  ) as any;
+      const res = (await this.spApiClient.getMarketplaceParticipations(
+        credentials,
+      )) as any;
 
-  console.log(
-    "MARKETPLACE PARTICIPATIONS RAW:",
-    JSON.stringify(res, null, 2)
-  );
+      const payload = res?.payload ?? res?.Payload ?? res ?? {};
+      const list: any[] = payload?.payload ?? payload?.Payload ?? payload ?? [];
 
-  const payload = res?.payload ?? res?.Payload ?? res ?? {};
-  const list: any[] = payload?.payload ?? payload?.Payload ?? payload ?? [];
+      const ids = Array.isArray(list)
+        ? list
+            .map((p) => p?.marketplace?.id ?? p?.Marketplace?.Id ?? null)
+            .filter((v) => typeof v === 'string' && v.length > 0)
+        : [];
 
-  const ids = Array.isArray(list)
-    ? list
-        .map((p) => p?.marketplace?.id ?? p?.Marketplace?.Id ?? null)
-        .filter((v) => typeof v === 'string' && v.length > 0)
-    : [];
+      if (ids.length) {
+        marketplaceIds = Array.from(new Set([...marketplaceIds, ...ids]));
+      }
 
-  if (ids.length) {
-   marketplaceIds = Array.from(
-  new Set([...marketplaceIds, ...ids])
-);
-  }
-} catch {
-  // ignore: fall back to region defaults
-
-
+      if (debug) {
+        this.logger.debug(
+          `Marketplace participations resolved ${ids.length} ids (marketplacesToSync=${marketplaceIds.length})`,
+        );
+      }
+    } catch {
       // ignore; fall back to region defaults
     }
 
@@ -2229,9 +1968,11 @@ console.table(
   if (org?.lastFbaInventorySyncAt) {
     const secondsAgo = (now.getTime() - org.lastFbaInventorySyncAt.getTime()) / 1000;
     if (secondsAgo < 60) {  // 60 = 1 minute
-      console.log(
-        `[syncFbaInventory] Skipping - last successful sync was ${Math.round(secondsAgo / 60)} min ago`
-      );
+      if (debug) {
+        this.logger.debug(
+          `[syncFbaInventory] Skipping - last successful sync was ${Math.round(secondsAgo / 60)} min ago`,
+        );
+      }
       return;  // exit function early, no API calls
     }
   }
@@ -2264,7 +2005,9 @@ console.table(
 
 
 try {
-  console.log("MARKETPLACES TO SYNC:", marketplaceIds);
+  if (debug) {
+    this.logger.debug(`Marketplaces to sync: ${marketplaceIds.join(',')}`);
+  }
 
 
       
@@ -2275,8 +2018,9 @@ try {
         // Paginate until exhausted
         while (true) {
 
-  // RATE LIMIT DELAY (ADD THIS)
-  await new Promise(resolve => setTimeout(resolve, 1200));
+  if (throttleMs > 0) {
+    await new Promise((resolve) => setTimeout(resolve, throttleMs));
+  }
 
   let res: any;
   try {
@@ -2290,43 +2034,19 @@ try {
   },
 );
 
-// 🔍 RAW RESPONSE
-console.log(
-  'RAW FBA RESPONSE:',
-  JSON.stringify(res, null, 2)
-);
-
-console.log(
-  'RAW KEYS:',
-  Object.keys(res ?? {})
-);
-
-console.log(
-  'PAYLOAD KEYS:',
-  Object.keys(res?.payload ?? {})
-);
-
-console.log(
-  'TOKEN:',
-  res?.payload?.nextToken
-);
-
-const summaries = res?.payload?.inventorySummaries ?? [];
-
-console.log(
-  `[FBA ${marketplaceId}] PAGE COUNT:`,
-  summaries.length,
-);
-
-console.log(
-  `[FBA ${marketplaceId}] NEXT TOKEN:`,
-  res?.nextToken ?? null,
-);
+          const pageCount = res?.payload?.inventorySummaries?.length ?? 0;
+          if (debug) {
+            this.logger.debug(
+              `[FBA ${marketplaceId}] pageCount=${pageCount} nextToken=${nextToken ? 'set' : 'null'}`,
+            );
+          }
 
           } catch (e: any) {
-  console.log("FBA ERROR RAW:", e?.response?.data ?? e);
-
-  const msg = e instanceof Error ? e.message : String(e);
+            const status = e?.response?.status ?? e?.status ?? null;
+            const msg = e instanceof Error ? e.message : String(e);
+            this.logger.warn(
+              `[FBA ${marketplaceId}] request failed${status ? ` (${status})` : ''}: ${msg}`,
+            );
             // If a single marketplace is denied, skip it and continue trying others.
             if (
               msg.includes('/fba/inventory/v1/summaries') &&
@@ -2336,16 +2056,7 @@ console.log(
                 .includes('access to requested resource is denied')
             ) {
               marketplaceErrors.push({ marketplaceId, error: msg });
-
-console.log(
-  "AGGREGATED INVENTORY:",
-  Array.from(inventoryBySku.values())
-);
-
-break;
-
-              
-;
+              break;
             }
             throw e;
           }
@@ -2357,12 +2068,10 @@ break;
 
           const payload = res?.payload ?? res?.Payload ?? res ?? {};
           const summaries =
-  payload?.inventorySummaries ??
-  payload?.InventorySummaries ??
-  payload?.summaries ??
-  [];
-
-console.log('FBA RESPONSE COUNT:', summaries.length);
+            payload?.inventorySummaries ??
+            payload?.InventorySummaries ??
+            payload?.summaries ??
+            [];
 
 
           for (const s of summaries) {
@@ -2382,13 +2091,6 @@ if (!sku) continue;
     (details.afnInboundWorkingQuantity ?? 0) +
     (details.afnInboundShippedQuantity ?? 0) +
     (details.afnInboundReceivingQuantity ?? 0);
-
-  console.log('FBA INVENTORY TEST →', {
-    marketplaceId,
-    sku,
-    fulfillable,
-    inbound,
-  });
 
 const key = `${marketplaceId}::${sku}`;
 
@@ -2434,11 +2136,17 @@ inventoryBySku.set(key, existing);
             undefined;
 
           if (!token) {
-            console.log(`[FBA ${marketplaceId}] No more pages; total SKUs in map: ${inventoryBySku.size}`);
+            if (debug) {
+              this.logger.debug(
+                `[FBA ${marketplaceId}] No more pages; totalSkusInMap=${inventoryBySku.size}`,
+              );
+            }
             break;
           }
           nextToken = token;
-          console.log(`[FBA ${marketplaceId}] Fetching next page`);
+          if (debug) {
+            this.logger.debug(`[FBA ${marketplaceId}] Fetching next page`);
+          }
         }
       }
 
@@ -2974,11 +2682,14 @@ if (org?.lastFbaInventorySyncAt) {
     (now.getTime() - org.lastFbaInventorySyncAt.getTime()) / 1000;
 
   if (secondsAgo < 60) {
-    console.log(
-      `[syncFbaInventory] Skipping - last successful sync was ${Math.round(
-        secondsAgo / 60,
-      )} min ago`,
+    const debug = ['1', 'true', 'yes'].includes(
+      (this.configService.get<string>('SPAPI_DEBUG_LOGS') ?? '').toLowerCase(),
     );
+    if (debug) {
+      this.logger.debug(
+        `[syncFbaInventory] Skipping - last successful sync was ${Math.round(secondsAgo / 60)} min ago`,
+      );
+    }
     return;
   }
 }
