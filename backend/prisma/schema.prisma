@@ -157,22 +157,17 @@ model OrderItem {
 }
 
 model Inventory {
-  id         String   @id @default(uuid())
-  userId     String   @map("user_id")
-  productId  String   @unique @map("product_id")
+  productId String @id @map("product_id")
+  userId    String @map("user_id")
 
-  // ===== Aggregated totals =====
-  currentQty Int @default(0) @map("current_qty")
+  // Summary buckets (table view)
+  availableQty Int @default(0) @map("available_qty") // = fulfillable
+  reservedQty  Int @default(0) @map("reserved_qty")
+  inboundQty   Int @default(0) @map("inbound_qty")
+  issueQty     Int @default(0) @map("issue_qty")
+  totalQty     Int @default(0) @map("total_qty")
 
-  // ===== Core FBA statuses =====
-  fulfillableQty   Int @default(0) @map("fulfillable_qty")
-  inboundQty       Int @default(0) @map("inbound_qty")
-  reservedQty      Int @default(0) @map("reserved_qty")
-  researchingQty   Int @default(0) @map("researching_qty")
-  unfulfillableQty Int @default(0) @map("unfulfillable_qty")
-
-  rawJson   Json?  @map("raw_json") 
-
+  rawJson   Json     @map("raw_json") // Full Amazon payload for modal drilldown
   updatedAt DateTime @updatedAt @map("updated_at")
 
   user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)

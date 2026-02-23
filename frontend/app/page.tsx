@@ -233,25 +233,6 @@ function HomeInner() {
               ) : null}
               . Profit / missing-COGS may be incomplete.
             </span>
-          ) : showMissingCogs ? (
-            <span>
-              COGS missing for{" "}
-              <span className="font-medium text-[var(--foreground)]">
-                {missingCogsCount}
-              </span>{" "}
-              SKU{missingCogsCount === 1 ? "" : "s"}.{" "}
-              <Link
-                href={`/cost-of-goods?${new URLSearchParams({
-                  missing: "1",
-                  start: effectiveStart,
-                  end: effectiveEnd,
-                }).toString()}`}
-                className="underline underline-offset-2"
-              >
-                Fix now
-              </Link>
-              .
-            </span>
           ) : showCogsNotice ? (
             <span>
               Set{" "}
@@ -430,6 +411,30 @@ function HomeInner() {
                 ) : null}
               </div>
             </div>
+
+            {showMissingCogs && missingCogsCount != null && (
+              <div className="mb-4 rounded-xl border border-[var(--surface-border)] bg-[var(--surface)] px-4 py-3">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <span className="text-sm text-[var(--muted-foreground)]">
+                    COGS missing for{" "}
+                    <span className="font-semibold text-[var(--foreground)]">
+                      {missingCogsCount}
+                    </span>{" "}
+                    SKU{missingCogsCount === 1 ? "" : "s"}
+                  </span>
+                  <Link
+                    href={`/cost-of-goods?${new URLSearchParams({
+                      missing: "1",
+                      start: effectiveStart,
+                      end: effectiveEnd,
+                    }).toString()}`}
+                    className="text-sm font-medium text-[var(--foreground)] underline underline-offset-2 hover:no-underline"
+                  >
+                    Fix now
+                  </Link>
+                </div>
+              </div>
+            )}
 
             <div className="grid gap-4 md:grid-cols-4">
               {cards.map((card) => (
