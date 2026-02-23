@@ -25,6 +25,7 @@ type InventoryRow = {
 };
 
 const SYSTEM_SKUS = new Set(["AMAZON_GENERIC", "AMAZON_MULTI"]);
+const PAGE_SIZE = 20;
 
 export default function InventoryPage() {
   const baseUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
@@ -38,6 +39,7 @@ export default function InventoryPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [showSystem, setShowSystem] = useState(false);
   const [query, setQuery] = useState("");
+  const [page, setPage] = useState(1);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -189,6 +191,18 @@ export default function InventoryPage() {
     });
   }, [rows, query, showSystem]);
 
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const safePage = Math.min(page, totalPages);
+  const paginated = useMemo(
+    () =>
+      filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE),
+    [filtered, safePage],
+  );
+
+  useEffect(() => {
+    setPage(1);
+  }, [query, showSystem]);
+
   return (
     <div className="mx-auto max-w-6xl px-6 py-10">
       <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
@@ -283,8 +297,9 @@ export default function InventoryPage() {
               No products found.
             </div>
           ) : (
+            <>
             <div className="divide-y divide-[var(--surface-border)] bg-transparent">
-              {filtered.map((r) => {
+              {paginated.map((r) => {
                 const isSystem = SYSTEM_SKUS.has(r.sku);
                 const Available =
                   r.fbaFulfillableQty == null ? "—" : String(r.fbaFulfillableQty);
@@ -416,6 +431,42 @@ export default function InventoryPage() {
                 );
               })}
             </div>
+
+            {totalPages > 1 ? (
+              <div className="flex items-center justify-between gap-4 border-t border-[var(--surface-border)] bg-[var(--surface)] px-4 py-3">
+                <div className="text-sm text-[var(--muted-foreground)]">
+                  Page {safePage} of {totalPages}
+                  <span className="ml-2">
+                    ({(safePage - 1) * PAGE_SIZE + 1}–{Math.min(safePage * PAGE_SIZE, filtered.length)} of {filtered.length})
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setPage((p) => Math.max(1, p - 1))}
+                    disabled={safePage <= 1}
+                    className="flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--surface-border)] bg-transparent text-[var(--foreground)] hover:bg-[var(--foreground)]/5 disabled:pointer-events-none disabled:opacity-40"
+                    aria-label="Previous page"
+                  >
+                    <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                    </svg>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                    disabled={safePage >= totalPages}
+                    className="flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--surface-border)] bg-transparent text-[var(--foreground)] hover:bg-[var(--foreground)]/5 disabled:pointer-events-none disabled:opacity-40"
+                    aria-label="Next page"
+                  >
+                    <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+            ) : null}
+            </>
           )}
         </div>
       </SignedIn>
