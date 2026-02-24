@@ -86,6 +86,7 @@ model Product {
   estimatedAmazonFeePerUnit  Decimal?    @map("estimated_amazon_fee_per_unit") @db.Decimal(10, 2)
   estimatedReferralFeePerUnit Decimal?   @map("estimated_referral_fee_per_unit") @db.Decimal(10, 2)
   estimatedFbaFeePerUnit     Decimal?    @map("estimated_fba_fee_per_unit") @db.Decimal(10, 2)
+  estimatedDigitalServiceFeePerUnit Decimal? @map("estimated_digital_service_fee_per_unit") @db.Decimal(10, 2)
   estimatedAmazonFeeUpdatedAt DateTime?  @map("estimated_amazon_fee_updated_at")
   currentListedPrice         Decimal?    @map("current_listed_price") @db.Decimal(10, 2)
   feeEstimateRawJson         Json?       @map("fee_estimate_raw_json")
@@ -147,6 +148,9 @@ model OrderItem {
   taxChargedTotal      Decimal  @map("tax_charged_total") @db.Decimal(14, 2)
   amazonFeesTotal      Decimal  @map("amazon_fees_total") @db.Decimal(14, 2)
   feesSource           String?  @map("fees_source") // 'finances' = settled from Finances API (exact); 'estimate' = from product estimate
+  settledReferralFeeTotal    Decimal? @map("settled_referral_fee_total") @db.Decimal(14, 2)
+  settledFbaFeeTotal         Decimal? @map("settled_fba_fee_total") @db.Decimal(14, 2)
+  settledDigitalServiceFeeTotal Decimal? @map("settled_digital_service_fee_total") @db.Decimal(14, 2)
   cogsTotal            Decimal? @map("cogs_total") @db.Decimal(14, 2)
   profit               Decimal? @map("profit") @db.Decimal(14, 2)
   rawResponse          Json?    @map("raw_response")

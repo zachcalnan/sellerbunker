@@ -18,6 +18,7 @@ type OrderRow = {
   amazonFeesTotal: number;
   referralFeeTotal: number | null;
   fbaFeeTotal: number | null;
+  digitalServiceFeeTotal: number | null;
   feesSource: string | null; // 'finances' = settled (exact); 'estimate' = from product estimate
   availableStock: number | null;
   totalStock: number | null;
@@ -302,7 +303,7 @@ export default function OrdersPage() {
                           <span className="font-semibold">Order ID: </span>{r.orderId}
                         </div>
                       </div>
-                      <div className="text-left pl-3 text-[var(--foreground)] tabular-nums min-w-0">
+                      <div className="text-center pl-3 text-[var(--foreground)] tabular-nums min-w-0">
                         {r.amazonFeesTotal != null && Number.isFinite(r.amazonFeesTotal) ? (
                           <>
                             <div className="font-semibold">
@@ -314,9 +315,10 @@ export default function OrdersPage() {
                                 <span className="font-normal text-[var(--muted-foreground)] text-xs ml-1">Est.</span>
                               )}
                             </div>
-                            <div className="text-xs text-[var(--muted-foreground)] mt-0.5">
+                            <div className="text-xs text-[var(--muted-foreground)] mt-0.5 text-center">
                               <div><span className="font-semibold">Referral fee: </span>{r.referralFeeTotal != null ? formatCurrency(r.referralFeeTotal) : "—"}</div>
                               <div><span className="font-semibold">FBA fee: </span>{r.fbaFeeTotal != null ? formatCurrency(r.fbaFeeTotal) : "—"}</div>
+                              <div><span className="font-semibold">Digital service fee: </span>{r.digitalServiceFeeTotal != null ? formatCurrency(r.digitalServiceFeeTotal) : "—"}</div>
                             </div>
                           </>
                         ) : (
