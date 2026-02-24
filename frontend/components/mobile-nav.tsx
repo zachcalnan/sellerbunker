@@ -70,6 +70,26 @@ function InventoryIcon({ className }: { className?: string }) {
   );
 }
 
+function OrdersIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <path d="M6 2L3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z" />
+      <line x1="3" y1="6" x2="21" y2="6" />
+      <path d="M16 10a4 4 0 0 1-8 0" />
+    </svg>
+  );
+}
+
 function BurgerIcon({ className }: { className?: string }) {
   return (
     <svg
@@ -264,6 +284,19 @@ export function MobileNav() {
                 >
                   <InventoryIcon className="h-4 w-4 shrink-0" />
                   Inventory
+                </Link>
+
+                <Link
+                  href="/orders"
+                  className={`flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium no-underline transition-colors ${
+                    pathname === "/orders"
+                      ? "bg-[rgb(2,242,170)] text-black"
+                      : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
+                  }`}
+                  onClick={() => setOpen(false)}
+                >
+                  <OrdersIcon className="h-4 w-4 shrink-0" />
+                  Orders
                 </Link>
               </SignedIn>
 

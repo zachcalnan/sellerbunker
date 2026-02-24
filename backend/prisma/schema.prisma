@@ -35,6 +35,7 @@ model Organization {
   createdAt              DateTime                 @default(now()) @map("created_at")
   updatedAt              DateTime                 @updatedAt @map("updated_at")
   lastFbaInventorySyncAt DateTime?
+  lastFeesEstimateAt     DateTime?                @map("last_fees_estimate_at")
   members                OrganizationMembership[]
   usersWithActiveOrg     User[]                   @relation("ActiveOrg")
 
@@ -75,15 +76,21 @@ model SellerAccount {
 }
 
 model Product {
-  id          String      @id @default(uuid())
-  userId      String      @map("user_id")
-  sku         String
-  asin        String?
-  title       String?
-  imageUrl    String?     @map("image_url")
-  costOfGoods Decimal?    @map("cost_of_goods") @db.Decimal(10, 2)
-  createdAt   DateTime    @default(now()) @map("created_at")
-  updatedAt   DateTime    @updatedAt @map("updated_at")
+  id                         String      @id @default(uuid())
+  userId                     String      @map("user_id")
+  sku                        String
+  asin                       String?
+  title                      String?
+  imageUrl                   String?     @map("image_url")
+  costOfGoods                Decimal?    @map("cost_of_goods") @db.Decimal(10, 2)
+  estimatedAmazonFeePerUnit  Decimal?    @map("estimated_amazon_fee_per_unit") @db.Decimal(10, 2)
+  estimatedReferralFeePerUnit Decimal?   @map("estimated_referral_fee_per_unit") @db.Decimal(10, 2)
+  estimatedFbaFeePerUnit     Decimal?    @map("estimated_fba_fee_per_unit") @db.Decimal(10, 2)
+  estimatedAmazonFeeUpdatedAt DateTime?  @map("estimated_amazon_fee_updated_at")
+  currentListedPrice         Decimal?    @map("current_listed_price") @db.Decimal(10, 2)
+  feeEstimateRawJson         Json?       @map("fee_estimate_raw_json")
+  createdAt                  DateTime    @default(now()) @map("created_at")
+  updatedAt                  DateTime    @updatedAt @map("updated_at")
   inventory   Inventory?
   inventoryByMarketplace InventoryByMarketplace[]
   orderItems  OrderItem[]
@@ -139,6 +146,7 @@ model OrderItem {
   shippingChargedTotal Decimal  @map("shipping_charged_total") @db.Decimal(14, 2)
   taxChargedTotal      Decimal  @map("tax_charged_total") @db.Decimal(14, 2)
   amazonFeesTotal      Decimal  @map("amazon_fees_total") @db.Decimal(14, 2)
+  feesSource           String?  @map("fees_source") // 'finances' = settled from Finances API (exact); 'estimate' = from product estimate
   cogsTotal            Decimal? @map("cogs_total") @db.Decimal(14, 2)
   profit               Decimal? @map("profit") @db.Decimal(14, 2)
   rawResponse          Json?    @map("raw_response")

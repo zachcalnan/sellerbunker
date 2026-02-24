@@ -166,6 +166,125 @@ export class AmazonSpApiClient {
   }
 
   /**
+   * Product Fees API v0: getMyFeesEstimateForSKU
+   * POST /products/fees/v0/listings/{SellerSKU}/feesEstimate
+   *
+   * Returns estimated Amazon fees for a SKU (before sale). Used for inventory/order profit display
+   * until actual fees settle from the Finances API.
+   */
+  async getMyFeesEstimateForSKU(
+    credentials: SpApiCredentials,
+    sellerSku: string,
+    params: {
+      marketplaceId: string;
+      isAmazonFulfilled?: boolean;
+      listingPriceAmount?: number;
+      listingPriceCurrency?: string;
+      identifier?: string;
+    },
+  ): Promise<unknown> {
+    const {
+      marketplaceId,
+      isAmazonFulfilled = true,
+      listingPriceAmount = 0,
+      listingPriceCurrency = 'GBP',
+      identifier = `fee-${sellerSku}-${Date.now()}`,
+    } = params;
+    const body = JSON.stringify({
+      FeesEstimateRequest: {
+        MarketplaceId: marketplaceId,
+        IsAmazonFulfilled: isAmazonFulfilled,
+        PriceToEstimateFees: {
+          ListingPrice: {
+            CurrencyCode: listingPriceCurrency,
+            Amount: listingPriceAmount,
+          },
+          Shipping: {
+            CurrencyCode: listingPriceCurrency,
+            Amount: 0,
+          },
+        },
+        Identifier: identifier,
+        ...(isAmazonFulfilled ? { OptionalFulfillmentProgram: 'FBA_CORE' } : {}),
+      },
+    });
+    return this.signedSpApiRequest(credentials, {
+      method: 'POST',
+      path: `/products/fees/v0/listings/${encodeURIComponent(sellerSku)}/feesEstimate`,
+      body,
+    });
+  }
+
+  /**
+   * Product Fees API v0: getMyFeesEstimateForASIN
+   * POST /products/fees/v0/items/{Asin}/feesEstimate
+   */
+  async getMyFeesEstimateForASIN(
+    credentials: SpApiCredentials,
+    asin: string,
+    params: {
+      marketplaceId: string;
+      isAmazonFulfilled?: boolean;
+      listingPriceAmount?: number;
+      listingPriceCurrency?: string;
+      identifier?: string;
+    },
+  ): Promise<unknown> {
+    const {
+      marketplaceId,
+      isAmazonFulfilled = true,
+      listingPriceAmount = 0,
+      listingPriceCurrency = 'GBP',
+      identifier = `fee-asin-${asin}-${Date.now()}`,
+    } = params;
+    const body = JSON.stringify({
+      FeesEstimateRequest: {
+        MarketplaceId: marketplaceId,
+        IsAmazonFulfilled: isAmazonFulfilled,
+        PriceToEstimateFees: {
+          ListingPrice: {
+            CurrencyCode: listingPriceCurrency,
+            Amount: listingPriceAmount,
+          },
+          Shipping: {
+            CurrencyCode: listingPriceCurrency,
+            Amount: 0,
+          },
+        },
+        Identifier: identifier,
+        ...(isAmazonFulfilled ? { OptionalFulfillmentProgram: 'FBA_CORE' } : {}),
+      },
+    });
+    return this.signedSpApiRequest(credentials, {
+      method: 'POST',
+      path: `/products/fees/v0/items/${encodeURIComponent(asin)}/feesEstimate`,
+      body,
+    });
+  }
+
+  /**
+   * Listings Items API v2021-08-01: getListingsItem
+   * GET /listings/2021-08-01/items/{sellerId}/{sku}
+   * Returns this seller's own listing (their SKU, their listed price). Not other sellers' or buy box price.
+   */
+  async getListingsItem(
+    credentials: SpApiCredentials,
+    sellerId: string,
+    sku: string,
+    marketplaceIds: string[],
+    includedData: string[] = ['summaries', 'offers'],
+  ) {
+    return this.signedSpApiRequest(credentials, {
+      method: 'GET',
+      path: `/listings/2021-08-01/items/${encodeURIComponent(sellerId)}/${encodeURIComponent(sku)}`,
+      query: {
+        marketplaceIds: marketplaceIds.join(','),
+        includedData: includedData.join(','),
+      },
+    });
+  }
+
+  /**
    * Catalog Items API v2022-04-01: getCatalogItem
    * GET /catalog/2022-04-01/items/{asin}
    *

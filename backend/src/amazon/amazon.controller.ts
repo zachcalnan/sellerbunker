@@ -188,6 +188,12 @@ ping() {
     );
   }
 
+  @UseGuards(ClerkAuthGuard)
+  @Get('orders')
+  listOrders(@Req() req: { user: { orgId: string } }) {
+    return this.amazonService.listOrders(req.user.orgId);
+  }
+
   /**
    * Dev-only helper: recompute the last 30 days of daily KPI aggregates
    * for the authenticated user from existing Order rows.
@@ -314,6 +320,34 @@ ping() {
   }
 
   /**
+   * Dev-only: inspect raw Product Fees API response (to debug referral vs FBA).
+   * Use sku= or asin= (e.g. asin=B09SV93C9H). Add save=1 to write fee-estimate-debug.json to backend root.
+   * Example: GET /api/amazon/dev/fees-estimate-raw?asin=B09SV93C9H&save=1
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Get('dev/fees-estimate-raw')
+  async devFeesEstimateRaw(
+    @Req() req: { user: { orgId: string } },
+    @Query('sku') sku?: string,
+    @Query('asin') asin?: string,
+    @Query('listingPrice') listingPrice?: string,
+    @Query('save') save?: string,
+  ) {
+    const skuTrim = sku?.trim();
+    const asinTrim = asin?.trim();
+    if (!skuTrim && !asinTrim) {
+      throw new BadRequestException('sku or asin is required');
+    }
+    const price = listingPrice ? Number(listingPrice) : undefined;
+    return this.amazonService.devGetFeesEstimateRaw(req.user.orgId, {
+      sku: skuTrim || undefined,
+      asin: asinTrim || undefined,
+      listingPrice: Number.isFinite(price) ? price : undefined,
+      save: save === '1' || save === 'true' || save === 'yes',
+    });
+  }
+
+  /**
    * Return the most profitable products for the authenticated user over the last 30 days.
    * Uses OrderItem rows for full accuracy (multi-SKU orders included).
    *
@@ -394,6 +428,18 @@ ping() {
   async syncInventory(@Req() req: { user: { orgId: string; userId: string } }) {
     this.logger.log(`Manual inventory sync requested (orgId=${req.user.orgId})`);
     return this.amazonService.syncFbaInventory(req.user.orgId, req.user.userId);
+  }
+
+  /**
+   * Refresh estimated Amazon fees per product (Product Fees API).
+   * Runs at most once per 24h per org; returns skipped if already run today.
+   *
+   * Example: POST /api/amazon/fees-estimate/refresh
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Post('fees-estimate/refresh')
+  async refreshFeeEstimates(@Req() req: { user: { orgId: string } }) {
+    return this.amazonService.refreshFeeEstimatesForOrg(req.user.orgId);
   }
 
   /**

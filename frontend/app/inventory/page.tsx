@@ -10,6 +10,13 @@ type InventoryRow = {
   title: string | null;
   imageUrl: string | null;
   productUpdatedAt: string;
+  estimatedAmazonFeePerUnit: number | null;
+  estimatedReferralFeePerUnit: number | null;
+  estimatedFbaFeePerUnit: number | null;
+  estimatedAmazonFeeUpdatedAt: string | null;
+  currentListedPrice: number | null;
+  costOfGoods: number | null;
+  feeEstimateRawJson: unknown;
   availableQty: number | null;
   reservedQty: number | null;
   inboundQty: number | null;
@@ -330,7 +337,7 @@ export default function InventoryPage() {
         </div>
 
         <div className="overflow-hidden rounded-xl ring-1 ring-[var(--surface-border)]">
-          <div className="hidden md:grid grid-cols-[44px_1.2fr_0.9fr_1.8fr_0.6fr_0.6fr_0.6fr_0.6fr_0.6fr] gap-2 bg-[var(--surface)] px-4 py-3 text-xs font-semibold uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
+          <div className="hidden md:grid grid-cols-[44px_1.2fr_0.9fr_1.8fr_0.6fr_0.6fr_0.6fr_0.6fr_0.6fr_0.85fr] gap-2 bg-[var(--surface)] px-4 py-3 text-xs font-semibold uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
             <div />
             <div>SKU</div>
             <div>ASIN</div>
@@ -340,6 +347,7 @@ export default function InventoryPage() {
             <div className="text-center pl-3">Reserved</div>
             <div className="text-center pl-3">Inbound</div>
             <div className="text-center pl-3">Issue</div>
+            <div className="text-center pl-3">List price & profit</div>
           </div>
 
           {loading ? (
@@ -356,6 +364,14 @@ export default function InventoryPage() {
               {paginated.map((r) => {
                 const isSystem = SYSTEM_SKUS.has(r.sku);
                 const num = (n: number | null) => (n == null ? "—" : String(n));
+                const price = r.currentListedPrice != null ? Number(r.currentListedPrice) : null;
+                const cogs = r.costOfGoods != null ? Number(r.costOfGoods) : 0;
+                const amazonFee = r.estimatedAmazonFeePerUnit != null ? Number(r.estimatedAmazonFeePerUnit) : 0;
+                // Estimated profit = listed price - Amazon fees (total) - COGS; show when we have a listed price
+                const estProfit =
+                  price != null
+                    ? Math.round((price - amazonFee - cogs) * 100) / 100
+                    : null;
                 const marketplaceLine =
                   r.byMarketplace && r.byMarketplace.length > 0
                     ? r.byMarketplace
@@ -428,6 +444,12 @@ export default function InventoryPage() {
                             <span>Reserved {num(r.reservedQty)}</span>
                             <span>Inbound {num(r.inboundQty)}</span>
                             <span>Issue {num(r.issueQty)}</span>
+                            {r.currentListedPrice != null && (
+                              <span>Price: £{Number(r.currentListedPrice).toFixed(2)}</span>
+                            )}
+                            {estProfit != null && (
+                              <span>Est profit: £{estProfit.toFixed(2)}</span>
+                            )}
                           </div>
                         </div>
                         <svg className="h-5 w-5 shrink-0 text-[var(--muted-foreground)]" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
@@ -443,7 +465,7 @@ export default function InventoryPage() {
                       tabIndex={0}
                       onClick={() => setDetailRow(r)}
                       onKeyDown={(e) => e.key === "Enter" && setDetailRow(r)}
-                      className="hidden md:grid grid-cols-[44px_1.2fr_0.9fr_1.8fr_0.6fr_0.6fr_0.6fr_0.6fr_0.6fr] items-center gap-2 px-4 py-3 cursor-pointer hover:bg-[var(--foreground)]/5 transition-colors"
+                      className="hidden md:grid grid-cols-[44px_1.2fr_0.9fr_1.8fr_0.6fr_0.6fr_0.6fr_0.6fr_0.6fr_0.85fr] items-center gap-2 px-4 py-3 cursor-pointer hover:bg-[var(--foreground)]/5 transition-colors"
                     >
                       <div className="flex items-center justify-center">
                         {r.imageUrl ? (
@@ -488,6 +510,16 @@ export default function InventoryPage() {
                         <svg className="h-4 w-4 text-[var(--muted-foreground)]" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                         </svg>
+                      </div>
+                      <div className="text-left pl-3 text-sm text-[var(--foreground)] tabular-nums min-w-0">
+                        <div>
+                          <span className="font-semibold">Price: </span>
+                          {r.currentListedPrice != null ? `£${Number(r.currentListedPrice).toFixed(2)}` : "—"}
+                        </div>
+                        <div className="text-xs text-[var(--muted-foreground)] mt-0.5">
+                          <span className="font-semibold">Est profit: </span>
+                          {estProfit != null ? `£${estProfit.toFixed(2)}` : "—"}
+                        </div>
                       </div>
                     </div>
                   </Fragment>
@@ -568,6 +600,14 @@ export default function InventoryPage() {
               </div>
               <div className="flex-1 overflow-y-auto px-4 py-3 text-sm">
                 <InventoryDetailDrilldown rawJson={detailRow.rawJson} />
+                {detailRow.feeEstimateRawJson != null ? (
+                  <div className="mt-4 pt-4 border-t border-[var(--surface-border)]">
+                    <h3 className="font-medium text-[var(--foreground)] mb-2">Fee estimate raw response</h3>
+                    <pre className="bg-[var(--muted)]/30 rounded-lg p-3 text-xs overflow-x-auto overflow-y-auto max-h-64 whitespace-pre-wrap break-all">
+                      {JSON.stringify(detailRow.feeEstimateRawJson, null, 2)}
+                    </pre>
+                  </div>
+                ) : null}
               </div>
             </div>
           </div>

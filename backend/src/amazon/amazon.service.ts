@@ -431,6 +431,7 @@ export class AmazonService {
       const cogsTotal =
         cogsPerUnit * (Number.isFinite(qty) && qty > 0 ? qty : 1);
 
+      // amazonFeesTotal is stored as negative from SP-API; adding it subtracts the fee from profit.
       const computed =
         revenueTotal - taxChargedTotal - cogsTotal + amazonFeesTotal;
       if (!Number.isNaN(computed)) {
@@ -841,7 +842,8 @@ export class AmazonService {
         }
       }
 
-      // Parse fees from Finances API into per-item allocations when possible.
+      // When Finances API returns settled fee data we save it per order item (feesSource='finances').
+      // Past sales then show exact concluded fees and profit; we never overwrite settled with estimates.
       const feeByOrderItemId = new Map<string, number>();
       const feeBySku = new Map<string, number>();
 
@@ -855,10 +857,12 @@ export class AmazonService {
         map.set(key, prev + amount);
       };
 
-      const sumFeeComponentList = (list: any[] | undefined): number => {
+      const sumFeeOrChargeList = (list: any[] | undefined): number => {
         if (!Array.isArray(list)) return 0;
         return list.reduce((sum, fc) => {
-          const n = Number(fc?.FeeAmount?.CurrencyAmount ?? 0);
+          const feeAmt = fc?.FeeAmount?.CurrencyAmount ?? fc?.FeeAmount?.Amount;
+          const chargeAmt = fc?.ChargeAmount?.CurrencyAmount ?? fc?.ChargeAmount?.Amount ?? fc?.ChargeAmount;
+          const n = Number(feeAmt ?? chargeAmt ?? 0);
           return Number.isNaN(n) ? sum : sum + n;
         }, 0);
       };
@@ -885,8 +889,9 @@ export class AmazonService {
             const items = ev?.ShipmentItemList ?? [];
             for (const si of items) {
               const fee =
-                sumFeeComponentList(si?.ItemFeeList) +
-                sumFeeComponentList(si?.ItemFeeAdjustmentList);
+                sumFeeOrChargeList(si?.ItemFeeList) +
+                sumFeeOrChargeList(si?.ItemFeeAdjustmentList) +
+                sumFeeOrChargeList(si?.ItemChargeList);
               const orderItemId = si?.OrderItemId as string | undefined;
               const sku = si?.SellerSKU as string | undefined;
               if (fee !== 0) {
@@ -966,6 +971,7 @@ export class AmazonService {
         ? Number(selectedProduct.costOfGoods)
         : null;
       const cogsTotal = cogsPerUnit != null ? cogsPerUnit * quantity : null;
+      // amazonFeesTotal from Finances API is negative; adding it subtracts the fee from profit.
       const computedTotalProfit =
         cogsTotal != null
           ? totalAmount - taxChargedTotal - cogsTotal + amazonFeesTotal
@@ -1066,6 +1072,19 @@ export class AmazonService {
           } else if (totalItemRevenue > 0 && amazonFeesTotal !== 0) {
             itemFees = (revenueTotal / totalItemRevenue) * amazonFeesTotal;
           }
+          // If no actual fees from Finances API yet, use product's estimated fee (per unit × qty).
+          if (itemFees === 0 && sku) {
+            const productWithEst = await this.prisma.product.findUnique({
+              where: { userId_sku: { userId, sku } },
+              select: { estimatedAmazonFeePerUnit: true },
+            });
+            const estPerUnit = productWithEst?.estimatedAmazonFeePerUnit != null
+              ? Number(productWithEst.estimatedAmazonFeePerUnit)
+              : null;
+            if (estPerUnit != null && !Number.isNaN(estPerUnit)) {
+              itemFees = estPerUnit * quantityOrdered;
+            }
+          }
 
           // Attach to a real product for this SKU.
           const itemProduct = sku
@@ -1084,11 +1103,48 @@ export class AmazonService {
             : null;
           const cogsTotal =
             cogsPerUnit != null ? cogsPerUnit * quantityOrdered : null;
+          // itemFees (amazonFeesTotal) is negative from SP-API; adding it subtracts the fee from profit.
           const profit =
             cogsTotal != null
               ? revenueTotal - taxCharged - cogsTotal + itemFees
               : null;
-
+          const feesFromFinances =
+            (orderItemId && feeByOrderItemId.has(orderItemId)) || (sku && feeBySku.has(sku));
+          const existingItem = await this.prisma.orderItem.findUnique({
+            where: {
+              orderDbId_orderItemId: {
+                orderDbId: persistedOrder.id,
+                orderItemId,
+              },
+            },
+            select: { amazonFeesTotal: true, profit: true, feesSource: true },
+          });
+          const finalFees = Number.isNaN(itemFees) ? 0 : Number(itemFees.toFixed(2));
+          const finalProfit = profit != null ? Number(profit.toFixed(2)) : null;
+          const updateFeesAndProfit =
+            feesFromFinances || (existingItem?.feesSource as string) !== 'finances';
+          const updatePayload = {
+            userId,
+            productId: itemProduct.id,
+            marketplace: 'amazon',
+            orderId: amazonOrderId,
+            sku: sku || genericSku,
+            asin,
+            quantity: quantityOrdered,
+            revenueTotal,
+            shippingChargedTotal: Number.isNaN(shippingCharged) ? 0 : shippingCharged,
+            taxChargedTotal: Number.isNaN(taxCharged) ? 0 : taxCharged,
+            ...(updateFeesAndProfit
+              ? {
+                  amazonFeesTotal: finalFees,
+                  profit: finalProfit,
+                  feesSource: feesFromFinances ? 'finances' : 'estimate',
+                }
+              : {}),
+            cogsTotal,
+            rawResponse: it,
+            orderDate,
+          };
           await (this.prisma as any).orderItem.upsert({
             where: {
               orderDbId_orderItemId: {
@@ -1096,27 +1152,7 @@ export class AmazonService {
                 orderItemId,
               },
             },
-            update: {
-              userId,
-              productId: itemProduct.id,
-              marketplace: 'amazon',
-              orderId: amazonOrderId,
-              sku: sku || genericSku,
-              asin,
-              quantity: quantityOrdered,
-              revenueTotal,
-              shippingChargedTotal: Number.isNaN(shippingCharged)
-                ? 0
-                : shippingCharged,
-              taxChargedTotal: Number.isNaN(taxCharged) ? 0 : taxCharged,
-              amazonFeesTotal: Number.isNaN(itemFees)
-                ? 0
-                : Number(itemFees.toFixed(2)),
-              cogsTotal,
-              profit: profit != null ? Number(profit.toFixed(2)) : null,
-              rawResponse: it,
-              orderDate,
-            },
+            update: updatePayload,
             create: {
               userId,
               orderDbId: persistedOrder.id,
@@ -1128,15 +1164,12 @@ export class AmazonService {
               asin,
               quantity: quantityOrdered,
               revenueTotal,
-              shippingChargedTotal: Number.isNaN(shippingCharged)
-                ? 0
-                : shippingCharged,
+              shippingChargedTotal: Number.isNaN(shippingCharged) ? 0 : shippingCharged,
               taxChargedTotal: Number.isNaN(taxCharged) ? 0 : taxCharged,
-              amazonFeesTotal: Number.isNaN(itemFees)
-                ? 0
-                : Number(itemFees.toFixed(2)),
+              amazonFeesTotal: finalFees,
+              feesSource: feesFromFinances ? 'finances' : 'estimate',
               cogsTotal,
-              profit: profit != null ? Number(profit.toFixed(2)) : null,
+              profit: finalProfit,
               rawResponse: it,
               orderDate,
             },
@@ -1647,6 +1680,7 @@ export class AmazonService {
             ? null
             : cogsPerUnit * safeQty;
 
+        // amazonFeesTotal is negative from SP-API; adding it subtracts the fee from profit.
         const profit =
           cogsTotal == null
             ? null
@@ -1704,6 +1738,145 @@ export class AmazonService {
     };
   }
 
+  /**
+   * List order items for the org (most recent first). Each row uses stored amazonFeesTotal and profit:
+   * when Finances API has settled (feesSource='finances') those are exact concluded values for past sales.
+   */
+  async listOrders(orgId: string) {
+    const userIds = await this.getOrgMemberUserIds(orgId);
+    const items = await this.prisma.orderItem.findMany({
+      where: { userId: { in: userIds }, marketplace: 'amazon' },
+      orderBy: [{ orderDate: 'desc' }],
+      select: {
+        id: true,
+        orderId: true,
+        orderDate: true,
+        sku: true,
+        asin: true,
+        quantity: true,
+        revenueTotal: true,
+        taxChargedTotal: true,
+        amazonFeesTotal: true,
+        feesSource: true,
+        profit: true,
+        cogsTotal: true,
+        productId: true,
+        product: {
+          select: {
+            title: true,
+            imageUrl: true,
+            id: true,
+            estimatedAmazonFeePerUnit: true,
+            estimatedReferralFeePerUnit: true,
+            estimatedFbaFeePerUnit: true,
+          },
+        },
+      },
+    });
+
+    const productIds = [...new Set(items.map((i) => i.productId).filter(Boolean))];
+    const inventoryByProductId = new Map<
+      string,
+      { availableQty: number; totalQty: number }
+    >();
+    if (productIds.length > 0) {
+      const inv = await this.prisma.inventory.findMany({
+        where: { productId: { in: productIds } },
+        select: { productId: true, availableQty: true, totalQty: true },
+      });
+      for (const row of inv) {
+        inventoryByProductId.set(row.productId, {
+          availableQty: row.availableQty,
+          totalQty: row.totalQty,
+        });
+      }
+    }
+
+    const safeNum = (v: unknown): number => {
+      if (v == null) return 0;
+      if (typeof v === 'number' && Number.isFinite(v)) return v;
+      const o = v as { toNumber?: () => number; toString?: () => string };
+      if (o?.toNumber && typeof o.toNumber === 'function') return o.toNumber();
+      if (o?.toString && typeof o.toString === 'function') return Number(o.toString()) || 0;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : 0;
+    };
+
+    const toNum = (v: unknown): number | null => {
+      if (v == null) return null;
+      if (typeof v === 'number' && Number.isFinite(v)) return v;
+      const o = v as { toNumber?: () => number };
+      if (o?.toNumber && typeof o.toNumber === 'function') return o.toNumber();
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    };
+
+    return items.map((it) => {
+      const product = it.product as {
+        title: string | null;
+        imageUrl: string | null;
+        id: string;
+        estimatedAmazonFeePerUnit?: unknown;
+        estimatedReferralFeePerUnit?: unknown;
+        estimatedFbaFeePerUnit?: unknown;
+      } | null;
+      const inv = product ? inventoryByProductId.get(it.productId) : null;
+      const revenueTotal = safeNum(it.revenueTotal);
+      const taxChargedTotal = safeNum(it.taxChargedTotal);
+      const settledFees = safeNum(it.amazonFeesTotal);
+      const qty = safeNum(it.quantity) || 1;
+      const estPerUnit = product ? toNum(product.estimatedAmazonFeePerUnit) : null;
+      // Use settled Amazon fee when present (non-zero); else fall back to expected fee (estimated per unit × qty)
+      const feesForDisplay =
+        settledFees !== 0
+          ? settledFees
+          : estPerUnit != null && Number.isFinite(estPerUnit)
+            ? -Math.abs(estPerUnit * qty)
+            : 0;
+      const feesSource = (it as any).feesSource ?? null;
+      const estReferral = product ? toNum(product.estimatedReferralFeePerUnit) : null;
+      const estFba = product ? toNum(product.estimatedFbaFeePerUnit) : null;
+      const referralFeeTotal =
+        feesSource === 'estimate' && estReferral != null && Number.isFinite(estReferral)
+          ? Math.round(-Math.abs(estReferral * qty) * 100) / 100
+          : null;
+      const fbaFeeTotal =
+        feesSource === 'estimate' && estFba != null && Number.isFinite(estFba)
+          ? Math.round(-Math.abs(estFba * qty) * 100) / 100
+          : null;
+      const cogsTotal = it.cogsTotal != null ? safeNum(it.cogsTotal) : null;
+      // Profit = revenue - tax - COGS + fees (fees are negative, so + fees subtracts the cost)
+      const profit =
+        cogsTotal != null
+          ? revenueTotal - taxChargedTotal - cogsTotal + feesForDisplay
+          : null;
+      const salePrice = qty > 0 ? revenueTotal / qty : revenueTotal;
+      const roiPct =
+        profit != null && cogsTotal != null && cogsTotal > 0
+          ? (profit / cogsTotal) * 100
+          : null;
+      return {
+        id: it.id,
+        orderId: it.orderId,
+        orderDate: it.orderDate,
+        sku: it.sku,
+        asin: it.asin ?? null,
+        title: product?.title ?? null,
+        imageUrl: product?.imageUrl ?? null,
+        quantity: it.quantity,
+        salePrice: Math.round(salePrice * 100) / 100,
+        profit: profit != null ? Math.round(profit * 100) / 100 : null,
+        roiPct: roiPct != null ? Math.round(roiPct * 10) / 10 : null,
+        amazonFeesTotal: Number.isFinite(feesForDisplay) ? Math.round(feesForDisplay * 100) / 100 : 0,
+        referralFeeTotal,
+        fbaFeeTotal,
+        feesSource,
+        availableStock: inv?.availableQty ?? null,
+        totalStock: inv?.totalQty ?? null,
+      };
+    });
+  }
+
   async listInventory(orgId: string) {
     const userIds = await this.getOrgMemberUserIds(orgId);
     type InventoryProductRow = {
@@ -1713,6 +1886,8 @@ export class AmazonService {
       title: string | null;
       imageUrl: string | null;
       updatedAt: Date;
+      estimatedAmazonFeePerUnit: number | null;
+      estimatedAmazonFeeUpdatedAt: Date | null;
       inventory: {
         availableQty: number;
         reservedQty: number;
@@ -1744,6 +1919,13 @@ export class AmazonService {
         title: true,
         imageUrl: true,
         updatedAt: true,
+        estimatedAmazonFeePerUnit: true,
+        estimatedReferralFeePerUnit: true,
+        estimatedFbaFeePerUnit: true,
+        estimatedAmazonFeeUpdatedAt: true,
+        currentListedPrice: true,
+        costOfGoods: true,
+        feeEstimateRawJson: true,
         inventory: {
           select: {
             availableQty: true,
@@ -1820,6 +2002,13 @@ export class AmazonService {
       title: p.title,
       imageUrl: p.imageUrl,
       productUpdatedAt: p.updatedAt,
+      estimatedAmazonFeePerUnit: p.estimatedAmazonFeePerUnit != null ? Number(p.estimatedAmazonFeePerUnit) : null,
+      estimatedReferralFeePerUnit: (p as any).estimatedReferralFeePerUnit != null ? Number((p as any).estimatedReferralFeePerUnit) : null,
+      estimatedFbaFeePerUnit: (p as any).estimatedFbaFeePerUnit != null ? Number((p as any).estimatedFbaFeePerUnit) : null,
+      estimatedAmazonFeeUpdatedAt: p.estimatedAmazonFeeUpdatedAt ?? null,
+      currentListedPrice: (p as any).currentListedPrice != null ? Number((p as any).currentListedPrice) : null,
+      costOfGoods: (p as any).costOfGoods != null ? Number((p as any).costOfGoods) : null,
+      feeEstimateRawJson: (p as any).feeEstimateRawJson ?? null,
       availableQty: p.inventory?.availableQty ?? null,
       reservedQty: p.inventory?.reservedQty ?? null,
       inboundQty: p.inventory?.inboundQty ?? null,
@@ -2365,8 +2554,454 @@ try {
 
 } // closes: syncFbaInventory
 
+  /**
+   * Refresh estimated Amazon fees per product and current listed price.
+   * - Fetches this seller's current listed price from Listings API and upserts Product.currentListedPrice.
+   * - Calls Product Fees API with that price (or sold price when we have orders) and saves estimated referral/FBA/total.
+   * Estimated fees and estimated profit (based on current listed price + fee estimate) are distinct from concluded
+   * fees and profit (actual amounts after sale, from Finances API / order items).
+   */
+  async refreshFeeEstimatesForOrg(orgId: string): Promise<{
+    skipped?: boolean;
+    reason?: string;
+    updatedCount?: number;
+    errorCount?: number;
+    skippedCount?: number;
+    total?: number;
+    processed?: number;
+  }> {
+    // Optional: throttle to once per 24h (uncomment to re-enable)
+    // const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+    // const org = await this.prisma.organization.findUnique({
+    //   where: { id: orgId },
+    //   select: { lastFeesEstimateAt: true },
+    // });
+    // if (org?.lastFeesEstimateAt) {
+    //   const elapsed = Date.now() - org.lastFeesEstimateAt.getTime();
+    //   if (elapsed < ONE_DAY_MS) {
+    //     return { skipped: true, reason: 'already_run_today' };
+    //   }
+    // }
 
-  
+    const credentials = await this.getAmazonCredentialsForOrg(orgId);
+    const userIds = await this.getOrgMemberUserIds(orgId);
+    const regionMarketplaceIds: Record<string, string[]> = {
+      eu: ['A1F83G8C2ARO7P', 'A1PA6795UKMFR9', 'A13V1IB3VIYZZH'],
+      na: ['ATVPDKIKX0DER'],
+      fe: ['A1VC38T7YXB528'],
+    };
+    const marketplaceId =
+      (regionMarketplaceIds[credentials.region ?? 'na'] ?? regionMarketplaceIds.na)[0] ?? 'ATVPDKIKX0DER';
+    const marketplaceIds = regionMarketplaceIds[credentials.region ?? 'eu'] ?? regionMarketplaceIds.eu;
+
+    // Need sellerId for Listings API: getListingsItem returns this seller's own listing and their listed price (not other sellers' or buy box).
+    const account = await this.prisma.sellerAccount.findFirst({
+      where: { userId: { in: userIds }, marketplace: 'amazon' },
+      orderBy: { updatedAt: 'desc' },
+      select: { sellerId: true },
+    });
+    const sellerId = account?.sellerId ?? null;
+
+    const batchSize = 50;
+    const totalProductCount = await this.prisma.product.count({
+      where: { userId: { in: userIds }, sku: { not: '' } },
+    });
+
+    // Load all order items for the org once (like FBA fetches all pages); sold price is then available for every batch.
+    const orderItems = await this.prisma.orderItem.findMany({
+      where: { userId: { in: userIds } },
+      select: { productId: true, revenueTotal: true, quantity: true },
+    });
+    const soldPriceByProductId = new Map<string, number[]>();
+    for (const item of orderItems) {
+      const qty = Number(item.quantity) || 1;
+      const rev = Number(item.revenueTotal) || 0;
+      const unitPrice = rev / qty;
+      if (!Number.isFinite(unitPrice) || unitPrice <= 0) continue;
+      const arr = soldPriceByProductId.get(item.productId) ?? [];
+      arr.push(unitPrice);
+      soldPriceByProductId.set(item.productId, arr);
+    }
+    const defaultListingPrice = 15;
+    const getSoldPrice = (productId: string): number | null => {
+      const arr = soldPriceByProductId.get(productId);
+      if (!arr?.length) return null;
+      const sum = arr.reduce((a, b) => a + b, 0);
+      const avg = sum / arr.length;
+      return Number.isFinite(avg) && avg > 0 ? Math.round(avg * 100) / 100 : null;
+    };
+
+    const listingCurrency = credentials.region === 'eu' ? 'GBP' : credentials.region === 'fe' ? 'JPY' : 'USD';
+    const delayMs = 2000;
+    const retryWaitMs = 60000;
+    let updatedCount = 0;
+    let errorCount = 0;
+    let totalProcessed = 0;
+
+    // Paginate until all products are processed (same pattern as FBA inventory: loop until no more pages).
+    while (true) {
+      const neverUpdated = await this.prisma.product.findMany({
+        where: { userId: { in: userIds }, sku: { not: '' }, estimatedAmazonFeeUpdatedAt: null },
+        orderBy: { updatedAt: 'asc' },
+        take: batchSize,
+        select: { id: true, sku: true, asin: true, currentListedPrice: true },
+      });
+      let products: Array<{ id: string; sku: string; asin: string | null; currentListedPrice: unknown }> = neverUpdated;
+      if (products.length < batchSize) {
+        const take = batchSize - products.length;
+        const idsToExclude = products.map((p) => p.id);
+        const oldestUpdated = await this.prisma.product.findMany({
+          where: {
+            userId: { in: userIds },
+            sku: { not: '' },
+            estimatedAmazonFeeUpdatedAt: { not: null },
+            id: { notIn: idsToExclude },
+          },
+          orderBy: { estimatedAmazonFeeUpdatedAt: 'asc' },
+          take,
+          select: { id: true, sku: true, asin: true, currentListedPrice: true },
+        });
+        products = [...products, ...oldestUpdated];
+      }
+      if (products.length === 0) break;
+
+      const currentListedPriceByProductId = new Map<string, number>();
+      for (const p of products) {
+        const raw = (p as any).currentListedPrice;
+        if (raw != null) {
+          const n = typeof raw === 'number' && Number.isFinite(raw) ? raw : Number(String(raw));
+          if (Number.isFinite(n) && n > 0) currentListedPriceByProductId.set(p.id, n);
+        }
+      }
+      const toProcess = products.slice(0, batchSize);
+
+      for (const product of toProcess) {
+      const callOnce = async (useAsin: boolean): Promise<boolean> => {
+        // Fetch this seller's current listed price from Listings API when possible; upsert so DB stays in sync when price changes.
+        let currentListedPriceToSave: number | null = null;
+        if (sellerId) {
+          try {
+            const listingRes = await this.spApiClient.getListingsItem(
+              credentials,
+              sellerId,
+              product.sku,
+              [marketplaceId],
+              ['summaries', 'offers', 'attributes'],
+            );
+            const parsed = this.parseListingsItemPrice(listingRes as any);
+            if (parsed != null && parsed > 0) currentListedPriceToSave = parsed;
+          } catch {
+            // Listings API may 403/404 for some SKUs; keep existing currentListedPrice if fetch fails
+          }
+        }
+        // For fee estimate: sold price > just-fetched listing price > stored currentListedPrice > default (so referral is never understated).
+        const soldPrice = getSoldPrice(product.id);
+        const storedListedPrice = currentListedPriceByProductId.get(product.id) ?? null;
+        const listingPriceAmount =
+          soldPrice ?? currentListedPriceToSave ?? storedListedPrice ?? defaultListingPrice;
+
+        const params = {
+          marketplaceId,
+          isAmazonFulfilled: true,
+          listingPriceAmount,
+          listingPriceCurrency: listingCurrency,
+        };
+        const res = useAsin && product.asin
+          ? ((await this.spApiClient.getMyFeesEstimateForASIN(
+              credentials,
+              product.asin,
+              params,
+            )) as any)
+          : ((await this.spApiClient.getMyFeesEstimateForSKU(
+              credentials,
+              product.sku,
+              params,
+            )) as any);
+        const breakdown = this.parseFeesEstimateBreakdown(res);
+        const hasValidTotal = breakdown.total != null && !Number.isNaN(breakdown.total) && breakdown.total >= 0;
+        // Always persist the price we used for the fee estimate so current_listed_price is never left null.
+        const feeResult = (res as any)?.payload?.FeesEstimateResult ?? (res as any)?.FeesEstimateResult;
+        const priceInFeeRes = feeResult?.FeesEstimateIdentifier?.PriceToEstimateFees?.ListingPrice
+          ?? feeResult?.feesEstimateIdentifier?.priceToEstimateFees?.listingPrice;
+        const amountFromFeeRaw = priceInFeeRes?.Amount ?? priceInFeeRes?.amount;
+        const amountFromFee = typeof amountFromFeeRaw === 'number' && Number.isFinite(amountFromFeeRaw)
+          ? amountFromFeeRaw
+          : typeof amountFromFeeRaw === 'string'
+            ? parseFloat(amountFromFeeRaw)
+            : null;
+        const listingPriceToPersist =
+          currentListedPriceToSave
+          ?? (amountFromFee != null && !Number.isNaN(amountFromFee) && amountFromFee > 0 ? amountFromFee : null)
+          ?? currentListedPriceByProductId.get(product.id)
+          ?? listingPriceAmount;
+        // Don't persist the default 15 when we have no real listing price (so DB stays null/real values instead of filled with 15).
+        const persistPrice = listingPriceToPersist !== defaultListingPrice
+          || currentListedPriceToSave != null
+          || currentListedPriceByProductId.has(product.id);
+        await this.prisma.product.update({
+          where: { id: product.id },
+          data: {
+            feeEstimateRawJson: res ?? undefined,
+            ...(persistPrice ? { currentListedPrice: listingPriceToPersist } : {}),
+            ...(hasValidTotal
+              ? {
+                  estimatedAmazonFeePerUnit: breakdown.total,
+                  estimatedReferralFeePerUnit: breakdown.referralFee ?? undefined,
+                  estimatedFbaFeePerUnit: breakdown.fbaFee ?? undefined,
+                  estimatedAmazonFeeUpdatedAt: new Date(),
+                }
+              : {}),
+          },
+        });
+        return !!hasValidTotal;
+      };
+
+      try {
+        let ok = product.asin ? await callOnce(true) : await callOnce(false);
+        if (!ok && product.asin) ok = await callOnce(false);
+        if (ok) updatedCount += 1;
+        else if (!ok) errorCount += 1;
+      } catch (e) {
+        const msg = (e as Error).message ?? '';
+        const is429 = msg.includes('(429)') || msg.includes('QuotaExceeded');
+        if (is429) {
+          this.logger.warn(
+            `[refreshFeeEstimatesForOrg] SKU ${product.sku} rate limited (429); waiting ${retryWaitMs / 1000}s before retry…`,
+          );
+          await new Promise((r) => setTimeout(r, retryWaitMs));
+          try {
+            let ok = product.asin ? await callOnce(true) : await callOnce(false);
+            if (!ok && product.asin) ok = await callOnce(false);
+            if (ok) updatedCount += 1;
+            else errorCount += 1;
+          } catch (retryErr) {
+            this.logger.warn(
+              `[refreshFeeEstimatesForOrg] SKU ${product.sku} failed after retry: ${(retryErr as Error).message}`,
+            );
+            errorCount += 1;
+          }
+        } else {
+          this.logger.warn(
+            `[refreshFeeEstimatesForOrg] SKU ${product.sku} failed: ${msg}`,
+          );
+          errorCount += 1;
+        }
+      }
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+
+      totalProcessed += toProcess.length;
+      if (toProcess.length < batchSize) break;
+    }
+
+    await this.prisma.organization.update({
+      where: { id: orgId },
+      data: { lastFeesEstimateAt: new Date() },
+    });
+
+    const skippedCount = Math.max(0, totalProductCount - totalProcessed);
+    return { updatedCount, errorCount, skippedCount, total: totalProductCount, processed: totalProcessed };
+  }
+
+  /** Parse total fee amount from Product Fees API (referral + FBA + all components).
+   * Prefer summing FeeDetailList so we include every component (referral, FBA, etc.);
+   * use TotalFeesEstimate only when FeeDetailList is empty (some responses may only have the total).
+   */
+  private parseFeesEstimateAmount(res: any): number | null {
+    const result = res?.payload?.FeesEstimateResult ?? res?.FeesEstimateResult ?? res;
+    if (!result) return null;
+    const fees = result.FeesEstimate ?? result.feesEstimate;
+    if (!fees) return null;
+
+    const moneyToNum = (m: any): number => {
+      if (m == null) return 0;
+      const a = m.Amount ?? m.amount ?? m.CurrencyAmount ?? (typeof m.CurrencyAmount === 'object' ? m.CurrencyAmount?.Amount : null);
+      if (typeof a === 'number' && Number.isFinite(a)) return a;
+      if (typeof a === 'string') return parseFloat(a) || 0;
+      return 0;
+    };
+
+    const sumFeeDetailList = (list: any[] | undefined): number => {
+      if (!Array.isArray(list)) return 0;
+      let sum = 0;
+      for (const item of list) {
+        const included = item.IncludedFeeDetailList ?? item.includedFeeDetailList;
+        if (Array.isArray(included) && included.length > 0) {
+          sum += sumFeeDetailList(included);
+        } else {
+          sum += moneyToNum(item.FinalFee ?? item.finalFee ?? item.FeeAmount ?? item.feeAmount);
+        }
+      }
+      return sum;
+    };
+
+    const list = fees.FeeDetailList ?? fees.feeDetailList;
+    if (Array.isArray(list) && list.length > 0) {
+      const fromDetails = sumFeeDetailList(list);
+      if (Number.isFinite(fromDetails)) return fromDetails;
+    }
+
+    const total = fees.TotalFeesEstimate ?? fees.totalFeesEstimate;
+    if (total != null) {
+      const amt = moneyToNum(total);
+      if (Number.isFinite(amt)) return amt;
+    }
+    return null;
+  }
+
+  /** Parse fee breakdown from Product Fees API: total, referral fee, and FBA fee from FeeDetailList. */
+  private parseFeesEstimateBreakdown(res: any): {
+    total: number | null;
+    referralFee: number | null;
+    fbaFee: number | null;
+  } {
+    const result = res?.payload?.FeesEstimateResult ?? res?.FeesEstimateResult ?? res;
+    if (!result) return { total: null, referralFee: null, fbaFee: null };
+    const fees = result.FeesEstimate ?? result.feesEstimate;
+    if (!fees) return { total: null, referralFee: null, fbaFee: null };
+
+    const moneyToNum = (m: any): number => {
+      if (m == null) return 0;
+      const a = m.Amount ?? m.amount ?? m.CurrencyAmount ?? (typeof m.CurrencyAmount === 'object' ? m.CurrencyAmount?.Amount : null);
+      if (typeof a === 'number' && Number.isFinite(a)) return a;
+      if (typeof a === 'string') return parseFloat(a) || 0;
+      return 0;
+    };
+
+    const list = fees.FeeDetailList ?? fees.feeDetailList;
+    let total: number | null = null;
+    let referralFee: number | null = null;
+    let fbaFee: number | null = null;
+
+    if (Array.isArray(list) && list.length > 0) {
+      let sum = 0;
+      for (const item of list) {
+        const feeType = (item.FeeType ?? item.feeType ?? '') as string;
+        const amount = moneyToNum(item.FinalFee ?? item.finalFee ?? item.FeeAmount ?? item.feeAmount);
+        if (Number.isFinite(amount)) sum += amount;
+        if (feeType === 'ReferralFee') referralFee = amount;
+        else if (feeType === 'FBAFees') fbaFee = amount;
+      }
+      total = sum;
+    } else {
+      const totalEst = fees.TotalFeesEstimate ?? fees.totalFeesEstimate;
+      if (totalEst != null) total = moneyToNum(totalEst);
+    }
+
+    return { total: total != null && Number.isFinite(total) ? total : null, referralFee, fbaFee };
+  }
+
+  /** Parse current listing price from Listings Items API getListingsItem response (for pre-sale fee estimate). */
+  private parseListingsItemPrice(res: any): number | null {
+    if (!res) return null;
+    const root = res.payload ?? res;
+    const extractAmount = (p: any): number | null => {
+      if (p == null) return null;
+      const amount =
+        p.amount ?? p.Amount ?? p.value ?? p.Value
+        ?? p.CurrencyAmount?.Amount ?? p.CurrencyAmount?.amount
+        ?? (typeof p.CurrencyAmount === 'object' && p.CurrencyAmount != null
+          ? (p.CurrencyAmount.Amount ?? p.CurrencyAmount.amount) : null);
+      if (typeof amount === 'number' && Number.isFinite(amount)) return amount;
+      if (typeof amount === 'string') return parseFloat(amount) || null;
+      return null;
+    };
+    const offers = root.offers ?? root.Offers;
+    if (Array.isArray(offers)) {
+      for (const o of offers) {
+        const price = o?.price ?? o?.Price;
+        const amt = extractAmount(price);
+        if (amt != null && amt > 0) return amt;
+      }
+    }
+    const summaries = root.summaries ?? root.Summaries;
+    if (Array.isArray(summaries)) {
+      for (const s of summaries) {
+        const listPrice = s?.list_price ?? s?.listPrice ?? s?.listingPrice;
+        if (Array.isArray(listPrice)) {
+          for (const lp of listPrice) {
+            const v = lp?.value ?? lp?.amount ?? lp?.Value ?? lp?.Amount;
+            if (typeof v === 'number' && Number.isFinite(v) && v > 0) return v;
+            if (typeof v === 'string') { const n = parseFloat(v); if (Number.isFinite(n) && n > 0) return n; }
+          }
+        }
+      }
+    }
+    const attrs = root.attributes ?? root.Attributes;
+    if (attrs && typeof attrs === 'object') {
+      const listPrice = attrs.list_price ?? attrs.listPrice ?? attrs.listingPrice;
+      if (Array.isArray(listPrice) && listPrice.length > 0) {
+        const v = listPrice[0]?.value ?? listPrice[0]?.amount;
+        if (typeof v === 'number' && Number.isFinite(v)) return v;
+        if (typeof v === 'string') return parseFloat(v) || null;
+      }
+    }
+    const found = this.findFirstPositiveAmount(root);
+    if (found != null) return found;
+    return null;
+  }
+
+  /** Deep-search for a numeric amount/price in JSON (fallback when Listings API structure varies). Only accepts values that look like prices (0.01–100000). */
+  private findFirstPositiveAmount(obj: any, depth = 0): number | null {
+    if (depth > 10 || obj == null) return null;
+    const accept = (n: number) => Number.isFinite(n) && n >= 0.01 && n <= 100000;
+    if (typeof obj === 'number' && accept(obj)) return obj;
+    if (typeof obj !== 'object') return null;
+    const keys = ['amount', 'Amount', 'value', 'Value'];
+    for (const k of keys) {
+      if (Object.prototype.hasOwnProperty.call(obj, k)) {
+        const v = obj[k];
+        if (typeof v === 'number' && accept(v)) return v;
+        if (typeof v === 'string') { const n = parseFloat(v); if (accept(n)) return n; }
+      }
+    }
+    for (const v of Object.values(obj)) {
+      const n = this.findFirstPositiveAmount(v, depth + 1);
+      if (n != null) return n;
+    }
+    return null;
+  }
+
+  /** Dev: return raw Product Fees API response for one SKU or ASIN to debug fee structure. */
+  async devGetFeesEstimateRaw(
+    orgId: string,
+    opts: { sku?: string; asin?: string; listingPrice?: number; save?: boolean },
+  ): Promise<unknown> {
+    const credentials = await this.getAmazonCredentialsForOrg(orgId);
+    const regionMarketplaceIds: Record<string, string[]> = {
+      eu: ['A1F83G8C2ARO7P'],
+      na: ['ATVPDKIKX0DER'],
+      fe: ['A1VC38T7YXB528'],
+    };
+    const marketplaceId = (regionMarketplaceIds[credentials.region ?? 'na'] ?? regionMarketplaceIds.na)[0] ?? 'ATVPDKIKX0DER';
+    const listingPriceAmount = opts.listingPrice ?? 15;
+    const params = { marketplaceId, isAmazonFulfilled: true, listingPriceAmount, listingPriceCurrency: 'GBP' as const };
+    const res = opts.asin
+      ? await this.spApiClient.getMyFeesEstimateForASIN(credentials, opts.asin, params)
+      : await this.spApiClient.getMyFeesEstimateForSKU(credentials, opts.sku!, params);
+    const parsed = this.parseFeesEstimateAmount(res as any);
+    const result = (res as any)?.payload?.FeesEstimateResult ?? (res as any)?.FeesEstimateResult;
+    const fees = result?.FeesEstimate ?? result?.feesEstimate;
+    const detailList = fees?.FeeDetailList ?? fees?.feeDetailList;
+    const totalEst = fees?.TotalFeesEstimate ?? fees?.totalFeesEstimate;
+    const summary = {
+      hasFeeDetailList: Array.isArray(detailList) && detailList.length > 0,
+      feeDetailListLength: Array.isArray(detailList) ? detailList.length : 0,
+      totalFeesEstimateAmount: totalEst != null ? (totalEst.Amount ?? totalEst.amount ?? totalEst.CurrencyAmount) : null,
+      parsedAmount: parsed,
+    };
+    const out = { raw: res, parsedAmount: parsed, _summary: summary };
+    if (opts.save) {
+      const path = require('path');
+      const fs = require('fs');
+      const filePath = path.join(process.cwd(), 'fee-estimate-debug.json');
+      fs.writeFileSync(filePath, JSON.stringify(out, null, 2), 'utf8');
+      this.logger.log(`[devGetFeesEstimateRaw] Wrote ${filePath}`);
+      return { ...out, savedTo: filePath };
+    }
+    return out;
+  }
+
   async backfillOrderItems(userId: string, days = 30) {
     const credentials = await this.getAmazonCredentialsForUser(userId);
 
@@ -2430,10 +3065,12 @@ try {
         if (!key) return;
         map.set(key, (map.get(key) ?? 0) + amount);
       };
-      const sumFeeComponentList = (list: any[] | undefined): number => {
+      const sumFeeOrChargeList = (list: any[] | undefined): number => {
         if (!Array.isArray(list)) return 0;
         return list.reduce((sum, fc) => {
-          const n = Number(fc?.FeeAmount?.CurrencyAmount ?? 0);
+          const feeAmt = fc?.FeeAmount?.CurrencyAmount ?? fc?.FeeAmount?.Amount;
+          const chargeAmt = fc?.ChargeAmount?.CurrencyAmount ?? fc?.ChargeAmount?.Amount ?? fc?.ChargeAmount;
+          const n = Number(feeAmt ?? chargeAmt ?? 0);
           return Number.isNaN(n) ? sum : sum + n;
         }, 0);
       };
@@ -2485,8 +3122,9 @@ try {
           const items = ev?.ShipmentItemList ?? [];
           for (const si of items) {
             const fee =
-              sumFeeComponentList(si?.ItemFeeList) +
-              sumFeeComponentList(si?.ItemFeeAdjustmentList);
+              sumFeeOrChargeList(si?.ItemFeeList) +
+              sumFeeOrChargeList(si?.ItemFeeAdjustmentList) +
+              sumFeeOrChargeList(si?.ItemChargeList);
             const orderItemId = si?.OrderItemId as string | undefined;
             const sku = si?.SellerSKU as string | undefined;
             if (fee !== 0) {
@@ -2534,6 +3172,19 @@ try {
         } else if (totalItemRevenue > 0 && amazonFeesTotal !== 0) {
           itemFees = (revenueTotal / totalItemRevenue) * amazonFeesTotal;
         }
+        // If no actual fees from Finances API yet, use product's estimated fee (per unit × qty).
+        if (itemFees === 0 && sku) {
+          const productWithEst = await this.prisma.product.findUnique({
+            where: { userId_sku: { userId, sku } },
+            select: { estimatedAmazonFeePerUnit: true },
+          });
+          const estPerUnit = productWithEst?.estimatedAmazonFeePerUnit != null
+            ? Number(productWithEst.estimatedAmazonFeePerUnit)
+            : null;
+          if (estPerUnit != null && !Number.isNaN(estPerUnit)) {
+            itemFees = estPerUnit * quantityOrdered;
+          }
+        }
 
         const itemProduct = sku
           ? await this.prisma.product.upsert({
@@ -2563,35 +3214,45 @@ try {
           cogsTotal != null
             ? revenueTotal - taxCharged - cogsTotal + itemFees
             : null;
-
+        const feesFromFinances =
+          (orderItemId && feeByOrderItemId.has(orderItemId)) || (sku && feeBySku.has(sku));
+        const existingItem = await this.prisma.orderItem.findUnique({
+          where: {
+            orderDbId_orderItemId: { orderDbId: ord.id, orderItemId },
+          },
+          select: { amazonFeesTotal: true, profit: true, feesSource: true },
+        });
+        const finalFees = Number.isNaN(itemFees) ? 0 : Number(itemFees.toFixed(2));
+        const finalProfit = profit != null ? Number(profit.toFixed(2)) : null;
+        const updateFeesAndProfit =
+          feesFromFinances || (existingItem?.feesSource as string) !== 'finances';
+        const updatePayload = {
+          userId,
+          productId: itemProduct.id,
+          marketplace: 'amazon',
+          orderId: amazonOrderId,
+          sku: sku || 'AMAZON_GENERIC',
+          asin,
+          quantity: quantityOrdered,
+          revenueTotal,
+          shippingChargedTotal: Number.isNaN(shippingCharged) ? 0 : shippingCharged,
+          taxChargedTotal: Number.isNaN(taxCharged) ? 0 : taxCharged,
+          ...(updateFeesAndProfit
+            ? {
+                amazonFeesTotal: finalFees,
+                profit: finalProfit,
+                feesSource: feesFromFinances ? 'finances' : 'estimate',
+              }
+            : {}),
+          cogsTotal,
+          rawResponse: it,
+          orderDate: ord.orderDate,
+        };
         await (this.prisma as any).orderItem.upsert({
           where: {
-            orderDbId_orderItemId: {
-              orderDbId: ord.id,
-              orderItemId,
-            },
+            orderDbId_orderItemId: { orderDbId: ord.id, orderItemId },
           },
-          update: {
-            userId,
-            productId: itemProduct.id,
-            marketplace: 'amazon',
-            orderId: amazonOrderId,
-            sku: sku || 'AMAZON_GENERIC',
-            asin,
-            quantity: quantityOrdered,
-            revenueTotal,
-            shippingChargedTotal: Number.isNaN(shippingCharged)
-              ? 0
-              : shippingCharged,
-            taxChargedTotal: Number.isNaN(taxCharged) ? 0 : taxCharged,
-            amazonFeesTotal: Number.isNaN(itemFees)
-              ? 0
-              : Number(itemFees.toFixed(2)),
-            cogsTotal,
-            profit: profit != null ? Number(profit.toFixed(2)) : null,
-            rawResponse: it,
-            orderDate: ord.orderDate,
-          },
+          update: updatePayload,
           create: {
             userId,
             orderDbId: ord.id,
@@ -2603,15 +3264,12 @@ try {
             asin,
             quantity: quantityOrdered,
             revenueTotal,
-            shippingChargedTotal: Number.isNaN(shippingCharged)
-              ? 0
-              : shippingCharged,
+            shippingChargedTotal: Number.isNaN(shippingCharged) ? 0 : shippingCharged,
             taxChargedTotal: Number.isNaN(taxCharged) ? 0 : taxCharged,
-            amazonFeesTotal: Number.isNaN(itemFees)
-              ? 0
-              : Number(itemFees.toFixed(2)),
+            amazonFeesTotal: finalFees,
+            feesSource: feesFromFinances ? 'finances' : 'estimate',
             cogsTotal,
-            profit: profit != null ? Number(profit.toFixed(2)) : null,
+            profit: finalProfit,
             rawResponse: it,
             orderDate: ord.orderDate,
           },
