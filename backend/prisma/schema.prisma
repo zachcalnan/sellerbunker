@@ -24,6 +24,7 @@ model User {
   products       Product[]
   purchases      Purchase[]
   sellerAccounts SellerAccount[]
+  shipments      Shipment[]
   activeOrg      Organization?            @relation("ActiveOrg", fields: [activeOrgId], references: [id])
 
   @@map("users")
@@ -217,6 +218,36 @@ model InventoryByMarketplace {
   @@map("inventory_by_marketplace")
 }
 
+
+model Shipment {
+  id                                String    @id @default(uuid())
+  userId                            String    @map("user_id")
+  shipmentId                        String    @map("shipment_id")
+  shipmentName                      String?   @map("shipment_name")
+  shipmentStatus                    String?   @map("shipment_status")
+  destinationFulfillmentCenterId    String?   @map("destination_fulfillment_center_id")
+  createdDate                       DateTime? @map("created_date")
+  lastUpdatedDate                   DateTime? @map("last_updated_date")
+  unitsSent                         Int       @default(0) @map("units_sent")
+  unitsReceived                     Int       @default(0) @map("units_received")
+  unitsDamaged                      Int       @default(0) @map("units_damaged")
+  unitsDisposed                     Int       @default(0) @map("units_disposed")
+  unitsMissing                      Int       @default(0) @map("units_missing")
+  pickupDate                        DateTime? @map("pickup_date")
+  transportStatus                   String?   @map("transport_status")
+  deliveryDate                      DateTime? @map("delivery_date")
+  damageClosedDate                  DateTime? @map("damage_closed_date")
+  checkInDurationDays               Int?      @map("check_in_duration_days")
+  checkedInDate                     DateTime? @map("checked_in_date")
+  checkedInDateIsClosedDate         Boolean?  @map("checked_in_date_is_closed_date")
+  createdAt                         DateTime  @default(now()) @map("created_at")
+  updatedAt                         DateTime  @updatedAt @map("updated_at")
+  user                              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, shipmentId])
+  @@index([userId])
+  @@map("shipments")
+}
 
 model Purchase {
   id                 String   @id @default(uuid())

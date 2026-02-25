@@ -2176,6 +2176,331 @@ export class AmazonService {
   }
 
   /**
+   * List FBA inbound shipments for the org (from DB).
+   */
+  async listShipments(orgId: string) {
+    const userIds = await this.getOrgMemberUserIds(orgId);
+    const rows = await this.prisma.shipment.findMany({
+      where: { userId: { in: userIds } },
+      orderBy: [{ createdDate: 'desc' }, { updatedAt: 'desc' }],
+    });
+    return rows.map((s) => ({
+      id: s.id,
+      shipmentId: s.shipmentId,
+      shipmentName: s.shipmentName ?? null,
+      shipmentStatus: s.shipmentStatus ?? null,
+      destinationFulfillmentCenterId: s.destinationFulfillmentCenterId ?? null,
+      createdDate: s.createdDate?.toISOString() ?? null,
+      lastUpdatedDate: s.lastUpdatedDate?.toISOString() ?? null,
+      unitsSent: s.unitsSent,
+      unitsReceived: s.unitsReceived,
+      unitsDamaged: s.unitsDamaged,
+      unitsDisposed: s.unitsDisposed,
+      unitsMissing: s.unitsMissing,
+      pickupDate: s.pickupDate?.toISOString() ?? null,
+      transportStatus: s.transportStatus ?? null,
+      deliveryDate: s.deliveryDate?.toISOString() ?? null,
+      damageClosedDate: s.damageClosedDate?.toISOString() ?? null,
+      checkInDurationDays: s.checkInDurationDays ?? null,
+      checkedInDate: s.checkedInDate?.toISOString() ?? null,
+      checkedInDateIsClosedDate: s.checkedInDateIsClosedDate ?? null,
+    }));
+  }
+
+  /**
+   * Sync FBA inbound shipments from SP-API and upsert into shipments table.
+   * Returns raw API payloads for debugging (getShipments response per page).
+   */
+  async syncShipments(orgId: string, preferredUserId?: string): Promise<{
+    synced: number;
+    errors: string[];
+    rawResponses?: unknown[];
+  }> {
+    const credentials = await this.getAmazonCredentialsForOrg(orgId, preferredUserId);
+    const userIds = await this.getOrgMemberUserIds(orgId);
+    const account =
+      preferredUserId && userIds.includes(preferredUserId)
+        ? await this.prisma.sellerAccount.findUnique({
+            where: {
+              userId_marketplace: { userId: preferredUserId, marketplace: 'amazon' },
+            },
+          })
+        : await this.prisma.sellerAccount.findFirst({
+            where: { userId: { in: userIds }, marketplace: 'amazon' },
+            orderBy: { updatedAt: 'desc' },
+          });
+    const ownerUserId = account?.userId ?? userIds[0];
+    if (!ownerUserId) {
+      return { synced: 0, errors: ['No Amazon account found for org'] };
+    }
+
+    const errors: string[] = [];
+    const rawResponses: unknown[] = [];
+    let synced = 0;
+    const throttleMs = Math.max(200, Number(this.configService.get<string>('SPAPI_THROTTLE_MS')) || 800);
+
+    const parseDate = (v: unknown): Date | null => {
+      if (v == null) return null;
+      if (typeof v === 'string') {
+        const d = new Date(v);
+        return Number.isNaN(d.getTime()) ? null : d;
+      }
+      if (typeof v === 'number' && !Number.isNaN(v)) {
+        const ms = v > 1e12 ? v : v * 1000;
+        const d = new Date(ms);
+        return Number.isNaN(d.getTime()) ? null : d;
+      }
+      if (v instanceof Date) return Number.isNaN(v.getTime()) ? null : v;
+      if (typeof v === 'object' && v !== null) {
+        const o = v as Record<string, unknown>;
+        const s = o.value ?? o.date ?? o.iso ?? o.Value ?? o.Date ?? o.ISO ?? o.__date__;
+        if (s != null) return parseDate(s);
+      }
+      return null;
+    };
+    const toInt = (v: unknown): number => {
+      if (v == null) return 0;
+      if (typeof v === 'number' && Number.isInteger(v)) return v;
+      const n = parseInt(String(v), 10);
+      return Number.isNaN(n) ? 0 : n;
+    };
+
+    // Phase 1 requires the first getShipments request to specify every status; otherwise the API won't return all shipment IDs.
+    // Single source of truth for all FBA inbound statuses (comma-separated in request).
+    const ALL_SHIPMENT_STATUSES = [
+      'WORKING',
+      'READY_TO_SHIP',
+      'SHIPPED',
+      'IN_TRANSIT',
+      'DELIVERED',
+      'CHECKED_IN',
+      'RECEIVING',
+      'CLOSED',
+      'CANCELLED',
+      'DELETED',
+      'ERROR',
+    ] as const;
+    const marketplaceId =
+      credentials.region === 'eu' ? 'A1F83G8C2ARO7P'
+        : credentials.region === 'fe' ? 'A1VC38T7YXB528'
+          : 'ATVPDKIKX0DER';
+
+    const parseShipmentList = (p: any): any[] => {
+      let list: unknown = p?.ShipmentData ?? p?.shipmentData ?? p?.Shipments ?? p?.shipments;
+      if (list != null && !Array.isArray(list) && typeof list === 'object') {
+        const obj = list as Record<string, unknown>;
+        list =
+          obj.member ?? obj.Member ?? obj.Shipment ?? obj.shipment
+          ?? obj.Shipments ?? obj.shipments ?? obj.ShipmentData ?? obj.shipmentData ?? [];
+      }
+      return Array.isArray(list) ? list : [];
+    };
+
+    // ——— Phase 1: First getShipments request must include all statuses so we get every shipment ID ———
+    const listRows: any[] = [];
+    let nextToken: string | undefined;
+    this.logger.log(
+      `[syncShipments] Phase 1: getShipments with all ${ALL_SHIPMENT_STATUSES.length} statuses (required for full list): ${ALL_SHIPMENT_STATUSES.join(',')}`,
+    );
+    do {
+      try {
+        if (throttleMs > 0) await new Promise((r) => setTimeout(r, throttleMs));
+        const queryType: 'NEXT_TOKEN' | 'SHIPMENT' = nextToken ? 'NEXT_TOKEN' : 'SHIPMENT';
+        const res = (await this.spApiClient.getFbaInboundShipments(credentials, {
+          marketplaceId,
+          queryType,
+          shipmentStatusList: nextToken ? undefined : [...ALL_SHIPMENT_STATUSES],
+          nextToken,
+        })) as any;
+        const payload = res?.payload ?? res;
+        rawResponses.push(payload);
+        this.logger.log(
+          `[syncShipments] getShipments page: payload keys=${Object.keys(payload ?? {}).join(', ')} ShipmentData length=${parseShipmentList(payload).length}`,
+        );
+        const items = parseShipmentList(payload);
+        for (const row of items) listRows.push(row);
+        nextToken = payload?.NextToken ?? payload?.nextToken ?? undefined;
+      } catch (e) {
+        const msg = (e as Error).message ?? 'Failed to fetch shipments';
+        errors.push(msg);
+        this.logger.warn(`[syncShipments] Phase 1 request failed: ${msg}`);
+        break;
+      }
+    } while (nextToken);
+
+    this.logger.log(`[syncShipments] Phase 1 done: ${listRows.length} shipment(s) from API. Saving to DB.`);
+
+    // Statuses that mean "checked in at FC" – we record lastUpdatedDate as checkedInDate when we see these
+    const CHECKED_IN_STATUSES = ['CLOSED', 'RECEIVING', 'Closed', 'Receiving'];
+
+    // Save each shipment from list data; set checkedInDate from status timestamp (created = shipment created, checked in = when we see RECEIVING/CLOSED)
+    if (listRows.length > 0) {
+      this.logger.log(`[syncShipments] First row keys: ${Object.keys(listRows[0]).join(', ')}`);
+      const r0 = listRows[0] as Record<string, unknown>;
+      this.logger.log(`[syncShipments] First row CreatedDate/LastUpdatedDate: ${JSON.stringify({ CreatedDate: r0.CreatedDate ?? r0.createdDate, LastUpdatedDate: r0.LastUpdatedDate ?? r0.lastUpdatedDate })}`);
+    }
+    for (const row of listRows) {
+      const shipmentId = row.ShipmentId ?? row.shipmentId ?? row.ShipmentIdentifier ?? row.shipmentIdentifier;
+      if (!shipmentId) continue;
+      const createdDate = parseDate(
+        row.CreatedDate ?? row.createdDate ?? row.Created ?? row.created ?? row.Created_date ?? row.created_date,
+      );
+      const lastUpdatedDate = parseDate(
+        row.LastUpdatedDate ?? row.lastUpdatedDate ?? row.LastUpdated ?? row.lastUpdated ?? row.LastUpdateDate ?? row.lastUpdateDate ?? row.Last_updated_date ?? row.last_updated_date,
+      );
+      const status = (row.ShipmentStatus ?? row.shipmentStatus ?? row.Status ?? row.status ?? '') as string;
+      const statusUpper = status.toUpperCase();
+
+      let checkedInDate: Date | null = null;
+      let checkedInDateIsClosedDate: boolean | undefined = undefined;
+
+      if (lastUpdatedDate && (statusUpper === 'CLOSED' || statusUpper === 'RECEIVING')) {
+        const existing = await this.prisma.shipment.findUnique({
+          where: { userId_shipmentId: { userId: ownerUserId, shipmentId: String(shipmentId) } },
+          select: { shipmentStatus: true },
+        });
+        const wasAlreadyCheckedIn =
+          existing?.shipmentStatus != null &&
+          CHECKED_IN_STATUSES.some((s) => existing.shipmentStatus!.toUpperCase() === s.toUpperCase());
+        checkedInDate = lastUpdatedDate;
+        // If we're creating the row or it was already closed/receiving, this is "closed date" not a live check-in timestamp
+        checkedInDateIsClosedDate = !existing || wasAlreadyCheckedIn;
+      }
+
+      const checkInDurationDays =
+        createdDate && checkedInDate
+          ? Math.max(0, Math.floor((checkedInDate.getTime() - createdDate.getTime()) / (24 * 60 * 60 * 1000)))
+          : null;
+
+      const updatePayload = {
+        shipmentName: (row.ShipmentName ?? row.shipmentName ?? null) ?? undefined,
+        shipmentStatus: (row.ShipmentStatus ?? row.shipmentStatus ?? row.Status ?? row.status ?? null) ?? undefined,
+        destinationFulfillmentCenterId: (row.DestinationFulfillmentCenterId ?? row.destinationFulfillmentCenterId ?? row.FulfillmentCenterId ?? row.fulfillmentCenterId ?? null) ?? undefined,
+        createdDate: createdDate ?? undefined,
+        lastUpdatedDate: lastUpdatedDate ?? undefined,
+        ...(checkedInDate != null && { checkedInDate, checkedInDateIsClosedDate }),
+        ...(checkInDurationDays != null && { checkInDurationDays }),
+      };
+
+      const createPayload = {
+        userId: ownerUserId,
+        shipmentId: String(shipmentId),
+        shipmentName: row.ShipmentName ?? row.shipmentName ?? null,
+        shipmentStatus: row.ShipmentStatus ?? row.shipmentStatus ?? row.Status ?? row.status ?? null,
+        destinationFulfillmentCenterId: row.DestinationFulfillmentCenterId ?? row.destinationFulfillmentCenterId ?? row.FulfillmentCenterId ?? row.fulfillmentCenterId ?? null,
+        createdDate: createdDate ?? undefined,
+        lastUpdatedDate: lastUpdatedDate ?? undefined,
+        ...(checkedInDate != null && { checkedInDate, checkedInDateIsClosedDate }),
+        ...(checkInDurationDays != null && { checkInDurationDays }),
+      };
+
+      try {
+        await this.prisma.shipment.upsert({
+          where: { userId_shipmentId: { userId: ownerUserId, shipmentId: String(shipmentId) } },
+          update: updatePayload,
+          create: createPayload,
+        });
+        synced += 1;
+        this.logger.log(`[syncShipments] saved list data for ${shipmentId} (${synced}/${listRows.length})`);
+      } catch (e) {
+        const msg = (e as Error).message ?? String(e);
+        errors.push(`Shipment ${shipmentId} save: ${msg}`);
+      }
+    }
+
+    // ——— Phase 2: For each shipment ID, fetch items + transport and update DB ———
+    this.logger.log(`[syncShipments] Phase 2: enriching ${listRows.length} shipment(s) with items and transport.`);
+    let transportDetailsSkipped = false; // set true after first 403 to avoid spamming Unauthorized
+    for (let i = 0; i < listRows.length; i++) {
+      const row = listRows[i];
+      const shipmentId = row.ShipmentId ?? row.shipmentId ?? row.ShipmentIdentifier ?? row.shipmentIdentifier;
+      if (!shipmentId) {
+        this.logger.warn(`[syncShipments] Phase 2 skip: no shipmentId in row`);
+        continue;
+      }
+
+      let unitsSent = 0;
+      let unitsReceived = 0;
+      let unitsDamaged = 0;
+      let unitsDisposed = 0;
+      try {
+        if (throttleMs > 0) await new Promise((r) => setTimeout(r, Math.floor(throttleMs / 2)));
+        const itemsRes = (await this.spApiClient.getFbaInboundShipmentItemsByShipmentId(credentials, String(shipmentId))) as any;
+        const itemPayload = itemsRes?.payload ?? itemsRes;
+        const itemList = itemPayload?.ItemData ?? itemPayload?.itemData ?? itemPayload?.ShipmentItems ?? itemPayload?.shipmentItems ?? [];
+        const itemArr = Array.isArray(itemList) ? itemList : [];
+        for (const it of itemArr) {
+          unitsSent += toInt(it.QuantityShipped ?? it.quantityShipped);
+          unitsReceived += toInt(it.QuantityReceived ?? it.quantityReceived);
+          unitsDamaged += toInt(it.QuantityDamaged ?? it.quantityDamaged);
+          unitsDisposed += toInt(it.QuantityDisposed ?? it.quantityDisposed);
+        }
+      } catch (e) {
+        const msg = (e as Error).message ?? '';
+        errors.push(`Shipment ${shipmentId} items: ${msg}`);
+      }
+
+      let pickupDate: Date | null = null;
+      let transportStatus: string | null = null;
+      let deliveryDate: Date | null = null;
+      if (!transportDetailsSkipped) {
+        try {
+          if (throttleMs > 0) await new Promise((r) => setTimeout(r, Math.floor(throttleMs / 2)));
+          const transportRes = (await this.spApiClient.getFbaInboundTransportDetails(credentials, String(shipmentId))) as any;
+          const transportPayload = transportRes?.payload ?? transportRes;
+          const transport = transportPayload?.TransportContent ?? transportPayload?.transportContent ?? transportPayload ?? {};
+          pickupDate = parseDate(transport.PickupDate ?? transport.pickupDate ?? transport.ShipmentPickupDate ?? transport.shipmentPickupDate) ?? null;
+          transportStatus = (transport.TransportStatus ?? transport.transportStatus ?? null) ?? null;
+          deliveryDate = parseDate(transport.DeliveryDate ?? transport.deliveryDate ?? transport.EstimatedDeliveryDate ?? transport.estimatedDeliveryDate) ?? null;
+        } catch (e) {
+          const msg = (e as Error).message ?? String(e);
+          this.logger.warn(
+            `[syncShipments] transportDetails error for shipmentId=${shipmentId} (raw=${JSON.stringify(shipmentId)}): ${msg}`,
+          );
+          const is403 = msg.includes('403') || msg.includes('Unauthorized');
+          if (is403) {
+            transportDetailsSkipped = true;
+            this.logger.warn(
+              `[syncShipments] Phase 2 transportDetails returned 403 Unauthorized. Your SP-API app may not have the FBA Inbound Transport role. ` +
+              `Add the role in Seller Central (SP-API app) to get Sent date / Delivered to FC. Skipping transportDetails for remaining ${listRows.length - i - 1} shipment(s).`,
+            );
+            errors.push('Transport details (Sent date, Delivered to FC): 403 Unauthorized – add FBA Inbound Transport role to your SP-API app in Seller Central.');
+          } else {
+            errors.push(`Shipment ${shipmentId} transportDetails: ${msg}`);
+          }
+        }
+      }
+
+      const damageClosedDate = parseDate(row.DamageClosedDate ?? row.damageClosedDate ?? row.UnitsDamageClosedDate ?? row.unitsDamageClosedDate);
+      const unitsMissing = Math.max(0, unitsSent - unitsReceived);
+      // Check-in (days) is set in Phase 1 from createdDate → checkedInDate (FBA list API); we do not overwrite with transport details here
+
+      try {
+        await this.prisma.shipment.update({
+          where: { userId_shipmentId: { userId: ownerUserId, shipmentId: String(shipmentId) } },
+          data: {
+            unitsSent,
+            unitsReceived,
+            unitsDamaged,
+            unitsDisposed,
+            unitsMissing,
+            pickupDate: pickupDate ?? undefined,
+            transportStatus: transportStatus ?? undefined,
+            deliveryDate: deliveryDate ?? undefined,
+            damageClosedDate: damageClosedDate ?? undefined,
+          },
+        });
+      } catch (e) {
+        const msg = (e as Error).message ?? String(e);
+        this.logger.warn(`[syncShipments] Phase 2 DB update failed for ${shipmentId}: ${msg}`);
+      }
+    }
+
+    this.logger.log(`[syncShipments] done: synced=${synced} errors=${errors.length}${errors.length ? ` [${errors.join('; ')}]` : ''}`);
+    return { synced, errors, rawResponses };
+  }
+
+  /**
    * Fetch FBA inventory summaries from SP-API and upsert Inventory rows
    * for products we already know about in this org (matched by SKU).
    */
@@ -4513,6 +4838,17 @@ if (org?.lastFbaInventorySyncAt) {
     throw new NotFoundException(
       'getRecentOrders is not wired for per-user credentials yet.',
     );
+  }
+
+  /**
+   * Disconnect (unlink) the Amazon seller account for the user.
+   * Deletes the SellerAccount row so they can reconnect with new permissions.
+   */
+  async disconnectAmazon(userId: string): Promise<{ ok: boolean }> {
+    await this.prisma.sellerAccount.deleteMany({
+      where: { userId, marketplace: 'amazon' },
+    });
+    return { ok: true };
   }
 
   async linkAmazonAccount(userId: string, dto: LinkAmazonAccountDto) {

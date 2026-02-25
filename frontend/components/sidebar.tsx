@@ -5,13 +5,12 @@ import {
   SignedOut,
   SignInButton,
   SignUpButton,
-  UserButton,
   useAuth,
-  useUser,
+  useClerk,
 } from "@clerk/nextjs";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 function DashboardIcon({ className }: { className?: string }) {
   return (
@@ -85,6 +84,26 @@ function OrdersIcon({ className }: { className?: string }) {
   );
 }
 
+function ShipmentsIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <path d="M14 18V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v11a1 1 0 0 0 1 1h2" />
+      <path d="M15 18h2" />
+      <path d="M19 18h2a1 1 0 0 0 1-1v-3.65a1 1 0 0 0-.22-.624l-3.48-4.35A1 1 0 0 0 17.52 8H14" />
+    </svg>
+  );
+}
+
 const NAV_ITEMS: {
   label: string;
   href: string;
@@ -94,41 +113,42 @@ const NAV_ITEMS: {
   { label: "Cost of Goods", href: "/cost-of-goods", icon: CostOfGoodsIcon },
   { label: "Inventory", href: "/inventory", icon: InventoryIcon },
   { label: "Orders", href: "/orders", icon: OrdersIcon },
+  { label: "FBA Shipments", href: "/shipments", icon: ShipmentsIcon },
 ];
 
 const BASE_URL =
   process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
 
 export function Sidebar() {
-  const { user } = useUser();
   const { isSignedIn, getToken } = useAuth();
-  const email = user?.primaryEmailAddress?.emailAddress ?? null;
+  const { signOut } = useClerk();
   const pathname = usePathname();
   const [amazonConnected, setAmazonConnected] = useState<boolean | null>(null);
   const [connectingAmazon, setConnectingAmazon] = useState(false);
+  const [disconnectingAmazon, setDisconnectingAmazon] = useState(false);
+  const [optionsOpen, setOptionsOpen] = useState(false);
+  const optionsRef = useRef<HTMLDivElement>(null);
+
+  const fetchAmazonStatus = useCallback(async () => {
+    if (!isSignedIn) return;
+    try {
+      const token = await getToken({ template: "backend" });
+      const res = await fetch(`${BASE_URL}/api/amazon/account/summary`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      setAmazonConnected(res.ok);
+    } catch {
+      setAmazonConnected(false);
+    }
+  }, [isSignedIn, getToken]);
 
   useEffect(() => {
     if (!isSignedIn) {
       setAmazonConnected(null);
       return;
     }
-    let cancelled = false;
-    (async () => {
-      try {
-        const token = await getToken({ template: "backend" });
-        const res = await fetch(`${BASE_URL}/api/amazon/account/summary`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (cancelled) return;
-        setAmazonConnected(res.ok);
-      } catch {
-        if (!cancelled) setAmazonConnected(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [isSignedIn, getToken]);
+    void fetchAmazonStatus();
+  }, [isSignedIn, fetchAmazonStatus]);
 
   const connectAmazon = async () => {
     if (!isSignedIn) return;
@@ -148,6 +168,33 @@ export function Sidebar() {
       setConnectingAmazon(false);
     }
   };
+
+  const disconnectAmazon = async () => {
+    if (!isSignedIn) return;
+    setOptionsOpen(false);
+    setDisconnectingAmazon(true);
+    try {
+      const token = await getToken({ template: "backend" });
+      if (!token) return;
+      const res = await fetch(`${BASE_URL}/api/amazon/disconnect`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) await fetchAmazonStatus();
+    } finally {
+      setDisconnectingAmazon(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!optionsOpen) return;
+    const handleClick = (e: MouseEvent) => {
+      if (optionsRef.current?.contains(e.target as Node)) return;
+      setOptionsOpen(false);
+    };
+    document.addEventListener("click", handleClick);
+    return () => document.removeEventListener("click", handleClick);
+  }, [optionsOpen]);
 
   return (
     <aside className="flex h-screen w-full flex-col border-r border-[var(--surface-border)] bg-[var(--surface)]">
@@ -202,12 +249,12 @@ export function Sidebar() {
               >
                 {connectingAmazon ? "Opening Amazon…" : "Connect Amazon for data"}
               </button>
+            ) : isSignedIn && amazonConnected === true ? (
+              <span className="truncate">Amazon connected</span>
             ) : (
               <span className="truncate">
                 {isSignedIn
-                  ? amazonConnected === true
-                    ? "Amazon connected"
-                    : "Authenticated"
+                  ? "Authenticated"
                   : "Sign in for data"}
               </span>
             )}
@@ -225,19 +272,57 @@ export function Sidebar() {
             </SignUpButton>
           </SignedOut>
           <SignedIn>
-            <div className="flex items-center gap-2 rounded-lg bg-transparent px-3 py-2">
-              <UserButton afterSignOutUrl="/" />
-              {email ? (
-                <span
-                  className="min-w-0 flex-1 truncate text-xs text-[var(--muted-foreground)]"
-                  title={email}
+            <div className="relative" ref={optionsRef}>
+              <button
+                type="button"
+                onClick={() => setOptionsOpen((o) => !o)}
+                className="flex w-full cursor-pointer items-center justify-between rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-left text-sm font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/5"
+                aria-expanded={optionsOpen}
+                aria-haspopup="true"
+              >
+                <span>Options</span>
+                <svg
+                  className={`h-4 w-4 shrink-0 transition-transform ${optionsOpen ? "rotate-180" : ""}`}
+                  xmlns="http://www.w3.org/2000/svg"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden
                 >
-                  {email}
-                </span>
-              ) : (
-                <span className="truncate text-xs text-[var(--muted-foreground)]">
-                  Account
-                </span>
+                  <path d="m6 9 6 6 6-6" />
+                </svg>
+              </button>
+              {optionsOpen && (
+                <div
+                  className="absolute bottom-full left-0 right-0 mb-1 flex flex-col overflow-hidden rounded-lg border border-[var(--surface-border)] bg-[var(--surface)] shadow-lg"
+                  role="menu"
+                >
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setOptionsOpen(false);
+                      void signOut({ redirectUrl: "/" });
+                    }}
+                    className="cursor-pointer px-3 py-2.5 text-left text-sm text-[var(--foreground)] hover:bg-[var(--foreground)]/10"
+                  >
+                    Log out
+                  </button>
+                  {amazonConnected === true && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => void disconnectAmazon()}
+                      disabled={disconnectingAmazon}
+                      className="cursor-pointer px-3 py-2.5 text-left text-sm text-[var(--foreground)] hover:bg-[var(--foreground)]/10 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {disconnectingAmazon ? "Disconnecting…" : "Disconnect Amazon"}
+                    </button>
+                  )}
+                </div>
               )}
             </div>
           </SignedIn>

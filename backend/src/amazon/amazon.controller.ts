@@ -113,6 +113,16 @@ ping() {
     return this.amazonService.linkAmazonAccount(req.user.userId, dto);
   }
 
+  /**
+   * Disconnect Amazon account so the user can reconnect with new permissions.
+   * Example: POST /api/amazon/disconnect
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Post('disconnect')
+  disconnectAmazon(@Req() req: { user: { userId: string } }) {
+    return this.amazonService.disconnectAmazon(req.user.userId);
+  }
+
   @UseGuards(ClerkAuthGuard)
   @Get('account/summary')
   getAccountSummary(
@@ -428,6 +438,26 @@ ping() {
   async syncInventory(@Req() req: { user: { orgId: string; userId: string } }) {
     this.logger.log(`Manual inventory sync requested (orgId=${req.user.orgId})`);
     return this.amazonService.syncFbaInventory(req.user.orgId, req.user.userId);
+  }
+
+  /**
+   * FBA Shipments: list inbound shipments from DB.
+   * Example: GET /api/amazon/shipments
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Get('shipments')
+  async listShipments(@Req() req: { user: { orgId: string } }) {
+    return this.amazonService.listShipments(req.user.orgId);
+  }
+
+  /**
+   * FBA Shipments: sync from SP-API (getShipments + items + transport).
+   * Example: POST /api/amazon/shipments/sync
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Post('shipments/sync')
+  async syncShipments(@Req() req: { user: { orgId: string; userId: string } }) {
+    return this.amazonService.syncShipments(req.user.orgId, req.user.userId);
   }
 
   /**

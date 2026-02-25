@@ -342,6 +342,94 @@ export class AmazonSpApiClient {
     });
   }
 
+  /**
+   * FBA Inbound API v0: getShipments
+   * GET /fba/inbound/v0/shipments
+   * Requires: QueryType (SHIPMENT | DATE_RANGE | NEXT_TOKEN), MarketplaceId. For SHIPMENT, at least one of ShipmentStatusList or ShipmentIdList.
+   */
+  async getFbaInboundShipments(
+    credentials: SpApiCredentials,
+    params: {
+      marketplaceId: string;
+      queryType: 'SHIPMENT' | 'DATE_RANGE' | 'NEXT_TOKEN';
+      lastUpdatedAfter?: string;
+      lastUpdatedBefore?: string;
+      shipmentStatusList?: string[];
+      shipmentIdList?: string[];
+      nextToken?: string;
+    },
+  ): Promise<unknown> {
+    const query: Record<string, unknown> = {
+      QueryType: params.queryType,
+      MarketplaceId: params.marketplaceId,
+    };
+    // All FBA inbound statuses – first getShipments request must send every status to return all shipment IDs.
+    const defaultStatuses = [
+      'WORKING', 'READY_TO_SHIP', 'SHIPPED', 'IN_TRANSIT', 'DELIVERED', 'CHECKED_IN', 'RECEIVING', 'CLOSED', 'CANCELLED', 'DELETED', 'ERROR',
+    ];
+    if (params.nextToken) {
+      query.NextToken = params.nextToken;
+    } else if (params.queryType === 'SHIPMENT') {
+      const statusList = params.shipmentStatusList?.length ? params.shipmentStatusList : defaultStatuses;
+      query.ShipmentStatusList = statusList.join(',');
+      if (params.shipmentIdList?.length) query.ShipmentIdList = params.shipmentIdList.join(',');
+      this.logger.log(
+        `[getFbaInboundShipments] SHIPMENT query: queryType=${params.queryType} marketplaceId=${params.marketplaceId} ShipmentStatusList=${query.ShipmentStatusList}`,
+      );
+    } else if (params.queryType === 'DATE_RANGE') {
+      if (params.lastUpdatedAfter) query.LastUpdatedAfter = params.lastUpdatedAfter;
+      if (params.lastUpdatedBefore) query.LastUpdatedBefore = params.lastUpdatedBefore;
+      const statusList = params.shipmentStatusList?.length ? params.shipmentStatusList : defaultStatuses;
+      query.ShipmentStatusList = statusList.join(',');
+    }
+    this.logger.log(
+      `[getFbaInboundShipments] query keys: ${Object.keys(query).join(', ')}`,
+    );
+    return this.signedSpApiRequest(credentials, {
+      method: 'GET',
+      path: '/fba/inbound/v0/shipments',
+      query,
+    });
+  }
+
+  /**
+   * FBA Inbound API v0: getShipmentItemsByShipmentId
+   * GET /fba/inbound/v0/shipments/{shipmentId}/items (ShipmentId in path, not query)
+   */
+  async getFbaInboundShipmentItemsByShipmentId(
+    credentials: SpApiCredentials,
+    shipmentId: string,
+    params?: { nextToken?: string },
+  ): Promise<unknown> {
+    const query: Record<string, unknown> = {};
+    if (params?.nextToken) query.NextToken = params.nextToken;
+    return this.signedSpApiRequest(credentials, {
+      method: 'GET',
+      path: `/fba/inbound/v0/shipments/${encodeURIComponent(shipmentId)}/items`,
+      query,
+    });
+  }
+
+  /**
+   * FBA Inbound API v0: getTransportDetails
+   * GET /fba/inbound/v0/shipments/{shipmentId}/transportDetails
+   * Path segment encoded once here; same string is used for canonical URI and request (no double-encoding).
+   */
+  async getFbaInboundTransportDetails(
+    credentials: SpApiCredentials,
+    shipmentId: string,
+  ): Promise<unknown> {
+    const path = `/fba/inbound/v0/shipments/${encodeURIComponent(shipmentId)}/transportDetails`;
+    this.logger.log(
+      `[getFbaInboundTransportDetails] GET path=${path} shipmentId=${shipmentId} (raw=${JSON.stringify(shipmentId)} length=${shipmentId?.length ?? 0}) query=(none)`,
+    );
+    return this.signedSpApiRequest(credentials, {
+      method: 'GET',
+      path,
+      query: {},
+    });
+  }
+
   private async getLwaAccessToken(
     credentials: SpApiCredentials,
   ): Promise<string> {
@@ -393,8 +481,20 @@ export class AmazonSpApiClient {
     const service = 'execute-api';
 
     const queryString = this.buildQueryString(options.query ?? {});
+    // Use options.path as-is for signing and request (caller must encode path segments once; no double-encoding).
     const canonicalUri = options.path;
     const canonicalQuerystring = queryString;
+    if (options.path === '/fba/inbound/v0/shipments') {
+      this.logger.log(
+        `[SP-API shipments] query object keys: ${Object.keys(options.query ?? {}).join(', ')}`,
+      );
+      this.logger.log(
+        `[SP-API shipments] built query string (length=${queryString.length}): ${queryString}`,
+      );
+      this.logger.log(
+        `[SP-API shipments] full path with query: ${canonicalUri}?${canonicalQuerystring}`,
+      );
+    }
     if (this.isDebugEnabled()) {
       this.logger.debug(`SP-API request host=${host} awsRegion=${region}`);
     }
@@ -457,6 +557,18 @@ export class AmazonSpApiClient {
       ? `${canonicalUri}?${canonicalQuerystring}`
       : canonicalUri;
 
+    const fullUrl = `https://${host}${pathWithQuery}`;
+    console.log('CANONICAL PATH USED FOR SIGNING:', canonicalUri);
+    console.log('FINAL REQUEST URL:', fullUrl);
+    if (canonicalQuerystring) {
+      console.log('CANONICAL QUERY STRING (sorted):', canonicalQuerystring);
+    }
+    this.logger.log(`[SP-API] CANONICAL PATH USED FOR SIGNING: ${canonicalUri}`);
+    this.logger.log(`[SP-API] FINAL REQUEST URL: ${fullUrl}`);
+    if (canonicalQuerystring) {
+      this.logger.log(`[SP-API] CANONICAL QUERY STRING (sorted): ${canonicalQuerystring}`);
+    }
+
     const response = await this.httpRequest({
       hostname: host,
       path: pathWithQuery,
@@ -475,6 +587,22 @@ export class AmazonSpApiClient {
     }
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
+      const fullUrl = `https://${host}${pathWithQuery}`;
+      this.logger.warn(
+        `[SP-API] request failed: ${options.method} ${fullUrl} -> ${response.statusCode}`,
+      );
+      const bodyPreview = (response.body ?? '').slice(0, 800);
+      this.logger.warn(`[SP-API] response body: ${bodyPreview}${(response.body?.length ?? 0) > 800 ? '...' : ''}`);
+      try {
+        const parsed = JSON.parse(response.body ?? '{}') as { errors?: Array<{ code?: string; message?: string; details?: string }> };
+        if (parsed?.errors?.length) {
+          parsed.errors.forEach((err, idx) => {
+            this.logger.warn(`[SP-API] error[${idx}] code=${err?.code ?? 'n/a'} message=${err?.message ?? 'n/a'} details=${err?.details ?? 'n/a'}`);
+          });
+        }
+      } catch {
+        // ignore parse errors
+      }
       throw new Error(
         `SP-API request failed: ${options.method} ${options.path} (${response.statusCode}) ${response.body}`,
       );
@@ -487,17 +615,27 @@ export class AmazonSpApiClient {
     }
   }
 
+  /**
+   * Build query string with params sorted by name (then value for duplicates) per AWS Sig V4.
+   * Ensures ShipmentStatusList and other repeated params are sent and signature matches.
+   */
   private buildQueryString(query: Record<string, unknown>): string {
-    const params = new URLSearchParams();
-    Object.entries(query).forEach(([key, value]) => {
-      if (value === undefined || value === null) return;
+    const pairs: Array<[string, string]> = [];
+    for (const [key, value] of Object.entries(query)) {
+      if (value === undefined || value === null) continue;
       if (Array.isArray(value)) {
-        value.forEach((v) => params.append(key, String(v)));
+        for (const v of value) {
+          pairs.push([key, String(v)]);
+        }
       } else {
-        params.append(key, String(value));
+        pairs.push([key, String(value)]);
       }
+    }
+    pairs.sort((a, b) => {
+      const cmp = a[0].localeCompare(b[0]);
+      return cmp !== 0 ? cmp : a[1].localeCompare(b[1]);
     });
-    return params.toString();
+    return pairs.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
   }
 
   private getSignatureKey(
