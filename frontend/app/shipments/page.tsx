@@ -11,6 +11,8 @@ type ShipmentRow = {
   destinationFulfillmentCenterId: string | null;
   createdDate: string | null;
   lastUpdatedDate: string | null;
+  createdAt: string;
+  updatedAt: string;
   unitsSent: number;
   unitsReceived: number;
   unitsDamaged: number;
@@ -46,6 +48,10 @@ export default function ShipmentsPage() {
   const [showRaw, setShowRaw] = useState(false);
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
+  const [manualCheckInModal, setManualCheckInModal] = useState<{ shipmentId: string; shipmentName: string | null } | null>(null);
+  const [manualCheckInDate, setManualCheckInDate] = useState("");
+  const [manualCheckInSaving, setManualCheckInSaving] = useState(false);
+  const [manualCheckInError, setManualCheckInError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -108,6 +114,40 @@ export default function ShipmentsPage() {
     }
   };
 
+  const saveManualCheckIn = async () => {
+    if (!manualCheckInModal || !manualCheckInDate.trim()) return;
+    setManualCheckInSaving(true);
+    setManualCheckInError(null);
+    try {
+      const token = await getToken();
+      const res = await fetch(`${baseUrl}/api/amazon/shipments/${encodeURIComponent(manualCheckInModal.shipmentId)}/checked-in`, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ checkedInDate: manualCheckInDate.trim() }),
+      });
+      if (!res.ok) {
+        const body = (await res.json()) as { message?: string };
+        throw new Error(body?.message ?? "Failed to set check-in date");
+      }
+      setManualCheckInModal(null);
+      setManualCheckInDate("");
+      await load();
+    } catch (e) {
+      setManualCheckInError(e instanceof Error ? e.message : "Failed to save");
+    } finally {
+      setManualCheckInSaving(false);
+    }
+  };
+
+  const openManualCheckIn = (r: ShipmentRow) => {
+    setManualCheckInModal({ shipmentId: r.shipmentId, shipmentName: r.shipmentName });
+    setManualCheckInDate("");
+    setManualCheckInError(null);
+  };
+
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return rows;
@@ -119,6 +159,11 @@ export default function ShipmentsPage() {
         (r.destinationFulfillmentCenterId ?? "").toLowerCase().includes(q)
     );
   }, [rows, query]);
+
+  const totalMissingUnits = useMemo(
+    () => rows.reduce((sum, r) => sum + (r.unitsMissing ?? 0), 0),
+    [rows]
+  );
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const safePage = Math.min(page, totalPages);
@@ -143,6 +188,10 @@ export default function ShipmentsPage() {
       <SignedIn>
         <div className="flex flex-col gap-4">
           <h1 className="text-xl font-semibold text-[var(--foreground)]">FBA Shipments</h1>
+
+          <div className="rounded-lg border border-[var(--surface-border)] bg-[var(--surface)] px-4 py-3 text-sm text-[var(--foreground)]">
+            You have <span className="font-semibold tabular-nums">{totalMissingUnits}</span> unit{totalMissingUnits !== 1 ? "s" : ""} missing from what was sent compared to what was received in Amazon.
+          </div>
 
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex flex-1 flex-col gap-2 sm:flex-row sm:items-center">
@@ -194,16 +243,24 @@ export default function ShipmentsPage() {
           )}
 
           <div className="overflow-x-auto rounded-lg border border-[var(--surface-border)] bg-[var(--surface)]">
-            <div className="grid grid-cols-[minmax(120px,1fr)_0.7fr_0.5fr_0.6fr_0.6fr_0.5fr_0.5fr_0.5fr_0.5fr] items-center gap-2 px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
+            <div className="grid grid-cols-[minmax(90px,0.9fr)_0.6fr_0.6fr_0.6fr_0.4fr_0.5fr_0.5fr_0.5fr] items-center gap-2 px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
               <div>Shipment ID</div>
-              <div>Status</div>
-              <div>FC</div>
+              <div className="pl-0.5">Status</div>
               <div>Created</div>
-              <div>Checked in</div>
-              <div className="text-center">Sent</div>
-              <div className="text-center">Received</div>
-              <div className="text-center">Missing</div>
+              <div className="flex items-center gap-1">
+                Checked in
+                <span
+                  className="inline-flex h-5 w-5 shrink-0 cursor-help items-center justify-center rounded-full border-2 border-[rgb(2,242,170)] bg-[rgb(2,242,170)] text-[11px] font-semibold lowercase text-black hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-[rgb(2,242,170)] focus:ring-offset-1"
+                  title="Cannot retrieve historic check-in dates - you can enter manually"
+                  aria-label="Info: Cannot retrieve historic check-in dates - you can enter manually"
+                >
+                  i
+                </span>
+              </div>
               <div className="text-center">Check-in (days)</div>
+              <div className="text-center">Units sent</div>
+              <div className="text-center">Units received</div>
+              <div className="text-center">Missing units</div>
             </div>
 
             {loading ? (
@@ -220,40 +277,58 @@ export default function ShipmentsPage() {
                   {paginated.map((r) => (
                     <div
                       key={r.id}
-                      className="grid grid-cols-[minmax(120px,1fr)_0.7fr_0.5fr_0.6fr_0.6fr_0.5fr_0.5fr_0.5fr_0.5fr] items-center gap-2 px-4 py-3 text-sm min-w-0"
+                      className="grid grid-cols-[minmax(90px,0.9fr)_0.6fr_0.6fr_0.6fr_0.4fr_0.5fr_0.5fr_0.5fr] items-center gap-2 px-4 py-3 text-sm min-w-0"
                     >
                       <div className="truncate font-mono text-[var(--foreground)]" title={r.shipmentId}>
                         {r.shipmentId}
                       </div>
-                      <div className="truncate text-[var(--foreground)]">
+                      <div className="truncate pl-0.5 text-[var(--foreground)]">
                         {r.transportStatus ?? r.shipmentStatus ?? "—"}
                       </div>
-                      <div className="truncate text-[var(--muted-foreground)]">
-                        {r.destinationFulfillmentCenterId ?? "—"}
-                      </div>
                       <div className="text-[var(--foreground)]">
-                        {formatDate(r.createdDate ?? r.lastUpdatedDate)}
-                        {r.createdDate == null && r.lastUpdatedDate != null && (
-                          <span className="ml-1 text-[10px] text-[var(--muted-foreground)]" title="Created date not provided by API; showing last updated">(updated)</span>
-                        )}
-                      </div>
-                      <div className="text-[var(--foreground)]">
-                        {(r.checkedInDate ?? r.lastUpdatedDate) != null ? (
-                          <span
-                            className={r.checkedInDateIsClosedDate === true ? "inline-flex items-center gap-1 rounded bg-amber-500/20 px-1.5 py-0.5 text-amber-700 dark:text-amber-400" : undefined}
-                            title={r.checkedInDateIsClosedDate === true ? "Closed date (shipment was already closed when synced; not the actual check-in time)" : r.checkedInDate == null ? "Last updated (checked-in date not yet recorded)" : undefined}
-                          >
-                            {formatDate(r.checkedInDate ?? r.lastUpdatedDate)}
-                            {r.checkedInDateIsClosedDate === true && (
-                              <span className="text-[10px] font-medium" aria-hidden> closed</span>
-                            )}
-                            {r.checkedInDate == null && r.lastUpdatedDate != null && (
-                              <span className="text-[10px] text-[var(--muted-foreground)]" aria-hidden> (updated)</span>
-                            )}
-                          </span>
+                        {r.createdDate != null ? (
+                          formatDate(r.createdDate)
                         ) : (
-                          "—"
+                          <>
+                            —<span className="ml-1 text-[10px] text-[var(--muted-foreground)]" title="Created date not available from API">(unknown)</span>
+                          </>
                         )}
+                      </div>
+                      <div className="flex flex-col gap-0.5">
+                        <div className="flex items-center gap-1.5 text-[var(--foreground)]">
+                          {r.checkedInDate != null ? (
+                            <span
+                              className={r.checkedInDateIsClosedDate === true ? "inline-flex items-center gap-1 rounded bg-amber-500/20 px-1.5 py-0.5 text-amber-700 dark:text-amber-400" : undefined}
+                              title={r.checkedInDateIsClosedDate === true ? "Closed date (shipment was already closed when synced)" : undefined}
+                            >
+                              {formatDate(r.checkedInDate)}
+                              {r.checkedInDateIsClosedDate === true && (
+                                <span className="text-[10px] font-medium" aria-hidden> closed</span>
+                              )}
+                            </span>
+                          ) : (
+                            <>
+                              <span>—</span>
+                              <button
+                                type="button"
+                                onClick={() => openManualCheckIn(r)}
+                                className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded border border-[var(--surface-border)] bg-[var(--surface-hover)] text-[var(--muted-foreground)] hover:border-[rgb(2,242,170)]/50 hover:bg-[rgb(2,242,170)]/10 hover:text-[var(--foreground)] focus:outline-none focus:ring-2 focus:ring-[rgb(2,242,170)]"
+                                title="Enter check-in date manually"
+                                aria-label="Enter check-in date manually"
+                              >
+                                <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                                </svg>
+                              </button>
+                            </>
+                          )}
+                        </div>
+                        <div className="text-[10px] text-[var(--muted-foreground)]">
+                          FC: {r.destinationFulfillmentCenterId ?? "—"}
+                        </div>
+                      </div>
+                      <div className="text-center text-[var(--foreground)] tabular-nums">
+                        {r.checkInDurationDays != null ? String(r.checkInDurationDays) : "—"}
                       </div>
                       <div className="text-center text-[var(--foreground)] tabular-nums">
                         {r.unitsSent}
@@ -261,11 +336,10 @@ export default function ShipmentsPage() {
                       <div className="text-center text-[var(--foreground)] tabular-nums">
                         {r.unitsReceived}
                       </div>
-                      <div className="text-center text-[var(--foreground)] tabular-nums">
+                      <div
+                        className={`text-center tabular-nums ${r.unitsMissing > 0 ? "text-red-600 dark:text-red-400" : "text-green-600 dark:text-green-400"}`}
+                      >
                         {r.unitsMissing}
-                      </div>
-                      <div className="text-center text-[var(--foreground)] tabular-nums">
-                        {r.checkInDurationDays != null ? String(r.checkInDurationDays) : "—"}
                       </div>
                     </div>
                   ))}
@@ -309,6 +383,47 @@ export default function ShipmentsPage() {
               </>
             )}
           </div>
+
+          {manualCheckInModal != null && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" role="dialog" aria-modal="true" aria-labelledby="manual-checkin-title">
+              <div className="w-full max-w-sm rounded-lg border border-[var(--surface-border)] bg-[var(--surface)] p-4 shadow-lg">
+                <h2 id="manual-checkin-title" className="text-sm font-semibold text-[var(--foreground)]">Enter check-in date</h2>
+                <p className="mt-1 text-xs text-[var(--muted-foreground)]">
+                  Shipment: {manualCheckInModal.shipmentName ?? manualCheckInModal.shipmentId}
+                </p>
+                <div className="mt-3">
+                  <label htmlFor="manual-checkin-date" className="block text-xs font-medium text-[var(--foreground)]">Date (YYYY-MM-DD)</label>
+                  <input
+                    id="manual-checkin-date"
+                    type="date"
+                    value={manualCheckInDate}
+                    onChange={(e) => setManualCheckInDate(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--foreground)] focus:outline-none focus:ring-2 focus:ring-[rgb(2,242,170)]"
+                  />
+                </div>
+                {manualCheckInError && (
+                  <p className="mt-2 text-xs text-red-600 dark:text-red-400">{manualCheckInError}</p>
+                )}
+                <div className="mt-4 flex justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => { setManualCheckInModal(null); setManualCheckInDate(""); setManualCheckInError(null); }}
+                    className="rounded-lg border border-[var(--surface-border)] px-3 py-2 text-sm text-[var(--foreground)] hover:bg-[var(--surface-hover)]"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={saveManualCheckIn}
+                    disabled={manualCheckInSaving || !manualCheckInDate.trim()}
+                    className="rounded-lg bg-[rgb(2,242,170)] px-3 py-2 text-sm font-medium text-black hover:opacity-90 disabled:opacity-60"
+                  >
+                    {manualCheckInSaving ? "Saving…" : "Save"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </SignedIn>
     </div>

@@ -839,18 +839,19 @@ function DonutCard({
     centerLine1 != null && centerLine2 != null && centerLine3 != null;
   const valueOnly = hidePercentage === true;
 
+  const ringGreen = "rgb(2, 242, 170)";
   return (
     <div className="flex flex-col items-center gap-4 rounded-xl bg-transparent p-4">
       <div className="relative flex h-36 w-36 items-center justify-center">
         <svg
           viewBox="0 0 120 120"
-          className="h-full w-full -rotate-90 text-[var(--chart-track)]"
+          className="h-full w-full -rotate-90"
         >
           <circle
             cx="60"
             cy="60"
             r={radius}
-            stroke="currentColor"
+            stroke={ringGreen}
             strokeWidth={strokeWidth}
             fill="none"
           />

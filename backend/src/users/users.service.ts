@@ -195,4 +195,61 @@ export class UsersService {
       create: { orgId, userId: memberUserId, role },
     });
   }
+
+  /**
+   * Get VAT settings for an org (caller must be a member).
+   */
+  async getOrgVatSettings(orgId: string, userId: string) {
+    const isMember = await this.isOrgMember(userId, orgId);
+    if (!isMember) throw new NotFoundException('Not a member of this org');
+    const org = await (this.prisma as any).organization.findUnique({
+      where: { id: orgId },
+      select: {
+        vatRegistrationType: true,
+        vatEffectiveDate: true,
+        vatFlatRatePct: true,
+        vatRatePct: true,
+        vatCostsIncludeVat: true,
+      },
+    });
+    if (!org) throw new NotFoundException('Organization not found');
+    return {
+      vatRegistrationType: org.vatRegistrationType ?? 'NON_VAT_REGISTERED',
+      vatEffectiveDate: org.vatEffectiveDate?.toISOString?.() ?? null,
+      vatFlatRatePct: org.vatFlatRatePct != null ? Number(org.vatFlatRatePct) : null,
+      vatRatePct: org.vatRatePct != null ? Number(org.vatRatePct) : null,
+      vatCostsIncludeVat: org.vatCostsIncludeVat ?? null,
+    };
+  }
+
+  /**
+   * Update VAT settings for an org (caller must be a member).
+   */
+  async updateOrgVatSettings(
+    orgId: string,
+    userId: string,
+    data: {
+      vatRegistrationType?: string;
+      vatEffectiveDate?: string;
+      vatFlatRatePct?: number;
+      vatRatePct?: number;
+      vatCostsIncludeVat?: boolean;
+    },
+  ) {
+    const isMember = await this.isOrgMember(userId, orgId);
+    if (!isMember) throw new NotFoundException('Not a member of this org');
+    const payload: Record<string, unknown> = {};
+    if (data.vatRegistrationType !== undefined)
+      payload.vatRegistrationType = data.vatRegistrationType;
+    if (data.vatEffectiveDate !== undefined)
+      payload.vatEffectiveDate = data.vatEffectiveDate ? new Date(data.vatEffectiveDate) : null;
+    if (data.vatFlatRatePct !== undefined) payload.vatFlatRatePct = data.vatFlatRatePct;
+    if (data.vatRatePct !== undefined) payload.vatRatePct = data.vatRatePct;
+    if (data.vatCostsIncludeVat !== undefined) payload.vatCostsIncludeVat = data.vatCostsIncludeVat;
+    await (this.prisma as any).organization.update({
+      where: { id: orgId },
+      data: payload,
+    });
+    return this.getOrgVatSettings(orgId, userId);
+  }
 }

@@ -61,6 +61,15 @@ function CostOfGoodsInner() {
   >([]);
   const [missingCount, setMissingCount] = useState<number | null>(null);
 
+  type VatSettings = {
+    vatRegistrationType: string;
+    vatEffectiveDate: string | null;
+    vatFlatRatePct: number | null;
+    vatRatePct: number | null;
+    vatCostsIncludeVat: boolean | null;
+  };
+  const [vatSettings, setVatSettings] = useState<VatSettings | null>(null);
+
   const [loading, setLoading] = useState(false);
   const [creating, setCreating] = useState(false);
   const [seeding, setSeeding] = useState(false);
@@ -133,7 +142,7 @@ function CostOfGoodsInner() {
       if (endParam) missingQs.set("end", endParam);
       missingQs.set("limit", "50");
 
-      const [entriesRes, productsRes, missingRes] = await Promise.all([
+      const [entriesRes, productsRes, missingRes, vatRes] = await Promise.all([
         fetch(
           `${baseUrl}/api/amazon/cost-of-goods/entries?` +
           new URLSearchParams({
@@ -151,11 +160,18 @@ function CostOfGoodsInner() {
         fetch(`${baseUrl}/api/amazon/cost-of-goods/missing?${missingQs.toString()}`, {
           headers: { Authorization: `Bearer ${token}` },
         }),
+        fetch(`${baseUrl}/api/orgs/vat-settings`, {
+          headers: { Authorization: `Bearer ${token}` },
+        }),
       ]);
 
       if (!entriesRes.ok) throw new Error("Failed to load cost entries.");
       if (!productsRes.ok) throw new Error("Failed to load products.");
       if (!missingRes.ok) throw new Error("Failed to load missing COGS.");
+      if (vatRes.ok) {
+        const vatData = (await vatRes.json()) as VatSettings;
+        setVatSettings(vatData);
+      }
 
       const entriesData = (await entriesRes.json()) as
         | CostEntryRow[]
@@ -260,6 +276,18 @@ function CostOfGoodsInner() {
       prepCostIncVat: String(editingEntry.prepCostIncVat ?? 0),
     });
   }, [showForm, editingEntry]);
+
+  useEffect(() => {
+    if (!showForm || !vatSettings) return;
+    if (vatSettings.vatRegistrationType === "VAT_STANDARD") {
+      const pct = vatSettings.vatRatePct ?? 20;
+      setForm((prev) => ({ ...prev, vatRatePct: String(pct) }));
+      const incl = vatSettings.vatCostsIncludeVat !== false;
+      setUnitVatMode(incl ? "inc" : "ex");
+      setDeliveryVatMode(incl ? "inc" : "ex");
+      setPrepVatMode(incl ? "inc" : "ex");
+    }
+  }, [showForm, vatSettings?.vatRegistrationType, vatSettings?.vatRatePct, vatSettings?.vatCostsIncludeVat]);
 
   useEffect(() => {
     if (!showForm) return;
@@ -421,6 +449,24 @@ function CostOfGoodsInner() {
       }
 
       await res.json();
+      if (vatSettings?.vatRegistrationType === "VAT_STANDARD") {
+        try {
+          await fetch(`${baseUrl}/api/orgs/vat-settings`, {
+            method: "PATCH",
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "Content-Type": "application/json",
+            },
+            credentials: "include",
+            body: JSON.stringify({
+              vatRatePct: Number(form.vatRatePct ?? 0) || 20,
+              vatCostsIncludeVat: unitVatMode === "inc",
+            }),
+          });
+        } catch {
+          // Non-fatal: entry saved; org VAT defaults may not be updated
+        }
+      }
       setNotice("Saved.");
       setShowForm(false);
       setEditingEntry(null);
@@ -491,6 +537,24 @@ function CostOfGoodsInner() {
         throw new Error(msg || "Failed to update entry.");
       }
 
+      if (vatSettings?.vatRegistrationType === "VAT_STANDARD") {
+        try {
+          await fetch(`${baseUrl}/api/orgs/vat-settings`, {
+            method: "PATCH",
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "Content-Type": "application/json",
+            },
+            credentials: "include",
+            body: JSON.stringify({
+              vatRatePct: Number(form.vatRatePct ?? 0) || 20,
+              vatCostsIncludeVat: unitVatMode === "inc",
+            }),
+          });
+        } catch {
+          // Non-fatal: entry saved; org VAT defaults may not be updated
+        }
+      }
       setNotice("Saved.");
       setShowForm(false);
       setEditingEntry(null);
@@ -975,195 +1039,217 @@ function CostOfGoodsInner() {
                     />
                   </div>
 
-                  <div>
-                    <div className="flex items-center justify-between gap-3">
-                      <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
-                        Unit
-                      </label>
-                      <div className="inline-flex overflow-hidden rounded-md ring-1 ring-[var(--surface-border)]">
-                        <button
-                          type="button"
-                          className={[
-                            "cursor-pointer px-2 py-1 text-[11px]",
-                            unitVatMode === "inc"
-                              ? "bg-[var(--surface)] text-[var(--foreground)]"
-                              : "text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5",
-                          ].join(" ")}
-                          onClick={() => {
-                            setUnitVatMode("inc");
-                            setUnitCostExVat("");
-                          }}
-                        >
-                          Inc VAT
-                        </button>
-                        <button
-                          type="button"
-                          className={[
-                            "cursor-pointer px-2 py-1 text-[11px]",
-                            unitVatMode === "ex"
-                              ? "bg-[var(--surface)] text-[var(--foreground)]"
-                              : "text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5",
-                          ].join(" ")}
-                          onClick={() => {
-                            setUnitVatMode("ex");
-                            const inc = Number(form.unitCostIncVat ?? 0) || 0;
-                            setUnitCostExVat(inc > 0 ? String(exFromInc(inc)) : "");
-                          }}
-                        >
-                          Ex VAT
-                        </button>
+                  {/* Unit, Delivery, Prep on one line - full width of modal */}
+                  <div className="md:col-span-3 grid w-full grid-cols-3 gap-3 min-w-0">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center justify-between gap-1">
+                        <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                          Unit
+                        </label>
+                        {vatSettings?.vatRegistrationType === "VAT_STANDARD" && (
+                          <div className="inline-flex overflow-hidden rounded-md ring-1 ring-[var(--surface-border)]">
+                            <button
+                              type="button"
+                              className={[
+                                "cursor-pointer px-1.5 py-0.5 text-[10px]",
+                                unitVatMode === "inc"
+                                  ? "bg-[var(--surface)] text-[var(--foreground)]"
+                                  : "text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5",
+                              ].join(" ")}
+                              onClick={() => {
+                                setUnitVatMode("inc");
+                                setUnitCostExVat("");
+                              }}
+                            >
+                              Inc
+                            </button>
+                            <button
+                              type="button"
+                              className={[
+                                "cursor-pointer px-1.5 py-0.5 text-[10px]",
+                                unitVatMode === "ex"
+                                  ? "bg-[var(--surface)] text-[var(--foreground)]"
+                                  : "text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5",
+                              ].join(" ")}
+                              onClick={() => {
+                                setUnitVatMode("ex");
+                                const inc = Number(form.unitCostIncVat ?? 0) || 0;
+                                setUnitCostExVat(inc > 0 ? String(exFromInc(inc)) : "");
+                              }}
+                            >
+                              Ex
+                            </button>
+                          </div>
+                        )}
                       </div>
+                      <input
+                        inputMode="decimal"
+                        value={vatSettings?.vatRegistrationType === "VAT_STANDARD" ? (unitVatMode === "inc" ? form.unitCostIncVat : unitCostExVat) : form.unitCostIncVat}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          if (vatSettings?.vatRegistrationType !== "VAT_STANDARD" || unitVatMode === "inc") {
+                            setForm((prev) => ({ ...prev, unitCostIncVat: v }));
+                            return;
+                          }
+                          setUnitCostExVat(v);
+                          const ex = Number(v ?? 0) || 0;
+                          setForm((prev) => ({ ...prev, unitCostIncVat: ex > 0 ? String(incFromEx(ex)) : "" }));
+                        }}
+                        placeholder={vatSettings?.vatRegistrationType === "VAT_STANDARD" && unitVatMode === "ex" ? "e.g. 10.28" : "e.g. 12.34"}
+                        className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-2 py-1.5 text-sm text-[var(--foreground)] outline-none"
+                      />
                     </div>
-                    <input
-                      inputMode="decimal"
-                      value={unitVatMode === "inc" ? form.unitCostIncVat : unitCostExVat}
-                      onChange={(e) => {
-                        const v = e.target.value;
-                        if (unitVatMode === "inc") {
-                          setForm((prev) => ({ ...prev, unitCostIncVat: v }));
-                          return;
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center justify-between gap-1">
+                        <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                          Delivery
+                        </label>
+                        {vatSettings?.vatRegistrationType === "VAT_STANDARD" && (
+                          <div className="inline-flex overflow-hidden rounded-md ring-1 ring-[var(--surface-border)]">
+                            <button
+                              type="button"
+                              className={[
+                                "cursor-pointer px-1.5 py-0.5 text-[10px]",
+                                deliveryVatMode === "inc"
+                                  ? "bg-[var(--surface)] text-[var(--foreground)]"
+                                  : "text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5",
+                              ].join(" ")}
+                              onClick={() => {
+                                setDeliveryVatMode("inc");
+                                setDeliveryCostExVat("");
+                              }}
+                            >
+                              Inc
+                            </button>
+                            <button
+                              type="button"
+                              className={[
+                                "cursor-pointer px-1.5 py-0.5 text-[10px]",
+                                deliveryVatMode === "ex"
+                                  ? "bg-[var(--surface)] text-[var(--foreground)]"
+                                  : "text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5",
+                              ].join(" ")}
+                              onClick={() => {
+                                setDeliveryVatMode("ex");
+                                const inc = Number(form.deliveryCostIncVat ?? 0) || 0;
+                                setDeliveryCostExVat(inc > 0 ? String(exFromInc(inc)) : "");
+                              }}
+                            >
+                              Ex
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                      <input
+                        inputMode="decimal"
+                        value={
+                          vatSettings?.vatRegistrationType === "VAT_STANDARD"
+                            ? deliveryVatMode === "inc"
+                              ? form.deliveryCostIncVat
+                              : deliveryCostExVat
+                            : form.deliveryCostIncVat
                         }
-                        setUnitCostExVat(v);
-                        const ex = Number(v ?? 0) || 0;
-                        setForm((prev) => ({ ...prev, unitCostIncVat: ex > 0 ? String(incFromEx(ex)) : "" }));
-                      }}
-                      placeholder={unitVatMode === "inc" ? "e.g. 12.34" : "e.g. 10.28"}
-                      className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
-                    />
+                        placeholder="0"
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          if (vatSettings?.vatRegistrationType !== "VAT_STANDARD" || deliveryVatMode === "inc") {
+                            setForm((prev) => ({ ...prev, deliveryCostIncVat: v }));
+                            return;
+                          }
+                          setDeliveryCostExVat(v);
+                          const ex = Number(v ?? 0) || 0;
+                          setForm((prev) => ({
+                            ...prev,
+                            deliveryCostIncVat: ex > 0 ? String(incFromEx(ex)) : "0",
+                          }));
+                        }}
+                        className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-2 py-1.5 text-sm text-[var(--foreground)] outline-none"
+                      />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center justify-between gap-1">
+                        <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                          Prep
+                        </label>
+                        {vatSettings?.vatRegistrationType === "VAT_STANDARD" && (
+                          <div className="inline-flex overflow-hidden rounded-md ring-1 ring-[var(--surface-border)]">
+                            <button
+                              type="button"
+                              className={[
+                                "cursor-pointer px-1.5 py-0.5 text-[10px]",
+                                prepVatMode === "inc"
+                                  ? "bg-[var(--surface)] text-[var(--foreground)]"
+                                  : "text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5",
+                              ].join(" ")}
+                              onClick={() => {
+                                setPrepVatMode("inc");
+                                setPrepCostExVat("");
+                              }}
+                            >
+                              Inc
+                            </button>
+                            <button
+                              type="button"
+                              className={[
+                                "cursor-pointer px-1.5 py-0.5 text-[10px]",
+                                prepVatMode === "ex"
+                                  ? "bg-[var(--surface)] text-[var(--foreground)]"
+                                  : "text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5",
+                              ].join(" ")}
+                              onClick={() => {
+                                setPrepVatMode("ex");
+                                const inc = Number(form.prepCostIncVat ?? 0) || 0;
+                                setPrepCostExVat(inc > 0 ? String(exFromInc(inc)) : "");
+                              }}
+                            >
+                              Ex
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                      <input
+                        inputMode="decimal"
+                        value={
+                          vatSettings?.vatRegistrationType === "VAT_STANDARD"
+                            ? prepVatMode === "inc"
+                              ? form.prepCostIncVat
+                              : prepCostExVat
+                            : form.prepCostIncVat
+                        }
+                        placeholder="0"
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          if (vatSettings?.vatRegistrationType !== "VAT_STANDARD" || prepVatMode === "inc") {
+                            setForm((prev) => ({ ...prev, prepCostIncVat: v }));
+                            return;
+                          }
+                          setPrepCostExVat(v);
+                          const ex = Number(v ?? 0) || 0;
+                          setForm((prev) => ({ ...prev, prepCostIncVat: ex > 0 ? String(incFromEx(ex)) : "0" }));
+                        }}
+                        className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-2 py-1.5 text-sm text-[var(--foreground)] outline-none"
+                      />
+                    </div>
                   </div>
 
-                  <div>
-                    <div className="flex items-center justify-between gap-3">
-                      <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
-                        Delivery
-                      </label>
-                      <div className="inline-flex overflow-hidden rounded-md ring-1 ring-[var(--surface-border)]">
-                        <button
-                          type="button"
-                          className={[
-                            "cursor-pointer px-2 py-1 text-[11px]",
-                            deliveryVatMode === "inc"
-                              ? "bg-[var(--surface)] text-[var(--foreground)]"
-                              : "text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5",
-                          ].join(" ")}
-                          onClick={() => {
-                            setDeliveryVatMode("inc");
-                            setDeliveryCostExVat("");
-                          }}
-                        >
-                          Inc VAT
-                        </button>
-                        <button
-                          type="button"
-                          className={[
-                            "cursor-pointer px-2 py-1 text-[11px]",
-                            deliveryVatMode === "ex"
-                              ? "bg-[var(--surface)] text-[var(--foreground)]"
-                              : "text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5",
-                          ].join(" ")}
-                          onClick={() => {
-                            setDeliveryVatMode("ex");
-                            const inc = Number(form.deliveryCostIncVat ?? 0) || 0;
-                            setDeliveryCostExVat(inc > 0 ? String(exFromInc(inc)) : "");
-                          }}
-                        >
-                          Ex VAT
-                        </button>
+                  {/* VAT % below costs, aligned right */}
+                  {vatSettings?.vatRegistrationType === "VAT_STANDARD" && (
+                    <div className="md:col-span-3 flex w-full justify-end">
+                      <div className="flex items-baseline gap-2">
+                        <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                          VAT rate (%)
+                        </label>
+                        <input
+                          inputMode="decimal"
+                          value={form.vatRatePct}
+                          onChange={(e) =>
+                            setForm((prev) => ({ ...prev, vatRatePct: e.target.value }))
+                          }
+                          className="w-16 rounded-lg border border-[var(--surface-border)] bg-transparent px-2 py-1 text-sm text-[var(--foreground)] outline-none text-right"
+                        />
                       </div>
                     </div>
-                    <input
-                      inputMode="decimal"
-                      value={
-                        deliveryVatMode === "inc" ? form.deliveryCostIncVat : deliveryCostExVat
-                      }
-                      placeholder="Per unit"
-                      onChange={(e) => {
-                        const v = e.target.value;
-                        if (deliveryVatMode === "inc") {
-                          setForm((prev) => ({ ...prev, deliveryCostIncVat: v }));
-                          return;
-                        }
-                        setDeliveryCostExVat(v);
-                        const ex = Number(v ?? 0) || 0;
-                        setForm((prev) => ({
-                          ...prev,
-                          deliveryCostIncVat: ex > 0 ? String(incFromEx(ex)) : "0",
-                        }));
-                      }}
-                      className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
-                    />
-                  </div>
-
-                  <div>
-                    <div className="flex items-center justify-between gap-3">
-                      <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
-                        Prep
-                      </label>
-                      <div className="inline-flex overflow-hidden rounded-md ring-1 ring-[var(--surface-border)]">
-                        <button
-                          type="button"
-                          className={[
-                            "cursor-pointer px-2 py-1 text-[11px]",
-                            prepVatMode === "inc"
-                              ? "bg-[var(--surface)] text-[var(--foreground)]"
-                              : "text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5",
-                          ].join(" ")}
-                          onClick={() => {
-                            setPrepVatMode("inc");
-                            setPrepCostExVat("");
-                          }}
-                        >
-                          Inc VAT
-                        </button>
-                        <button
-                          type="button"
-                          className={[
-                            "cursor-pointer px-2 py-1 text-[11px]",
-                            prepVatMode === "ex"
-                              ? "bg-[var(--surface)] text-[var(--foreground)]"
-                              : "text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5",
-                          ].join(" ")}
-                          onClick={() => {
-                            setPrepVatMode("ex");
-                            const inc = Number(form.prepCostIncVat ?? 0) || 0;
-                            setPrepCostExVat(inc > 0 ? String(exFromInc(inc)) : "");
-                          }}
-                        >
-                          Ex VAT
-                        </button>
-                      </div>
-                    </div>
-                    <input
-                      inputMode="decimal"
-                      value={prepVatMode === "inc" ? form.prepCostIncVat : prepCostExVat}
-                      placeholder="Per unit"
-                      onChange={(e) => {
-                        const v = e.target.value;
-                        if (prepVatMode === "inc") {
-                          setForm((prev) => ({ ...prev, prepCostIncVat: v }));
-                          return;
-                        }
-                        setPrepCostExVat(v);
-                        const ex = Number(v ?? 0) || 0;
-                        setForm((prev) => ({ ...prev, prepCostIncVat: ex > 0 ? String(incFromEx(ex)) : "0" }));
-                      }}
-                      className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
-                      VAT rate (%)
-                    </label>
-                    <input
-                      inputMode="decimal"
-                      value={form.vatRatePct}
-                      onChange={(e) =>
-                        setForm((prev) => ({ ...prev, vatRatePct: e.target.value }))
-                      }
-                      className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
-                    />
-                  </div>
+                  )}
 
                   <div>
                     <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">

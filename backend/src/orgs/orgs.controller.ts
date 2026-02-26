@@ -3,16 +3,39 @@ import {
   Body,
   Controller,
   Get,
+  Patch,
   Post,
   UseGuards,
   Req,
 } from '@nestjs/common';
 import { ClerkAuthGuard } from '../auth/clerk-auth.guard';
 import { UsersService } from '../users/users.service';
+import { UpdateVatSettingsDto } from './dto/update-vat-settings.dto';
 
 @Controller('orgs')
 export class OrgsController {
   constructor(private readonly usersService: UsersService) {}
+
+  @UseGuards(ClerkAuthGuard)
+  @Get('vat-settings')
+  async getVatSettings(@Req() req: { user: { userId: string; orgId: string } }) {
+    return this.usersService.getOrgVatSettings(req.user.orgId, req.user.userId);
+  }
+
+  @UseGuards(ClerkAuthGuard)
+  @Patch('vat-settings')
+  async updateVatSettings(
+    @Req() req: { user: { userId: string; orgId: string } },
+    @Body() dto: UpdateVatSettingsDto,
+  ) {
+    return this.usersService.updateOrgVatSettings(req.user.orgId, req.user.userId, {
+      vatRegistrationType: dto.vatRegistrationType,
+      vatEffectiveDate: dto.vatEffectiveDate,
+      vatFlatRatePct: dto.vatFlatRatePct,
+      vatRatePct: dto.vatRatePct,
+      vatCostsIncludeVat: dto.vatCostsIncludeVat,
+    });
+  }
 
   @UseGuards(ClerkAuthGuard)
   @Get()

@@ -109,6 +109,25 @@ function ShipmentsIcon({ className }: { className?: string }) {
   );
 }
 
+function ReplenishIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <path d="M3 3v18h18" />
+      <path d="m19 9-5 5-4-4-3 3" />
+    </svg>
+  );
+}
+
 function BurgerIcon({ className }: { className?: string }) {
   return (
     <svg
@@ -357,6 +376,19 @@ export function MobileNav() {
                   <ShipmentsIcon className="h-4 w-4 shrink-0" />
                   FBA Shipments
                 </Link>
+
+                <Link
+                  href="/replenish"
+                  className={`flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium no-underline transition-colors ${
+                    pathname === "/replenish"
+                      ? "bg-[rgb(2,242,170)] text-black"
+                      : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
+                  }`}
+                  onClick={() => setOpen(false)}
+                >
+                  <ReplenishIcon className="h-4 w-4 shrink-0" />
+                  Replenish
+                </Link>
               </SignedIn>
 
               <div className="my-2 h-px bg-[var(--surface-border)]" />
@@ -445,6 +477,17 @@ export function MobileNav() {
                         className="absolute left-0 right-0 top-full z-10 mt-1 flex flex-col overflow-hidden rounded-lg border border-[var(--surface-border)] bg-[var(--surface)] shadow-lg"
                         role="menu"
                       >
+                        <Link
+                          href="/settings"
+                          role="menuitem"
+                          onClick={() => {
+                            setOptionsOpen(false);
+                            setOpen(false);
+                          }}
+                          className="block px-3 py-2.5 text-left text-sm text-[var(--foreground)] no-underline hover:bg-[var(--foreground)]/10"
+                        >
+                          Settings
+                        </Link>
                         <button
                           type="button"
                           role="menuitem"

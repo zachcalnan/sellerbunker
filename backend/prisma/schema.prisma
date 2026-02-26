@@ -37,6 +37,12 @@ model Organization {
   updatedAt              DateTime                 @updatedAt @map("updated_at")
   lastFbaInventorySyncAt DateTime?
   lastFeesEstimateAt     DateTime?                @map("last_fees_estimate_at")
+  // VAT: NON_VAT_REGISTERED | VAT_STANDARD | VAT_FLAT_RATE
+  vatRegistrationType    String?                  @map("vat_registration_type")
+  vatEffectiveDate       DateTime?                @map("vat_effective_date") // when to start applying VAT logic
+  vatFlatRatePct         Decimal?                 @map("vat_flat_rate_pct") @db.Decimal(7, 4) // flat rate %
+  vatRatePct             Decimal?                @map("vat_rate_pct") @db.Decimal(7, 4) // standard rate % for costs/revenue
+  vatCostsIncludeVat     Boolean?                 @map("vat_costs_include_vat") // true = user enters costs incl VAT
   members                OrganizationMembership[]
   usersWithActiveOrg     User[]                   @relation("ActiveOrg")
 
@@ -158,6 +164,22 @@ model OrderItem {
   orderDate            DateTime @map("order_date")
   createdAt            DateTime @default(now()) @map("created_at")
   updatedAt            DateTime @updatedAt @map("updated_at")
+  // VAT breakdown (nullable for backfill): revenue and costs inc/excl VAT for profit ex VAT and VAT balance
+  salePriceIncVat      Decimal? @map("sale_price_inc_vat") @db.Decimal(14, 2)
+  salePriceExVat       Decimal? @map("sale_price_ex_vat") @db.Decimal(14, 2)
+  saleVatAmount        Decimal? @map("sale_vat_amount") @db.Decimal(14, 2)
+  estimatedSalePriceIncVat Decimal? @map("estimated_sale_price_inc_vat") @db.Decimal(14, 2)
+  estimatedSalePriceExVat  Decimal? @map("estimated_sale_price_ex_vat") @db.Decimal(14, 2)
+  estimatedSaleVatAmount   Decimal? @map("estimated_sale_vat_amount") @db.Decimal(14, 2)
+  unitCostIncVat       Decimal? @map("unit_cost_inc_vat") @db.Decimal(14, 2)
+  unitCostExVat        Decimal? @map("unit_cost_ex_vat") @db.Decimal(14, 2)
+  unitVatAmount        Decimal? @map("unit_vat_amount") @db.Decimal(14, 2)
+  deliveryIncVat       Decimal? @map("delivery_inc_vat") @db.Decimal(14, 2)
+  deliveryExVat        Decimal? @map("delivery_ex_vat") @db.Decimal(14, 2)
+  deliveryVatAmount    Decimal? @map("delivery_vat_amount") @db.Decimal(14, 2)
+  prepIncVat           Decimal? @map("prep_inc_vat") @db.Decimal(14, 2)
+  prepExVat            Decimal? @map("prep_ex_vat") @db.Decimal(14, 2)
+  prepVatAmount        Decimal? @map("prep_vat_amount") @db.Decimal(14, 2)
   order                Order    @relation(fields: [orderDbId], references: [id], onDelete: Cascade)
   product              Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
   user                 User     @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -262,10 +284,16 @@ model Purchase {
   qtyDelivered       Int      @default(0) @map("qty_delivered")
   currency           String   @default("GBP")
   vatRatePct         Decimal  @default(0) @map("vat_rate_pct") @db.Decimal(7, 4)
+  // true = user entered costs incl VAT; false = excl VAT (only one stored, other derived)
+  costsEnteredInclVat Boolean  @default(true) @map("costs_entered_incl_vat")
   unitCostIncVat     Decimal  @default(0) @map("unit_cost_inc_vat") @db.Decimal(14, 2)
+  unitCostExVat      Decimal? @map("unit_cost_ex_vat") @db.Decimal(14, 2)
   deliveryCostIncVat Decimal  @default(0) @map("delivery_cost_inc_vat") @db.Decimal(14, 2)
+  deliveryCostExVat  Decimal? @map("delivery_cost_ex_vat") @db.Decimal(14, 2)
   prepCostIncVat     Decimal  @default(0) @map("prep_cost_inc_vat") @db.Decimal(14, 2)
+  prepCostExVat      Decimal? @map("prep_cost_ex_vat") @db.Decimal(14, 2)
   totalCostIncVat    Decimal  @default(0) @map("total_cost_inc_vat") @db.Decimal(14, 2)
+  totalCostExVat     Decimal? @map("total_cost_ex_vat") @db.Decimal(14, 2)
   createdAt          DateTime @default(now()) @map("created_at")
   updatedAt          DateTime @updatedAt @map("updated_at")
   supplierLink       String?  @map("supplier_link")

@@ -15,6 +15,11 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { LinkAmazonAccountDto } from './dto/link-amazon-account.dto';
 import { UsersService } from '../users/users.service';
+import {
+  amountExVatFromIncl,
+  vatAmountFromIncl,
+  vatAmountFromEx,
+} from '../common/vat.util';
 
 @Injectable()
 export class AmazonService {
@@ -28,6 +33,191 @@ export class AmazonService {
 
   private async getOrgMemberUserIds(orgId: string): Promise<string[]> {
     return this.usersService.getOrgMemberUserIds(orgId);
+  }
+
+  /** Load org VAT settings for a user (uses user's active org). Returns null if no org or no VAT settings. */
+  private async getVatSettingsForUser(userId: string): Promise<{
+    vatRegistrationType: string;
+    vatEffectiveDate: Date | null;
+    vatRatePct: number;
+    vatFlatRatePct: number;
+    vatCostsIncludeVat: boolean;
+  } | null> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { activeOrgId: true },
+    });
+    const orgId = user?.activeOrgId;
+    if (!orgId) return null;
+    const org = await (this.prisma as any).organization.findUnique({
+      where: { id: orgId },
+      select: {
+        vatRegistrationType: true,
+        vatEffectiveDate: true,
+        vatFlatRatePct: true,
+        vatRatePct: true,
+        vatCostsIncludeVat: true,
+      },
+    });
+    if (!org) return null;
+    const effectiveDate = org.vatEffectiveDate ? (org.vatEffectiveDate as Date) : null;
+    return {
+      vatRegistrationType: org.vatRegistrationType ?? 'NON_VAT_REGISTERED',
+      vatEffectiveDate: effectiveDate,
+      vatRatePct: org.vatRatePct != null ? Number(org.vatRatePct) : 20,
+      vatFlatRatePct: org.vatFlatRatePct != null ? Number(org.vatFlatRatePct) : 0,
+      vatCostsIncludeVat: org.vatCostsIncludeVat !== false,
+    };
+  }
+
+  /**
+   * Compute profit and VAT breakdown for an order item based on org VAT settings and order date.
+   * Returns profit (ex-VAT for VAT reg, gross for non-VAT) and optional VAT fields to persist.
+   */
+  private computeOrderItemVatAndProfit(
+    revenueTotal: number,
+    cogsTotal: number | null,
+    quantity: number,
+    orderDate: Date,
+    itemFees: number,
+    taxCharged: number,
+    vatSettings: {
+      vatRegistrationType: string;
+      vatEffectiveDate: Date | null;
+      vatRatePct: number;
+      vatFlatRatePct: number;
+      vatCostsIncludeVat: boolean;
+    } | null,
+  ): {
+    profit: number | null;
+    salePriceIncVat: number | null;
+    salePriceExVat: number | null;
+    saleVatAmount: number | null;
+    unitCostIncVat: number | null;
+    unitCostExVat: number | null;
+    unitVatAmount: number | null;
+    deliveryIncVat: number | null;
+    deliveryExVat: number | null;
+    deliveryVatAmount: number | null;
+    prepIncVat: number | null;
+    prepExVat: number | null;
+    prepVatAmount: number | null;
+  } {
+    const nil = {
+      profit: null as number | null,
+      salePriceIncVat: null,
+      salePriceExVat: null,
+      saleVatAmount: null,
+      unitCostIncVat: null,
+      unitCostExVat: null,
+      unitVatAmount: null,
+      deliveryIncVat: null,
+      deliveryExVat: null,
+      deliveryVatAmount: null,
+      prepIncVat: null,
+      prepExVat: null,
+      prepVatAmount: null,
+    };
+    const safeQty = quantity > 0 ? quantity : 1;
+    const costPerUnit = cogsTotal != null ? cogsTotal / safeQty : null;
+
+    if (!vatSettings || vatSettings.vatRegistrationType === 'NON_VAT_REGISTERED') {
+      const profit =
+        cogsTotal != null
+          ? Math.round((revenueTotal - taxCharged - cogsTotal + itemFees) * 100) / 100
+          : null;
+      return { ...nil, profit };
+    }
+
+    const effective = vatSettings.vatEffectiveDate;
+    if (effective != null && orderDate < effective) {
+      const profit =
+        cogsTotal != null
+          ? Math.round((revenueTotal - taxCharged - cogsTotal + itemFees) * 100) / 100
+          : null;
+      return { ...nil, profit };
+    }
+
+    if (vatSettings.vatRegistrationType === 'VAT_STANDARD') {
+      const rate = vatSettings.vatRatePct;
+      const salePriceIncVat = Math.round(revenueTotal * 100) / 100;
+      const salePriceExVat = amountExVatFromIncl(revenueTotal, rate);
+      const saleVatAmount = vatAmountFromIncl(revenueTotal, rate);
+
+      let unitCostIncVat: number;
+      let unitCostExVat: number;
+      let unitVatAmount: number;
+      if (costPerUnit != null && costPerUnit > 0) {
+        if (vatSettings.vatCostsIncludeVat) {
+          unitCostIncVat = Math.round(costPerUnit * 100) / 100;
+          unitCostExVat = amountExVatFromIncl(costPerUnit, rate);
+          unitVatAmount = vatAmountFromIncl(costPerUnit, rate);
+        } else {
+          unitCostExVat = Math.round(costPerUnit * 100) / 100;
+          unitVatAmount = vatAmountFromEx(costPerUnit, rate);
+          unitCostIncVat = Math.round((costPerUnit + unitVatAmount) * 100) / 100;
+        }
+      } else {
+        unitCostIncVat = 0;
+        unitCostExVat = 0;
+        unitVatAmount = 0;
+      }
+      const costExVatTotal = (unitCostExVat ?? 0) * safeQty;
+      const profit =
+        cogsTotal != null
+          ? Math.round((salePriceExVat - costExVatTotal + itemFees) * 100) / 100
+          : null;
+      return {
+        profit,
+        salePriceIncVat,
+        salePriceExVat,
+        saleVatAmount,
+        unitCostIncVat,
+        unitCostExVat,
+        unitVatAmount,
+        deliveryIncVat: 0,
+        deliveryExVat: 0,
+        deliveryVatAmount: 0,
+        prepIncVat: 0,
+        prepExVat: 0,
+        prepVatAmount: 0,
+      };
+    }
+
+    if (vatSettings.vatRegistrationType === 'VAT_FLAT_RATE') {
+      const flatPct = vatSettings.vatFlatRatePct;
+      const salePriceIncVat = Math.round(revenueTotal * 100) / 100;
+      const saleVatAmount = Math.round(revenueTotal * (flatPct / 100) * 100) / 100;
+      const salePriceExVat = Math.round((revenueTotal - saleVatAmount) * 100) / 100;
+      const unitCostIncVat = costPerUnit != null ? Math.round(costPerUnit * 100) / 100 : 0;
+      const unitCostExVat = unitCostIncVat;
+      const unitVatAmount = 0;
+      const profit =
+        cogsTotal != null
+          ? Math.round((salePriceExVat - cogsTotal + itemFees) * 100) / 100
+          : null;
+      return {
+        profit,
+        salePriceIncVat,
+        salePriceExVat,
+        saleVatAmount,
+        unitCostIncVat,
+        unitCostExVat,
+        unitVatAmount,
+        deliveryIncVat: 0,
+        deliveryExVat: 0,
+        deliveryVatAmount: 0,
+        prepIncVat: 0,
+        prepExVat: 0,
+        prepVatAmount: 0,
+      };
+    }
+
+    const profit =
+      cogsTotal != null
+        ? Math.round((revenueTotal - taxCharged - cogsTotal + itemFees) * 100) / 100
+        : null;
+    return { ...nil, profit };
   }
 
   private async getAmazonCredentialsForOrg(
@@ -753,6 +943,8 @@ export class AmazonService {
     let orderItemsThrottled = false;
     let financesUnauthorized = false;
 
+    const vatSettings = await this.getVatSettingsForUser(userId);
+
     for (const order of orders) {
       const amazonOrderId = order.AmazonOrderId;
       if (!amazonOrderId) {
@@ -1141,11 +1333,16 @@ export class AmazonService {
             : null;
           const cogsTotal =
             cogsPerUnit != null ? cogsPerUnit * quantityOrdered : null;
-          // itemFees (amazonFeesTotal) is negative from SP-API; adding it subtracts the fee from profit.
-          const profit =
-            cogsTotal != null
-              ? revenueTotal - taxCharged - cogsTotal + itemFees
-              : null;
+          const taxChargedNum = Number.isNaN(taxCharged) ? 0 : taxCharged;
+          const vatResult = this.computeOrderItemVatAndProfit(
+            revenueTotal,
+            cogsTotal,
+            quantityOrdered,
+            orderDate,
+            itemFees,
+            taxChargedNum,
+            vatSettings,
+          );
           const feesFromFinances =
             (orderItemId && feeByOrderItemId.has(orderItemId)) || (sku && feeBySku.has(sku));
           const settledBreakdown =
@@ -1162,7 +1359,20 @@ export class AmazonService {
             select: { amazonFeesTotal: true, profit: true, feesSource: true },
           });
           const finalFees = Number.isNaN(itemFees) ? 0 : Number(itemFees.toFixed(2));
-          const finalProfit = profit != null ? Number(profit.toFixed(2)) : null;
+          const finalProfit = vatResult.profit != null ? Number(vatResult.profit.toFixed(2)) : null;
+          const vatData: Record<string, number | null> = {};
+          if (vatResult.salePriceIncVat != null) vatData.salePriceIncVat = vatResult.salePriceIncVat;
+          if (vatResult.salePriceExVat != null) vatData.salePriceExVat = vatResult.salePriceExVat;
+          if (vatResult.saleVatAmount != null) vatData.saleVatAmount = vatResult.saleVatAmount;
+          if (vatResult.unitCostIncVat != null) vatData.unitCostIncVat = vatResult.unitCostIncVat;
+          if (vatResult.unitCostExVat != null) vatData.unitCostExVat = vatResult.unitCostExVat;
+          if (vatResult.unitVatAmount != null) vatData.unitVatAmount = vatResult.unitVatAmount;
+          if (vatResult.deliveryIncVat != null) vatData.deliveryIncVat = vatResult.deliveryIncVat;
+          if (vatResult.deliveryExVat != null) vatData.deliveryExVat = vatResult.deliveryExVat;
+          if (vatResult.deliveryVatAmount != null) vatData.deliveryVatAmount = vatResult.deliveryVatAmount;
+          if (vatResult.prepIncVat != null) vatData.prepIncVat = vatResult.prepIncVat;
+          if (vatResult.prepExVat != null) vatData.prepExVat = vatResult.prepExVat;
+          if (vatResult.prepVatAmount != null) vatData.prepVatAmount = vatResult.prepVatAmount;
           const updateFeesAndProfit =
             feesFromFinances || (existingItem?.feesSource as string) !== 'finances';
           const settledFeeFields =
@@ -1193,6 +1403,7 @@ export class AmazonService {
                 }
               : {}),
             cogsTotal,
+            ...vatData,
             rawResponse: it,
             orderDate,
           };
@@ -1222,6 +1433,7 @@ export class AmazonService {
               ...settledFeeFields,
               cogsTotal,
               profit: finalProfit,
+              ...vatData,
               rawResponse: it,
               orderDate,
             },
@@ -1636,6 +1848,109 @@ export class AmazonService {
     });
   }
 
+  /**
+   * Best-selling products for replenishment: out of stock first, then by most sold, then by estimated profit.
+   * Uses all order data already in the DB (no date filter). OrderItem first; if none, falls back to Order.
+   */
+  async getReplenishProducts(orgId: string, limit = 200) {
+    const userIds = await this.getOrgMemberUserIds(orgId);
+
+    let orderStats: { productId: string; _sum: { quantity?: number; profit?: number; totalProfit?: number }; _max: { orderDate: Date } }[];
+    const orderItemStats = await (this.prisma as any).orderItem.groupBy({
+      by: ['productId'],
+      where: {
+        userId: { in: userIds },
+        marketplace: 'amazon',
+      },
+      _sum: { quantity: true, profit: true },
+      _max: { orderDate: true },
+    });
+    if (orderItemStats.length > 0) {
+      orderStats = orderItemStats;
+    } else {
+      const orderStatsFromOrders = await (this.prisma as any).order.groupBy({
+        by: ['productId'],
+        where: {
+          userId: { in: userIds },
+          marketplace: 'amazon',
+        },
+        _sum: { quantity: true, totalProfit: true },
+        _max: { orderDate: true },
+      });
+      orderStats = orderStatsFromOrders.map((r: any) => ({
+        productId: r.productId,
+        _sum: { quantity: r._sum?.quantity, profit: r._sum?.totalProfit ?? null },
+        _max: r._max,
+      }));
+    }
+
+    const productIds = orderStats.map((r: any) => r.productId);
+    if (productIds.length === 0) return [];
+
+    const products = await this.prisma.product.findMany({
+      where: { id: { in: productIds }, userId: { in: userIds } },
+      select: {
+        id: true,
+        sku: true,
+        asin: true,
+        title: true,
+        imageUrl: true,
+        inventory: { select: { availableQty: true } },
+      },
+    });
+
+    const statsByProductId = new Map(
+      orderStats.map((r: any) => [
+        r.productId,
+        {
+          unitsSold: Number(r._sum?.quantity ?? 0),
+          estimatedProfit: Number(r._sum?.profit ?? 0),
+          lastSold: r._max?.orderDate ?? null,
+        },
+      ]),
+    );
+    const productMap = new Map(products.map((p) => [p.id, p]));
+
+    const combined = productIds
+      .map((productId: string) => {
+        const p = productMap.get(productId);
+        const stats = statsByProductId.get(productId);
+        if (!p || !stats) return null;
+        const availableQty = p.inventory?.availableQty ?? 0;
+        const outOfStock = availableQty <= 0;
+        return {
+          productId: p.id,
+          imageUrl: p.imageUrl ?? null,
+          title: p.title ?? null,
+          sku: p.sku,
+          asin: p.asin ?? null,
+          lastSold: stats.lastSold ? (stats.lastSold as Date).toISOString() : null,
+          outOfStock,
+          unitsSold: stats.unitsSold,
+          estimatedProfit: stats.estimatedProfit,
+        };
+      })
+      .filter(Boolean) as {
+      productId: string;
+      imageUrl: string | null;
+      title: string | null;
+      sku: string;
+      asin: string | null;
+      lastSold: string | null;
+      outOfStock: boolean;
+      unitsSold: number;
+      estimatedProfit: number;
+    }[];
+
+    combined.sort((a, b) => {
+      if (a.outOfStock !== b.outOfStock) return a.outOfStock ? -1 : 1;
+      if (b.unitsSold !== a.unitsSold) return b.unitsSold - a.unitsSold;
+      return b.estimatedProfit - a.estimatedProfit;
+    });
+
+    return combined.slice(0, limit);
+  }
+
   async listProducts(orgId: string) {
     const userIds = await this.getOrgMemberUserIds(orgId);
     const products = await this.prisma.product.findMany({
@@ -1712,9 +2027,11 @@ export class AmazonService {
           revenueTotal: true,
           taxChargedTotal: true,
           amazonFeesTotal: true,
+          orderDate: true,
         },
       });
 
+      const vatSettings = await this.getVatSettingsForUser(updated.userId);
       const orderDbIds = new Set<string>();
 
       for (const it of orderItems) {
@@ -1732,17 +2049,39 @@ export class AmazonService {
             ? null
             : cogsPerUnit * safeQty;
 
-        // amazonFeesTotal is negative from SP-API; adding it subtracts the fee from profit.
+        const cogsTotalNum = cogsTotal == null ? 0 : cogsTotal;
+        const orderDate = it.orderDate ? new Date(it.orderDate) : new Date();
+        const vatResult = this.computeOrderItemVatAndProfit(
+          revenueTotal,
+          cogsTotalNum,
+          safeQty,
+          orderDate,
+          amazonFeesTotal,
+          taxChargedTotal,
+          vatSettings,
+        );
         const profit =
-          cogsTotal == null
-            ? null
-            : revenueTotal - taxChargedTotal - cogsTotal + amazonFeesTotal;
+          vatResult.profit != null ? Number(vatResult.profit.toFixed(2)) : null;
+        const vatData: Record<string, number | null> = {};
+        if (vatResult.salePriceIncVat != null) vatData.salePriceIncVat = vatResult.salePriceIncVat;
+        if (vatResult.salePriceExVat != null) vatData.salePriceExVat = vatResult.salePriceExVat;
+        if (vatResult.saleVatAmount != null) vatData.saleVatAmount = vatResult.saleVatAmount;
+        if (vatResult.unitCostIncVat != null) vatData.unitCostIncVat = vatResult.unitCostIncVat;
+        if (vatResult.unitCostExVat != null) vatData.unitCostExVat = vatResult.unitCostExVat;
+        if (vatResult.unitVatAmount != null) vatData.unitVatAmount = vatResult.unitVatAmount;
+        if (vatResult.deliveryIncVat != null) vatData.deliveryIncVat = vatResult.deliveryIncVat;
+        if (vatResult.deliveryExVat != null) vatData.deliveryExVat = vatResult.deliveryExVat;
+        if (vatResult.deliveryVatAmount != null) vatData.deliveryVatAmount = vatResult.deliveryVatAmount;
+        if (vatResult.prepIncVat != null) vatData.prepIncVat = vatResult.prepIncVat;
+        if (vatResult.prepExVat != null) vatData.prepExVat = vatResult.prepExVat;
+        if (vatResult.prepVatAmount != null) vatData.prepVatAmount = vatResult.prepVatAmount;
 
         await (this.prisma as any).orderItem.update({
           where: { id: it.id },
           data: {
             cogsTotal: cogsTotal == null ? null : Number(cogsTotal.toFixed(2)),
-            profit: profit == null ? null : Number(profit.toFixed(2)),
+            profit,
+            ...vatData,
           },
         });
       }
@@ -2176,7 +2515,45 @@ export class AmazonService {
   }
 
   /**
+   * Set manual check-in date for a shipment (when historic check-in was not recorded).
+   * Recomputes checkInDurationDays from createdDate to the new checkedInDate.
+   */
+  async setShipmentManualCheckedInDate(
+    orgId: string,
+    shipmentId: string,
+    checkedInDateIso: string,
+  ): Promise<{ ok: boolean; error?: string }> {
+    const userIds = await this.getOrgMemberUserIds(orgId);
+    const shipment = await this.prisma.shipment.findFirst({
+      where: { shipmentId, userId: { in: userIds } },
+      select: { id: true, userId: true, createdDate: true },
+    });
+    if (!shipment) {
+      return { ok: false, error: 'Shipment not found' };
+    }
+    const checkedInDate = new Date(checkedInDateIso);
+    if (Number.isNaN(checkedInDate.getTime())) {
+      return { ok: false, error: 'Invalid date' };
+    }
+    const checkInDurationDays =
+      shipment.createdDate != null
+        ? Math.max(0, Math.floor((checkedInDate.getTime() - shipment.createdDate.getTime()) / (24 * 60 * 60 * 1000)))
+        : null;
+    await this.prisma.shipment.update({
+      where: { id: shipment.id },
+      data: {
+        checkedInDate,
+        checkedInDateIsClosedDate: false,
+        checkInDurationDays: checkInDurationDays ?? undefined,
+      },
+    });
+    return { ok: true };
+  }
+
+  /**
    * List FBA inbound shipments for the org (from DB).
+   * Masks createdDate/checkedInDate when they fall on the same calendar day as createdAt/updatedAt,
+   * since those were likely stored as "today" at sync time rather than real API dates.
    */
   async listShipments(orgId: string) {
     const userIds = await this.getOrgMemberUserIds(orgId);
@@ -2184,27 +2561,48 @@ export class AmazonService {
       where: { userId: { in: userIds } },
       orderBy: [{ createdDate: 'desc' }, { updatedAt: 'desc' }],
     });
-    return rows.map((s) => ({
-      id: s.id,
-      shipmentId: s.shipmentId,
-      shipmentName: s.shipmentName ?? null,
-      shipmentStatus: s.shipmentStatus ?? null,
-      destinationFulfillmentCenterId: s.destinationFulfillmentCenterId ?? null,
-      createdDate: s.createdDate?.toISOString() ?? null,
-      lastUpdatedDate: s.lastUpdatedDate?.toISOString() ?? null,
-      unitsSent: s.unitsSent,
-      unitsReceived: s.unitsReceived,
-      unitsDamaged: s.unitsDamaged,
-      unitsDisposed: s.unitsDisposed,
-      unitsMissing: s.unitsMissing,
-      pickupDate: s.pickupDate?.toISOString() ?? null,
-      transportStatus: s.transportStatus ?? null,
-      deliveryDate: s.deliveryDate?.toISOString() ?? null,
-      damageClosedDate: s.damageClosedDate?.toISOString() ?? null,
-      checkInDurationDays: s.checkInDurationDays ?? null,
-      checkedInDate: s.checkedInDate?.toISOString() ?? null,
-      checkedInDateIsClosedDate: s.checkedInDateIsClosedDate ?? null,
-    }));
+    const sameCalendarDay = (a: Date, b: Date) =>
+      a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+    return rows.map((s) => {
+      const createdDateReal =
+        s.createdDate != null && !sameCalendarDay(s.createdDate, s.createdAt)
+          ? s.createdDate
+          : null;
+      const checkedInDateReal =
+        s.checkedInDate != null && !sameCalendarDay(s.checkedInDate, s.updatedAt)
+          ? s.checkedInDate
+          : null;
+      const checkInDurationDays =
+        checkedInDateReal != null
+          ? s.checkInDurationDays ??
+            (createdDateReal && checkedInDateReal
+              ? Math.max(0, Math.floor((checkedInDateReal.getTime() - createdDateReal.getTime()) / (24 * 60 * 60 * 1000)))
+              : null)
+          : null;
+      return {
+        id: s.id,
+        shipmentId: s.shipmentId,
+        shipmentName: s.shipmentName ?? null,
+        shipmentStatus: s.shipmentStatus ?? null,
+        destinationFulfillmentCenterId: s.destinationFulfillmentCenterId ?? null,
+        createdDate: createdDateReal?.toISOString() ?? null,
+        lastUpdatedDate: s.lastUpdatedDate?.toISOString() ?? null,
+        createdAt: s.createdAt.toISOString(),
+        updatedAt: s.updatedAt.toISOString(),
+        unitsSent: s.unitsSent,
+        unitsReceived: s.unitsReceived,
+        unitsDamaged: s.unitsDamaged,
+        unitsDisposed: s.unitsDisposed,
+        unitsMissing: s.unitsMissing,
+        pickupDate: s.pickupDate?.toISOString() ?? null,
+        transportStatus: s.transportStatus ?? null,
+        deliveryDate: s.deliveryDate?.toISOString() ?? null,
+        damageClosedDate: s.damageClosedDate?.toISOString() ?? null,
+        checkInDurationDays,
+        checkedInDate: checkedInDateReal?.toISOString() ?? null,
+        checkedInDateIsClosedDate: checkedInDateReal != null ? s.checkedInDateIsClosedDate ?? null : null,
+      };
+    });
   }
 
   /**
@@ -2242,7 +2640,9 @@ export class AmazonService {
     const parseDate = (v: unknown): Date | null => {
       if (v == null) return null;
       if (typeof v === 'string') {
-        const d = new Date(v);
+        const trimmed = v.trim();
+        if (!trimmed) return null;
+        const d = new Date(trimmed);
         return Number.isNaN(d.getTime()) ? null : d;
       }
       if (typeof v === 'number' && !Number.isNaN(v)) {
@@ -2263,6 +2663,25 @@ export class AmazonService {
       if (typeof v === 'number' && Number.isInteger(v)) return v;
       const n = parseInt(String(v), 10);
       return Number.isNaN(n) ? 0 : n;
+    };
+
+    /** Parse date from ShipmentName when API does not return CreatedDate. e.g. "FBA STA (11/03/2025 19:20)-BHX4" -> DD/MM/YYYY HH:MM */
+    const parseDateFromShipmentName = (name: unknown): Date | null => {
+      const s = typeof name === 'string' ? name : null;
+      if (!s) return null;
+      const match = s.match(/\((\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2}))?\)/);
+      if (!match) return null;
+      const [, day, month, year, hour = '0', min = '0'] = match;
+      const d = new Date(
+        parseInt(year, 10),
+        parseInt(month, 10) - 1,
+        parseInt(day, 10),
+        parseInt(hour, 10),
+        parseInt(min, 10),
+        0,
+        0,
+      );
+      return Number.isNaN(d.getTime()) ? null : d;
     };
 
     // Phase 1 requires the first getShipments request to specify every status; otherwise the API won't return all shipment IDs.
@@ -2314,6 +2733,7 @@ export class AmazonService {
         })) as any;
         const payload = res?.payload ?? res;
         rawResponses.push(payload);
+        // No DTO: payload and ShipmentData items are raw API JSON; we never map or strip fields.
         this.logger.log(
           `[syncShipments] getShipments page: payload keys=${Object.keys(payload ?? {}).join(', ')} ShipmentData length=${parseShipmentList(payload).length}`,
         );
@@ -2333,39 +2753,83 @@ export class AmazonService {
     // Statuses that mean "checked in at FC" – we record lastUpdatedDate as checkedInDate when we see these
     const CHECKED_IN_STATUSES = ['CLOSED', 'RECEIVING', 'Closed', 'Receiving'];
 
-    // Save each shipment from list data; set checkedInDate from status timestamp (created = shipment created, checked in = when we see RECEIVING/CLOSED)
+    // Raw API data only: no DTO or mapper – we use the same objects from getFbaInboundShipments (JSON.parse(response.body)).
+    // Log full first shipment object so no field is hidden by truncation (e.g. LastUpdatedDate, ClosedDate).
     if (listRows.length > 0) {
-      this.logger.log(`[syncShipments] First row keys: ${Object.keys(listRows[0]).join(', ')}`);
       const r0 = listRows[0] as Record<string, unknown>;
-      this.logger.log(`[syncShipments] First row CreatedDate/LastUpdatedDate: ${JSON.stringify({ CreatedDate: r0.CreatedDate ?? r0.createdDate, LastUpdatedDate: r0.LastUpdatedDate ?? r0.lastUpdatedDate })}`);
+      this.logger.log(`[syncShipments] First row keys (raw API, no DTO): ${Object.keys(r0).join(', ')}`);
+      const fullFirstRow = JSON.stringify(r0);
+      if (fullFirstRow.length <= 4000) {
+        this.logger.log(`[syncShipments] First row full: ${fullFirstRow}`);
+      } else {
+        this.logger.log(`[syncShipments] First row full (${fullFirstRow.length} chars): ${fullFirstRow.slice(0, 4000)}...`);
+        this.logger.log(`[syncShipments] First row tail: ...${fullFirstRow.slice(-1500)}`);
+      }
     }
     for (const row of listRows) {
       const shipmentId = row.ShipmentId ?? row.shipmentId ?? row.ShipmentIdentifier ?? row.shipmentIdentifier;
       if (!shipmentId) continue;
-      const createdDate = parseDate(
-        row.CreatedDate ?? row.createdDate ?? row.Created ?? row.created ?? row.Created_date ?? row.created_date,
-      );
-      const lastUpdatedDate = parseDate(
-        row.LastUpdatedDate ?? row.lastUpdatedDate ?? row.LastUpdated ?? row.lastUpdated ?? row.LastUpdateDate ?? row.lastUpdateDate ?? row.Last_updated_date ?? row.last_updated_date,
-      );
+      // Created: API may return CreatedDate; else parse from ShipmentName e.g. "FBA STA (11/03/2025 19:20)-BHX4"
+      const createdDate =
+        parseDate(
+          row.CreatedDate ?? row.createdDate ?? row.Created ?? row.created ?? row.Created_date ?? row.created_date,
+        ) ?? parseDateFromShipmentName(row.ShipmentName ?? row.shipmentName);
+      // Last updated / closed: try every plausible key (API may return LastUpdatedDate or ClosedDate even if not in v0 schema)
+      const lastUpdatedDate =
+        parseDate(
+          row.LastUpdatedDate ??
+            row.lastUpdatedDate ??
+            row.LastUpdatedAt ??
+            row.lastUpdatedAt ??
+            row.ClosedDate ??
+            row.closedDate ??
+            row.ClosedAt ??
+            row.closedAt ??
+            row.LastUpdated ??
+            row.lastUpdated ??
+            row.LastUpdateDate ??
+            row.lastUpdateDate ??
+            row.UpdateDate ??
+            row.updateDate ??
+            row.LastModifiedDate ??
+            row.lastModifiedDate ??
+            row.Last_updated_date ??
+            row.last_updated_date,
+        );
+      if (listRows.indexOf(row) === 0) {
+        const dateLikeKeys = Object.keys(row).filter(
+          (k) =>
+            /date|updated|closed|modified|at$/i.test(k) &&
+            typeof (row as Record<string, unknown>)[k] !== 'object',
+        );
+        this.logger.log(
+          `[syncShipments] First row date-like keys and values: ${JSON.stringify(
+            Object.fromEntries(dateLikeKeys.map((k) => [k, (row as Record<string, unknown>)[k]])),
+          )}`,
+        );
+        this.logger.log(
+          `[syncShipments] First shipment dates parsed: createdDate=${createdDate?.toISOString() ?? 'null'} lastUpdatedDate=${lastUpdatedDate?.toISOString() ?? 'null'}`,
+        );
+      }
       const status = (row.ShipmentStatus ?? row.shipmentStatus ?? row.Status ?? row.status ?? '') as string;
       const statusUpper = status.toUpperCase();
 
       let checkedInDate: Date | null = null;
       let checkedInDateIsClosedDate: boolean | undefined = undefined;
 
-      if (lastUpdatedDate && (statusUpper === 'CLOSED' || statusUpper === 'RECEIVING')) {
-        const existing = await this.prisma.shipment.findUnique({
-          where: { userId_shipmentId: { userId: ownerUserId, shipmentId: String(shipmentId) } },
-          select: { shipmentStatus: true },
-        });
+      const existing = await this.prisma.shipment.findUnique({
+        where: { userId_shipmentId: { userId: ownerUserId, shipmentId: String(shipmentId) } },
+        select: { shipmentStatus: true, checkedInDate: true },
+      });
+      // Automatic check-in: only set from API when we don't already have a date (1st preference = automatic timestamp when status first changed; never overwrite existing automatic or manual).
+      if (lastUpdatedDate && (statusUpper === 'CLOSED' || statusUpper === 'RECEIVING') && existing?.checkedInDate == null) {
         const wasAlreadyCheckedIn =
           existing?.shipmentStatus != null &&
           CHECKED_IN_STATUSES.some((s) => existing.shipmentStatus!.toUpperCase() === s.toUpperCase());
         checkedInDate = lastUpdatedDate;
-        // If we're creating the row or it was already closed/receiving, this is "closed date" not a live check-in timestamp
         checkedInDateIsClosedDate = !existing || wasAlreadyCheckedIn;
       }
+      // When API does not return LastUpdatedDate, we do not set checkedInDate; user can enter manually in the app.
 
       const checkInDurationDays =
         createdDate && checkedInDate
@@ -2473,7 +2937,6 @@ export class AmazonService {
 
       const damageClosedDate = parseDate(row.DamageClosedDate ?? row.damageClosedDate ?? row.UnitsDamageClosedDate ?? row.unitsDamageClosedDate);
       const unitsMissing = Math.max(0, unitsSent - unitsReceived);
-      // Check-in (days) is set in Phase 1 from createdDate → checkedInDate (FBA list API); we do not overwrite with transport details here
 
       try {
         await this.prisma.shipment.update({
