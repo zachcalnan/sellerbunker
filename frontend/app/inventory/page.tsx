@@ -528,7 +528,7 @@ export default function InventoryPage() {
             </div>
 
             {totalPages > 1 ? (
-              <div className="flex items-center justify-between gap-4 border-t border-[var(--surface-border)] bg-[var(--surface)] px-4 py-3">
+              <div className="flex items-center justify-end gap-4 border-t border-[var(--surface-border)] bg-[var(--surface)] px-4 py-2">
                 <div className="text-sm text-[var(--muted-foreground)]">
                   Page {safePage} of {totalPages}
                   <span className="ml-2">

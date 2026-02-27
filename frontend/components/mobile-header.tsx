@@ -14,11 +14,19 @@ export function MobileHeader() {
     <header className="flex h-16 shrink-0 items-center justify-between gap-4 border-b border-[var(--surface-border)] bg-[var(--surface)] px-4 md:hidden">
       <Link
         href="/"
-        className="font-semibold text-[var(--foreground)] no-underline hover:opacity-80"
+        className="flex shrink-0 items-center font-semibold text-[var(--foreground)] no-underline hover:opacity-80"
+        aria-label="Seller Bunker home"
       >
-        <span className="font-bold">SELLER</span>
-        <span className="font-normal">BUNKER</span>
+        <img
+          src="/sellerbunker-logo.png"
+          alt="Seller Bunker"
+          className="sellerbunker-logo h-16 w-auto min-w-[130px] object-contain object-left"
+        />
       </Link>
+      <span className="font-semibold tracking-tight text-[var(--foreground)]">
+        <span className="font-bold">SELLER</span>
+        <span className="font-normal"> BUNKER</span>
+      </span>
       <div className="flex items-center gap-4">
         <SignedOut>
           <SignInButton>

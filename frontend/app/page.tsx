@@ -46,14 +46,18 @@ function HomeInner() {
   const endParam = searchParams.get("end");
 
   const [rangePreset, setRangePreset] = useState<
-    "today" | "7d" | "30d" | "custom"
+    "today" | "7d" | "30d" | "yesterday" | "all" | "custom"
+  >("30d");
+  const [trendPreset, setTrendPreset] = useState<
+    "today" | "7d" | "30d" | "yesterday" | "all" | "custom"
   >("30d");
   const [customStart, setCustomStart] = useState<string>("");
   const [customEnd, setCustomEnd] = useState<string>("");
+  const [trendCustomStart, setTrendCustomStart] = useState<string>("");
+  const [trendCustomEnd, setTrendCustomEnd] = useState<string>("");
   const [summary, setSummary] = useState<AccountSummary | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [missingCogsCount, setMissingCogsCount] = useState<number | null>(null);
 
   const toDateOnly = (d: Date) => d.toISOString().slice(0, 10);
   const today = new Date();
@@ -61,18 +65,82 @@ function HomeInner() {
   const defaultStart30 = toDateOnly(
     new Date(today.getTime() - 29 * 24 * 60 * 60 * 1000),
   );
+  const yesterday = toDateOnly(
+    new Date(today.getTime() - 24 * 60 * 60 * 1000),
+  );
+  const allTimeStart = "2020-01-01"; // fixed "all time" start
 
-  const effectiveStart = startParam ?? defaultStart30;
-  const effectiveEnd = endParam ?? defaultEnd;
+  const effectiveStart =
+    rangePreset === "today"
+      ? defaultEnd
+      : rangePreset === "7d"
+        ? toDateOnly(new Date(today.getTime() - 6 * 24 * 60 * 60 * 1000))
+        : rangePreset === "30d"
+          ? defaultStart30
+          : rangePreset === "yesterday"
+            ? yesterday
+            : rangePreset === "all"
+              ? allTimeStart
+              : (startParam ?? defaultStart30);
+  const effectiveEnd =
+    rangePreset === "today" || rangePreset === "7d" || rangePreset === "30d"
+      ? defaultEnd
+      : rangePreset === "yesterday"
+        ? yesterday
+        : rangePreset === "all"
+          ? defaultEnd
+          : (endParam ?? defaultEnd);
+
+  // Trend has its own range (separate from summary/cards)
+  const trendStart =
+    trendPreset === "today"
+      ? defaultEnd
+      : trendPreset === "7d"
+        ? toDateOnly(new Date(today.getTime() - 6 * 24 * 60 * 60 * 1000))
+        : trendPreset === "30d"
+          ? defaultStart30
+          : trendPreset === "yesterday"
+            ? yesterday
+            : trendPreset === "all"
+              ? allTimeStart
+              : (trendCustomStart || defaultStart30);
+  const trendEnd =
+    trendPreset === "today"
+      ? defaultEnd
+      : trendPreset === "7d"
+        ? defaultEnd
+        : trendPreset === "30d"
+          ? defaultEnd
+          : trendPreset === "yesterday"
+            ? yesterday
+            : trendPreset === "all"
+              ? defaultEnd
+              : (trendCustomEnd || defaultEnd);
 
   const rangeLabel =
     rangePreset === "today"
       ? "Today"
-      : rangePreset === "7d"
-        ? "Last 7 days"
-        : rangePreset === "30d"
-          ? "Last 30 days"
-          : "Custom";
+      : rangePreset === "yesterday"
+        ? "Yesterday"
+        : rangePreset === "7d"
+          ? "7 days"
+          : rangePreset === "30d"
+            ? "30 days"
+            : rangePreset === "all"
+              ? "All time"
+              : "Custom";
+  const trendLabel =
+    trendPreset === "today"
+      ? "Today"
+      : trendPreset === "yesterday"
+        ? "Yesterday"
+        : trendPreset === "7d"
+          ? "7 days"
+          : trendPreset === "30d"
+            ? "30 days"
+            : trendPreset === "all"
+              ? "All time"
+              : "Custom";
 
   useEffect(() => {
     // Initialize preset based on URL (or defaults)
@@ -89,9 +157,16 @@ function HomeInner() {
     const startIs30 = isSame(start, defaultStart30);
 
     if (startParam || endParam) {
+      const startIsYesterday = isSame(start, yesterday);
+      const endIsYesterday = isSame(end, yesterday);
+      const startIsAll = isSame(start, allTimeStart);
+      const endIsTodayForAll = isSame(end, defaultEnd);
       if (startIsToday && endIsToday) setRangePreset("today");
       else if (startIs7 && endIsToday) setRangePreset("7d");
       else if (startIs30 && endIsToday) setRangePreset("30d");
+      else if (startIsYesterday && endIsYesterday)
+        setRangePreset("yesterday");
+      else if (startIsAll && endIsTodayForAll) setRangePreset("all");
       else setRangePreset("custom");
     } else {
       setRangePreset("30d");
@@ -157,40 +232,6 @@ function HomeInner() {
     fetchSummary();
   }, [isSignedIn, getToken, baseUrl, effectiveStart, effectiveEnd]);
 
-  useEffect(() => {
-    if (!isSignedIn) {
-      setMissingCogsCount(null);
-      return;
-    }
-
-    let cancelled = false;
-    (async () => {
-      try {
-        const token = await getToken({ template: "backend" });
-        if (!token) return;
-
-        const res = await fetch(
-          `${baseUrl}/api/amazon/cost-of-goods/missing?` +
-            new URLSearchParams({
-              start: effectiveStart,
-              end: effectiveEnd,
-            }).toString(),
-          { headers: { Authorization: `Bearer ${token}` } },
-        );
-        if (!res.ok) return;
-
-        const data = (await res.json()) as { missingSkusCount?: number };
-        if (!cancelled) setMissingCogsCount(Number(data.missingSkusCount ?? 0));
-      } catch {
-        if (!cancelled) setMissingCogsCount(null);
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [isSignedIn, getToken, baseUrl, effectiveStart, effectiveEnd]);
-
   const effectiveCurrency = summary?.currency ?? "USD";
 
   const profit =
@@ -204,7 +245,6 @@ function HomeInner() {
 
   const hasCostData = summary?.hasCostData ?? false;
   const showCogsNotice = summary != null && summary.totalOrders > 0 && !hasCostData;
-  const showMissingCogs = (missingCogsCount ?? 0) > 0;
   const orderItemsCoveragePct = summary?.orderItemsCoveragePct ?? 1;
   const orderItemsOrdersCount = summary?.orderItemsOrdersCount ?? null;
   const showLineItemBackfillNotice =
@@ -299,7 +339,7 @@ function HomeInner() {
     : [];
   return (
     <div className="min-h-screen bg-[var(--background)] text-[var(--foreground)]">
-      <main className="mx-auto flex min-h-screen max-w-6xl flex-col gap-10 px-6 py-10">
+      <main className="mx-auto flex min-h-screen max-w-6xl flex-col gap-10 px-6 pt-3 pb-10">
 
         {loading && (
           <div className="rounded-xl border border-[var(--surface-border)] bg-transparent px-4 py-3 text-xs text-[var(--muted-foreground)]">
@@ -346,100 +386,177 @@ function HomeInner() {
         ) : null}
 
         {summary && (
-          <section>
-            <div className="mb-4 flex items-center justify-between">
-              <h2 className="text-sm font-medium uppercase tracking-[0.2em] text-[var(--muted-foreground)]">
-                Performance Snapshot
-              </h2>
-              <div className="flex flex-wrap items-center justify-end gap-2 text-xs text-[var(--muted-foreground)]">
-                <select
-                  value={rangePreset}
-                  onChange={(e) => {
-                    const v = e.target.value as
-                      | "today"
-                      | "7d"
-                      | "30d"
-                      | "custom";
-                    setRangePreset(v);
-                    if (v === "custom") return;
-                    const end = defaultEnd;
-                    const start =
-                      v === "today"
-                        ? defaultEnd
-                        : v === "7d"
-                          ? toDateOnly(
-                              new Date(
-                                today.getTime() - 6 * 24 * 60 * 60 * 1000,
-                              ),
-                            )
-                          : defaultStart30;
-                    setRangeInUrl(start, end);
-                  }}
-                  className="h-8 cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-xs text-[var(--foreground)] outline-none"
-                >
-                  <option value="today">Today</option>
-                  <option value="7d">Last 7 days</option>
-                  <option value="30d">Last 30 days</option>
-                  <option value="custom">Custom</option>
-                </select>
-                {rangePreset === "custom" ? (
-                  <>
-                    <input
-                      type="date"
-                      value={customStart}
-                      onChange={(e) => setCustomStart(e.target.value)}
-                      className="h-8 rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-xs text-[var(--foreground)] outline-none"
-                    />
-                    <span>→</span>
-                    <input
-                      type="date"
-                      value={customEnd}
-                      onChange={(e) => setCustomEnd(e.target.value)}
-                      className="h-8 rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-xs text-[var(--foreground)] outline-none"
-                    />
-                    <button
-                      type="button"
-                      className="h-8 cursor-pointer rounded-lg bg-[rgb(2,242,170)] px-3 text-xs font-medium text-black"
-                      onClick={() => {
-                        if (!customStart || !customEnd) return;
-                        setRangeInUrl(customStart, customEnd);
+          <section className="-mt-0.5">
+            <div className="flex flex-col gap-4 md:flex-row md:items-start md:gap-6">
+              {/* Performance Snapshot: narrow box, filter just above the 4 rings */}
+              <div className="w-fit max-w-[min(100%,28rem)] shrink-0 rounded-xl p-4 ring-1 ring-[var(--surface-border)]">
+                <h2 className="mb-1 text-sm font-medium uppercase tracking-[0.2em] text-[var(--muted-foreground)]">
+                  Performance Snapshot
+                </h2>
+                <div className="mb-2 flex flex-wrap items-center justify-end gap-2 text-xs text-[var(--muted-foreground)]">
+                    <select
+                      value={rangePreset}
+                      onChange={(e) => {
+                        const v = e.target.value as
+                          | "today"
+                          | "7d"
+                          | "30d"
+                          | "yesterday"
+                          | "all"
+                          | "custom";
+                        setRangePreset(v);
+                        if (v === "custom") return;
+                        const end =
+                          v === "yesterday"
+                            ? yesterday
+                            : v === "all"
+                              ? defaultEnd
+                              : defaultEnd;
+                        const start =
+                          v === "today"
+                            ? defaultEnd
+                            : v === "7d"
+                              ? toDateOnly(
+                                  new Date(
+                                    today.getTime() - 6 * 24 * 60 * 60 * 1000,
+                                  ),
+                                )
+                              : v === "30d"
+                                ? defaultStart30
+                                : v === "yesterday"
+                                  ? yesterday
+                                  : allTimeStart;
+                        setRangeInUrl(start, end);
                       }}
+                      className="h-8 cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-xs text-[var(--foreground)] outline-none"
                     >
-                      Apply
-                    </button>
-                  </>
-                ) : null}
-              </div>
-            </div>
-
-            {showMissingCogs && missingCogsCount != null && (
-              <div className="mb-4 rounded-xl border border-[var(--surface-border)] bg-[var(--surface)] px-4 py-3">
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <span className="text-sm text-[var(--muted-foreground)]">
-                    COGS missing for{" "}
-                    <span className="font-semibold text-[var(--foreground)]">
-                      {missingCogsCount}
-                    </span>{" "}
-                    SKU{missingCogsCount === 1 ? "" : "s"}
-                  </span>
-                  <Link
-                    href={`/cost-of-goods?${new URLSearchParams({
-                      missing: "1",
-                      start: effectiveStart,
-                      end: effectiveEnd,
-                    }).toString()}`}
-                    className="text-sm font-medium text-[var(--foreground)] underline underline-offset-2 hover:no-underline"
-                  >
-                    Fix now
-                  </Link>
+                      <option value="today">Today</option>
+                      <option value="yesterday">Yesterday</option>
+                      <option value="7d">7 days</option>
+                      <option value="30d">30 days</option>
+                      <option value="all">All time</option>
+                      <option value="custom">Custom</option>
+                    </select>
+                    {rangePreset === "custom" ? (
+                      <>
+                        <input
+                          type="date"
+                          value={customStart}
+                          onChange={(e) =>
+                            setCustomStart(e.target.value)}
+                          className="h-8 rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-xs text-[var(--foreground)] outline-none"
+                        />
+                        <span>→</span>
+                        <input
+                          type="date"
+                          value={customEnd}
+                          onChange={(e) =>
+                            setCustomEnd(e.target.value)}
+                          className="h-8 rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-xs text-[var(--foreground)] outline-none"
+                        />
+                        <button
+                          type="button"
+                          className="h-8 cursor-pointer rounded-lg bg-[rgb(2,242,170)] px-3 text-xs font-medium text-black"
+                          onClick={() => {
+                            if (!customStart || !customEnd) return;
+                            setRangeInUrl(customStart, customEnd);
+                          }}
+                        >
+                          Apply
+                        </button>
+                      </>
+                    ) : null}
+                </div>
+                <div className="grid grid-cols-4 w-fit gap-3">
+                  {cards.map((card) => (
+                    <DonutCard key={card.label} {...card} />
+                  ))}
                 </div>
               </div>
-            )}
 
-            <div className="grid gap-4 md:grid-cols-4">
-              {cards.map((card) => (
-                <DonutCard key={card.label} {...card} />
-              ))}
+              {/* Sales Trend: takes remaining space, pulled left */}
+              <div className="min-w-0 flex-1 rounded-xl p-4 ring-1 ring-[var(--surface-border)]">
+                <div className="mb-3 flex items-center justify-between">
+                  <h2 className="text-sm font-medium uppercase tracking-[0.2em] text-[var(--muted-foreground)]">
+                    Sales Trend
+                  </h2>
+                  <div className="flex flex-wrap items-center justify-end gap-2 text-xs text-[var(--muted-foreground)]">
+                    <select
+                      value={trendPreset}
+                      onChange={(e) => {
+                        const v = e.target.value as
+                          | "today"
+                          | "7d"
+                          | "30d"
+                          | "yesterday"
+                          | "all"
+                          | "custom";
+                        setTrendPreset(v);
+                        if (v === "custom") return;
+                        const end =
+                          v === "yesterday"
+                            ? yesterday
+                            : v === "all"
+                              ? defaultEnd
+                              : defaultEnd;
+                        const start =
+                          v === "today"
+                            ? defaultEnd
+                            : v === "7d"
+                              ? toDateOnly(
+                                  new Date(
+                                    today.getTime() - 6 * 24 * 60 * 60 * 1000,
+                                  ),
+                                )
+                              : v === "30d"
+                                ? defaultStart30
+                                : v === "yesterday"
+                                  ? yesterday
+                                  : allTimeStart;
+                        setTrendCustomStart(start);
+                        setTrendCustomEnd(end);
+                      }}
+                      className="h-8 cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-xs text-[var(--foreground)] outline-none"
+                    >
+                      <option value="today">Today</option>
+                      <option value="yesterday">Yesterday</option>
+                      <option value="7d">7 days</option>
+                      <option value="30d">30 days</option>
+                      <option value="all">All time</option>
+                      <option value="custom">Custom</option>
+                    </select>
+                    {trendPreset === "custom" ? (
+                      <>
+                        <input
+                          type="date"
+                          value={trendCustomStart}
+                          onChange={(e) =>
+                            setTrendCustomStart(e.target.value)}
+                          className="h-8 rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-xs text-[var(--foreground)] outline-none"
+                        />
+                        <span>→</span>
+                        <input
+                          type="date"
+                          value={trendCustomEnd}
+                          onChange={(e) =>
+                            setTrendCustomEnd(e.target.value)}
+                          className="h-8 rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-xs text-[var(--foreground)] outline-none"
+                        />
+                      </>
+                    ) : null}
+                  </div>
+                </div>
+                <SalesTrend
+                  baseUrl={baseUrl}
+                  isSignedIn={isSignedIn}
+                  getToken={getToken}
+                  currency={effectiveCurrency}
+                  start={trendStart}
+                  end={trendEnd}
+                  label={trendLabel}
+                  noWrapper
+                />
+              </div>
             </div>
 
             <div className="mt-4 grid gap-4 md:grid-cols-4">
@@ -447,16 +564,6 @@ function HomeInner() {
                 <KpiCard key={card.label} {...card} />
               ))}
             </div>
-
-            <SalesTrend
-              baseUrl={baseUrl}
-              isSignedIn={isSignedIn}
-              getToken={getToken}
-              currency={effectiveCurrency}
-              start={effectiveStart}
-              end={effectiveEnd}
-              label={rangeLabel}
-            />
           </section>
         )}
       </main>
@@ -507,6 +614,8 @@ type SalesTrendProps = {
   start: string;
   end: string;
   label: string;
+  /** When true, do not render outer box/title (parent provides them) */
+  noWrapper?: boolean;
 };
 
 function SalesTrend({
@@ -517,6 +626,7 @@ function SalesTrend({
   start,
   end,
   label,
+  noWrapper = false,
 }: SalesTrendProps) {
   const [sales, setSales] = useState<SalesSeries | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -592,14 +702,16 @@ function SalesTrend({
     points.length > 0 ? barAreaWidth / points.length : barAreaWidth;
   const barWidth = bucketWidth * 0.6;
 
-  return (
-    <div className="mt-4 rounded-xl bg-transparent p-4 ring-1 ring-[var(--surface-border)]">
+  const content = (
+    <>
       <div className="mb-3 flex items-center justify-between">
         <div>
-          <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
-            Sales Trend
-          </p>
-          <p className="mt-0.5 text-[11px] text-[var(--muted-foreground)]">
+          {!noWrapper && (
+            <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
+              Sales Trend
+            </p>
+          )}
+          <p className={`text-[11px] text-[var(--muted-foreground)] ${noWrapper ? "" : "mt-0.5"}`}>
             {label} ·{" "}
             {mode === "revenue" ? currency : "Orders"}
           </p>
@@ -802,6 +914,13 @@ function SalesTrend({
           })}
         </svg>
       )}
+    </>
+  );
+  return noWrapper ? (
+    content
+  ) : (
+    <div className="rounded-xl bg-transparent p-4 ring-1 ring-[var(--surface-border)]">
+      {content}
     </div>
   );
 }
@@ -831,7 +950,7 @@ function DonutCard({
   hidePercentage,
 }: DonutCardProps) {
   const radius = 54;
-  const strokeWidth = 6;
+  const strokeWidth = 12;
   const circumference = 2 * Math.PI * radius;
   const clamped = Math.max(0, Math.min(100, percentage));
   const offset = circumference * (1 - clamped / 100);
@@ -841,8 +960,8 @@ function DonutCard({
 
   const ringGreen = "rgb(2, 242, 170)";
   return (
-    <div className="flex flex-col items-center gap-4 rounded-xl bg-transparent p-4">
-      <div className="relative flex h-36 w-36 items-center justify-center">
+    <div className="flex flex-col items-center gap-2 rounded-xl bg-transparent p-2">
+      <div className="relative flex h-28 w-28 items-center justify-center">
         <svg
           viewBox="0 0 120 120"
           className="h-full w-full -rotate-90"

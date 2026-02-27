@@ -34,6 +34,14 @@
     "Liberation Mono", "Courier New", monospace;
 }
 
+/* Logo: black in light theme, white in dark theme */
+.sellerbunker-logo {
+  filter: brightness(0);
+}
+[data-theme="dark"] .sellerbunker-logo {
+  filter: brightness(0) invert(1);
+}
+
 html {
   scroll-padding-top: 5rem;
 }

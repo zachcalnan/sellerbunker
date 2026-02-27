@@ -123,10 +123,57 @@ function ReplenishIcon({ className }: { className?: string }) {
   );
 }
 
+function FbmOrdersIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <path d="M6 2L3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z" />
+      <line x1="3" y1="6" x2="21" y2="6" />
+      <path d="M16 10a4 4 0 0 1-8 0" />
+    </svg>
+  );
+}
+
+function RepricerIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <path d="M12 2v4" />
+      <path d="m4.93 4.93 2.83 2.83" />
+      <path d="M2 12h4" />
+      <path d="m4.93 19.07 2.83-2.83" />
+      <path d="M12 18v4" />
+      <path d="m19.07 19.07-2.83-2.83" />
+      <path d="M22 12h-4" />
+      <path d="m19.07 4.93-2.83 2.83" />
+    </svg>
+  );
+}
+
 const NAV_ITEMS: {
   label: string;
   href: string;
   icon?: typeof DashboardIcon;
+  disabled?: boolean;
+  tooltip?: string;
 }[] = [
   { label: "Dashboard", href: "/", icon: DashboardIcon },
   { label: "Cost of Goods", href: "/cost-of-goods", icon: CostOfGoodsIcon },
@@ -134,6 +181,8 @@ const NAV_ITEMS: {
   { label: "Orders", href: "/orders", icon: OrdersIcon },
   { label: "FBA Shipments", href: "/shipments", icon: ShipmentsIcon },
   { label: "Replenish", href: "/replenish", icon: ReplenishIcon },
+  { label: "FBM Orders", href: "#", icon: FbmOrdersIcon, disabled: true, tooltip: "Coming soon" },
+  { label: "Repricer", href: "#", icon: RepricerIcon, disabled: true, tooltip: "In development" },
 ];
 
 const BASE_URL =
@@ -218,20 +267,35 @@ export function Sidebar() {
 
   return (
     <aside className="flex h-screen w-full flex-col border-r border-[var(--surface-border)] bg-[var(--surface)]">
-      <div className="flex shrink-0 flex-col gap-1 px-4 py-5">
+      <div className="flex shrink-0 items-start justify-start overflow-hidden pl-0 pr-1 -pt-0.5 pb-0">
         <Link
           href="/"
-          className="flex items-center gap-2 font-semibold tracking-tight text-[var(--foreground)] no-underline hover:opacity-80"
+          className="-ml-1 flex shrink-0 items-start overflow-hidden font-semibold tracking-tight text-[var(--foreground)] no-underline hover:opacity-80"
+          aria-label="Seller Bunker home"
         >
-          <span>
-            <span className="font-bold">SELLER</span>
-            <span className="font-normal">BUNKER</span>
-          </span>
+          <img
+            src="/sellerbunker-logo.png"
+            alt="Seller Bunker"
+            className="sellerbunker-logo -mt-2 h-28 w-auto min-w-[140px] max-w-[180px] scale-105 origin-top-left object-contain object-left"
+          />
         </Link>
       </div>
-      <nav className="flex shrink-0 flex-col gap-0.5 px-2" aria-label="Main">
+      <nav className="-mt-1 flex shrink-0 flex-col gap-0.5 px-2" aria-label="Main">
         <SignedIn>
-          {NAV_ITEMS.map(({ label, href, icon: Icon }) => {
+          {NAV_ITEMS.map(({ label, href, icon: Icon, disabled, tooltip }) => {
+            if (disabled) {
+              return (
+                <div
+                  key={label}
+                  title={tooltip}
+                  className="flex cursor-not-allowed items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-[var(--muted-foreground)] opacity-70 blur-[0.5px] transition-all hover:opacity-90 hover:blur-0"
+                  aria-disabled="true"
+                >
+                  {Icon ? <Icon className="h-4 w-4 shrink-0" /> : null}
+                  {label}
+                </div>
+              );
+            }
             const isActive = pathname === href;
             return (
               <Link

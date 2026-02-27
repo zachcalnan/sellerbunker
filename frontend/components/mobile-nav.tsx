@@ -128,6 +128,51 @@ function ReplenishIcon({ className }: { className?: string }) {
   );
 }
 
+function FbmOrdersIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <path d="M6 2L3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z" />
+      <line x1="3" y1="6" x2="21" y2="6" />
+      <path d="M16 10a4 4 0 0 1-8 0" />
+    </svg>
+  );
+}
+
+function RepricerIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <path d="M12 2v4" />
+      <path d="m4.93 4.93 2.83 2.83" />
+      <path d="M2 12h4" />
+      <path d="m4.93 19.07 2.83-2.83" />
+      <path d="M12 18v4" />
+      <path d="m19.07 19.07-2.83-2.83" />
+      <path d="M22 12h-4" />
+      <path d="m19.07 4.93-2.83 2.83" />
+    </svg>
+  );
+}
+
 function BurgerIcon({ className }: { className?: string }) {
   return (
     <svg
@@ -260,11 +305,19 @@ export function MobileNav() {
       <header className="flex h-14 shrink-0 items-center justify-between gap-4 border-b border-[var(--surface-border)] bg-[var(--surface)] px-4 md:hidden">
         <Link
           href="/"
-          className="font-semibold tracking-tight text-[var(--foreground)] no-underline hover:opacity-80"
+          className="flex shrink-0 items-center font-semibold tracking-tight text-[var(--foreground)] no-underline hover:opacity-80"
+          aria-label="Seller Bunker home"
         >
-          <span className="font-bold">SELLER</span>
-          <span className="font-normal">BUNKER</span>
+          <img
+            src="/sellerbunker-logo.png"
+            alt="Seller Bunker"
+            className="sellerbunker-logo h-16 w-auto min-w-[130px] object-contain object-left"
+          />
         </Link>
+        <span className="flex-1 text-center font-semibold tracking-tight text-[var(--foreground)]">
+          <span className="font-bold">SELLER</span>
+          <span className="font-normal"> BUNKER</span>
+        </span>
         <button
           type="button"
           onClick={() => setOpen(true)}
@@ -389,6 +442,24 @@ export function MobileNav() {
                   <ReplenishIcon className="h-4 w-4 shrink-0" />
                   Replenish
                 </Link>
+
+                <div
+                  title="Coming soon"
+                  className="flex cursor-not-allowed items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium text-[var(--muted-foreground)] opacity-70 blur-[0.5px] transition-all hover:opacity-90 hover:blur-0"
+                  aria-disabled="true"
+                >
+                  <FbmOrdersIcon className="h-4 w-4 shrink-0" />
+                  FBM Orders
+                </div>
+
+                <div
+                  title="In development"
+                  className="flex cursor-not-allowed items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium text-[var(--muted-foreground)] opacity-70 blur-[0.5px] transition-all hover:opacity-90 hover:blur-0"
+                  aria-disabled="true"
+                >
+                  <RepricerIcon className="h-4 w-4 shrink-0" />
+                  Repricer
+                </div>
               </SignedIn>
 
               <div className="my-2 h-px bg-[var(--surface-border)]" />
