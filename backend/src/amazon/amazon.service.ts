@@ -1714,12 +1714,12 @@ export class AmazonService {
       imageUrl: string | null;
       updatedAt: Date;
       inventory: {
-        currentQty: number;
-        fulfillableQty: number;
-        inboundQty: number;
+        availableQty: number;
         reservedQty: number;
-        researchingQty: number;
-        unfulfillableQty: number;
+        inboundQty: number;
+        issueQty: number;
+        totalQty: number;
+        rawJson: unknown;
         updatedAt: Date;
       } | null;
       inventoryByMarketplace: Array<{
@@ -1734,8 +1734,6 @@ export class AmazonService {
       }>;
     };
 
-    // Explicitly type the payload so downstream code can safely access `inventory`.
-    // (This also makes the file robust if Prisma Client typings are temporarily stale.)
     const rows = (await this.prisma.product.findMany({
       where: { userId: { in: userIds } },
       orderBy: [{ updatedAt: 'desc' }],
@@ -1748,12 +1746,12 @@ export class AmazonService {
         updatedAt: true,
         inventory: {
           select: {
-            currentQty: true,
-            fulfillableQty: true,
-            inboundQty: true,
+            availableQty: true,
             reservedQty: true,
-            researchingQty: true,
-            unfulfillableQty: true,
+            inboundQty: true,
+            issueQty: true,
+            totalQty: true,
+            rawJson: true,
             updatedAt: true,
           },
         },
@@ -1771,8 +1769,6 @@ export class AmazonService {
           orderBy: [{ marketplaceId: 'asc' }],
         },
       },
-      // Some environments can have temporarily stale Prisma Client typings.
-      // This is a no-op at runtime, but keeps TS happy until typings are refreshed.
     } as any)) as unknown as InventoryProductRow[];
 
     // Products are currently user-scoped (multiple users can exist in one org),
@@ -1824,13 +1820,13 @@ export class AmazonService {
       title: p.title,
       imageUrl: p.imageUrl,
       productUpdatedAt: p.updatedAt,
-      fbaCurrentQty: p.inventory?.currentQty ?? null,
-      fbaFulfillableQty: p.inventory?.fulfillableQty ?? null,
-      fbaInboundQty: p.inventory?.inboundQty ?? null,
-      fbaReservedQty: p.inventory?.reservedQty ?? null,
-      fbaResearchingQty: p.inventory?.researchingQty ?? null,
-      fbaUnfulfillableQty: p.inventory?.unfulfillableQty ?? null,
+      availableQty: p.inventory?.availableQty ?? null,
+      reservedQty: p.inventory?.reservedQty ?? null,
+      inboundQty: p.inventory?.inboundQty ?? null,
+      issueQty: p.inventory?.issueQty ?? null,
+      totalQty: p.inventory?.totalQty ?? null,
       inventoryUpdatedAt: p.inventory?.updatedAt ?? null,
+      rawJson: p.inventory?.rawJson ?? null,
       byMarketplace: (p as any).inventoryByMarketplace?.map((m: any) => ({
         marketplaceId: m.marketplaceId,
         fulfillableQty: Number(m.fulfillableQty ?? 0),
@@ -1918,8 +1914,32 @@ export class AmazonService {
 
     
 
+    // FBA Inventory API only accepts marketplaces in the same region as the credentials.
+    // getMarketplaceParticipations returns ALL seller marketplaces (e.g. EU + India + MEA);
+    // we must filter to the credential region or we get 403 "marketplaces not valid for region".
+    const regionMarketplaceIds: Record<string, string[]> = {
+      eu: [
+        'A1F83G8C2ARO7P', // UK
+        'A1PA6795UKMFR9', // DE
+        'A13V1IB3VIYZZH', // FR
+        'APJ6JRA9NG5V4', // IT
+        'A1RKKUPIHCS9HS', // ES
+        'A28R8C7NBKEWEA', // IE
+        'A1805IZSGTT6HS', // NL
+        'AMEN7PMS3EDWL', // BE
+        'A2NODRKZP88ZB9', // SE
+        'A1C3SOZRARQ6R3', // PL
+      ],
+      na: ['ATVPDKIKX0DER', 'A2EUQ1WTGCTBG2', 'A1AM78C64UM0Y8', 'A2Q3Y263D00KWC'], // US, CA, MX, BR
+      fe: ['A19VAU5U5O7RUS', 'A39IBJ37TRP1C6', 'A1VC38T7YXB528'], // SG, AU, JP
+    };
+    const allowedInRegion = new Set(
+      regionMarketplaceIds[credentials.region ?? 'eu'] ?? regionMarketplaceIds.eu,
+    );
+
+    const defaultRegion = credentials.region ?? 'eu';
     let marketplaceIds =
-      credentials.region === 'eu'
+      defaultRegion === 'eu'
         ? [
             'A1F83G8C2ARO7P', // UK
             'A1PA6795UKMFR9', // DE
@@ -1927,9 +1947,11 @@ export class AmazonService {
             'APJ6JRA9NG5V4', // IT
             'A1RKKUPIHCS9HS', // ES
           ]
-        : ['ATVPDKIKX0DER']; // US
+        : defaultRegion === 'fe'
+          ? ['A1VC38T7YXB528', 'A19VAU5U5O7RUS', 'A39IBJ37TRP1C6'] // JP, SG, AU
+          : ['ATVPDKIKX0DER']; // US (na)
 
-    // Attempt to fetch actual participations (best-effort).
+    // Optionally narrow to seller's participations, but only for marketplaces in this region.
     try {
       const res = (await this.spApiClient.getMarketplaceParticipations(
         credentials,
@@ -1941,7 +1963,7 @@ export class AmazonService {
       const ids = Array.isArray(list)
         ? list
             .map((p) => p?.marketplace?.id ?? p?.Marketplace?.Id ?? null)
-            .filter((v) => typeof v === 'string' && v.length > 0)
+            .filter((v) => typeof v === 'string' && v.length > 0 && allowedInRegion.has(v as string))
         : [];
 
       if (ids.length) {
@@ -1950,7 +1972,7 @@ export class AmazonService {
 
       if (debug) {
         this.logger.debug(
-          `Marketplace participations resolved ${ids.length} ids (marketplacesToSync=${marketplaceIds.length})`,
+          `Marketplace participations resolved ${ids.length} ids in region (marketplacesToSync=${marketplaceIds.length})`,
         );
       }
     } catch {
@@ -2311,6 +2333,7 @@ try {
       agg.reserved +
       agg.researching +
       agg.unfulfillable;
+    const issueQty = agg.researching + agg.unfulfillable;
 
     await this.prisma.inventory.upsert({
       where: {
@@ -2318,24 +2341,22 @@ try {
       },
       update: {
         userId: match.userId,
-        fulfillableQty: agg.fulfillable,
-        inboundQty: agg.inbound,
+        availableQty: agg.fulfillable,
         reservedQty: agg.reserved,
-        researchingQty: agg.researching,
-        unfulfillableQty: agg.unfulfillable,
-        currentQty: totalQty,
-        rawJson: agg.raw,
+        inboundQty: agg.inbound,
+        issueQty,
+        totalQty,
+        rawJson: agg.raw as object,
       },
       create: {
         userId: match.userId,
         productId: match.id,
-        fulfillableQty: agg.fulfillable,
-        inboundQty: agg.inbound,
+        availableQty: agg.fulfillable,
         reservedQty: agg.reserved,
-        researchingQty: agg.researching,
-        unfulfillableQty: agg.unfulfillable,
-        currentQty: totalQty,
-        rawJson: agg.raw,
+        inboundQty: agg.inbound,
+        issueQty,
+        totalQty,
+        rawJson: agg.raw as object,
       },
     });
   }
