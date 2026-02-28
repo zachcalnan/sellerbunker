@@ -29,6 +29,7 @@ function DashboardIcon({ className }: { className?: string }) {
       strokeLinejoin="round"
       className={className}
       aria-hidden
+      suppressHydrationWarning
     >
       <path d="M 19,19L 36,19L 36,36L 19,36L 19,19 Z M 19,40L 36,40L 36,57L 19,57L 19,40 Z M 40,57L 40,40L 57,40L 57,57L 40,57 Z M 40,36L 40,19L 57,19L 57,36L 40,36 Z" />
     </svg>
@@ -62,6 +63,7 @@ function InventoryIcon({ className }: { className?: string }) {
       strokeLinejoin="round"
       className={className}
       aria-hidden
+      suppressHydrationWarning
     >
       <path d="M21 8a2 2 0 0 0-1.2-1.84l-7-3a2 2 0 0 0-1.6 0l-7 3A2 2 0 0 0 3 8v8a2 2 0 0 0 1.2 1.84l7 3a2 2 0 0 0 1.6 0l7-3A2 2 0 0 0 21 16Z" />
       <path d="M3.3 7.2 12 11l8.7-3.8" />
@@ -82,6 +84,7 @@ function BurgerIcon({ className }: { className?: string }) {
       strokeLinejoin="round"
       className={className}
       aria-hidden
+      suppressHydrationWarning
     >
       <path d="M4 6h16M4 12h16M4 18h16" />
     </svg>
@@ -100,6 +103,7 @@ function CloseIcon({ className }: { className?: string }) {
       strokeLinejoin="round"
       className={className}
       aria-hidden
+      suppressHydrationWarning
     >
       <path d="M18 6L6 18M6 6l12 12" />
     </svg>

@@ -30,7 +30,10 @@ type InventoryRow = {
 };
 
 const SYSTEM_SKUS = new Set(["AMAZON_GENERIC", "AMAZON_MULTI"]);
-const PAGE_SIZE = 20;
+const PAGE_SIZE_OPTIONS = [20, 50, 100] as const;
+const AUTO_SYNC_COOLDOWN_MS = 5 * 60 * 1000; // 5 min
+const AUTO_SYNC_STORAGE_KEY = "inventory_last_auto_sync";
+const AUTO_BACKFILL_STORAGE_KEY = "inventory_last_auto_backfill";
 
 export default function InventoryPage() {
   const baseUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
@@ -45,13 +48,14 @@ export default function InventoryPage() {
   const [showSystem, setShowSystem] = useState(false);
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
   const [detailRow, setDetailRow] = useState<InventoryRow | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const token = await getToken();
+      const token = await getToken({ skipCache: true });
       const res = await fetch(`${baseUrl}/api/amazon/inventory`, {
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -74,12 +78,80 @@ export default function InventoryPage() {
     void load();
   }, [isSignedIn, load]);
 
+  // Auto sync when page loads (with cooldown)
+  useEffect(() => {
+    if (!isSignedIn || loading || syncing) return;
+
+    const lastStr = typeof window !== "undefined" ? sessionStorage.getItem(AUTO_SYNC_STORAGE_KEY) : null;
+    const lastTime = lastStr ? parseInt(lastStr, 10) : 0;
+    if (Date.now() - lastTime < AUTO_SYNC_COOLDOWN_MS) return;
+
+    const run = async () => {
+      if (typeof window !== "undefined") sessionStorage.setItem(AUTO_SYNC_STORAGE_KEY, String(Date.now()));
+      setSyncing(true);
+      setError(null);
+      try {
+        const token = await getToken({ skipCache: true });
+        const syncRes = await fetch(`${baseUrl}/api/amazon/inventory/sync`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!syncRes.ok) {
+          const msg = syncRes.headers.get("content-type")?.includes("application/json")
+            ? ((await syncRes.json()) as { message?: unknown })?.message
+            : await syncRes.text();
+          throw new Error(typeof msg === "string" ? msg : "Failed to sync.");
+        }
+        await load();
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Auto-sync failed.");
+        if (typeof window !== "undefined") sessionStorage.setItem(AUTO_SYNC_STORAGE_KEY, "0");
+      } finally {
+        setSyncing(false);
+      }
+    };
+
+    void run();
+  }, [isSignedIn, loading, syncing, getToken, baseUrl, load]);
+
+  // Auto backfill when we have rows with missing images (separate effect, own cooldown)
+  useEffect(() => {
+    if (!isSignedIn || loading || syncing || backfillingTitles || rows.length === 0) return;
+    const needsBackfill = rows.some((r) => !r.imageUrl || !r.title);
+    if (!needsBackfill) return;
+
+    const lastStr = typeof window !== "undefined" ? sessionStorage.getItem(AUTO_BACKFILL_STORAGE_KEY) : null;
+    const lastTime = lastStr ? parseInt(lastStr, 10) : 0;
+    if (Date.now() - lastTime < AUTO_SYNC_COOLDOWN_MS) return;
+
+    const run = async () => {
+      if (typeof window !== "undefined") sessionStorage.setItem(AUTO_BACKFILL_STORAGE_KEY, String(Date.now()));
+      setBackfillingTitles(true);
+      setError(null);
+      try {
+        const token = await getToken({ skipCache: true });
+        const res = await fetch(
+          `${baseUrl}/api/amazon/dev/backfill-product-titles?limit=200`,
+          { method: "POST", headers: { Authorization: `Bearer ${token}` } },
+        );
+        if (res.ok) await load();
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Auto-backfill failed.");
+        if (typeof window !== "undefined") sessionStorage.setItem(AUTO_BACKFILL_STORAGE_KEY, "0");
+      } finally {
+        setBackfillingTitles(false);
+      }
+    };
+
+    void run();
+  }, [isSignedIn, loading, syncing, backfillingTitles, rows, getToken, baseUrl, load]);
+
   const syncNow = async () => {
     setSyncing(true);
     setError(null);
     setNotice(null);
     try {
-      const token = await getToken();
+      const token = await getToken({ skipCache: true });
       const res = await fetch(`${baseUrl}/api/amazon/inventory/sync`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}` },
@@ -97,6 +169,7 @@ export default function InventoryPage() {
         const msg = await res.text();
         throw new Error(msg || "Failed to sync.");
       }
+      if (typeof window !== "undefined") sessionStorage.setItem(AUTO_SYNC_STORAGE_KEY, String(Date.now()));
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to sync.");
@@ -110,7 +183,7 @@ export default function InventoryPage() {
     setError(null);
     setNotice(null);
     try {
-      const token = await getToken();
+      const token = await getToken({ skipCache: true });
       const res = await fetch(
         `${baseUrl}/api/amazon/dev/backfill-product-titles?limit=200`,
         {
@@ -132,6 +205,8 @@ export default function InventoryPage() {
         const msg = await res.text();
         throw new Error(msg || "Failed to backfill titles.");
       }
+
+      if (typeof window !== "undefined") sessionStorage.setItem(AUTO_BACKFILL_STORAGE_KEY, String(Date.now()));
 
       const result = (await res.json()) as {
         requested?: number;
@@ -198,12 +273,12 @@ export default function InventoryPage() {
     return [...list].sort((a, b) => (b.totalQty ?? 0) - (a.totalQty ?? 0));
   }, [rows, query, showSystem]);
 
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
   const safePage = Math.min(page, totalPages);
   const paginated = useMemo(
     () =>
-      filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE),
-    [filtered, safePage],
+      filtered.slice((safePage - 1) * pageSize, safePage * pageSize),
+    [filtered, safePage, pageSize],
   );
 
   const inventoryTotals = useMemo(() => {
@@ -224,7 +299,7 @@ export default function InventoryPage() {
 
   useEffect(() => {
     setPage(1);
-  }, [query, showSystem]);
+  }, [query, showSystem, pageSize]);
 
   return (
     <div className="mx-auto max-w-6xl px-6 py-10">
@@ -483,11 +558,8 @@ export default function InventoryPage() {
                       <div className="text-center pl-3 text-sm text-[var(--foreground)]">{num(r.availableQty)}</div>
                       <div className="text-center pl-3 text-sm text-[var(--foreground)]">{num(r.reservedQty)}</div>
                       <div className="text-center pl-3 text-sm text-[var(--foreground)]">{num(r.inboundQty)}</div>
-                      <div className="text-center pl-3 text-sm text-[var(--foreground)] flex items-center justify-center gap-1">
+                      <div className="text-center pl-3 text-sm text-[var(--foreground)]">
                         {num(r.issueQty)}
-                        <svg className="h-4 w-4 text-[var(--muted-foreground)]" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                        </svg>
                       </div>
                     </div>
                   </Fragment>
@@ -497,18 +569,33 @@ export default function InventoryPage() {
 
             {totalPages > 1 ? (
               <div className="flex items-center justify-between gap-4 border-t border-[var(--surface-border)] bg-[var(--surface)] px-4 py-3">
-                <div className="text-sm text-[var(--muted-foreground)]">
-                  Page {safePage} of {totalPages}
-                  <span className="ml-2">
-                    ({(safePage - 1) * PAGE_SIZE + 1}–{Math.min(safePage * PAGE_SIZE, filtered.length)} of {filtered.length})
-                  </span>
+                <div className="flex items-center gap-4">
+                  <div className="text-sm text-[var(--muted-foreground)]">
+                    Page {safePage} of {totalPages}
+                    <span className="ml-2">
+                      ({(safePage - 1) * pageSize + 1}–{Math.min(safePage * pageSize, filtered.length)} of {filtered.length})
+                    </span>
+                  </div>
+                  <select
+                    value={pageSize}
+                    onChange={(e) => {
+                      setPageSize(Number(e.target.value) as 20 | 50 | 100);
+                      setPage(1);
+                    }}
+                    className="cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-2 py-1 text-sm text-[var(--foreground)] outline-none"
+                    aria-label="Items per page"
+                  >
+                    {PAGE_SIZE_OPTIONS.map((n) => (
+                      <option key={n} value={n}>{n} per page</option>
+                    ))}
+                  </select>
                 </div>
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
                     onClick={() => setPage((p) => Math.max(1, p - 1))}
                     disabled={safePage <= 1}
-                    className="flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--surface-border)] bg-transparent text-[var(--foreground)] hover:bg-[var(--foreground)]/5 disabled:pointer-events-none disabled:opacity-40"
+                    className="cursor-pointer flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--surface-border)] bg-transparent text-[var(--foreground)] hover:bg-[var(--foreground)]/5 disabled:pointer-events-none disabled:opacity-40"
                     aria-label="Previous page"
                   >
                     <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
@@ -519,7 +606,7 @@ export default function InventoryPage() {
                     type="button"
                     onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
                     disabled={safePage >= totalPages}
-                    className="flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--surface-border)] bg-transparent text-[var(--foreground)] hover:bg-[var(--foreground)]/5 disabled:pointer-events-none disabled:opacity-40"
+                    className="cursor-pointer flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--surface-border)] bg-transparent text-[var(--foreground)] hover:bg-[var(--foreground)]/5 disabled:pointer-events-none disabled:opacity-40"
                     aria-label="Next page"
                   >
                     <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
@@ -577,16 +664,27 @@ export default function InventoryPage() {
   );
 }
 
+/** Helper to safely read a number from an object (SP-API uses camelCase or PascalCase). */
+function getNum(obj: Record<string, unknown> | undefined, ...keys: string[]): number {
+  if (!obj || typeof obj !== 'object') return 0;
+  for (const k of keys) {
+    const v = obj[k];
+    if (typeof v === 'number' && !Number.isNaN(v)) return v;
+  }
+  return 0;
+}
+
 /** Parses SP-API rawJson (array of summary payloads) into the drilldown tree for the modal. */
 function InventoryDetailDrilldown({ rawJson }: { rawJson: unknown }) {
-  const payloads = Array.isArray(rawJson) ? rawJson : rawJson != null ? [rawJson] : [];
+  const payloads: Record<string, unknown>[] = Array.isArray(rawJson)
+    ? rawJson.filter((x): x is Record<string, unknown> => x != null && typeof x === 'object')
+    : rawJson != null && typeof rawJson === 'object' ? [rawJson as Record<string, unknown>] : [];
   if (payloads.length === 0) {
     return (
       <p className="text-[var(--muted-foreground)]">No inventory detail data. Run a sync to populate.</p>
     );
   }
 
-  // Aggregate details across marketplaces
   let fulfillable = 0;
   let reservedTotal = 0;
   let fcProcessing = 0;
@@ -601,22 +699,24 @@ function InventoryDetailDrilldown({ rawJson }: { rawJson: unknown }) {
   let aged = 0;
 
   for (const p of payloads) {
-    const d = (p as any)?.inventoryDetails ?? (p as any)?.InventoryDetails ?? {};
-    const r = d?.reservedQuantity ?? d?.ReservedQuantity ?? {};
-    const res = d?.researchingQuantity ?? d?.ResearchingQuantity ?? {};
-    const u = d?.unfulfillableQuantity ?? d?.UnfulfillableQuantity ?? {};
-    fulfillable += Number(d?.afnFulfillableQuantity ?? d?.fulfillableQuantity ?? 0);
-    reservedTotal += Number(r?.totalReservedQuantity ?? r?.total ?? 0);
-    fcProcessing += Number(r?.fcProcessingQuantity ?? r?.fcProcessing ?? 0);
-    customerOrders += Number(r?.customerOrderQuantity ?? r?.customerOrder ?? 0);
-    transshipment += Number(r?.transshipmentQuantity ?? r?.transshipment ?? 0);
-    inboundWorking += Number(d?.afnInboundWorkingQuantity ?? 0);
-    inboundShipped += Number(d?.afnInboundShippedQuantity ?? 0);
-    inboundReceiving += Number(d?.afnInboundReceivingQuantity ?? 0);
-    unfulfillable += Number(u?.totalUnfulfillableQuantity ?? u?.total ?? 0);
-    researching += Number(res?.totalResearchingQuantity ?? res?.total ?? 0);
-    lost += Number(u?.lostQuantity ?? u?.lost ?? 0);
-    aged += Number(u?.agedQuantity ?? u?.aged ?? 0);
+    const raw = p as Record<string, unknown>;
+    const d = (raw.inventoryDetails ?? raw.InventoryDetails ?? {}) as Record<string, unknown>;
+    const r = (d.reservedQuantity ?? d.ReservedQuantity ?? {}) as Record<string, unknown>;
+    const res = (d.researchingQuantity ?? d.ResearchingQuantity ?? {}) as Record<string, unknown>;
+    const u = (d.unfulfillableQuantity ?? d.UnfulfillableQuantity ?? {}) as Record<string, unknown>;
+
+    fulfillable += getNum(d, 'afnFulfillableQuantity', 'fulfillableQuantity');
+    reservedTotal += getNum(r, 'totalReservedQuantity', 'total');
+    fcProcessing += getNum(r, 'fcProcessingQuantity', 'fcProcessing');
+    customerOrders += getNum(r, 'customerOrderQuantity', 'customerOrder');
+    transshipment += getNum(r, 'transshipmentQuantity', 'transshipment');
+    inboundWorking += getNum(d, 'afnInboundWorkingQuantity');
+    inboundShipped += getNum(d, 'afnInboundShippedQuantity');
+    inboundReceiving += getNum(d, 'afnInboundReceivingQuantity');
+    unfulfillable += getNum(u, 'totalUnfulfillableQuantity', 'total');
+    researching += getNum(res, 'totalResearchingQuantity', 'total');
+    lost += getNum(u, 'lostQuantity', 'lost');
+    aged += getNum(u, 'agedQuantity', 'aged');
   }
 
   const total =

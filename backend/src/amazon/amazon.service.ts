@@ -1934,11 +1934,12 @@ export class AmazonService {
       fe: ['A19VAU5U5O7RUS', 'A39IBJ37TRP1C6', 'A1VC38T7YXB528'], // SG, AU, JP
     };
     const allowedInRegion = new Set(
-      regionMarketplaceIds[credentials.region ?? 'na'] ?? regionMarketplaceIds.na,
+      regionMarketplaceIds[credentials.region ?? 'eu'] ?? regionMarketplaceIds.eu,
     );
 
+    const defaultRegion = credentials.region ?? 'eu';
     let marketplaceIds =
-      credentials.region === 'eu'
+      defaultRegion === 'eu'
         ? [
             'A1F83G8C2ARO7P', // UK
             'A1PA6795UKMFR9', // DE
@@ -1946,9 +1947,9 @@ export class AmazonService {
             'APJ6JRA9NG5V4', // IT
             'A1RKKUPIHCS9HS', // ES
           ]
-        : credentials.region === 'fe'
+        : defaultRegion === 'fe'
           ? ['A1VC38T7YXB528', 'A19VAU5U5O7RUS', 'A39IBJ37TRP1C6'] // JP, SG, AU
-          : ['ATVPDKIKX0DER']; // US
+          : ['ATVPDKIKX0DER']; // US (na)
 
     // Optionally narrow to seller's participations, but only for marketplaces in this region.
     try {
