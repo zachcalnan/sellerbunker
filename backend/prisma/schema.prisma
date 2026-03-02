@@ -226,6 +226,16 @@ model InventoryByMarketplace {
   researchingQty   Int @default(0) @map("researching_qty")
   unfulfillableQty Int @default(0) @map("unfulfillable_qty")
 
+  // Granular breakdown from FBA API (details=true)
+  fcProcessingQty      Int @default(0) @map("fc_processing_qty")
+  customerOrdersQty    Int @default(0) @map("customer_orders_qty")
+  transshipmentQty    Int @default(0) @map("transshipment_qty")
+  inboundWorkingQty   Int @default(0) @map("inbound_working_qty")
+  inboundShippedQty   Int @default(0) @map("inbound_shipped_qty")
+  inboundReceivingQty Int @default(0) @map("inbound_receiving_qty")
+  warehouseDamagedQty  Int @default(0) @map("warehouse_damaged_qty")
+  expiredQty          Int @default(0) @map("expired_qty")
+
   currentQty Int @default(0) @map("current_qty")
 
   rawJson Json? @map("raw_json")

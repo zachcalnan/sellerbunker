@@ -28,11 +28,28 @@ type SalesPoint = {
   date: string;
   revenue: number;
   orders: number;
+  profit: number;
 };
 
 type SalesSeries = {
   currency: string;
   points: SalesPoint[];
+};
+
+type RecentOrderRow = {
+  id: string;
+  orderId: string;
+  orderDate: string;
+  sku: string;
+  asin: string | null;
+  title: string | null;
+  imageUrl: string | null;
+  quantity: number;
+  salePrice: number;
+  profit: number | null;
+  roiPct?: number | null;
+  availableStock: number | null;
+  totalStock: number | null;
 };
 
 function HomeInner() {
@@ -260,6 +277,7 @@ function HomeInner() {
           value: hasCostData ? formatCurrency(profit, effectiveCurrency, 2) : "—",
           percentage: hasCostData ? Math.round(summary.profitMargin * 100) : 0,
           color: "#10B981",
+          centerTitle: "Profit",
           centerLine1: hasCostData ? formatCurrency(profit, effectiveCurrency, 2) : "—",
           centerLine2: "Profit on Sales",
           centerLine3: hasCostData ? `${(summary.profitMargin * 100).toFixed(1)}%` : "—",
@@ -309,37 +327,14 @@ function HomeInner() {
           percentage: hasCostData ? Math.min(100, Math.round(roiPct)) : 0,
           color: "#EC4899",
           hidePercentage: !hasCostData,
+          centerTitle: "ROI",
         },
       ]
     : [];
 
-  const kpiCards = summary
-    ? [
-        {
-          label: "Total Orders",
-          value: summary.totalOrders.toLocaleString(),
-          helper: "All marketplaces · 30d",
-        },
-        {
-          label: "Active SKUs",
-          value: summary.activeSkus.toLocaleString(),
-          helper: "Live & in stock",
-        },
-        {
-          label: "Units in FBA",
-          value: summary.unitsInFba.toLocaleString(),
-          helper: "Fulfilled by Amazon",
-        },
-        {
-          label: "Open Shipments",
-          value: summary.openShipments.toLocaleString(),
-          helper: "Inbound & pending",
-        },
-      ]
-    : [];
   return (
     <div className="min-h-screen bg-[var(--background)] text-[var(--foreground)]">
-      <main className="mx-auto flex min-h-screen max-w-6xl flex-col gap-10 px-6 pt-3 pb-10">
+      <main className="flex min-h-screen w-full flex-col gap-10 px-6 pt-3 pb-10">
 
         {loading && (
           <div className="rounded-xl border border-[var(--surface-border)] bg-transparent px-4 py-3 text-xs text-[var(--muted-foreground)]">
@@ -387,13 +382,15 @@ function HomeInner() {
 
         {summary && (
           <section className="-mt-0.5">
-            <div className="flex flex-col gap-4 md:flex-row md:items-start md:gap-6">
-              {/* Performance Snapshot: narrow box, filter just above the 4 rings */}
-              <div className="w-fit max-w-[min(100%,28rem)] shrink-0 rounded-xl p-4 ring-1 ring-[var(--surface-border)]">
-                <h2 className="mb-1 text-sm font-medium uppercase tracking-[0.2em] text-[var(--muted-foreground)]">
-                  Performance Snapshot
-                </h2>
-                <div className="mb-2 flex flex-wrap items-center justify-end gap-2 text-xs text-[var(--muted-foreground)]">
+            <div className="flex flex-col gap-4 md:flex-row md:items-stretch md:gap-6">
+              {/* Left column: Performance Snapshot + Recent orders */}
+              <div className="flex w-fit max-w-[min(100%,42rem)] shrink-0 flex-col gap-4">
+                {/* Performance Snapshot */}
+                <div className="rounded-xl p-4 ring-1 ring-[var(--surface-border)]">
+                  <h2 className="mb-1 text-sm font-medium uppercase tracking-[0.2em] text-[var(--muted-foreground)]">
+                    Performance Snapshot
+                  </h2>
+                  <div className="mb-2 flex flex-wrap items-center justify-end gap-2 text-xs text-[var(--muted-foreground)]">
                     <select
                       value={rangePreset}
                       onChange={(e) => {
@@ -466,19 +463,29 @@ function HomeInner() {
                         </button>
                       </>
                     ) : null}
+                  </div>
+                  <div className="grid grid-cols-4 w-fit gap-3">
+                    {cards.map((card) => (
+                      <DonutCard key={card.label} {...card} />
+                    ))}
+                  </div>
                 </div>
-                <div className="grid grid-cols-4 w-fit gap-3">
-                  {cards.map((card) => (
-                    <DonutCard key={card.label} {...card} />
-                  ))}
-                </div>
+
+                {/* Recent orders */}
+                <RecentOrders
+                  baseUrl={baseUrl}
+                  isSignedIn={isSignedIn}
+                  getToken={getToken}
+                  currency={effectiveCurrency}
+                />
               </div>
 
-              {/* Sales Trend: takes remaining space, pulled left */}
-              <div className="min-w-0 flex-1 rounded-xl p-4 ring-1 ring-[var(--surface-border)]">
+              {/* Right column: Sales Trend + Inventory summary in the space below */}
+              <div className="flex min-w-0 flex-1 flex-col gap-4">
+              <div className="flex min-w-0 max-h-[20rem] w-full flex-col overflow-y-auto rounded-xl p-4 ring-1 ring-[var(--surface-border)]">
                 <div className="mb-3 flex items-center justify-between">
                   <h2 className="text-sm font-medium uppercase tracking-[0.2em] text-[var(--muted-foreground)]">
-                    Sales Trend
+                    Sales v Profit
                   </h2>
                   <div className="flex flex-wrap items-center justify-end gap-2 text-xs text-[var(--muted-foreground)]">
                     <select
@@ -557,12 +564,15 @@ function HomeInner() {
                   noWrapper
                 />
               </div>
-            </div>
 
-            <div className="mt-4 grid gap-4 md:grid-cols-4">
-              {kpiCards.map((card) => (
-                <KpiCard key={card.label} {...card} />
-              ))}
+              {/* Inventory breakdown: fills the space below Sales Trend */}
+              <InventorySummary
+                baseUrl={baseUrl}
+                isSignedIn={isSignedIn}
+                getToken={getToken}
+                currency={effectiveCurrency}
+              />
+              </div>
             </div>
           </section>
         )}
@@ -575,7 +585,7 @@ export default function Home() {
   return (
     <Suspense
       fallback={
-        <div className="mx-auto max-w-6xl px-6 py-10 text-sm text-[var(--muted-foreground)]">
+        <div className="w-full px-6 py-10 text-sm text-[var(--muted-foreground)]">
           Loading…
         </div>
       }
@@ -585,11 +595,415 @@ export default function Home() {
   );
 }
 
+type RecentOrdersProps = {
+  baseUrl: string;
+  isSignedIn: boolean | undefined;
+  getToken: (args: { template?: string }) => Promise<string | null>;
+  currency: string;
+};
+
+function RecentOrders({
+  baseUrl,
+  isSignedIn,
+  getToken,
+  currency,
+}: RecentOrdersProps) {
+  const [orders, setOrders] = useState<RecentOrderRow[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isSignedIn) {
+      setOrders([]);
+      return;
+    }
+    const fetchOrders = async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const token = await getToken({ template: "backend" });
+        const res = await fetch(`${baseUrl}/api/amazon/orders`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok) throw new Error("Failed to load orders");
+        const data = (await res.json()) as RecentOrderRow[];
+        setOrders(Array.isArray(data) ? data.slice(0, 10) : []);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Error");
+        setOrders([]);
+      } finally {
+        setLoading(false);
+      }
+    };
+    void fetchOrders();
+  }, [isSignedIn, getToken, baseUrl]);
+
+  const formatDate = (dateStr: string) => {
+    const d = new Date(dateStr);
+    if (Number.isNaN(d.getTime())) return "—";
+    return d.toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  };
+
+  return (
+    <div className="rounded-xl p-4 ring-1 ring-[var(--surface-border)]">
+      <h2 className="mb-2 text-sm font-medium uppercase tracking-[0.2em] text-[var(--muted-foreground)]">
+        Recent orders
+      </h2>
+      {loading && (
+        <p className="text-[11px] text-[var(--muted-foreground)]">Loading…</p>
+      )}
+      {error && (
+        <p className="text-[11px] text-red-600">{error}</p>
+      )}
+      {!loading && !error && orders.length === 0 && (
+        <p className="text-[11px] text-[var(--muted-foreground)]">
+          No orders yet.
+        </p>
+      )}
+      {!loading && !error && orders.length > 0 && (
+        <div className="max-h-80 overflow-y-auto overflow-x-hidden">
+          <div className="min-w-0">
+            {/* Header row: same grid as data rows so Price/Profit/ROI align */}
+            <div className="grid grid-cols-[2.25rem_minmax(0,14rem)_10rem] items-center gap-1.5 border-b border-[var(--surface-border)] pb-1 pt-0 text-[9px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
+              <div aria-hidden />
+              <div />
+              <div className="grid grid-cols-3 gap-8 text-right text-xs text-white">
+                <span>Price</span>
+                <span>Profit</span>
+                <span>ROI</span>
+              </div>
+            </div>
+            {orders.map((row) => {
+              const revenue = row.salePrice * row.quantity;
+              const title = row.title?.trim() || "—";
+              const shortTitle = title.length > 42 ? title.slice(0, 39) + "…" : title;
+              return (
+                <div
+                  key={row.id}
+                  className="grid grid-cols-[2.25rem_minmax(0,14rem)_10rem] items-center gap-1.5 border-b border-[var(--surface-border)] py-1.5 text-[10px] last:border-b-0"
+                >
+                  <div className="h-9 w-9 shrink-0 overflow-hidden rounded bg-[var(--surface)] ring-1 ring-[var(--surface-border)]">
+                    {row.imageUrl ? (
+                      <img
+                        src={row.imageUrl}
+                        alt=""
+                        className="h-full w-full object-cover"
+                      />
+                    ) : (
+                      <div className="flex h-full w-full items-center justify-center text-[var(--muted-foreground)]">
+                        —
+                      </div>
+                    )}
+                  </div>
+                  <div className="min-w-0">
+                    <div className="truncate text-xs font-medium text-[var(--foreground)]" title={row.title ?? undefined}>
+                      {shortTitle}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 truncate text-[11px] text-[var(--muted-foreground)]">
+                      <span>{formatDate(row.orderDate)}</span>
+                      <span>·</span>
+                      <span>{row.sku}</span>
+                      <span>·</span>
+                      <span>{row.asin ?? "—"}</span>
+                      <span>·</span>
+                      <span>Qty {row.quantity}</span>
+                      <span>·</span>
+                      <span>Stock {row.availableStock != null ? row.availableStock : "—"}</span>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-3 gap-8 text-right text-xs font-medium text-white">
+                    <span>{revenue != null && Number.isFinite(revenue) ? formatCurrency(revenue, currency) : "—"}</span>
+                    <span>{row.profit != null && Number.isFinite(row.profit) ? formatCurrency(row.profit, currency) : "—"}</span>
+                    <span>{row.roiPct != null && Number.isFinite(row.roiPct) ? `${row.roiPct.toFixed(1)}%` : "—"}</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+type InventorySummaryRow = {
+  availableQty: number | null;
+  reservedQty: number | null;
+  inboundQty: number | null;
+  issueQty: number | null;
+  totalQty: number | null;
+  currentListedPrice?: number | null;
+  costOfGoods?: number | null;
+  byMarketplace?: Array<{
+    fulfillableQty: number;
+    inboundQty: number;
+    reservedQty: number;
+    researchingQty: number;
+    unfulfillableQty: number;
+    currentQty: number;
+    fcProcessingQty?: number;
+    customerOrdersQty?: number;
+    transshipmentQty?: number;
+    inboundWorkingQty?: number;
+    inboundShippedQty?: number;
+    inboundReceivingQty?: number;
+    warehouseDamagedQty?: number;
+    expiredQty?: number;
+  }>;
+};
+
+type InventorySummaryProps = {
+  baseUrl: string;
+  isSignedIn: boolean | undefined;
+  getToken: (args: { template?: string }) => Promise<string | null>;
+  currency: string;
+};
+
+function InventorySummary({
+  baseUrl,
+  isSignedIn,
+  getToken,
+  currency,
+}: InventorySummaryProps) {
+  const [rows, setRows] = useState<InventorySummaryRow[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isSignedIn) {
+      setRows([]);
+      return;
+    }
+    const fetchInventory = async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const token = await getToken({ template: "backend" });
+        const res = await fetch(`${baseUrl}/api/amazon/inventory`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok) throw new Error("Failed to load inventory");
+        const data = (await res.json()) as InventorySummaryRow[];
+        setRows(Array.isArray(data) ? data : []);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Error");
+        setRows([]);
+      } finally {
+        setLoading(false);
+      }
+    };
+    void fetchInventory();
+  }, [isSignedIn, getToken, baseUrl]);
+
+  const n = (v: number | null | undefined) => (v != null && Number.isFinite(v) ? v : 0);
+  const total = rows.reduce((sum, r) => sum + n(r.totalQty), 0);
+  const price = (r: InventorySummaryRow) => n(r.currentListedPrice);
+  const cogs = (r: InventorySummaryRow) => n(r.costOfGoods);
+
+  let fulfillable = 0;
+  let fulfillableValue = 0;
+  let fulfillableCost = 0;
+  let reserved = 0;
+  let reservedValue = 0;
+  let reservedCost = 0;
+  let inbound = 0;
+  let inboundValue = 0;
+  let inboundCost = 0;
+  let researching = 0;
+  let researchingValue = 0;
+  let researchingCost = 0;
+  let unfulfillable = 0;
+  let unfulfillableValue = 0;
+  let unfulfillableCost = 0;
+  let current = 0;
+  let currentValue = 0;
+  let currentCost = 0;
+  let fcProcessing = 0;
+  let fcProcessingValue = 0;
+  let fcProcessingCost = 0;
+  let customerOrders = 0;
+  let customerOrdersValue = 0;
+  let customerOrdersCost = 0;
+  let transshipment = 0;
+  let transshipmentValue = 0;
+  let transshipmentCost = 0;
+  let inboundWorking = 0;
+  let inboundWorkingValue = 0;
+  let inboundWorkingCost = 0;
+  let inboundShipped = 0;
+  let inboundShippedValue = 0;
+  let inboundShippedCost = 0;
+  let inboundReceiving = 0;
+  let inboundReceivingValue = 0;
+  let inboundReceivingCost = 0;
+  let warehouseDamaged = 0;
+  let warehouseDamagedValue = 0;
+  let warehouseDamagedCost = 0;
+  let expired = 0;
+  let expiredValue = 0;
+  let expiredCost = 0;
+
+  rows.forEach((r) => {
+    const p = price(r);
+    const c = cogs(r);
+    const av = n(r.availableQty);
+    const rv = n(r.reservedQty);
+    const inv = n(r.inboundQty);
+    fulfillable += av;
+    fulfillableValue += p * av;
+    fulfillableCost += c * av;
+    reserved += rv;
+    reservedValue += p * rv;
+    reservedCost += c * rv;
+    inbound += inv;
+    inboundValue += p * inv;
+    inboundCost += c * inv;
+
+    r.byMarketplace?.forEach((m) => {
+      const rq = n(m.researchingQty);
+      const uq = n(m.unfulfillableQty);
+      const cq = n(m.currentQty);
+      const fcp = n(m.fcProcessingQty);
+      const co = n(m.customerOrdersQty);
+      const ts = n(m.transshipmentQty);
+      const iw = n(m.inboundWorkingQty);
+      const ish = n(m.inboundShippedQty);
+      const ir = n(m.inboundReceivingQty);
+      const wd = n(m.warehouseDamagedQty);
+      const ex = n(m.expiredQty);
+
+      researching += rq;
+      researchingValue += p * rq;
+      researchingCost += c * rq;
+      unfulfillable += uq;
+      unfulfillableValue += p * uq;
+      unfulfillableCost += c * uq;
+      current += cq;
+      currentValue += p * cq;
+      currentCost += c * cq;
+      fcProcessing += fcp;
+      fcProcessingValue += p * fcp;
+      fcProcessingCost += c * fcp;
+      customerOrders += co;
+      customerOrdersValue += p * co;
+      customerOrdersCost += c * co;
+      transshipment += ts;
+      transshipmentValue += p * ts;
+      transshipmentCost += c * ts;
+      inboundWorking += iw;
+      inboundWorkingValue += p * iw;
+      inboundWorkingCost += c * iw;
+      inboundShipped += ish;
+      inboundShippedValue += p * ish;
+      inboundShippedCost += c * ish;
+      inboundReceiving += ir;
+      inboundReceivingValue += p * ir;
+      inboundReceivingCost += c * ir;
+      warehouseDamaged += wd;
+      warehouseDamagedValue += p * wd;
+      warehouseDamagedCost += c * wd;
+      expired += ex;
+      expiredValue += p * ex;
+      expiredCost += c * ex;
+    });
+  });
+
+  // Total value/cost from product-level totalQty to avoid double-counting
+  const totalValue = rows.reduce((sum, r) => sum + price(r) * n(r.totalQty), 0);
+  const totalCost = rows.reduce((sum, r) => sum + cogs(r) * n(r.totalQty), 0);
+  const totalProfit = totalValue - totalCost;
+  const totalRoiPct = totalCost > 0 ? (totalProfit / totalCost) * 100 : null;
+
+  // Granular statuses from FBA API (details=true): show all breakdowns we store; profit = value - cost, ROI = profit/cost
+  type StatusRow = { label: string; value: number; stockValue: number; unitCost: number; profit: number; roiPct: number | null };
+  const toStatusRow = (label: string, value: number, stockValue: number, unitCost: number): StatusRow => ({
+    label,
+    value,
+    stockValue,
+    unitCost,
+    profit: stockValue - unitCost,
+    roiPct: unitCost > 0 ? ((stockValue - unitCost) / unitCost) * 100 : null,
+  });
+  const statuses: StatusRow[] = [
+    toStatusRow("Fulfillable", fulfillable, fulfillableValue, fulfillableCost),
+    toStatusRow("FC Processing", fcProcessing, fcProcessingValue, fcProcessingCost),
+    toStatusRow("Customer Orders", customerOrders, customerOrdersValue, customerOrdersCost),
+    toStatusRow("Transshipment", transshipment, transshipmentValue, transshipmentCost),
+    toStatusRow("Reserved", reserved, reservedValue, reservedCost),
+    toStatusRow("Inbound Working", inboundWorking, inboundWorkingValue, inboundWorkingCost),
+    toStatusRow("Inbound Shipped", inboundShipped, inboundShippedValue, inboundShippedCost),
+    toStatusRow("Inbound Receiving", inboundReceiving, inboundReceivingValue, inboundReceivingCost),
+    toStatusRow("Inbound", inbound, inboundValue, inboundCost),
+    toStatusRow("Researching", researching, researchingValue, researchingCost),
+    toStatusRow("Unfulfillable", unfulfillable, unfulfillableValue, unfulfillableCost),
+    toStatusRow("Warehouse Damaged", warehouseDamaged, warehouseDamagedValue, warehouseDamagedCost),
+    toStatusRow("Expired", expired, expiredValue, expiredCost),
+    toStatusRow("Current", current > 0 ? current : total, current > 0 ? currentValue : totalValue, current > 0 ? currentCost : totalCost),
+  ];
+
+  return (
+    <div className="rounded-xl p-4 ring-1 ring-[var(--surface-border)]">
+      <h2 className="mb-2 text-sm font-medium uppercase tracking-[0.2em] text-[var(--muted-foreground)]">
+        Inventory summary
+      </h2>
+      {loading && (
+        <p className="text-[11px] text-[var(--muted-foreground)]">Loading…</p>
+      )}
+      {error && (
+        <p className="text-[11px] text-red-600">{error}</p>
+      )}
+      {!loading && !error && (
+        <div className="min-w-0 overflow-x-auto">
+          <table className="w-full text-[11px]">
+            <thead>
+              <tr className="border-b border-[var(--surface-border)] text-[10px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
+                <th className="py-1 pr-2 text-left">Status</th>
+                <th className="py-1 text-right">Qty</th>
+                <th className="py-1 pl-2 text-right">Stock value</th>
+                <th className="py-1 pl-2 text-right">Unit cost</th>
+                <th className="py-1 pl-2 text-right">Profit</th>
+                <th className="py-1 pl-2 text-right">ROI</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr className="border-b border-[var(--surface-border)] bg-[var(--surface)]/50 font-semibold">
+                <td className="py-1.5 pr-2 text-[var(--foreground)]">Total</td>
+                <td className="py-1.5 text-right tabular-nums text-[var(--foreground)]">{total.toLocaleString()}</td>
+                <td className="py-1.5 pl-2 text-right tabular-nums text-[var(--foreground)]">{formatCurrency(totalValue, currency, 2)}</td>
+                <td className="py-1.5 pl-2 text-right tabular-nums text-[var(--foreground)]">{formatCurrency(totalCost, currency, 2)}</td>
+                <td className="py-1.5 pl-2 text-right tabular-nums text-[var(--foreground)]">{formatCurrency(totalProfit, currency, 2)}</td>
+                <td className="py-1.5 pl-2 text-right tabular-nums text-[var(--foreground)]">{totalRoiPct != null ? `${totalRoiPct.toFixed(1)}%` : "—"}</td>
+              </tr>
+              {statuses.map(({ label, value, stockValue, unitCost, profit, roiPct }) => (
+                <tr key={label} className="border-b border-[var(--surface-border)] last:border-b-0">
+                  <td className="py-1 pr-2 text-[var(--muted-foreground)]">{label}</td>
+                  <td className="py-1 text-right font-medium tabular-nums text-[var(--foreground)]">{value.toLocaleString()}</td>
+                  <td className="py-1 pl-2 text-right tabular-nums text-[var(--foreground)]">{formatCurrency(stockValue, currency, 2)}</td>
+                  <td className="py-1 pl-2 text-right tabular-nums text-[var(--foreground)]">{formatCurrency(unitCost, currency, 2)}</td>
+                  <td className="py-1 pl-2 text-right tabular-nums text-[var(--foreground)]">{formatCurrency(profit, currency, 2)}</td>
+                  <td className="py-1 pl-2 text-right tabular-nums text-[var(--foreground)]">{roiPct != null ? `${roiPct.toFixed(1)}%` : "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 type DonutCardProps = {
   label: string;
   value: string;
   percentage: number;
   color: string;
+  /** Small title shown above the value in the center (e.g. "Profit", "ROI") */
+  centerTitle?: string;
   /** Override center: line 1 (amount, biggest), line 2 ("Profit on Sales"), line 3 (percent) */
   centerLine1?: string;
   centerLine2?: string;
@@ -598,12 +1012,6 @@ type DonutCardProps = {
   note?: ReactNode;
   /** When true, show only value (no %); ring stays empty. Use for metrics without a meaningful %. */
   hidePercentage?: boolean;
-};
-
-type KpiCardProps = {
-  label: string;
-  value: string;
-  helper?: string;
 };
 
 type SalesTrendProps = {
@@ -631,7 +1039,6 @@ function SalesTrend({
   const [sales, setSales] = useState<SalesSeries | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [mode, setMode] = useState<"revenue" | "orders">("revenue");
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
 
   useEffect(() => {
@@ -683,24 +1090,25 @@ function SalesTrend({
   const maxValue =
     points.length > 0
       ? points.reduce(
-          (m, p) =>
-            Math.max(m, mode === "revenue" ? p.revenue : p.orders),
+          (m, p) => Math.max(m, p.revenue, p.profit),
           0
         )
       : 0;
   const allZero = points.length > 0 && maxValue === 0;
 
   const width = 400;
-  const height = 140;
-  const paddingX = 32; // extra room on the left for y-axis labels
-  const paddingBottom = 16;
-  const paddingTop = 24; // extra room at the top for hover labels
+  const height = 200;
+  const paddingX = 28; // room for y-axis labels
+  const paddingBottom = 12;
+  const paddingTop = 18; // room for hover labels
 
   const barAreaHeight = height - paddingTop - paddingBottom;
   const barAreaWidth = width - paddingX * 2;
   const bucketWidth =
     points.length > 0 ? barAreaWidth / points.length : barAreaWidth;
-  const barWidth = bucketWidth * 0.6;
+  const barWidth = bucketWidth * 0.44; // two bars per bucket (revenue + profit) with gap
+  const revenueColor = "rgb(2, 242, 170)"; // teal
+  const profitColor = "rgb(251, 191, 36)"; // amber
 
   const content = (
     <>
@@ -708,44 +1116,22 @@ function SalesTrend({
         <div>
           {!noWrapper && (
             <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
-              Sales Trend
+              Sales v Profit
             </p>
           )}
           <p className={`text-[11px] text-[var(--muted-foreground)] ${noWrapper ? "" : "mt-0.5"}`}>
-            {label} ·{" "}
-            {mode === "revenue" ? currency : "Orders"}
+            {label} · Revenue vs profit ({currency})
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <div className="relative inline-flex rounded-full bg-[var(--surface)] p-0.5 text-[10px] ring-1 ring-[var(--surface-border)]">
-            <div
-              className={`absolute inset-y-0 left-0 w-1/2 rounded-full bg-[var(--foreground)] transition-transform duration-200 ${
-                mode === "orders" ? "translate-x-full" : "translate-x-0"
-              }`}
-            />
-            <button
-              type="button"
-              onClick={() => setMode("revenue")}
-              className={`relative z-10 px-2 py-0.5 rounded-full ${
-                mode === "revenue"
-                  ? "text-[var(--background)]"
-                  : "text-[var(--muted-foreground)]"
-              } cursor-pointer`}
-            >
-              Revenue
-            </button>
-            <button
-              type="button"
-              onClick={() => setMode("orders")}
-              className={`relative z-10 px-2 py-0.5 rounded-full ${
-                mode === "orders"
-                  ? "text-[var(--background)]"
-                  : "text-[var(--muted-foreground)]"
-              } cursor-pointer`}
-            >
-              Orders
-            </button>
-          </div>
+          <span className="inline-flex items-center gap-1.5 text-[10px] text-[var(--muted-foreground)]">
+            <span className="inline-block h-2 w-2 rounded-sm" style={{ backgroundColor: revenueColor }} />
+            Revenue
+          </span>
+          <span className="inline-flex items-center gap-1.5 text-[10px] text-[var(--muted-foreground)]">
+            <span className="inline-block h-2 w-2 rounded-sm" style={{ backgroundColor: profitColor }} />
+            Profit
+          </span>
           {loading && (
             <span className="text-[11px] text-[var(--muted-foreground)]">
               Loading…
@@ -764,7 +1150,7 @@ function SalesTrend({
       {points.length > 0 && !allZero && (
         <svg
           viewBox={`0 0 ${width} ${height}`}
-          className="mt-2 h-40 w-full"
+          className="mt-2 h-[18rem] min-h-[12rem] w-full"
         >
           {/* Y-axis grid / labels */}
           {maxValue > 0 &&
@@ -790,43 +1176,48 @@ function SalesTrend({
                     fontSize="8"
                     fill="currentColor"
                   >
-                    {mode === "revenue"
-                      ? formatCurrency(
-                          Math.round(value),
-                          currency
-                        )
-                      : Math.round(value).toLocaleString()}
+                    {formatCurrency(Math.round(value), currency)}
                   </text>
                 </g>
               );
             })}
 
           {points.map((p, idx) => {
-            const x =
-              paddingX +
-              idx * bucketWidth +
-              (bucketWidth - barWidth) / 2;
-            const valueRatio =
-              maxValue > 0
-                ? (mode === "revenue"
-                    ? p.revenue
-                    : p.orders) / maxValue
-                : 0;
-            const barHeight = valueRatio * barAreaHeight;
-            const y = paddingTop + (barAreaHeight - barHeight);
+            const bucketLeft = paddingX + idx * bucketWidth;
+            const revenueRatio = maxValue > 0 ? p.revenue / maxValue : 0;
+            const profitRatio = maxValue > 0 ? p.profit / maxValue : 0;
+            const revenueHeight = revenueRatio * barAreaHeight;
+            const profitHeight = profitRatio * barAreaHeight;
+            const revenueY = paddingTop + (barAreaHeight - revenueHeight);
+            const profitY = paddingTop + (barAreaHeight - profitHeight);
+            const gap = 2;
+            const revenueX = bucketLeft + (bucketWidth - barWidth * 2 - gap) / 2;
+            const profitX = revenueX + barWidth + gap;
+            const isHovered = hoveredIndex === idx;
 
             return (
-              <g key={p.date}>
+              <g
+                key={p.date}
+                onMouseEnter={() => setHoveredIndex(idx)}
+                onMouseLeave={() => setHoveredIndex(null)}
+              >
                 <rect
-                  x={x}
-                  y={y}
+                  x={revenueX}
+                  y={revenueY}
                   width={barWidth}
-                  height={barHeight}
-                  fill={hoveredIndex === idx ? "rgb(2, 242, 170)" : "rgba(2, 242, 170, 0.5)"}
+                  height={revenueHeight}
+                  fill={isHovered ? revenueColor : "rgba(2, 242, 170, 0.5)"}
                   rx={2}
                   className="cursor-pointer"
-                  onMouseEnter={() => setHoveredIndex(idx)}
-                  onMouseLeave={() => setHoveredIndex(null)}
+                />
+                <rect
+                  x={profitX}
+                  y={profitY}
+                  width={barWidth}
+                  height={profitHeight}
+                  fill={isHovered ? profitColor : "rgba(251, 191, 36, 0.5)"}
+                  rx={2}
+                  className="cursor-pointer"
                 />
               </g>
             );
@@ -838,24 +1229,15 @@ function SalesTrend({
                 paddingX +
                 hoveredIndex * bucketWidth +
                 bucketWidth / 2;
-              const valueRatio =
-                maxValue > 0
-                  ? (mode === "revenue"
-                      ? p.revenue
-                      : p.orders) / maxValue
-                  : 0;
-              const barHeight = valueRatio * barAreaHeight;
-              const y = paddingTop + (barAreaHeight - barHeight);
-
-              const label =
-                mode === "revenue"
-                  ? formatCurrency(p.revenue, currency)
-                  : `${p.orders.toLocaleString()}`;
-              const approxWidth = label.length * 6;
-              const padding = 4;
+              const revenueRatio = maxValue > 0 ? p.revenue / maxValue : 0;
+              const revenueHeight = revenueRatio * barAreaHeight;
+              const y = paddingTop + (barAreaHeight - revenueHeight);
+              const label = `Rev: ${formatCurrency(p.revenue, currency)} · Profit: ${formatCurrency(p.profit, currency)}`;
+              const approxWidth = Math.min(label.length * 5.5, 140);
+              const padding = 6;
               const rectWidth = approxWidth + padding * 2;
               const rectY = Math.max(4, y - 22);
-              const textY = rectY + 10;
+              const textY = rectY + 11;
 
               return (
                 <g>
@@ -863,7 +1245,7 @@ function SalesTrend({
                     x={x - rectWidth / 2}
                     y={rectY}
                     width={rectWidth}
-                    height={14}
+                    height={20}
                     rx={3}
                     fill="var(--surface)"
                     stroke="var(--surface-border)"
@@ -873,7 +1255,7 @@ function SalesTrend({
                     x={x}
                     y={textY}
                     textAnchor="middle"
-                    fontSize="9"
+                    fontSize="8"
                     fill="var(--foreground)"
                   >
                     {label}
@@ -943,6 +1325,7 @@ function DonutCard({
   value,
   percentage,
   color,
+  centerTitle,
   centerLine1,
   centerLine2,
   centerLine3,
@@ -990,6 +1373,11 @@ function DonutCard({
           />
         </svg>
         <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-0.5 text-center">
+          {centerTitle && (
+            <span className="text-[9px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
+              {centerTitle}
+            </span>
+          )}
           {useCustomCenter ? (
             <>
               <span className="text-lg font-semibold leading-tight text-[var(--foreground)]">
@@ -1033,25 +1421,4 @@ function DonutCard({
     </div>
   );
 }
-
-function KpiCard({ label, value, helper }: KpiCardProps) {
-  return (
-    <div className="flex flex-col justify-between rounded-xl bg-transparent p-4 ring-1 ring-[var(--surface-border)]">
-      <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
-        {label}
-      </p>
-      <div className="mt-3 flex items-baseline gap-2">
-        <span className="text-xl font-semibold text-[var(--foreground)]">
-          {value}
-        </span>
-      </div>
-      {helper ? (
-        <p className="mt-1 text-[11px] text-[var(--muted-foreground)]">
-          {helper}
-        </p>
-      ) : null}
-    </div>
-  );
-}
-
 

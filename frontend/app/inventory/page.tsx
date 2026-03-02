@@ -234,7 +234,7 @@ export default function InventoryPage() {
   }, [query, showSystem]);
 
   return (
-    <div className="mx-auto max-w-6xl px-6 py-10">
+    <div className="w-full px-6 py-10">
       <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold text-[var(--foreground)]">

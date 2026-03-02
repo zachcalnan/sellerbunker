@@ -695,10 +695,14 @@ export class AmazonService {
         orderDate: true,
         itemPrice: true,
         quantity: true,
+        totalProfit: true,
       },
     });
 
-    const byDate = new Map<string, { revenue: number; orders: number }>();
+    const byDate = new Map<
+      string,
+      { revenue: number; orders: number; profit: number }
+    >();
 
     for (const order of ordersFromDb) {
       const d = order.orderDate;
@@ -707,39 +711,55 @@ export class AmazonService {
       const itemPriceNum = Number(order.itemPrice);
       const quantityNum = order.quantity;
       const revenueForOrder = itemPriceNum * quantityNum;
+      const profitForOrder = order.totalProfit != null ? Number(order.totalProfit) : 0;
 
-      const existing = byDate.get(key) ?? { revenue: 0, orders: 0 };
+      const existing = byDate.get(key) ?? {
+        revenue: 0,
+        orders: 0,
+        profit: 0,
+      };
       existing.revenue += revenueForOrder;
       existing.orders += 1;
+      existing.profit += profitForOrder;
       byDate.set(key, existing);
     }
 
     const currency = credentials.region === 'eu' ? 'GBP' : 'USD';
 
-    let points = Array.from(byDate.entries())
-      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-      .map(([date, value]) => ({
-        date,
-        revenue: value.revenue,
-        orders: value.orders,
-      }));
-
-    // If no explicit range is provided, pad to a full 30-day window so charts
-    // always have consistent length.
-    if (!range?.start && !range?.end) {
-      const dayMs = 24 * 60 * 60 * 1000;
-      const padded: { date: string; revenue: number; orders: number }[] = [];
-      for (let i = 0; i < 30; i += 1) {
-        const d = new Date(defaultStart.getTime() + i * dayMs);
-        const key = d.toISOString().slice(0, 10); // YYYY-MM-DD
-        const existing = byDate.get(key) ?? { revenue: 0, orders: 0 };
-        padded.push({
-          date: key,
-          revenue: existing.revenue,
-          orders: existing.orders,
-        });
-      }
-      points = padded;
+    // One bar per day from start to end (inclusive); fill missing days with 0. Cap at 30 days.
+    const dayMs = 24 * 60 * 60 * 1000;
+    const startDay = new Date(startDate);
+    startDay.setUTCHours(0, 0, 0, 0);
+    const endDay = new Date(endDate);
+    endDay.setUTCHours(0, 0, 0, 0);
+    let numDays = Math.round((endDay.getTime() - startDay.getTime()) / dayMs) + 1;
+    if (numDays > 30) {
+      numDays = 30;
+    }
+    if (numDays < 1) {
+      numDays = 1;
+    }
+    const endTime = endDay.getTime();
+    const startTime =
+      numDays === 30 && (endTime - startDay.getTime()) > (numDays - 1) * dayMs
+        ? endTime - (numDays - 1) * dayMs
+        : startDay.getTime();
+    const points: {
+      date: string;
+      revenue: number;
+      orders: number;
+      profit: number;
+    }[] = [];
+    for (let i = 0; i < numDays; i += 1) {
+      const d = new Date(startTime + i * dayMs);
+      const key = d.toISOString().slice(0, 10); // YYYY-MM-DD
+      const existing = byDate.get(key) ?? { revenue: 0, orders: 0, profit: 0 };
+      points.push({
+        date: key,
+        revenue: existing.revenue,
+        orders: existing.orders,
+        profit: existing.profit,
+      });
     }
 
     return {
@@ -2431,6 +2451,14 @@ export class AmazonService {
             researchingQty: true,
             unfulfillableQty: true,
             currentQty: true,
+            fcProcessingQty: true,
+            customerOrdersQty: true,
+            transshipmentQty: true,
+            inboundWorkingQty: true,
+            inboundShippedQty: true,
+            inboundReceivingQty: true,
+            warehouseDamagedQty: true,
+            expiredQty: true,
             updatedAt: true,
           },
           orderBy: [{ marketplaceId: 'asc' }],
@@ -2509,6 +2537,14 @@ export class AmazonService {
         researchingQty: Number(m.researchingQty ?? 0),
         unfulfillableQty: Number(m.unfulfillableQty ?? 0),
         currentQty: Number(m.currentQty ?? 0),
+        fcProcessingQty: Number(m.fcProcessingQty ?? 0),
+        customerOrdersQty: Number(m.customerOrdersQty ?? 0),
+        transshipmentQty: Number(m.transshipmentQty ?? 0),
+        inboundWorkingQty: Number(m.inboundWorkingQty ?? 0),
+        inboundShippedQty: Number(m.inboundShippedQty ?? 0),
+        inboundReceivingQty: Number(m.inboundReceivingQty ?? 0),
+        warehouseDamagedQty: Number(m.warehouseDamagedQty ?? 0),
+        expiredQty: Number(m.expiredQty ?? 0),
         updatedAt: m.updatedAt ?? null,
       })) ?? [],
     }));
@@ -3143,6 +3179,14 @@ export class AmazonService {
     reserved: number;
     researching: number;
     unfulfillable: number;
+    fcProcessingQty: number;
+    customerOrdersQty: number;
+    transshipmentQty: number;
+    inboundWorkingQty: number;
+    inboundShippedQty: number;
+    inboundReceivingQty: number;
+    warehouseDamagedQty: number;
+    expiredQty: number;
     raw: any;
   }
 >();
@@ -3238,6 +3282,8 @@ if (!sku) continue;
 
 const key = `${marketplaceId}::${sku}`;
 
+const rq = details.reservedQuantity;
+const uq = details.unfulfillableQuantity;
 const existing = inventoryBySku.get(key) ?? {
   sellerSku: sku,
   marketplaceId,
@@ -3247,16 +3293,30 @@ const existing = inventoryBySku.get(key) ?? {
   reserved: 0,
   researching: 0,
   unfulfillable: 0,
+  fcProcessingQty: 0,
+  customerOrdersQty: 0,
+  transshipmentQty: 0,
+  inboundWorkingQty: 0,
+  inboundShippedQty: 0,
+  inboundReceivingQty: 0,
+  warehouseDamagedQty: 0,
+  expiredQty: 0,
   raw: null as any,
 };
 
-
 existing.fulfillable += fulfillable;
 existing.inbound += inbound;
-existing.reserved += details.reservedQuantity?.totalReservedQuantity ?? 0;
+existing.reserved += rq?.totalReservedQuantity ?? 0;
 existing.researching += details.researchingQuantity?.totalResearchingQuantity ?? 0;
-existing.unfulfillable +=
-  details.unfulfillableQuantity?.totalUnfulfillableQuantity ?? 0;
+existing.unfulfillable += uq?.totalUnfulfillableQuantity ?? 0;
+existing.fcProcessingQty += rq?.fcProcessingQuantity ?? 0;
+existing.customerOrdersQty += rq?.pendingCustomerOrderQuantity ?? 0;
+existing.transshipmentQty += rq?.pendingTransshipmentQuantity ?? 0;
+existing.inboundWorkingQty += details.afnInboundWorkingQuantity ?? details.inboundWorkingQuantity ?? 0;
+existing.inboundShippedQty += details.afnInboundShippedQuantity ?? details.inboundShippedQuantity ?? 0;
+existing.inboundReceivingQty += details.afnInboundReceivingQuantity ?? details.inboundReceivingQuantity ?? 0;
+existing.warehouseDamagedQty += uq?.warehouseDamagedQuantity ?? 0;
+existing.expiredQty += uq?.expiredQuantity ?? 0;
 if (s?.asin != null || s?.ASIN != null) {
   existing.asin = (s?.asin ?? s?.ASIN ?? null) as string | null;
 }
@@ -3357,6 +3417,24 @@ try {
       row.researching +
       row.unfulfillable;
 
+    const byMp = {
+      userId: match.userId,
+      fulfillableQty: row.fulfillable,
+      inboundQty: row.inbound,
+      reservedQty: row.reserved,
+      researchingQty: row.researching,
+      unfulfillableQty: row.unfulfillable,
+      currentQty: totalQty,
+      fcProcessingQty: row.fcProcessingQty ?? 0,
+      customerOrdersQty: row.customerOrdersQty ?? 0,
+      transshipmentQty: row.transshipmentQty ?? 0,
+      inboundWorkingQty: row.inboundWorkingQty ?? 0,
+      inboundShippedQty: row.inboundShippedQty ?? 0,
+      inboundReceivingQty: row.inboundReceivingQty ?? 0,
+      warehouseDamagedQty: row.warehouseDamagedQty ?? 0,
+      expiredQty: row.expiredQty ?? 0,
+      rawJson: row.raw ?? row,
+    };
     await this.prisma.inventoryByMarketplace.upsert({
       where: {
         productId_marketplaceId: {
@@ -3364,27 +3442,11 @@ try {
           marketplaceId: row.marketplaceId,
         },
       },
-      update: {
-        userId: match.userId,
-        fulfillableQty: row.fulfillable,
-        inboundQty: row.inbound,
-        reservedQty: row.reserved,
-        researchingQty: row.researching,
-        unfulfillableQty: row.unfulfillable,
-        currentQty: totalQty,
-        rawJson: row.raw ?? row,
-      },
+      update: byMp,
       create: {
-        userId: match.userId,
+        ...byMp,
         productId: match.id,
         marketplaceId: row.marketplaceId,
-        fulfillableQty: row.fulfillable,
-        inboundQty: row.inbound,
-        reservedQty: row.reserved,
-        researchingQty: row.researching,
-        unfulfillableQty: row.unfulfillable,
-        currentQty: totalQty,
-        rawJson: row.raw ?? row,
       },
     });
   }

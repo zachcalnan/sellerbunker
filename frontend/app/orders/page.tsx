@@ -156,7 +156,7 @@ export default function OrdersPage() {
   const nil = (v: string | number | null | undefined) => (v == null || v === "" ? "—" : String(v));
 
   return (
-    <div className="mx-auto max-w-[1600px] px-6 py-10">
+    <div className="w-full px-6 py-10">
       <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold text-[var(--foreground)]">
