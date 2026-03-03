@@ -382,15 +382,16 @@ function HomeInner() {
 
         {summary && (
           <section className="-mt-0.5">
-            <div className="flex flex-col gap-4 md:flex-row md:items-stretch md:gap-6">
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 md:gap-6">
               {/* Left column: Performance Snapshot + Recent orders */}
-              <div className="flex w-fit max-w-[min(100%,42rem)] shrink-0 flex-col gap-4">
+              <div className="flex min-w-0 flex-col gap-4">
                 {/* Performance Snapshot */}
-                <div className="rounded-xl p-4 ring-1 ring-[var(--surface-border)]">
-                  <h2 className="mb-1 text-sm font-medium uppercase tracking-[0.2em] text-[var(--muted-foreground)]">
-                    Performance Snapshot
-                  </h2>
-                  <div className="mb-2 flex flex-wrap items-center justify-end gap-2 text-xs text-[var(--muted-foreground)]">
+                <div className="flex w-full flex-col rounded-xl p-4 ring-1 ring-[var(--surface-border)]">
+                  <div className="mb-1 flex w-full items-center justify-between gap-2">
+                    <h2 className="text-sm font-medium uppercase tracking-[0.2em] text-[var(--muted-foreground)]">
+                      Performance Snapshot
+                    </h2>
+                    <div className="flex flex-wrap items-center justify-end gap-2 text-xs text-[var(--muted-foreground)]">
                     <select
                       value={rangePreset}
                       onChange={(e) => {
@@ -463,8 +464,9 @@ function HomeInner() {
                         </button>
                       </>
                     ) : null}
+                    </div>
                   </div>
-                  <div className="grid grid-cols-4 w-fit gap-3">
+                  <div className="grid w-full grid-cols-2 gap-3 sm:grid-cols-4">
                     {cards.map((card) => (
                       <DonutCard key={card.label} {...card} />
                     ))}
@@ -481,9 +483,9 @@ function HomeInner() {
               </div>
 
               {/* Right column: Sales Trend + Inventory summary in the space below */}
-              <div className="flex min-w-0 flex-1 flex-col gap-4">
+              <div className="flex min-w-0 flex-col gap-4">
               <div className="flex min-w-0 max-h-[20rem] w-full flex-col overflow-y-auto rounded-xl p-4 ring-1 ring-[var(--surface-border)]">
-                <div className="mb-3 flex items-center justify-between">
+                <div className="mb-3 flex w-full items-center justify-between gap-2">
                   <h2 className="text-sm font-medium uppercase tracking-[0.2em] text-[var(--muted-foreground)]">
                     Sales v Profit
                   </h2>
@@ -650,7 +652,7 @@ function RecentOrders({
   };
 
   return (
-    <div className="rounded-xl p-4 ring-1 ring-[var(--surface-border)]">
+    <div className="flex w-full flex-col rounded-xl p-4 ring-1 ring-[var(--surface-border)]">
       <h2 className="mb-2 text-sm font-medium uppercase tracking-[0.2em] text-[var(--muted-foreground)]">
         Recent orders
       </h2>
@@ -666,17 +668,15 @@ function RecentOrders({
         </p>
       )}
       {!loading && !error && orders.length > 0 && (
-        <div className="max-h-80 overflow-y-auto overflow-x-hidden">
-          <div className="min-w-0">
+        <div className="max-h-80 w-full overflow-y-auto overflow-x-hidden">
+          <div className="min-w-0 w-full pr-5">
             {/* Header row: same grid as data rows so Price/Profit/ROI align */}
-            <div className="grid grid-cols-[2.25rem_minmax(0,14rem)_10rem] items-center gap-1.5 border-b border-[var(--surface-border)] pb-1 pt-0 text-[9px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
+            <div className="grid w-full grid-cols-[2.25rem_minmax(0,1fr)_6rem_6rem_4rem] items-center gap-x-4 gap-y-1 border-b border-[var(--surface-border)] pb-1 pt-0 text-[9px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
               <div aria-hidden />
               <div />
-              <div className="grid grid-cols-3 gap-8 text-right text-xs text-white">
-                <span>Price</span>
-                <span>Profit</span>
-                <span>ROI</span>
-              </div>
+              <div className="text-center text-xs text-white">Price</div>
+              <div className="text-center text-xs text-white">Profit</div>
+              <div className="text-center text-xs text-white">ROI</div>
             </div>
             {orders.map((row) => {
               const revenue = row.salePrice * row.quantity;
@@ -685,7 +685,7 @@ function RecentOrders({
               return (
                 <div
                   key={row.id}
-                  className="grid grid-cols-[2.25rem_minmax(0,14rem)_10rem] items-center gap-1.5 border-b border-[var(--surface-border)] py-1.5 text-[10px] last:border-b-0"
+                  className="grid w-full grid-cols-[2.25rem_minmax(0,1fr)_6rem_6rem_4rem] items-center gap-x-4 gap-y-1 border-b border-[var(--surface-border)] py-1.5 text-[10px] last:border-b-0"
                 >
                   <div className="h-9 w-9 shrink-0 overflow-hidden rounded bg-[var(--surface)] ring-1 ring-[var(--surface-border)]">
                     {row.imageUrl ? (
@@ -716,10 +716,14 @@ function RecentOrders({
                       <span>Stock {row.availableStock != null ? row.availableStock : "—"}</span>
                     </div>
                   </div>
-                  <div className="grid grid-cols-3 gap-8 text-right text-xs font-medium text-white">
-                    <span>{revenue != null && Number.isFinite(revenue) ? formatCurrency(revenue, currency) : "—"}</span>
-                    <span>{row.profit != null && Number.isFinite(row.profit) ? formatCurrency(row.profit, currency) : "—"}</span>
-                    <span>{row.roiPct != null && Number.isFinite(row.roiPct) ? `${row.roiPct.toFixed(1)}%` : "—"}</span>
+                  <div className="text-center text-xs font-medium tabular-nums text-white">
+                    {revenue != null && Number.isFinite(revenue) ? formatCurrency(revenue, currency) : "—"}
+                  </div>
+                  <div className="text-center text-xs font-medium tabular-nums text-white">
+                    {row.profit != null && Number.isFinite(row.profit) ? formatCurrency(row.profit, currency) : "—"}
+                  </div>
+                  <div className="text-center text-xs font-medium tabular-nums text-white">
+                    {row.roiPct != null && Number.isFinite(row.roiPct) ? `${row.roiPct.toFixed(1)}%` : "—"}
                   </div>
                 </div>
               );
@@ -947,7 +951,7 @@ function InventorySummary({
   ];
 
   return (
-    <div className="rounded-xl p-4 ring-1 ring-[var(--surface-border)]">
+    <div className="flex w-full flex-col rounded-xl p-4 ring-1 ring-[var(--surface-border)]">
       <h2 className="mb-2 text-sm font-medium uppercase tracking-[0.2em] text-[var(--muted-foreground)]">
         Inventory summary
       </h2>
@@ -958,7 +962,7 @@ function InventorySummary({
         <p className="text-[11px] text-red-600">{error}</p>
       )}
       {!loading && !error && (
-        <div className="min-w-0 overflow-x-auto">
+        <div className="min-w-0 w-full overflow-x-auto">
           <table className="w-full text-[11px]">
             <thead>
               <tr className="border-b border-[var(--surface-border)] text-[10px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
@@ -1096,17 +1100,17 @@ function SalesTrend({
       : 0;
   const allZero = points.length > 0 && maxValue === 0;
 
-  const width = 400;
-  const height = 200;
-  const paddingX = 28; // room for y-axis labels
-  const paddingBottom = 12;
-  const paddingTop = 18; // room for hover labels
+  const height = 250;
+  const paddingX = 22; // room for y-axis labels (right-aligned so they don’t overlap bars)
+  const paddingBottom = 82; // room for bars + date labels below (no clip)
+  const paddingTop = 12; // room for hover labels
 
+  const width = 400;
   const barAreaHeight = height - paddingTop - paddingBottom;
   const barAreaWidth = width - paddingX * 2;
-  const bucketWidth =
-    points.length > 0 ? barAreaWidth / points.length : barAreaWidth;
-  const barWidth = bucketWidth * 0.44; // two bars per bucket (revenue + profit) with gap
+  const numPoints = Math.max(1, points.length);
+  const bucketWidth = barAreaWidth / numPoints;
+  const barWidth = bucketWidth * 0.88; // one overlapping stacked bar per day
   const revenueColor = "rgb(2, 242, 170)"; // teal
   const profitColor = "rgb(251, 191, 36)"; // amber
 
@@ -1149,16 +1153,45 @@ function SalesTrend({
       )}
       {points.length > 0 && !allZero && (
         <svg
-          viewBox={`0 0 ${width} ${height}`}
+          viewBox={`-50 0 ${width + 50} ${height + 35}`}
           className="mt-2 h-[18rem] min-h-[12rem] w-full"
+          preserveAspectRatio="none"
         >
-          {/* Y-axis grid / labels */}
+          {/* X-axis line */}
+          <line
+            x1={paddingX}
+            y1={paddingTop + barAreaHeight}
+            x2={width - paddingX}
+            y2={paddingTop + barAreaHeight}
+            stroke="currentColor"
+            strokeWidth={1}
+            opacity={0.4}
+          />
+          {/* Y-axis line */}
+          <line
+            x1={paddingX}
+            y1={paddingTop}
+            x2={paddingX}
+            y2={paddingTop + barAreaHeight}
+            stroke="currentColor"
+            strokeWidth={1}
+            opacity={0.4}
+          />
+          {/* Y-axis grid / labels – compact format, right-aligned to avoid overlap */}
           {maxValue > 0 &&
             [0, 0.5, 1].map((ratio, idx) => {
               const value = maxValue * ratio;
               const y =
                 paddingTop +
                 (1 - ratio) * barAreaHeight;
+              const compactLabel =
+                value >= 1000
+                  ? `${(value / 1000).toFixed(1)}k`
+                  : value >= 1
+                    ? Math.round(value).toString()
+                    : value > 0
+                      ? value.toFixed(1)
+                      : "0";
               return (
                 <g key={`y-${idx}`}>
                   <line
@@ -1171,12 +1204,13 @@ function SalesTrend({
                     opacity={0.15}
                   />
                   <text
-                    x={4}
+                    x={paddingX - 2}
                     y={y + 3}
-                    fontSize="8"
+                    textAnchor="end"
+                    fontSize="7"
                     fill="currentColor"
                   >
-                    {formatCurrency(Math.round(value), currency)}
+                    {compactLabel}
                   </text>
                 </g>
               );
@@ -1184,15 +1218,14 @@ function SalesTrend({
 
           {points.map((p, idx) => {
             const bucketLeft = paddingX + idx * bucketWidth;
+            const barX = bucketLeft + (bucketWidth - barWidth) / 2;
             const revenueRatio = maxValue > 0 ? p.revenue / maxValue : 0;
             const profitRatio = maxValue > 0 ? p.profit / maxValue : 0;
             const revenueHeight = revenueRatio * barAreaHeight;
             const profitHeight = profitRatio * barAreaHeight;
-            const revenueY = paddingTop + (barAreaHeight - revenueHeight);
-            const profitY = paddingTop + (barAreaHeight - profitHeight);
-            const gap = 2;
-            const revenueX = bucketLeft + (bucketWidth - barWidth * 2 - gap) / 2;
-            const profitX = revenueX + barWidth + gap;
+            const barBottomY = paddingTop + barAreaHeight;
+            const profitSegmentTopY = barBottomY - profitHeight;
+            const barTopY = barBottomY - revenueHeight;
             const isHovered = hoveredIndex === idx;
 
             return (
@@ -1201,24 +1234,28 @@ function SalesTrend({
                 onMouseEnter={() => setHoveredIndex(idx)}
                 onMouseLeave={() => setHoveredIndex(null)}
               >
+                {/* Profit (amber) – bottom segment, drawn first */}
                 <rect
-                  x={revenueX}
-                  y={revenueY}
-                  width={barWidth}
-                  height={revenueHeight}
-                  fill={isHovered ? revenueColor : "rgba(2, 242, 170, 0.5)"}
-                  rx={2}
-                  className="cursor-pointer"
-                />
-                <rect
-                  x={profitX}
-                  y={profitY}
+                  x={barX}
+                  y={profitSegmentTopY}
                   width={barWidth}
                   height={profitHeight}
-                  fill={isHovered ? profitColor : "rgba(251, 191, 36, 0.5)"}
+                  fill={isHovered ? profitColor : "rgba(251, 191, 36, 0.7)"}
                   rx={2}
                   className="cursor-pointer"
                 />
+                {/* Revenue extends above profit (green) – overlapping, revenue = profit + (revenue - profit) */}
+                {revenueHeight > profitHeight && (
+                  <rect
+                    x={barX}
+                    y={barTopY}
+                    width={barWidth}
+                    height={revenueHeight - profitHeight}
+                    fill={isHovered ? revenueColor : "rgba(2, 242, 170, 0.6)"}
+                    rx={2}
+                    className="cursor-pointer"
+                  />
+                )}
               </g>
             );
           })}
@@ -1232,7 +1269,10 @@ function SalesTrend({
               const revenueRatio = maxValue > 0 ? p.revenue / maxValue : 0;
               const revenueHeight = revenueRatio * barAreaHeight;
               const y = paddingTop + (barAreaHeight - revenueHeight);
-              const label = `Rev: ${formatCurrency(p.revenue, currency)} · Profit: ${formatCurrency(p.profit, currency)}`;
+              const isZero = p.revenue === 0 && p.profit === 0;
+              const label = isZero
+                ? "Zero sales"
+                : `Revenue: ${formatCurrency(p.revenue, currency)} · Profit: ${formatCurrency(p.profit, currency)}`;
               const approxWidth = Math.min(label.length * 5.5, 140);
               const padding = 6;
               const rectWidth = approxWidth + padding * 2;
@@ -1265,30 +1305,27 @@ function SalesTrend({
             })()
           )}
           {points.map((p, idx) => {
-            const step =
-              points.length > 12
-                ? Math.ceil(points.length / 6)
-                : 1;
-            const isLast = idx === points.length - 1;
-            if (idx % step !== 0 && !isLast) {
-              return null;
-            }
-
+            if (idx % 2 !== 0) return null; // show date every 2 days only
             const x =
               paddingX +
               idx * bucketWidth +
               bucketWidth / 2;
+            const labelY = height - 20;
             const [, month, day] = p.date.split("-"); // YYYY-MM-DD
-            const label = `${day}-${month}`; // DD-MM
+            const label = `${day}/${month}`;
 
             return (
               <text
                 key={`${p.date}-label`}
                 x={x}
-                y={height - 2}
-                textAnchor="middle"
-                fontSize="8"
-                fill="currentColor"
+                y={labelY}
+                textAnchor="end"
+                fontSize="10"
+                fontFamily="system-ui, -apple-system, BlinkMacSystemFont, sans-serif"
+                fontWeight="600"
+                fontStyle="normal"
+                fill="var(--foreground)"
+                transform={`rotate(-55 ${x} ${labelY})`}
               >
                 {label}
               </text>
