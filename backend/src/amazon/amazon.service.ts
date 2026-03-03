@@ -656,6 +656,313 @@ export class AmazonService {
     };
   }
 
+  /**
+   * Top 4 categories (by displayGroup) for each metric: sales, profit, ROI, units sold.
+   * Used by dashboard category pie charts. Uses same date range as account summary.
+   */
+  async getCategoryBreakdown(
+    orgId: string,
+    range?: { start?: string; end?: string },
+  ): Promise<{
+    sales: Array<{ category: string; value: number }>;
+    profit: Array<{ category: string; value: number }>;
+    roi: Array<{ category: string; value: number }>;
+    units: Array<{ category: string; value: number }>;
+    currency: string;
+  }> {
+    const empty = (): Array<{ category: string; value: number }> => [];
+    const defaultRes = {
+      sales: empty(),
+      profit: empty(),
+      roi: empty(),
+      units: empty(),
+      currency: 'GBP',
+    };
+
+    const parseDate = (s: string | undefined): Date | null => {
+      if (!s || typeof s !== 'string') return null;
+      const d = new Date(s);
+      return Number.isFinite(d.getTime()) ? d : null;
+    };
+    const endDate = parseDate(range?.end) ?? new Date();
+    const startDate = parseDate(range?.start) ?? new Date(endDate.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const safeStart = startDate <= endDate ? startDate : new Date(endDate.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const safeEnd = endDate;
+
+    const userIds = await this.getOrgMemberUserIds(orgId);
+    if (userIds.length === 0) return defaultRes;
+
+    const orderItems = await (this.prisma as any).orderItem.findMany({
+      where: {
+        userId: { in: userIds },
+        marketplace: 'amazon',
+        orderDate: { gte: safeStart, lte: safeEnd },
+        product: {
+          displayGroup: { not: null, notIn: [''] },
+        },
+      },
+      select: {
+        revenueTotal: true,
+        profit: true,
+        cogsTotal: true,
+        quantity: true,
+        product: { select: { displayGroup: true } },
+      },
+    });
+
+    const toNum = (v: unknown): number => {
+      if (v == null) return 0;
+      if (typeof v === 'number' && Number.isFinite(v)) return v;
+      if (typeof v === 'string') return parseFloat(v) || 0;
+      return Number(v) || 0;
+    };
+
+    type Agg = { sales: number; profit: number; cogs: number; units: number };
+    const byCategory = new Map<string, Agg>();
+    for (const it of orderItems) {
+      const cat = (it.product?.displayGroup ?? '').trim() || 'Uncategorized';
+      const cur = byCategory.get(cat) ?? { sales: 0, profit: 0, cogs: 0, units: 0 };
+      cur.sales += toNum(it.revenueTotal);
+      cur.profit += toNum(it.profit);
+      cur.cogs += toNum(it.cogsTotal);
+      cur.units += toNum(it.quantity) || 0;
+      byCategory.set(cat, cur);
+    }
+
+    const withRoi = Array.from(byCategory.entries()).map(([category, a]) => ({
+      category,
+      ...a,
+      roi: a.cogs > 0 ? (a.profit / a.cogs) * 100 : 0,
+    }));
+
+    const top4 = <T>(arr: T[], fn: (x: T) => number): Array<{ category: string; value: number }> =>
+      [...arr]
+        .sort((a, b) => fn(b) - fn(a))
+        .slice(0, 4)
+        .map((x: any) => ({ category: x.category, value: fn(x) }));
+
+    const sales = top4(withRoi, (x) => x.sales);
+    const profit = top4(withRoi, (x) => x.profit);
+    const roi = top4(withRoi, (x) => x.roi);
+    const units = top4(withRoi, (x) => x.units);
+
+    return {
+      sales,
+      profit,
+      roi,
+      units,
+      currency: 'GBP',
+    };
+  }
+
+  /**
+   * Cost breakdown from actual sales (OrderItem) for the last 30 days: COGS, prep, referral, FBA, digital service fees.
+   * All values are positive "cost" amounts. We do not store removal/storage in OrderItem; only order-related costs.
+   */
+  async getCostBreakdown(
+    orgId: string,
+    range?: { start?: string; end?: string },
+  ): Promise<{
+    totalCogs: number;
+    prepFees: number;
+    referralFees: number;
+    fbaFees: number;
+    digitalServiceFees: number;
+    totalAmazonFees: number;
+    currency: string;
+    start: string;
+    end: string;
+  }> {
+    const parseDate = (s: string | undefined): Date | null => {
+      if (!s || typeof s !== 'string') return null;
+      const d = new Date(s);
+      return Number.isFinite(d.getTime()) ? d : null;
+    };
+    const endDate = parseDate(range?.end) ?? new Date();
+    const startDate = parseDate(range?.start) ?? new Date(endDate.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const safeStart = startDate <= endDate ? startDate : new Date(endDate.getTime() - 30 * 24 * 60 * 60 * 1000);
+    // End date inclusive: use end of day so "last 7 days" includes orders on the end date.
+    const safeEnd = new Date(endDate);
+    if (range?.end && /^\d{4}-\d{2}-\d{2}$/.test(String(range.end).trim())) {
+      safeEnd.setUTCHours(23, 59, 59, 999);
+    }
+
+    const userIds = await this.getOrgMemberUserIds(orgId);
+    if (userIds.length === 0) {
+      return {
+        totalCogs: 0,
+        prepFees: 0,
+        referralFees: 0,
+        fbaFees: 0,
+        digitalServiceFees: 0,
+        totalAmazonFees: 0,
+        currency: 'GBP',
+        start: safeStart.toISOString().slice(0, 10),
+        end: safeEnd.toISOString().slice(0, 10),
+      };
+    }
+
+    const orderItems = await (this.prisma as any).orderItem.findMany({
+      where: {
+        userId: { in: userIds },
+        marketplace: 'amazon',
+        orderDate: { gte: safeStart, lte: safeEnd },
+      },
+      select: {
+        cogsTotal: true,
+        prepIncVat: true,
+        prepExVat: true,
+        settledReferralFeeTotal: true,
+        settledFbaFeeTotal: true,
+        settledDigitalServiceFeeTotal: true,
+        amazonFeesTotal: true,
+      },
+    });
+
+    const toNum = (v: unknown): number => {
+      if (v == null) return 0;
+      if (typeof v === 'number' && Number.isFinite(v)) return v;
+      if (typeof v === 'string') return parseFloat(v) || 0;
+      return Number(v) || 0;
+    };
+    const asCost = (n: number) => Math.abs(n);
+
+    let totalCogs = 0;
+    let prepFees = 0;
+    let referralFees = 0;
+    let fbaFees = 0;
+    let digitalServiceFees = 0;
+    let totalAmazonFees = 0;
+
+    for (const it of orderItems) {
+      totalCogs += toNum(it.cogsTotal);
+      const prep = toNum(it.prepIncVat) || toNum(it.prepExVat);
+      prepFees += asCost(prep);
+      referralFees += asCost(toNum(it.settledReferralFeeTotal));
+      fbaFees += asCost(toNum(it.settledFbaFeeTotal));
+      digitalServiceFees += asCost(toNum(it.settledDigitalServiceFeeTotal));
+      totalAmazonFees += asCost(toNum(it.amazonFeesTotal));
+    }
+
+    return {
+      totalCogs,
+      prepFees,
+      referralFees,
+      fbaFees,
+      digitalServiceFees,
+      totalAmazonFees,
+      currency: 'GBP',
+      start: safeStart.toISOString().slice(0, 10),
+      end: safeEnd.toISOString().slice(0, 10),
+    };
+  }
+
+  /**
+   * Profit & Loss for a period: revenue minus selling unit costs (COGS, prep, fees) and fixed costs (software/other subscriptions).
+   * Total profit = revenue - totalSellingCosts - totalFixedCosts (excl. corporation tax).
+   */
+  async getProfitAndLoss(
+    orgId: string,
+    range?: { start?: string; end?: string },
+  ): Promise<{
+    revenue: number;
+    totalSellingCosts: number;
+    totalCogs: number;
+    prepFees: number;
+    referralFees: number;
+    fbaFees: number;
+    digitalServiceFees: number;
+    totalAmazonFees: number;
+    softwareSubsTotal: number;
+    otherSubsTotal: number;
+    totalFixedCosts: number;
+    totalProfit: number;
+    currency: string;
+    start: string;
+    end: string;
+  }> {
+    const cost = await this.getCostBreakdown(orgId, range);
+    const parseDate = (s: string | undefined): Date | null => {
+      if (!s || typeof s !== 'string') return null;
+      const d = new Date(s);
+      return Number.isFinite(d.getTime()) ? d : null;
+    };
+    const endDate = parseDate(range?.end) ?? new Date();
+    const startDate = parseDate(range?.start) ?? new Date(endDate.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const safeStart = startDate <= endDate ? startDate : new Date(endDate.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const safeEnd = new Date(endDate);
+    if (range?.end && /^\d{4}-\d{2}-\d{2}$/.test(String(range.end).trim())) {
+      safeEnd.setUTCHours(23, 59, 59, 999);
+    }
+
+    const userIds = await this.getOrgMemberUserIds(orgId);
+    let revenue = 0;
+    if (userIds.length > 0) {
+      const items = await (this.prisma as any).orderItem.findMany({
+        where: {
+          userId: { in: userIds },
+          marketplace: 'amazon',
+          orderDate: { gte: safeStart, lte: safeEnd },
+        },
+        select: { revenueTotal: true },
+      });
+      const toNum = (v: unknown): number => {
+        if (v == null) return 0;
+        if (typeof v === 'number' && Number.isFinite(v)) return v;
+        if (typeof v === 'string') return parseFloat(v) || 0;
+        return Number((v as any).toString?.() ?? 0) || 0;
+      };
+      for (const it of items) revenue += toNum(it.revenueTotal);
+    }
+
+    let softwareSubsTotal = 0;
+    let otherSubsTotal = 0;
+    if (userIds.length > 0) {
+      const rows = await (this.prisma as any).aggDailyKpiSummary.findMany({
+        where: {
+          userId: { in: userIds },
+          date: { gte: safeStart, lte: safeEnd },
+        },
+        select: { softwareSubsTotal: true, otherSubsTotal: true },
+      });
+      const toNum = (v: unknown): number => {
+        if (v == null) return 0;
+        if (typeof v === 'number' && Number.isFinite(v)) return v;
+        if (typeof v === 'string') return parseFloat(v) || 0;
+        return Number((v as any).toString?.() ?? 0) || 0;
+      };
+      for (const r of rows) {
+        softwareSubsTotal += toNum(r.softwareSubsTotal);
+        otherSubsTotal += toNum(r.otherSubsTotal);
+      }
+    }
+
+    const totalSellingCosts =
+      cost.totalCogs +
+      cost.prepFees +
+      cost.totalAmazonFees;
+    const totalFixedCosts = softwareSubsTotal + otherSubsTotal;
+    const totalProfit = revenue - totalSellingCosts - totalFixedCosts;
+
+    return {
+      revenue,
+      totalSellingCosts,
+      totalCogs: cost.totalCogs,
+      prepFees: cost.prepFees,
+      referralFees: cost.referralFees,
+      fbaFees: cost.fbaFees,
+      digitalServiceFees: cost.digitalServiceFees,
+      totalAmazonFees: cost.totalAmazonFees,
+      softwareSubsTotal,
+      otherSubsTotal,
+      totalFixedCosts,
+      totalProfit,
+      currency: cost.currency,
+      start: cost.start,
+      end: cost.end,
+    };
+  }
+
   async getSalesTimeSeries(
     orgId: string,
     range?: { start?: string; end?: string },
@@ -964,6 +1271,7 @@ export class AmazonService {
     let financesUnauthorized = false;
 
     const vatSettings = await this.getVatSettingsForUser(userId);
+    const seenAsinsInThisSync = new Set<string>();
 
     for (const order of orders) {
       const amazonOrderId = order.AmazonOrderId;
@@ -1099,14 +1407,33 @@ export class AmazonService {
       };
       const parseFeeBreakdown = (list: any[] | undefined): FeeBreakdown => {
         const out = { referral: 0, fba: 0, digital: 0 };
-        if (!Array.isArray(list)) return out;
-        for (const fc of list) {
-          const feeType = (fc?.FeeType ?? fc?.feeType ?? '') as string;
-          const amt = Number(fc?.FeeAmount?.CurrencyAmount ?? fc?.FeeAmount?.Amount ?? 0);
-          if (Number.isNaN(amt)) continue;
+        const readAmt = (obj: any): number => {
+          if (!obj) return 0;
+          const a = obj?.FeeAmount ?? obj?.feeAmount ?? obj;
+          const n = a?.CurrencyAmount ?? a?.currencyAmount ?? a?.Amount ?? a?.amount;
+          const num = Number(n);
+          return Number.isNaN(num) ? 0 : num;
+        };
+        const addFee = (feeType: string, amt: number) => {
+          if (amt === 0) return;
           if (feeType === 'ReferralFee') out.referral += amt;
           else if (feeType === 'FBAFees' || feeType.startsWith('FBA')) out.fba += amt;
           else if (feeType === 'VariableClosingFee' || feeType === 'DigitalServiceFee') out.digital += amt;
+        };
+        if (!Array.isArray(list)) return out;
+        for (const fc of list) {
+          const feeType = (fc?.FeeType ?? fc?.feeType ?? '') as string;
+          const amt = readAmt(fc);
+          if (amt !== 0) addFee(feeType, amt);
+          // SP-API often nests fee components: ItemFeeList[].FeeComponent[] with FeeType/FeeAmount.
+          const components = fc?.FeeComponent ?? fc?.feeComponent;
+          if (Array.isArray(components)) {
+            for (const comp of components) {
+              const t = (comp?.FeeType ?? comp?.feeType ?? '') as string;
+              const a = readAmt(comp);
+              if (a !== 0) addFee(t, a);
+            }
+          }
         }
         return out;
       };
@@ -1170,6 +1497,103 @@ export class AmazonService {
         }
       }
 
+      // When we already have OrderItems for this order (skipped getOrderItems), still fetch Finances
+      // and backfill settled fee breakdown so Cost Breakdown and profit use actual fees.
+      if (
+        !financesUnauthorized &&
+        existingOrderItemOrderIds.has(amazonOrderId)
+      ) {
+        try {
+          const finRes = (await this.spApiClient.listFinancialEventsByOrderId(
+            credentials,
+            amazonOrderId,
+            { maxResultsPerPage: 100 },
+          )) as any;
+          const events = finRes?.payload?.FinancialEvents ?? {};
+          const shipmentLists = [
+            ...(events?.ShipmentEventList ?? []),
+            ...(events?.RefundEventList ?? []),
+            ...(events?.ChargebackEventList ?? []),
+            ...(events?.GuaranteeClaimEventList ?? []),
+          ];
+          for (const ev of shipmentLists) {
+            const items = ev?.ShipmentItemList ?? [];
+            for (const si of items) {
+              const fee =
+                sumFeeOrChargeList(si?.ItemFeeList) +
+                sumFeeOrChargeList(si?.ItemFeeAdjustmentList) +
+                sumFeeOrChargeList(si?.ItemChargeList);
+              const orderItemId = si?.OrderItemId as string | undefined;
+              const sku = si?.SellerSKU as string | undefined;
+              if (fee !== 0 && orderItemId) addFee(feeByOrderItemId, orderItemId, fee);
+              if (fee !== 0 && sku) addFee(feeBySku, sku, fee);
+              const b1 = parseFeeBreakdown(si?.ItemFeeList);
+              const b2 = parseFeeBreakdown(si?.ItemFeeAdjustmentList);
+              const r = b1.referral + b2.referral, f = b1.fba + b2.fba, d = b1.digital + b2.digital;
+              if (orderItemId) addFeeBreakdown(breakdownByOrderItemId, orderItemId, r, f, d);
+              if (sku) addFeeBreakdown(breakdownBySku, sku, r, f, d);
+            }
+          }
+          const orderRecord = await (this.prisma as any).order.findFirst({
+            where: { userId, orderId: amazonOrderId, marketplace: 'amazon' },
+            select: { id: true },
+          });
+          if (orderRecord && (breakdownByOrderItemId.size > 0 || feeByOrderItemId.size > 0)) {
+            const existingItems = await (this.prisma as any).orderItem.findMany({
+              where: { orderDbId: orderRecord.id },
+              select: {
+                id: true,
+                orderItemId: true,
+                revenueTotal: true,
+                cogsTotal: true,
+                quantity: true,
+                taxChargedTotal: true,
+                orderDate: true,
+              },
+            });
+            for (const oi of existingItems) {
+              const bid = breakdownByOrderItemId.get(oi.orderItemId);
+              const fee = feeByOrderItemId.get(oi.orderItemId) ?? 0;
+              if (!bid && fee === 0) continue;
+              const rev = Number(oi.revenueTotal ?? 0);
+              const cogs = oi.cogsTotal != null ? Number(oi.cogsTotal) : null;
+              const qty = Number(oi.quantity ?? 1) || 1;
+              const taxChargedNum = Number(oi.taxChargedTotal ?? 0) || 0;
+              const orderDateItem = oi.orderDate instanceof Date ? oi.orderDate : new Date(oi.orderDate);
+              const vatResult = this.computeOrderItemVatAndProfit(
+                rev,
+                cogs,
+                qty,
+                orderDateItem,
+                fee,
+                taxChargedNum,
+                vatSettings,
+              );
+              const updateData: any = {
+                feesSource: 'finances',
+                amazonFeesTotal: Number((fee ?? 0).toFixed(2)),
+                profit: vatResult.profit != null ? Number(vatResult.profit.toFixed(2)) : undefined,
+              };
+              if (bid) {
+                updateData.settledReferralFeeTotal = Number(bid.referral.toFixed(2));
+                updateData.settledFbaFeeTotal = Number(bid.fba.toFixed(2));
+                updateData.settledDigitalServiceFeeTotal = Number(bid.digital.toFixed(2));
+              }
+              await (this.prisma as any).orderItem.update({
+                where: { id: oi.id },
+                data: updateData,
+              });
+            }
+          }
+        } catch (err: any) {
+          // Non-fatal; do not set financesUnauthorized so new orders can still try.
+          console.warn(
+            '[AmazonService.syncRecentOrdersToDb] backfill finances for existing order items failed',
+            { userId, amazonOrderId, err: err?.message ?? err },
+          );
+        }
+      }
+
       // Determine the product/SKU to associate with this order (order-level; line-items handled below).
       let selectedSku = genericSku;
       let selectedAsin: string | null = null;
@@ -1212,6 +1636,11 @@ export class AmazonService {
       } else if (uniqueSkus.length > 1) {
         selectedSku = multiSku;
         selectedProduct = multiProduct;
+      }
+      if (selectedAsin && selectedAsin.trim()) seenAsinsInThisSync.add(selectedAsin.trim());
+      for (const it of orderItems) {
+        const a = (it?.ASIN ?? it?.Asin) as string | undefined;
+        if (a && String(a).trim()) seenAsinsInThisSync.add(String(a).trim());
       }
 
       // Compute profit only when we have COGS. We subtract taxes charged (VAT) if available,
@@ -1619,6 +2048,34 @@ export class AmazonService {
         `[AmazonService.syncRecentOrdersToDb] failed to recompute daily KPI summary (userId=${userId}): ${msg}`,
       );
     }
+
+    // Backfill Product.productType/displayGroup for new ASINs seen in this sync.
+    if (seenAsinsInThisSync.size > 0) {
+      const membership = await this.prisma.organizationMembership.findFirst({
+        where: { userId },
+        select: { orgId: true },
+      });
+      if (membership?.orgId) {
+        try {
+          const result = await this.backfillCatalogCategoriesForNewAsins(
+            membership.orgId,
+            userId,
+            Array.from(seenAsinsInThisSync),
+            20,
+          );
+          if (result.processed > 0 && this.logger.debug) {
+            this.logger.debug(
+              `[AmazonService.syncRecentOrdersToDb] catalog category backfill: processed=${result.processed} updated=${result.updated}`,
+            );
+          }
+        } catch (e) {
+          // Non-fatal: don't fail order sync if catalog backfill fails
+          this.logger.warn(
+            `[AmazonService.syncRecentOrdersToDb] catalog category backfill failed: ${e instanceof Error ? e.message : String(e)}`,
+          );
+        }
+      }
+    }
   }
 
   /**
@@ -1811,43 +2268,146 @@ export class AmazonService {
     return { updated: result.count };
   }
 
-  async getTopProfitableProducts(orgId: string, limit = 10) {
+  /**
+   * Top sellers: OrderItem first (best product details), then fill from Order if needed.
+   * Best by total profit, then by units. Period = this month or last 30d.
+   */
+  async getTopProfitableProducts(
+    orgId: string,
+    limit = 10,
+    period: '30d' | 'month' = '30d',
+  ) {
     const nowSafe = new Date(Date.now() - 5 * 60 * 1000);
-    const startDate = new Date(nowSafe.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const startDate =
+      period === 'month'
+        ? new Date(nowSafe.getFullYear(), nowSafe.getMonth(), 1)
+        : new Date(nowSafe.getTime() - 30 * 24 * 60 * 60 * 1000);
     const userIds = await this.getOrgMemberUserIds(orgId);
+    const dateFilter = {
+      orderDate: { gte: startDate, lte: nowSafe },
+    };
 
-    // Use OrderItem rows for accurate per-product totals.
-    const rows = await (this.prisma as any).orderItem.groupBy({
+    // Exclude synthetic products (AMAZON_GENERIC, AMAZON_MULTI) so real products with images show first
+    const genericProductIds = await this.prisma.product
+      .findMany({
+        where: {
+          userId: { in: userIds },
+          sku: { in: ['AMAZON_GENERIC', 'AMAZON_MULTI'] },
+        },
+        select: { id: true },
+      })
+      .then((rows) => rows.map((r) => r.id));
+    const excludeProductIds =
+      genericProductIds.length > 0 ? { notIn: genericProductIds } : undefined;
+
+    // 1) OrderItem: top by profit, then fill by units (exclude generic so real products + images show)
+    const byProfit = await (this.prisma as any).orderItem.groupBy({
       by: ['productId'],
       where: {
         userId: { in: userIds },
         marketplace: 'amazon',
-        orderDate: { gte: startDate, lte: nowSafe },
-        // Only rank by profit where we actually have profit computed
+        ...dateFilter,
         profit: { not: null },
+        ...(excludeProductIds ? { productId: excludeProductIds } : {}),
       },
-      _sum: {
-        revenueTotal: true,
-        profit: true,
-        quantity: true,
-      },
-      _count: {
-        _all: true,
-      },
-      orderBy: {
-        _sum: { profit: 'desc' },
-      },
+      _sum: { revenueTotal: true, profit: true, quantity: true },
+      _count: { _all: true },
+      orderBy: { _sum: { profit: 'desc' } },
       take: limit,
     });
 
-    const productIds = rows.map((r: any) => r.productId);
+    let mergedRows: any[] = [...byProfit];
+    if (mergedRows.length < limit) {
+      const excludeIds = [
+        ...byProfit.map((r: any) => r.productId),
+        ...(genericProductIds ?? []),
+      ];
+      const byUnits = await (this.prisma as any).orderItem.groupBy({
+        by: ['productId'],
+        where: {
+          userId: { in: userIds },
+          marketplace: 'amazon',
+          ...dateFilter,
+          ...(excludeIds.length > 0 ? { productId: { notIn: excludeIds } } : {}),
+        },
+        _sum: { revenueTotal: true, profit: true, quantity: true },
+        _count: { _all: true },
+        orderBy: { _sum: { quantity: 'desc' } },
+        take: limit - mergedRows.length,
+      });
+      mergedRows = [...byProfit, ...byUnits];
+    }
+
+    // 2) If still no rows, include generic products (OrderItem then Order) so something shows
+    if (mergedRows.length === 0) {
+      const byProfitWithGeneric = await (this.prisma as any).orderItem.groupBy({
+        by: ['productId'],
+        where: {
+          userId: { in: userIds },
+          marketplace: 'amazon',
+          ...dateFilter,
+          profit: { not: null },
+        },
+        _sum: { revenueTotal: true, profit: true, quantity: true },
+        _count: { _all: true },
+        orderBy: { _sum: { profit: 'desc' } },
+        take: limit,
+      });
+      mergedRows = [...byProfitWithGeneric];
+      if (mergedRows.length < limit) {
+        const excludeIds = byProfitWithGeneric.map((r: any) => r.productId);
+        const byUnits = await (this.prisma as any).orderItem.groupBy({
+          by: ['productId'],
+          where: {
+            userId: { in: userIds },
+            marketplace: 'amazon',
+            ...dateFilter,
+            ...(excludeIds.length > 0 ? { productId: { notIn: excludeIds } } : {}),
+          },
+          _sum: { revenueTotal: true, profit: true, quantity: true },
+          _count: { _all: true },
+          orderBy: { _sum: { quantity: 'desc' } },
+          take: limit - mergedRows.length,
+        });
+        mergedRows = [...byProfitWithGeneric, ...byUnits];
+      }
+      if (mergedRows.length === 0) {
+        const orderRows = await (this.prisma as any).order.groupBy({
+          by: ['productId'],
+          where: {
+            userId: { in: userIds },
+            marketplace: 'amazon',
+            ...dateFilter,
+          },
+          _sum: { quantity: true, totalProfit: true },
+          _count: { _all: true },
+          orderBy: { _sum: { totalProfit: 'desc' } },
+          take: limit,
+        });
+        if (orderRows.length > 0) {
+          mergedRows = orderRows.map((r: any) => ({
+            productId: r.productId,
+            _sum: {
+              quantity: r._sum?.quantity ?? 0,
+              revenueTotal: 0,
+              profit: r._sum?.totalProfit ?? 0,
+            },
+            _count: { _all: r._count?._all ?? 0 },
+          }));
+        }
+      }
+    }
+
+    if (mergedRows.length === 0) return [];
+
+    const allProductIds = mergedRows.map((r: any) => r.productId);
     const products = await this.prisma.product.findMany({
-      where: { id: { in: productIds } },
+      where: { id: { in: allProductIds } },
       select: { id: true, sku: true, asin: true, title: true, imageUrl: true },
     });
     const byId = new Map(products.map((p) => [p.id, p]));
 
-    return rows.map((r: any) => {
+    return mergedRows.map((r: any) => {
       const p = byId.get(r.productId);
       return {
         productId: r.productId,
@@ -1858,7 +2418,6 @@ export class AmazonService {
         units: Number(r._sum?.quantity ?? 0),
         revenue: Number(r._sum?.revenueTotal ?? 0),
         profit: Number(r._sum?.profit ?? 0),
-        // Profit margin for this product over the window
         marginPct:
           Number(r._sum?.revenueTotal ?? 0) > 0
             ? Number(r._sum?.profit ?? 0) / Number(r._sum?.revenueTotal ?? 0)
@@ -2423,6 +2982,8 @@ export class AmazonService {
         asin: true,
         title: true,
         imageUrl: true,
+        productType: true,
+        displayGroup: true,
         updatedAt: true,
         estimatedAmazonFeePerUnit: true,
         estimatedReferralFeePerUnit: true,
@@ -2470,6 +3031,7 @@ export class AmazonService {
     // but Inventory is an org-level screen. If multiple users have the same SKU,
     // we want one canonical row per SKU; otherwise the UI shows duplicates and
     // only one of them will have inventory filled in (sync is SKU-keyed).
+    // Prefer the row that has both catalog (productType/displayGroup) and fee data when present, so we don't hide catalog or fees.
     const pickCanonicalForSku = (a: InventoryProductRow, b: InventoryProductRow) => {
       const aInv = a.inventory?.updatedAt ?? null;
       const bInv = b.inventory?.updatedAt ?? null;
@@ -2482,6 +3044,15 @@ export class AmazonService {
       if (aInv && bInv) {
         if (aInv.getTime() !== bInv.getTime()) return aInv > bInv ? a : b;
       }
+
+      // Prefer the row that has catalog (productType/displayGroup) and/or fee data so we show them when we have them.
+      const hasCatalog = (p: InventoryProductRow) =>
+        !!((p as any).productType?.trim?.() || (p as any).displayGroup?.trim?.());
+      const hasFees = (p: InventoryProductRow) => !!(p as any).estimatedAmazonFeeUpdatedAt;
+      const catalogFeeScore = (p: InventoryProductRow) => (hasCatalog(p) ? 2 : 0) + (hasFees(p) ? 1 : 0);
+      const ca = catalogFeeScore(a);
+      const cb = catalogFeeScore(b);
+      if (ca !== cb) return ca > cb ? a : b;
 
       // Prefer the newest product row as a tie-breaker.
       if (a.updatedAt.getTime() !== b.updatedAt.getTime()) {
@@ -2514,6 +3085,8 @@ export class AmazonService {
       asin: p.asin,
       title: p.title,
       imageUrl: p.imageUrl,
+      productType: (p as any).productType ?? null,
+      displayGroup: (p as any).displayGroup ?? null,
       productUpdatedAt: p.updatedAt,
       estimatedAmazonFeePerUnit: p.estimatedAmazonFeePerUnit != null ? Number(p.estimatedAmazonFeePerUnit) : null,
       estimatedReferralFeePerUnit: (p as any).estimatedReferralFeePerUnit != null ? Number((p as any).estimatedReferralFeePerUnit) : null,
@@ -3223,11 +3796,11 @@ try {
 );
 
           const pageCount = res?.payload?.inventorySummaries?.length ?? 0;
-          if (debug) {
-            this.logger.debug(
-              `[FBA ${marketplaceId}] pageCount=${pageCount} nextToken=${nextToken ? 'set' : 'null'}`,
-            );
-          }
+          const hasNext =
+            !!(res?.pagination?.nextToken ?? res?.pagination?.NextToken ?? res?.Pagination?.nextToken ?? res?.Pagination?.NextToken ?? res?.nextToken ?? res?.NextToken ?? (res?.payload && (res.payload as any).nextToken) ?? (res?.payload && (res.payload as any).NextToken));
+          this.logger.log(
+            `[FBA ${marketplaceId}] Page: received ${pageCount} summaries, hasNextPage=${hasNext}, totalSkusSoFar=${inventoryBySku.size}`,
+          );
 
           } catch (e: any) {
             const status = e?.response?.status ?? e?.status ?? null;
@@ -3329,15 +3902,20 @@ inventoryBySku.set(key, existing);
             upsertedInventoryRows += 1;
           }
 
-          // SP-API returns next page token at res.pagination.nextToken
-          const token: string | undefined =
+          // SP-API returns next page token in pagination (or payload); check all known locations
+          const rawToken: string | undefined =
             res?.pagination?.nextToken ??
             res?.pagination?.NextToken ??
+            res?.Pagination?.nextToken ??
+            res?.Pagination?.NextToken ??
+            res?.nextToken ??
+            res?.NextToken ??
             payload?.nextToken ??
             payload?.NextToken ??
             res?.payload?.nextToken ??
             res?.payload?.NextToken ??
             undefined;
+          const token = typeof rawToken === 'string' ? rawToken.trim() || undefined : undefined;
 
           if (!token) {
             if (debug) {
@@ -3348,9 +3926,9 @@ inventoryBySku.set(key, existing);
             break;
           }
           nextToken = token;
-          if (debug) {
-            this.logger.debug(`[FBA ${marketplaceId}] Fetching next page`);
-          }
+          this.logger.log(
+            `[FBA ${marketplaceId}] Pagination: fetching next page (nextToken length=${token.length}, totalSkusSoFar=${inventoryBySku.size})`,
+          );
         }
       }
 
@@ -3547,6 +4125,37 @@ try {
 } catch (e) {
   throw e;
 }
+
+    // Backfill: every ASIN from this inventory sync → call Catalog API, save productType/displayGroup when present; else move on. No errors.
+    const asinsFromInventory = [
+      ...new Set(
+        [...inventoryBySku.values()]
+          .map((r) => r.asin)
+          .filter((a): a is string => a != null && a.trim() !== ''),
+      ),
+    ];
+    try {
+      const result = await this.backfillCatalogCategoriesForNewAsins(
+        orgId,
+        ownerUserId,
+        asinsFromInventory.length > 0 ? asinsFromInventory : undefined,
+        250,
+      );
+      if (debug || result.requested > 0 || result.updated > 0 || result.noDataCount > 0) {
+        this.logger.log(
+          `[syncFbaInventory] catalog backfill: requested=${result.requested} processed=${result.processed} updated=${result.updated} noData=${result.noDataCount}`,
+        );
+        if (result.noDataCount > 0 && result.noDataSample?.length) {
+          this.logger.log(
+            `[syncFbaInventory] catalog noData sample ASINs: ${result.noDataSample.slice(0, 5).join(', ')}`,
+          );
+        }
+      }
+    } catch (e) {
+      this.logger.warn(
+        `[syncFbaInventory] catalog category backfill failed: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
 
 } // closes: syncFbaInventory
 
@@ -3745,6 +4354,7 @@ try {
         const persistPrice = listingPriceToPersist !== defaultListingPrice
           || currentListedPriceToSave != null
           || currentListedPriceByProductId.has(product.id);
+        // Update only fee and price fields; do not touch productType, displayGroup, or other catalog data.
         await this.prisma.product.update({
           where: { id: product.id },
           data: {
@@ -4102,14 +4712,32 @@ try {
       };
       const parseFeeBreakdownBackfill = (list: any[] | undefined): FeeBreakdownBackfill => {
         const out = { referral: 0, fba: 0, digital: 0 };
-        if (!Array.isArray(list)) return out;
-        for (const fc of list) {
-          const feeType = (fc?.FeeType ?? fc?.feeType ?? '') as string;
-          const amt = Number(fc?.FeeAmount?.CurrencyAmount ?? fc?.FeeAmount?.Amount ?? 0);
-          if (Number.isNaN(amt)) continue;
+        const readAmt = (obj: any): number => {
+          if (!obj) return 0;
+          const a = obj?.FeeAmount ?? obj?.feeAmount ?? obj;
+          const n = a?.CurrencyAmount ?? a?.currencyAmount ?? a?.Amount ?? a?.amount;
+          const num = Number(n);
+          return Number.isNaN(num) ? 0 : num;
+        };
+        const addFee = (feeType: string, amt: number) => {
+          if (amt === 0) return;
           if (feeType === 'ReferralFee') out.referral += amt;
           else if (feeType === 'FBAFees' || feeType.startsWith('FBA')) out.fba += amt;
           else if (feeType === 'VariableClosingFee' || feeType === 'DigitalServiceFee') out.digital += amt;
+        };
+        if (!Array.isArray(list)) return out;
+        for (const fc of list) {
+          const feeType = (fc?.FeeType ?? fc?.feeType ?? '') as string;
+          const amt = readAmt(fc);
+          if (amt !== 0) addFee(feeType, amt);
+          const components = fc?.FeeComponent ?? fc?.feeComponent;
+          if (Array.isArray(components)) {
+            for (const comp of components) {
+              const t = (comp?.FeeType ?? comp?.feeType ?? '') as string;
+              const a = readAmt(comp);
+              if (a !== 0) addFee(t, a);
+            }
+          }
         }
         return out;
       };
@@ -4417,6 +5045,10 @@ let marketplaceIds = ['A1F83G8C2ARO7P']; // UK ONLY
     } catch {
       // ignore; fall back to region defaults
     }
+    // Catalog API: for EU use only UK marketplace (same as orders/inventory) to avoid 404/403 from other EU marketplaces
+    if ((credentials.region ?? 'eu') === 'eu') {
+      marketplaceIds = ['A1F83G8C2ARO7P'];
+    }
 const now = new Date();
 
 const org = await this.prisma.organization.findUnique({
@@ -4723,6 +5355,380 @@ if (org?.lastFbaInventorySyncAt) {
       preferredUserId,
     );
     return this.spApiClient.getCatalogItem(credentials, asin, [marketplaceId]);
+  }
+
+  /**
+   * Dev-only: call Catalog API and return raw response + parsed productType and displayGroup.
+   */
+  async devGetCatalogItemCategoryDebug(
+    orgId: string,
+    preferredUserId: string,
+    asin: string,
+  ): Promise<{
+    asin: string;
+    marketplaceIdsUsed: string[];
+    rawPayload: any;
+    fullResponse: any;
+    parsedProductType: string | null;
+    parsedDisplayGroup: string | null;
+    error?: string;
+  }> {
+    const credentials = await this.getAmazonCredentialsForOrg(
+      orgId,
+      preferredUserId,
+    );
+    const region = credentials.region ?? 'eu';
+    const marketplaceIds =
+      region === 'eu'
+        ? ['A1F83G8C2ARO7P']
+        : region === 'fe'
+          ? ['A1VC38T7YXB528']
+          : ['ATVPDKIKX0DER'];
+    const includedData =
+      'summaries,attributes,images,classifications,productTypes,salesRanks';
+    try {
+      const res = (await this.spApiClient.getCatalogItem(
+        credentials,
+        asin,
+        marketplaceIds,
+        includedData,
+      )) as any;
+      const payload =
+        res?.payload ??
+        res?.Payload ??
+        res?.item ??
+        res?.Item ??
+        res?.data ??
+        res ??
+        {};
+      const { productType: parsedProductType, displayGroup: parsedDisplayGroup } =
+        this.parseProductTypeAndDisplayGroupFromPayload(payload);
+      return {
+        asin,
+        marketplaceIdsUsed: marketplaceIds,
+        rawPayload: payload,
+        fullResponse: res,
+        parsedProductType,
+        parsedDisplayGroup,
+      };
+    } catch (e) {
+      const error = e instanceof Error ? e.message : String(e);
+      return {
+        asin,
+        marketplaceIdsUsed: marketplaceIds,
+        rawPayload: null,
+        fullResponse: null,
+        parsedProductType: null,
+        parsedDisplayGroup: null,
+        error,
+      };
+    }
+  }
+
+  /**
+   * Parse productType and displayGroup from Catalog Items API response.
+   * - productType: from productTypes[].productType (ItemProductTypeByMarketplace has no displayGroup).
+   * - displayGroup: from summaries[].websiteDisplayGroupName (or websiteDisplayGroup), or salesRanks[].displayGroupRanks[].websiteDisplayGroup.
+   */
+  private parseProductTypeAndDisplayGroupFromPayload(payload: any): {
+    productType: string | null;
+    displayGroup: string | null;
+  } {
+    const out = { productType: null as string | null, displayGroup: null as string | null };
+    if (!payload || typeof payload !== 'object') return out;
+
+    // 1) productType from productTypes array (ItemProductTypeByMarketplace), or summaries[].itemClassification
+    const productTypes =
+      payload.productTypes ?? payload.ProductTypes ?? payload.product_type ?? null;
+    if (Array.isArray(productTypes) && productTypes.length > 0) {
+      const first = productTypes[0];
+      if (first && typeof first === 'object') {
+        const pt =
+          first.productType ?? first.product_type ?? first.value ?? null;
+        if (typeof pt === 'string' && pt.trim()) out.productType = pt.trim();
+      } else if (typeof first === 'string' && first.trim()) {
+        out.productType = first.trim();
+      }
+    }
+    if (!out.productType) {
+      const summaries = payload.summaries ?? payload.Summaries ?? null;
+      if (Array.isArray(summaries) && summaries.length > 0) {
+        const s = summaries[0];
+        const pt =
+          s?.itemClassification ?? s?.item_classification ?? s?.productType ?? s?.product_type ?? null;
+        if (typeof pt === 'string' && pt.trim()) out.productType = pt.trim();
+      }
+    }
+
+    // 2) displayGroup: from summaries (websiteDisplayGroupName), salesRanks (displayGroupRanks), or classifications (browse node)
+    const summaries = payload.summaries ?? payload.Summaries ?? null;
+    if (Array.isArray(summaries) && summaries.length > 0) {
+      const s = summaries[0];
+      const name =
+        s?.websiteDisplayGroupName ??
+        s?.website_display_group_name ??
+        s?.websiteDisplayGroup ??
+        s?.website_display_group ??
+        null;
+      if (typeof name === 'string' && name.trim()) {
+        out.displayGroup = name.trim();
+        return out;
+      }
+      // Fallback: browseClassification.displayName (category path)
+      const browse = s?.browseClassification ?? s?.browse_classification ?? null;
+      if (browse && typeof browse === 'object') {
+        const dn = browse.displayName ?? browse.display_name ?? browse.DisplayName ?? null;
+        if (typeof dn === 'string' && dn.trim()) out.displayGroup = dn.trim();
+        if (out.displayGroup) return out;
+      }
+    }
+    const salesRanks = payload.salesRanks ?? payload.SalesRanks ?? null;
+    if (Array.isArray(salesRanks) && salesRanks.length > 0) {
+      const byMp = salesRanks[0];
+      const displayGroupRanks =
+        byMp?.displayGroupRanks ??
+        byMp?.display_group_ranks ??
+        byMp?.DisplayGroupRanks ??
+        [];
+      if (Array.isArray(displayGroupRanks) && displayGroupRanks.length > 0) {
+        const first = displayGroupRanks[0];
+        const name =
+          first?.websiteDisplayGroup ??
+          first?.website_display_group ??
+          null;
+        if (typeof name === 'string' && name.trim()) out.displayGroup = name.trim();
+      }
+    }
+    // Fallback: top-level classifications (browse path)
+    const classifications = payload.classifications ?? payload.Classifications ?? null;
+    if (!out.displayGroup && Array.isArray(classifications) && classifications.length > 0) {
+      const list = classifications[0]?.classifications ?? classifications[0]?.Classifications ?? [];
+      const first = Array.isArray(list) ? list[0] : null;
+      if (first) {
+        const dn = first.displayName ?? first.display_name ?? first.DisplayName ?? null;
+        if (typeof dn === 'string' && dn.trim()) out.displayGroup = dn.trim();
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Call Catalog API for one ASIN, parse productType and displayGroup, save when present.
+   * For EU: try UK first, then DE then FR if 404 so more rows get data. Never throws.
+   */
+  async fetchAndStoreCatalogCategoryForAsin(
+    orgId: string,
+    preferredUserId: string,
+    asin: string,
+  ): Promise<{ productType: string | null; displayGroup: string | null; updated: number }> {
+    const out = { productType: null as string | null, displayGroup: null as string | null, updated: 0 };
+    const userIds = await this.getOrgMemberUserIds(orgId);
+    if (userIds.length === 0) return out;
+
+    let credentials: any;
+    try {
+      credentials = await this.getAmazonCredentialsForOrg(orgId, preferredUserId);
+    } catch {
+      return out;
+    }
+    const region = credentials.region ?? 'eu';
+    const includedData = 'summaries,attributes,images,classifications,productTypes,salesRanks';
+    const euMarketplaces = ['A1F83G8C2ARO7P', 'A1PA6795UKMFR9', 'A13V1IB3VIYZZH'];
+    const marketplaceIds =
+      region === 'eu'
+        ? euMarketplaces
+        : region === 'fe'
+          ? ['A1VC38T7YXB528']
+          : ['ATVPDKIKX0DER'];
+
+    let productType: string | null = null;
+    let displayGroup: string | null = null;
+    for (const marketplaceId of marketplaceIds) {
+      let gotResponse = false;
+      for (let attempt = 0; attempt <= 2 && !gotResponse; attempt++) {
+        try {
+          const res = (await this.spApiClient.getCatalogItem(
+            credentials,
+            asin,
+            [marketplaceId],
+            includedData,
+          )) as any;
+          const payload =
+            res?.payload ?? res?.Payload ?? res?.item ?? res?.Item ?? res?.data ?? res ?? {};
+          const parsed = this.parseProductTypeAndDisplayGroupFromPayload(payload);
+          productType = parsed.productType;
+          displayGroup = parsed.displayGroup;
+          gotResponse = true;
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          const is404 = msg.includes('404') || msg.includes('NOT_FOUND');
+          const is429 = msg.includes('429') || msg.toLowerCase().includes('throttl');
+          if (is429 && attempt < 2) {
+            await new Promise((r) => setTimeout(r, attempt === 0 ? 2000 : 5000));
+            continue;
+          }
+          if (is404) {
+            gotResponse = true;
+            break;
+          }
+          await this.markCatalogCheckedNoData(userIds, asin);
+          return out;
+        }
+      }
+      if (productType?.trim() || displayGroup?.trim()) break;
+      await new Promise((r) => setTimeout(r, 400));
+    }
+
+    const data: { productType?: string; displayGroup?: string } = {};
+    if (productType != null && productType.trim() !== '') data.productType = productType;
+    if (displayGroup != null && displayGroup.trim() !== '') data.displayGroup = displayGroup;
+    if (Object.keys(data).length === 0) {
+      await this.markCatalogCheckedNoData(userIds, asin);
+      return out;
+    }
+
+    try {
+      const result = await (this.prisma as any).product.updateMany({
+        where: {
+          userId: { in: userIds },
+          asin,
+          OR: [
+            { productType: null },
+            { productType: '' },
+            { displayGroup: null },
+            { displayGroup: '' },
+          ],
+        },
+        data,
+      });
+      return { productType, displayGroup, updated: result.count };
+    } catch {
+      return out;
+    }
+  }
+
+  /** Mark products as catalog-checked with no data (set null → '') so they leave the backfill set and we don't retry. */
+  private async markCatalogCheckedNoData(userIds: string[], asin: string): Promise<void> {
+    try {
+      await (this.prisma as any).product.updateMany({
+        where: { userId: { in: userIds }, asin, productType: null },
+        data: { productType: '' },
+      });
+      await (this.prisma as any).product.updateMany({
+        where: { userId: { in: userIds }, asin, displayGroup: null },
+        data: { displayGroup: '' },
+      });
+    } catch {
+      // ignore
+    }
+  }
+
+  /**
+   * Backfill Product.productType and Product.displayGroup for ASINs missing either field.
+   * Catalog API is getCatalogItem(asin) — one request per ASIN; there is no nextToken. We "paginate" by querying the DB in batches and looping until no products need backfill.
+   * When no asinList: paginates in batches of at least 50 (or limit) until no products need backfill (no per-run cap).
+   * @param asinList - if provided, process all these ASINs; otherwise paginate through all org products that need it
+   * @param limit - when no asinList, batch size per DB query (min 50); we keep requesting next batch until none left
+   */
+  async backfillCatalogCategoriesForNewAsins(
+    orgId: string,
+    preferredUserId: string,
+    asinList?: string[],
+    limit = 250,
+  ): Promise<{
+    requested: number;
+    processed: number;
+    updated: number;
+    noDataCount: number;
+    noDataSample: string[];
+    errors: Array<{ asin: string; error: string }>;
+    hint?: string;
+  }> {
+    const userIds = await this.getOrgMemberUserIds(orgId);
+    if (userIds.length === 0) {
+      return { requested: 0, processed: 0, updated: 0, noDataCount: 0, noDataSample: [], errors: [] };
+    }
+    // Only products that have never been checked: productType or displayGroup is null. Once we set a value or '', do not re-select (avoids re-processing same rows and stopping early).
+    const needsBackfill = {
+      userId: { in: userIds },
+      asin: { not: null },
+      OR: [{ productType: null }, { displayGroup: null }],
+    };
+    // Catalog API is getCatalogItem(asin) — one request per ASIN, no nextToken. We paginate by querying DB in batches.
+    const batchSize = Math.max(50, limit);
+    let totalRequested = 0;
+    let totalProcessed = 0;
+    let totalUpdated = 0;
+    let noDataCount = 0;
+    const noDataSample: string[] = [];
+    const errors: Array<{ asin: string; error: string }> = [];
+    let batchNumber = 0;
+
+    // 1) If we have an ASIN list (e.g. from inventory sync), process all of them (no per-page cap)
+    if (asinList && asinList.length > 0) {
+      const asinsToFetch = [...new Set(asinList.filter((a): a is string => typeof a === 'string' && a.trim() !== ''))];
+      totalRequested += asinsToFetch.length;
+      this.logger.log(
+        `[catalog backfill] Processing asinList: ${asinsToFetch.length} ASINs (no pagination; Catalog API is 1 request per ASIN)`,
+      );
+      for (const asin of asinsToFetch) {
+        const result = await this.fetchAndStoreCatalogCategoryForAsin(orgId, preferredUserId, asin);
+        totalProcessed += 1;
+        totalUpdated += result.updated;
+        if (result.updated === 0) {
+          noDataCount += 1;
+          if (noDataSample.length < 5) noDataSample.push(asin);
+        }
+        await new Promise((r) => setTimeout(r, 500));
+      }
+    }
+
+    // 2) Fallback: paginate through all products needing backfill (batch = batchSize; loop until none left, like nextToken)
+    while (true) {
+      const products = await (this.prisma as any).product.findMany({
+        where: needsBackfill,
+        select: { asin: true },
+        distinct: ['asin'],
+        orderBy: { updatedAt: 'asc' },
+        take: batchSize,
+      });
+      const asinsToFetch = (products as Array<{ asin: string | null }>)
+        .map((p) => p.asin)
+        .filter((a): a is string => a != null && a.trim() !== '');
+      if (asinsToFetch.length === 0) break;
+      batchNumber += 1;
+      totalRequested += asinsToFetch.length;
+      this.logger.log(
+        `[catalog backfill] Batch ${batchNumber}: ${asinsToFetch.length} ASINs (total requested this run: ${totalRequested})`,
+      );
+      for (const asin of asinsToFetch) {
+        const result = await this.fetchAndStoreCatalogCategoryForAsin(orgId, preferredUserId, asin);
+        totalProcessed += 1;
+        totalUpdated += result.updated;
+        if (result.updated === 0) {
+          noDataCount += 1;
+          if (noDataSample.length < 5) noDataSample.push(asin);
+        }
+        await new Promise((r) => setTimeout(r, 500));
+      }
+    }
+
+    let hint: string | undefined;
+    if (totalRequested > 0 && totalUpdated === 0 && errors.length === 0) {
+      hint = 'Catalog API returned no productType/displayGroup for these ASINs, or run: npx prisma migrate deploy.';
+    } else if (noDataCount > 0) {
+      hint = `${noDataCount} ASIN(s) had no productType/displayGroup in Catalog API (e.g. not in UK catalog or empty response). Sample: ${noDataSample.slice(0, 5).join(', ') || '—'}. Use "Debug catalog category" to inspect.`;
+    }
+
+    return {
+      requested: totalRequested,
+      processed: totalProcessed,
+      updated: totalUpdated,
+      noDataCount,
+      noDataSample,
+      errors,
+      hint,
+    };
   }
 
   /**

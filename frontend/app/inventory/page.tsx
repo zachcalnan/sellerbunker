@@ -9,6 +9,8 @@ type InventoryRow = {
   asin: string | null;
   title: string | null;
   imageUrl: string | null;
+  productType: string | null;
+  displayGroup: string | null;
   productUpdatedAt: string;
   estimatedAmazonFeePerUnit: number | null;
   estimatedReferralFeePerUnit: number | null;
@@ -337,11 +339,12 @@ export default function InventoryPage() {
         </div>
 
         <div className="overflow-hidden rounded-xl ring-1 ring-[var(--surface-border)]">
-          <div className="hidden md:grid grid-cols-[44px_1.2fr_0.9fr_1.8fr_0.6fr_0.6fr_0.6fr_0.6fr_0.6fr_0.85fr] gap-2 bg-[var(--surface)] px-4 py-3 text-xs font-semibold uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
+          <div className="hidden md:grid grid-cols-[44px_1.2fr_0.9fr_1.5fr_0.75fr_0.55fr_0.55fr_0.55fr_0.55fr_0.55fr_0.55fr_0.8fr] gap-2 bg-[var(--surface)] px-4 py-3 text-xs font-semibold uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
             <div />
             <div>SKU</div>
             <div>ASIN</div>
             <div>Title</div>
+            <div>Type / Group</div>
             <div className="text-center pl-3">Total</div>
             <div className="text-center pl-3">Available</div>
             <div className="text-center pl-3">Reserved</div>
@@ -465,7 +468,7 @@ export default function InventoryPage() {
                       tabIndex={0}
                       onClick={() => setDetailRow(r)}
                       onKeyDown={(e) => e.key === "Enter" && setDetailRow(r)}
-                      className="hidden md:grid grid-cols-[44px_1.2fr_0.9fr_1.8fr_0.6fr_0.6fr_0.6fr_0.6fr_0.6fr_0.85fr] items-center gap-2 px-4 py-3 cursor-pointer hover:bg-[var(--foreground)]/5 transition-colors"
+                      className="hidden md:grid grid-cols-[44px_1.2fr_0.9fr_1.5fr_0.75fr_0.55fr_0.55fr_0.55fr_0.55fr_0.55fr_0.55fr_0.8fr] items-center gap-2 px-4 py-3 cursor-pointer hover:bg-[var(--foreground)]/5 transition-colors"
                     >
                       <div className="flex items-center justify-center">
                         {r.imageUrl ? (
@@ -500,6 +503,9 @@ export default function InventoryPage() {
                       </div>
                       <div className="truncate text-sm text-[var(--muted-foreground)]">
                         {r.title ?? "—"}
+                      </div>
+                      <div className="truncate text-xs text-[var(--muted-foreground)]">
+                        {[r.productType, r.displayGroup].filter(Boolean).join(" · ") || "—"}
                       </div>
                       <div className="text-center pl-3 text-sm font-medium text-[var(--foreground)]">{num(r.totalQty)}</div>
                       <div className="text-center pl-3 text-sm text-[var(--foreground)]">{num(r.availableQty)}</div>
@@ -586,6 +592,11 @@ export default function InventoryPage() {
                   <p className="text-sm text-[var(--muted-foreground)]">
                     SKU {detailRow.sku} {detailRow.asin ? `· ASIN ${detailRow.asin}` : ""}
                   </p>
+                  {(detailRow.productType ?? detailRow.displayGroup) ? (
+                    <p className="text-xs text-[var(--muted-foreground)] mt-0.5">
+                      {[detailRow.productType, detailRow.displayGroup].filter(Boolean).join(" · ")}
+                    </p>
+                  ) : null}
                 </div>
                 <button
                   type="button"

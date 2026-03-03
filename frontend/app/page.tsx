@@ -277,9 +277,8 @@ function HomeInner() {
           value: hasCostData ? formatCurrency(profit, effectiveCurrency, 2) : "—",
           percentage: hasCostData ? Math.round(summary.profitMargin * 100) : 0,
           color: "#10B981",
-          centerTitle: "Profit",
           centerLine1: hasCostData ? formatCurrency(profit, effectiveCurrency, 2) : "—",
-          centerLine2: "Profit on Sales",
+          centerLine2: "",
           centerLine3: hasCostData ? `${(summary.profitMargin * 100).toFixed(1)}%` : "—",
           note: showLineItemBackfillNotice ? (
             <span>
@@ -383,7 +382,7 @@ function HomeInner() {
         {summary && (
           <section className="-mt-0.5">
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2 md:gap-6">
-              {/* Left column: Performance Snapshot + Recent orders */}
+              {/* Left column: Performance Snapshot + Recent orders + Top Sellers + Cost Breakdown */}
               <div className="flex min-w-0 flex-col gap-4">
                 {/* Performance Snapshot */}
                 <div className="flex w-full flex-col rounded-xl p-4 ring-1 ring-[var(--surface-border)]">
@@ -480,11 +479,37 @@ function HomeInner() {
                   getToken={getToken}
                   currency={effectiveCurrency}
                 />
+
+                {/* Top categories by metric (4 pie charts by displayGroup) */}
+                <CategoryPieCharts
+                  baseUrl={baseUrl}
+                  isSignedIn={isSignedIn}
+                  getToken={getToken}
+                  currency={effectiveCurrency}
+                  start={effectiveStart}
+                  end={effectiveEnd}
+                />
+
+                {/* Top Sellers (this month) */}
+                <TopSellers
+                  baseUrl={baseUrl}
+                  isSignedIn={isSignedIn}
+                  getToken={getToken}
+                  currency={effectiveCurrency}
+                />
+
+                {/* Cost Breakdown (actual sales costs) */}
+                <CostBreakdown
+                  baseUrl={baseUrl}
+                  isSignedIn={isSignedIn}
+                  getToken={getToken}
+                  currency={effectiveCurrency}
+                />
               </div>
 
-              {/* Right column: Sales Trend + Inventory summary in the space below */}
+              {/* Right column: Sales v Profit + Inventory Summary + Category Pie Charts + Profit & Loss */}
               <div className="flex min-w-0 flex-col gap-4">
-              <div className="flex min-w-0 max-h-[20rem] w-full flex-col overflow-y-auto rounded-xl p-4 ring-1 ring-[var(--surface-border)]">
+              <div className="flex min-w-0 w-full flex-col overflow-hidden rounded-xl p-4 ring-1 ring-[var(--surface-border)]">
                 <div className="mb-3 flex w-full items-center justify-between gap-2">
                   <h2 className="text-sm font-medium uppercase tracking-[0.2em] text-[var(--muted-foreground)]">
                     Sales v Profit
@@ -567,8 +592,16 @@ function HomeInner() {
                 />
               </div>
 
-              {/* Inventory breakdown: fills the space below Sales Trend */}
+              {/* Inventory breakdown */}
               <InventorySummary
+                baseUrl={baseUrl}
+                isSignedIn={isSignedIn}
+                getToken={getToken}
+                currency={effectiveCurrency}
+              />
+
+              {/* Profit & Loss: just below Inventory Summary */}
+              <ProfitAndLoss
                 baseUrl={baseUrl}
                 isSignedIn={isSignedIn}
                 getToken={getToken}
@@ -668,7 +701,7 @@ function RecentOrders({
         </p>
       )}
       {!loading && !error && orders.length > 0 && (
-        <div className="max-h-80 w-full overflow-y-auto overflow-x-hidden">
+        <div className="max-h-44 w-full overflow-y-auto overflow-x-hidden">
           <div className="min-w-0 w-full pr-5">
             {/* Header row: same grid as data rows so Price/Profit/ROI align */}
             <div className="grid w-full grid-cols-[2.25rem_minmax(0,1fr)_6rem_6rem_4rem] items-center gap-x-4 gap-y-1 border-b border-[var(--surface-border)] pb-1 pt-0 text-[9px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
@@ -730,6 +763,582 @@ function RecentOrders({
             })}
           </div>
         </div>
+      )}
+    </div>
+  );
+}
+
+type TopSellerRow = {
+  productId: string;
+  sku: string | null;
+  asin: string | null;
+  title: string | null;
+  imageUrl: string | null;
+  units: number;
+  revenue: number;
+  profit: number;
+};
+
+type TopSellersProps = {
+  baseUrl: string;
+  isSignedIn: boolean | undefined;
+  getToken: (args: { template?: string }) => Promise<string | null>;
+  currency: string;
+};
+
+function TopSellers({
+  baseUrl,
+  isSignedIn,
+  getToken,
+  currency,
+}: TopSellersProps) {
+  const [rows, setRows] = useState<TopSellerRow[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [isFallbackPeriod, setIsFallbackPeriod] = useState(false);
+
+  useEffect(() => {
+    if (!isSignedIn) {
+      setRows([]);
+      return;
+    }
+    const fetchTop = async () => {
+      setLoading(true);
+      setError(null);
+      setIsFallbackPeriod(false);
+      try {
+        const token = await getToken({ template: "backend" });
+        let res = await fetch(
+          `${baseUrl}/api/amazon/products/top-profitable?limit=5&period=month`,
+          { headers: { Authorization: `Bearer ${token}` } },
+        );
+        if (!res.ok) throw new Error("Failed to load top sellers");
+        let data = (await res.json()) as TopSellerRow[];
+        if (Array.isArray(data) && data.length === 0) {
+          res = await fetch(
+            `${baseUrl}/api/amazon/products/top-profitable?limit=5&period=30d`,
+            { headers: { Authorization: `Bearer ${token}` } },
+          );
+          if (res.ok) {
+            data = (await res.json()) as TopSellerRow[];
+            if (Array.isArray(data) && data.length > 0) setIsFallbackPeriod(true);
+          }
+        }
+        setRows(Array.isArray(data) ? data : []);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Error");
+        setRows([]);
+      } finally {
+        setLoading(false);
+      }
+    };
+    void fetchTop();
+  }, [isSignedIn, getToken, baseUrl]);
+
+  return (
+    <div className="flex w-full flex-col rounded-xl p-4 ring-1 ring-[var(--surface-border)]">
+      <h2 className="mb-2 text-sm font-medium uppercase tracking-[0.2em] text-[var(--muted-foreground)]">
+        Top Sellers (this month)
+      </h2>
+      {isFallbackPeriod && rows.length > 0 && (
+        <p className="mb-1.5 text-[10px] text-[var(--muted-foreground)]">
+          No sales this month — showing last 30 days
+        </p>
+      )}
+      {loading && (
+        <p className="text-[11px] text-[var(--muted-foreground)]">Loading…</p>
+      )}
+      {error && (
+        <p className="text-[11px] text-red-600">{error}</p>
+      )}
+      {!loading && !error && rows.length === 0 && (
+        <p className="text-[11px] text-[var(--muted-foreground)]">
+          No sales this month yet.
+        </p>
+      )}
+      {!loading && !error && rows.length > 0 && (
+        <div className="w-full overflow-x-auto">
+          <table className="w-full text-[11px]">
+            <thead>
+              <tr className="border-b border-[var(--surface-border)] text-[10px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
+                <th className="py-1.5 pr-2 text-left">Title</th>
+                <th className="py-1.5 px-2 text-left">SKU</th>
+                <th className="py-1.5 px-2 text-left">IMG</th>
+                <th className="py-1.5 px-2 text-left">ASIN</th>
+                <th className="py-1.5 px-2 text-right">Qty</th>
+                <th className="py-1.5 px-2 text-right">Revenue</th>
+                <th className="py-1.5 pl-2 text-right">Profit</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row) => (
+                <tr
+                  key={row.productId}
+                  className="border-b border-[var(--surface-border)] last:border-b-0"
+                >
+                  <td className="max-w-[10rem] truncate py-1.5 pr-2 font-medium text-[var(--foreground)]" title={row.title ?? undefined}>
+                    {row.title?.trim() || "—"}
+                  </td>
+                  <td className="py-1.5 px-2 font-medium tabular-nums text-[var(--foreground)]">
+                    {row.sku ?? "—"}
+                  </td>
+                  <td className="py-1.5 px-2">
+                    <div className="h-9 w-9 overflow-hidden rounded bg-[var(--surface)] ring-1 ring-[var(--surface-border)]">
+                      {row.imageUrl ? (
+                        <img
+                          src={row.imageUrl}
+                          alt=""
+                          className="h-full w-full object-cover"
+                        />
+                      ) : (
+                        <div
+                          className="flex h-full w-full items-center justify-center bg-[var(--surface)] text-[8px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]"
+                          title="No image"
+                        >
+                          Img
+                        </div>
+                      )}
+                    </div>
+                  </td>
+                  <td className="py-1.5 px-2 tabular-nums text-[var(--foreground)]">
+                    {row.asin ?? "—"}
+                  </td>
+                  <td className="py-1.5 px-2 text-right tabular-nums text-[var(--foreground)]">
+                    {row.units.toLocaleString()}
+                  </td>
+                  <td className="py-1.5 px-2 text-right tabular-nums text-[var(--foreground)]">
+                    {formatCurrency(row.revenue, currency)}
+                  </td>
+                  <td className="py-1.5 pl-2 text-right tabular-nums text-[var(--foreground)]">
+                    {formatCurrency(row.profit, currency)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+type CostBreakdownData = {
+  totalCogs: number;
+  prepFees: number;
+  referralFees: number;
+  fbaFees: number;
+  digitalServiceFees: number;
+  totalAmazonFees: number;
+  currency: string;
+  start: string;
+  end: string;
+};
+
+type CostBreakdownProps = {
+  baseUrl: string;
+  isSignedIn: boolean | undefined;
+  getToken: (args: { template?: string }) => Promise<string | null>;
+  currency: string;
+};
+
+type CostBreakdownPreset = "yesterday" | "today" | "7d" | "14d" | "30d" | "all" | "custom";
+
+function CostBreakdown({
+  baseUrl,
+  isSignedIn,
+  getToken,
+  currency,
+}: CostBreakdownProps) {
+  const [data, setData] = useState<CostBreakdownData | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [periodPreset, setPeriodPreset] = useState<CostBreakdownPreset>("30d");
+  const [customStart, setCustomStart] = useState("");
+  const [customEnd, setCustomEnd] = useState("");
+
+  const toDateOnly = (d: Date) => d.toISOString().slice(0, 10);
+  const today = new Date();
+  const defaultEnd = toDateOnly(today);
+  const defaultStart30 = toDateOnly(new Date(today.getTime() - 29 * 24 * 60 * 60 * 1000));
+  const yesterday = toDateOnly(new Date(today.getTime() - 24 * 60 * 60 * 1000));
+  const allTimeStart = "2020-01-01";
+
+  const effectiveStart =
+    periodPreset === "today"
+      ? defaultEnd
+      : periodPreset === "yesterday"
+        ? yesterday
+        : periodPreset === "7d"
+          ? toDateOnly(new Date(today.getTime() - 6 * 24 * 60 * 60 * 1000))
+          : periodPreset === "14d"
+            ? toDateOnly(new Date(today.getTime() - 13 * 24 * 60 * 60 * 1000))
+            : periodPreset === "30d"
+              ? defaultStart30
+              : periodPreset === "all"
+                ? allTimeStart
+                : customStart || defaultStart30;
+  const effectiveEnd =
+    periodPreset === "today" || periodPreset === "7d" || periodPreset === "14d" || periodPreset === "30d"
+      ? defaultEnd
+      : periodPreset === "yesterday"
+        ? yesterday
+        : periodPreset === "all"
+          ? defaultEnd
+          : customEnd || defaultEnd;
+
+  useEffect(() => {
+    if (!isSignedIn) {
+      setData(null);
+      return;
+    }
+    const fetchData = async () => {
+      setLoading(true);
+      try {
+        const token = await getToken({ template: "backend" });
+        const res = await fetch(
+          `${baseUrl}/api/amazon/dashboard/cost-breakdown?${new URLSearchParams({
+            start: effectiveStart,
+            end: effectiveEnd,
+          }).toString()}`,
+          { headers: { Authorization: `Bearer ${token}` } },
+        );
+        if (!res.ok) throw new Error("Failed to load cost breakdown");
+        const json = (await res.json()) as CostBreakdownData;
+        setData(json);
+      } catch {
+        setData(null);
+      } finally {
+        setLoading(false);
+      }
+    };
+    void fetchData();
+  }, [isSignedIn, getToken, baseUrl, effectiveStart, effectiveEnd]);
+
+  const cur = data?.currency ?? currency;
+  const fmt = (n: number) =>
+    new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: cur,
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }).format(n);
+
+  const rows: { label: string; value: number }[] = data
+    ? [
+        { label: "Total COGS", value: data.totalCogs },
+        { label: "Prep fees", value: data.prepFees },
+        { label: "Referral (sales fee)", value: data.referralFees },
+        { label: "FBA (sales fee)", value: data.fbaFees },
+        { label: "Digital service fee", value: data.digitalServiceFees },
+        { label: "Total Amazon fees", value: data.totalAmazonFees },
+      ]
+    : [];
+
+  const total = data
+    ? data.totalCogs + data.prepFees + data.totalAmazonFees
+    : 0;
+
+  return (
+    <div className="flex w-full flex-col rounded-xl p-4 ring-1 ring-[var(--surface-border)]">
+      <div className="mb-2 flex w-full flex-wrap items-center justify-between gap-2">
+        <h2 className="text-sm font-medium uppercase tracking-[0.2em] text-[var(--muted-foreground)]">
+          Cost Breakdown
+        </h2>
+        <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--muted-foreground)]">
+          <select
+            value={periodPreset}
+            onChange={(e) => setPeriodPreset(e.target.value as CostBreakdownPreset)}
+            className="h-8 cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-[var(--foreground)] outline-none"
+          >
+            <option value="yesterday">Yesterday</option>
+            <option value="today">Today</option>
+            <option value="7d">7 days</option>
+            <option value="14d">Two weeks</option>
+            <option value="30d">30 days</option>
+            <option value="all">All time</option>
+            <option value="custom">Custom</option>
+          </select>
+          {periodPreset === "custom" && (
+            <>
+              <input
+                type="date"
+                value={customStart}
+                onChange={(e) => setCustomStart(e.target.value)}
+                className="h-8 rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-[var(--foreground)] outline-none"
+              />
+              <span>→</span>
+              <input
+                type="date"
+                value={customEnd}
+                onChange={(e) => setCustomEnd(e.target.value)}
+                className="h-8 rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-[var(--foreground)] outline-none"
+              />
+            </>
+          )}
+        </div>
+      </div>
+      {data && (
+        <p className="mb-2 text-[10px] text-[var(--muted-foreground)]">
+          {data.start} – {data.end} · actual sales costs (not estimated)
+        </p>
+      )}
+      {loading && (
+        <p className="text-[11px] text-[var(--muted-foreground)]">Loading…</p>
+      )}
+      {!loading && data && (
+        <div className="w-full overflow-x-auto">
+          <table className="w-full text-[11px]">
+            <thead>
+              <tr className="border-b border-[var(--surface-border)] text-[10px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
+                <th className="py-1.5 pr-2 text-left">Cost</th>
+                <th className="py-1.5 pl-2 text-right">Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(({ label, value }) => (
+                <tr key={label} className="border-b border-[var(--surface-border)] last:border-b-0">
+                  <td className="py-1.5 pr-2 text-[var(--foreground)]">{label}</td>
+                  <td className="py-1.5 pl-2 text-right tabular-nums font-medium text-[var(--foreground)]">
+                    {fmt(value)}
+                  </td>
+                </tr>
+              ))}
+              <tr className="border-t-2 border-[var(--surface-border)] bg-[var(--surface)]/50 font-semibold">
+                <td className="py-1.5 pr-2 text-[var(--foreground)]">Total costs</td>
+                <td className="py-1.5 pl-2 text-right tabular-nums text-[var(--foreground)]">
+                  {fmt(total)}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      )}
+      {!loading && !data && (
+        <p className="text-[11px] text-[var(--muted-foreground)]">No cost data for this period.</p>
+      )}
+      {!loading && data && (
+        <p className="mt-1.5 text-[10px] text-[var(--muted-foreground)]">
+          Order-related costs only. Removal &amp; storage are not stored in DB.
+        </p>
+      )}
+    </div>
+  );
+}
+
+type ProfitAndLossData = {
+  revenue: number;
+  totalSellingCosts: number;
+  totalCogs: number;
+  prepFees: number;
+  referralFees: number;
+  fbaFees: number;
+  digitalServiceFees: number;
+  totalAmazonFees: number;
+  softwareSubsTotal: number;
+  otherSubsTotal: number;
+  totalFixedCosts: number;
+  totalProfit: number;
+  currency: string;
+  start: string;
+  end: string;
+};
+
+type ProfitAndLossProps = {
+  baseUrl: string;
+  isSignedIn: boolean | undefined;
+  getToken: (args: { template?: string }) => Promise<string | null>;
+  currency: string;
+};
+
+function ProfitAndLoss({
+  baseUrl,
+  isSignedIn,
+  getToken,
+  currency,
+}: ProfitAndLossProps) {
+  const [data, setData] = useState<ProfitAndLossData | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [periodPreset, setPeriodPreset] = useState<CostBreakdownPreset>("30d");
+  const [customStart, setCustomStart] = useState("");
+  const [customEnd, setCustomEnd] = useState("");
+
+  const toDateOnly = (d: Date) => d.toISOString().slice(0, 10);
+  const today = new Date();
+  const defaultEnd = toDateOnly(today);
+  const defaultStart30 = toDateOnly(new Date(today.getTime() - 29 * 24 * 60 * 60 * 1000));
+  const yesterday = toDateOnly(new Date(today.getTime() - 24 * 60 * 60 * 1000));
+  const allTimeStart = "2020-01-01";
+
+  const effectiveStart =
+    periodPreset === "today"
+      ? defaultEnd
+      : periodPreset === "yesterday"
+        ? yesterday
+        : periodPreset === "7d"
+          ? toDateOnly(new Date(today.getTime() - 6 * 24 * 60 * 60 * 1000))
+          : periodPreset === "14d"
+            ? toDateOnly(new Date(today.getTime() - 13 * 24 * 60 * 60 * 1000))
+            : periodPreset === "30d"
+              ? defaultStart30
+              : periodPreset === "all"
+                ? allTimeStart
+                : customStart || defaultStart30;
+  const effectiveEnd =
+    periodPreset === "today" || periodPreset === "7d" || periodPreset === "14d" || periodPreset === "30d"
+      ? defaultEnd
+      : periodPreset === "yesterday"
+        ? yesterday
+        : periodPreset === "all"
+          ? defaultEnd
+          : customEnd || defaultEnd;
+
+  useEffect(() => {
+    if (!isSignedIn) {
+      setData(null);
+      return;
+    }
+    const fetchData = async () => {
+      setLoading(true);
+      try {
+        const token = await getToken({ template: "backend" });
+        const res = await fetch(
+          `${baseUrl}/api/amazon/dashboard/profit-and-loss?${new URLSearchParams({
+            start: effectiveStart,
+            end: effectiveEnd,
+          }).toString()}`,
+          { headers: { Authorization: `Bearer ${token}` } },
+        );
+        if (!res.ok) throw new Error("Failed to load profit & loss");
+        const json = (await res.json()) as ProfitAndLossData;
+        setData(json);
+      } catch {
+        setData(null);
+      } finally {
+        setLoading(false);
+      }
+    };
+    void fetchData();
+  }, [isSignedIn, getToken, baseUrl, effectiveStart, effectiveEnd]);
+
+  const cur = data?.currency ?? currency;
+  const fmt = (n: number) =>
+    new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: cur,
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }).format(n);
+
+  return (
+    <div className="flex w-full flex-col rounded-xl p-4 ring-1 ring-[var(--surface-border)]">
+      <div className="mb-2 flex w-full flex-wrap items-center justify-between gap-2">
+        <h2 className="text-sm font-medium uppercase tracking-[0.2em] text-[var(--muted-foreground)]">
+          Profit &amp; Loss
+        </h2>
+        <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--muted-foreground)]">
+          <select
+            value={periodPreset}
+            onChange={(e) => setPeriodPreset(e.target.value as CostBreakdownPreset)}
+            className="h-8 cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-[var(--foreground)] outline-none"
+          >
+            <option value="yesterday">Yesterday</option>
+            <option value="today">Today</option>
+            <option value="7d">7 days</option>
+            <option value="14d">Two weeks</option>
+            <option value="30d">30 days</option>
+            <option value="all">All time</option>
+            <option value="custom">Custom</option>
+          </select>
+          {periodPreset === "custom" && (
+            <>
+              <input
+                type="date"
+                value={customStart}
+                onChange={(e) => setCustomStart(e.target.value)}
+                className="h-8 rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-[var(--foreground)] outline-none"
+              />
+              <span>→</span>
+              <input
+                type="date"
+                value={customEnd}
+                onChange={(e) => setCustomEnd(e.target.value)}
+                className="h-8 rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-[var(--foreground)] outline-none"
+              />
+            </>
+          )}
+        </div>
+      </div>
+      {data && (
+        <p className="mb-2 text-[10px] text-[var(--muted-foreground)]">
+          {data.start} – {data.end} · excl. corporation tax
+        </p>
+      )}
+      {loading && (
+        <p className="text-[11px] text-[var(--muted-foreground)]">Loading…</p>
+      )}
+      {!loading && data && (
+        <div className="w-full overflow-x-auto">
+          <table className="w-full text-[11px]">
+            <tbody>
+              <tr className="border-b border-[var(--surface-border)]">
+                <td className="py-1.5 pr-2 text-[var(--foreground)]">Revenue</td>
+                <td className="py-1.5 pl-2 text-right tabular-nums font-medium text-[var(--foreground)]">
+                  {fmt(data.revenue)}
+                </td>
+              </tr>
+              <tr className="text-[10px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
+                <td colSpan={2} className="pt-2 pb-0.5">Selling unit costs</td>
+              </tr>
+              <tr className="border-b border-[var(--surface-border)]">
+                <td className="py-0.5 pr-2 pl-2 text-[var(--foreground)]">COGS</td>
+                <td className="py-0.5 pl-2 text-right tabular-nums text-[var(--foreground)]">{fmt(data.totalCogs)}</td>
+              </tr>
+              <tr className="border-b border-[var(--surface-border)]">
+                <td className="py-0.5 pr-2 pl-2 text-[var(--foreground)]">Prep fees</td>
+                <td className="py-0.5 pl-2 text-right tabular-nums text-[var(--foreground)]">{fmt(data.prepFees)}</td>
+              </tr>
+              <tr className="border-b border-[var(--surface-border)]">
+                <td className="py-0.5 pr-2 pl-2 text-[var(--foreground)]">Referral</td>
+                <td className="py-0.5 pl-2 text-right tabular-nums text-[var(--foreground)]">{fmt(data.referralFees)}</td>
+              </tr>
+              <tr className="border-b border-[var(--surface-border)]">
+                <td className="py-0.5 pr-2 pl-2 text-[var(--foreground)]">FBA</td>
+                <td className="py-0.5 pl-2 text-right tabular-nums text-[var(--foreground)]">{fmt(data.fbaFees)}</td>
+              </tr>
+              <tr className="border-b border-[var(--surface-border)]">
+                <td className="py-0.5 pr-2 pl-2 text-[var(--foreground)]">Digital service fee</td>
+                <td className="py-0.5 pl-2 text-right tabular-nums text-[var(--foreground)]">{fmt(data.digitalServiceFees)}</td>
+              </tr>
+              <tr className="border-b border-[var(--surface-border)] font-medium">
+                <td className="py-1 pr-2 pl-2 text-[var(--foreground)]">Total selling costs</td>
+                <td className="py-1 pl-2 text-right tabular-nums text-[var(--foreground)]">{fmt(data.totalSellingCosts)}</td>
+              </tr>
+              <tr className="text-[10px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
+                <td colSpan={2} className="pt-2 pb-0.5">Fixed costs</td>
+              </tr>
+              <tr className="border-b border-[var(--surface-border)]">
+                <td className="py-0.5 pr-2 pl-2 text-[var(--foreground)]">Software subscriptions</td>
+                <td className="py-0.5 pl-2 text-right tabular-nums text-[var(--foreground)]">{fmt(data.softwareSubsTotal)}</td>
+              </tr>
+              <tr className="border-b border-[var(--surface-border)]">
+                <td className="py-0.5 pr-2 pl-2 text-[var(--foreground)]">Other subscriptions</td>
+                <td className="py-0.5 pl-2 text-right tabular-nums text-[var(--foreground)]">{fmt(data.otherSubsTotal)}</td>
+              </tr>
+              <tr className="border-b border-[var(--surface-border)] font-medium">
+                <td className="py-1 pr-2 pl-2 text-[var(--foreground)]">Total fixed costs</td>
+                <td className="py-1 pl-2 text-right tabular-nums text-[var(--foreground)]">{fmt(data.totalFixedCosts)}</td>
+              </tr>
+              <tr className="border-t-2 border-[var(--surface-border)] bg-[var(--surface)]/50 font-semibold">
+                <td className="py-1.5 pr-2 text-[var(--foreground)]">Total profit</td>
+                <td className={`py-1.5 pl-2 text-right tabular-nums ${data.totalProfit >= 0 ? "text-[var(--foreground)]" : "text-red-500"}`}>
+                  {fmt(data.totalProfit)}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      )}
+      {!loading && !data && (
+        <p className="text-[11px] text-[var(--muted-foreground)]">No P&amp;L data for this period.</p>
       )}
     </div>
   );
@@ -1101,8 +1710,8 @@ function SalesTrend({
   const allZero = points.length > 0 && maxValue === 0;
 
   const height = 250;
-  const paddingX = 22; // room for y-axis labels (right-aligned so they don’t overlap bars)
-  const paddingBottom = 82; // room for bars + date labels below (no clip)
+  const paddingX = 12; // room for y-axis labels (right-aligned so they don’t overlap bars)
+  const paddingBottom = 48; // room for x-axis line + rotated date labels underneath
   const paddingTop = 12; // room for hover labels
 
   const width = 400;
@@ -1152,8 +1761,9 @@ function SalesTrend({
         </p>
       )}
       {points.length > 0 && !allZero && (
+        <div className="w-full">
         <svg
-          viewBox={`-50 0 ${width + 50} ${height + 35}`}
+          viewBox={`-50 0 ${width + 50} ${height}`}
           className="mt-2 h-[18rem] min-h-[12rem] w-full"
           preserveAspectRatio="none"
         >
@@ -1304,24 +1914,24 @@ function SalesTrend({
               );
             })()
           )}
+          {/* Date labels: drawn in SVG so they sit under the x-axis and fit in the padding area */}
           {points.map((p, idx) => {
-            if (idx % 2 !== 0) return null; // show date every 2 days only
+            if (idx % 2 !== 0) return null;
             const x =
               paddingX +
               idx * bucketWidth +
               bucketWidth / 2;
-            const labelY = height - 20;
-            const [, month, day] = p.date.split("-"); // YYYY-MM-DD
+            const labelY = paddingTop + barAreaHeight + 14; // just under the x-axis line
+            const [, month, day] = p.date.split("-");
             const label = `${day}/${month}`;
-
             return (
               <text
                 key={`${p.date}-label`}
                 x={x}
                 y={labelY}
                 textAnchor="end"
-                fontSize="10"
-                fontFamily="system-ui, -apple-system, BlinkMacSystemFont, sans-serif"
+                fontSize="9"
+                fontFamily="system-ui, sans-serif"
                 fontWeight="600"
                 fontStyle="normal"
                 fill="var(--foreground)"
@@ -1332,6 +1942,7 @@ function SalesTrend({
             );
           })}
         </svg>
+      </div>
       )}
     </>
   );
@@ -1340,6 +1951,201 @@ function SalesTrend({
   ) : (
     <div className="rounded-xl bg-transparent p-4 ring-1 ring-[var(--surface-border)]">
       {content}
+    </div>
+  );
+}
+
+type CategoryBreakdown = {
+  sales: Array<{ category: string; value: number }>;
+  profit: Array<{ category: string; value: number }>;
+  roi: Array<{ category: string; value: number }>;
+  units: Array<{ category: string; value: number }>;
+  currency: string;
+};
+
+type CategoryPieChartsProps = {
+  baseUrl: string;
+  isSignedIn: boolean | undefined;
+  getToken: (args: { template?: string }) => Promise<string | null>;
+  currency: string;
+  start: string;
+  end: string;
+};
+
+const PIE_COLORS = ["#4F46E5", "#10B981", "#F59E0B", "#EC4899"];
+
+function CategoryPieChart({
+  title,
+  data,
+  currency,
+  formatValue,
+}: {
+  title: string;
+  data: Array<{ category: string; value: number }>;
+  currency: string;
+  formatValue: (v: number) => string;
+}) {
+  const total = data.reduce((s, d) => s + d.value, 0);
+  const hasData = total > 0 && data.length > 0;
+  const size = 80;
+  const cx = size / 2;
+  const cy = size / 2;
+  const r = 32;
+
+  let cumulative = 0;
+  const segments = hasData
+    ? data.map((d, i) => {
+        const pct = total > 0 ? d.value / total : 0;
+        const startAngle = cumulative * 2 * Math.PI;
+        cumulative += pct;
+        const endAngle = cumulative * 2 * Math.PI;
+        const x1 = cx + r * Math.sin(startAngle);
+        const y1 = cy - r * Math.cos(startAngle);
+        const x2 = cx + r * Math.sin(endAngle);
+        const y2 = cy - r * Math.cos(endAngle);
+        const large = pct > 0.5 ? 1 : 0;
+        const path = `M ${cx} ${cy} L ${x1} ${y1} A ${r} ${r} 0 ${large} 1 ${x2} ${y2} Z`;
+        return { path, color: PIE_COLORS[i % PIE_COLORS.length], ...d };
+      })
+    : [];
+
+  return (
+    <div className="flex min-w-0 flex-1 flex-col rounded-lg border border-[var(--surface-border)] bg-[var(--surface)]/30 p-2">
+      <h3 className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
+        {title}
+      </h3>
+      {hasData ? (
+        <div className="flex min-w-0 items-start gap-2">
+          <svg viewBox={`0 0 ${size} ${size}`} className="h-14 w-14 shrink-0 sm:h-16 sm:w-16">
+            {segments.map((seg, i) => (
+              <path
+                key={i}
+                d={seg.path}
+                fill={seg.color}
+                stroke="var(--background)"
+                strokeWidth={1}
+              />
+            ))}
+          </svg>
+          <ul className="min-w-0 flex-1 space-y-0.5 text-[10px]">
+            {segments.map((seg, i) => (
+              <li
+                key={i}
+                className="flex items-center justify-between gap-1.5 text-[var(--foreground)]"
+              >
+                <span className="flex min-w-0 items-center gap-1 truncate">
+                  <span
+                    className="h-1.5 w-1.5 shrink-0 rounded-full"
+                    style={{ backgroundColor: seg.color }}
+                  />
+                  <span className="truncate">{seg.category}</span>
+                </span>
+                <span className="shrink-0 tabular-nums font-medium">
+                  {formatValue(seg.value)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : (
+        <p className="py-2 text-[10px] text-[var(--muted-foreground)]">No data</p>
+      )}
+    </div>
+  );
+}
+
+function CategoryPieCharts({
+  baseUrl,
+  isSignedIn,
+  getToken,
+  currency,
+  start,
+  end,
+}: CategoryPieChartsProps) {
+  const [data, setData] = useState<CategoryBreakdown | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!isSignedIn) {
+      setData(null);
+      return;
+    }
+    const fetchData = async () => {
+      setLoading(true);
+      try {
+        const token = await getToken({ template: "backend" });
+        const res = await fetch(
+          `${baseUrl}/api/amazon/dashboard/category-breakdown?${new URLSearchParams({
+            start,
+            end,
+          }).toString()}`,
+          { headers: { Authorization: `Bearer ${token}` } },
+        );
+        if (!res.ok) throw new Error("Failed to load category breakdown");
+        const json = (await res.json()) as CategoryBreakdown;
+        setData(json);
+      } catch {
+        setData(null);
+      } finally {
+        setLoading(false);
+      }
+    };
+    void fetchData();
+  }, [isSignedIn, getToken, baseUrl, start, end]);
+
+  if (loading) {
+    return (
+      <div className="flex w-full flex-col rounded-xl p-3 ring-1 ring-[var(--surface-border)]">
+        <h2 className="mb-2 text-xs font-medium uppercase tracking-[0.2em] text-[var(--muted-foreground)]">
+          Top categories by metric
+        </h2>
+        <p className="text-[10px] text-[var(--muted-foreground)]">Loading…</p>
+      </div>
+    );
+  }
+
+  const cur = data?.currency ?? currency;
+  const formatCur = (n: number) =>
+    new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: cur,
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 0,
+    }).format(n);
+  const formatPct = (n: number) => `${Math.round(n)}%`;
+  const formatNum = (n: number) => n.toLocaleString();
+
+  return (
+    <div className="flex w-full flex-col rounded-xl p-3 ring-1 ring-[var(--surface-border)]">
+      <h2 className="mb-2 text-xs font-medium uppercase tracking-[0.2em] text-[var(--muted-foreground)]">
+        Top categories by metric
+      </h2>
+      <div className="grid grid-cols-2 gap-2 sm:gap-3">
+        <CategoryPieChart
+          title="Sales"
+          data={data?.sales ?? []}
+          currency={cur}
+          formatValue={formatCur}
+        />
+        <CategoryPieChart
+          title="Profit"
+          data={data?.profit ?? []}
+          currency={cur}
+          formatValue={formatCur}
+        />
+        <CategoryPieChart
+          title="ROI"
+          data={data?.roi ?? []}
+          currency={cur}
+          formatValue={formatPct}
+        />
+        <CategoryPieChart
+          title="Units sold"
+          data={data?.units ?? []}
+          currency={cur}
+          formatValue={formatNum}
+        />
+      </div>
     </div>
   );
 }
@@ -1417,12 +2223,14 @@ function DonutCard({
           )}
           {useCustomCenter ? (
             <>
-              <span className="text-lg font-semibold leading-tight text-[var(--foreground)]">
+              <span className="text-xl font-semibold leading-tight text-[var(--foreground)]">
                 {centerLine1}
               </span>
-              <span className="text-[10px] text-[var(--muted-foreground)]">
-                {centerLine2}
-              </span>
+              {centerLine2 ? (
+                <span className="text-[10px] text-[var(--muted-foreground)]">
+                  {centerLine2}
+                </span>
+              ) : null}
               <span
                 className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-normal"
                 style={{
@@ -1435,7 +2243,7 @@ function DonutCard({
             </>
           ) : (
             <>
-              <span className="text-sm font-semibold text-[var(--foreground)]">
+              <span className="text-lg font-semibold text-[var(--foreground)]">
                 {value}
               </span>
               {!valueOnly && (

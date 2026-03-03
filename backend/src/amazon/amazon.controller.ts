@@ -137,6 +137,45 @@ ping() {
     );
   }
 
+  @UseGuards(ClerkAuthGuard)
+  @Get('dashboard/category-breakdown')
+  getCategoryBreakdown(
+    @Req() req: { user: { orgId: string } },
+    @Query('start') start?: string,
+    @Query('end') end?: string,
+  ) {
+    return this.amazonService.getCategoryBreakdown(req.user.orgId, {
+      start,
+      end,
+    });
+  }
+
+  @UseGuards(ClerkAuthGuard)
+  @Get('dashboard/cost-breakdown')
+  getCostBreakdown(
+    @Req() req: { user: { orgId: string } },
+    @Query('start') start?: string,
+    @Query('end') end?: string,
+  ) {
+    return this.amazonService.getCostBreakdown(req.user.orgId, {
+      start,
+      end,
+    });
+  }
+
+  @UseGuards(ClerkAuthGuard)
+  @Get('dashboard/profit-and-loss')
+  getProfitAndLoss(
+    @Req() req: { user: { orgId: string } },
+    @Query('start') start?: string,
+    @Query('end') end?: string,
+  ) {
+    return this.amazonService.getProfitAndLoss(req.user.orgId, {
+      start,
+      end,
+    });
+  }
+
   /**
    * Manually trigger a background Amazon full-sync for the authenticated user.
    * Example: POST /api/amazon/sync
@@ -307,6 +346,65 @@ ping() {
   }
 
   /**
+   * Call Catalog API for products missing productType/displayGroup and store them on Product.
+   * Paginates through all needing backfill (batch size = limit); no nextToken — Catalog API is 1 request per ASIN.
+   * Example: POST /api/amazon/catalog/backfill-categories?limit=250
+   * Example: GET /api/amazon/catalog/backfill-categories?limit=250
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Post('catalog/backfill-categories')
+  async backfillCatalogCategories(
+    @Req() req: { user: { orgId: string; userId: string } },
+    @Query('limit') limit?: string,
+  ) {
+    const n = Number(limit ?? 250);
+    const safeLimit = Number.isFinite(n) ? Math.max(50, Math.min(500, n)) : 250;
+    return this.amazonService.backfillCatalogCategoriesForNewAsins(
+      req.user.orgId,
+      req.user.userId,
+      undefined,
+      safeLimit,
+    );
+  }
+
+  @UseGuards(ClerkAuthGuard)
+  @Get('catalog/backfill-categories')
+  async backfillCatalogCategoriesGet(
+    @Req() req: { user: { orgId: string; userId: string } },
+    @Query('limit') limit?: string,
+  ) {
+    const n = Number(limit ?? 250);
+    const safeLimit = Number.isFinite(n) ? Math.max(50, Math.min(500, n)) : 250;
+    return this.amazonService.backfillCatalogCategoriesForNewAsins(
+      req.user.orgId,
+      req.user.userId,
+      undefined,
+      safeLimit,
+    );
+  }
+
+  /**
+   * Dev-only: Catalog API raw response + parsed productType and displayGroup for debugging.
+   * Example: GET /api/amazon/dev/catalog-item-category-debug?asin=B0B7NSZTHX
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Get('dev/catalog-item-category-debug')
+  async devCatalogItemCategoryDebug(
+    @Req() req: { user: { orgId: string; userId: string } },
+    @Query('asin') asin?: string,
+  ) {
+    const asinTrim = asin?.trim();
+    if (!asinTrim) {
+      throw new BadRequestException('asin is required');
+    }
+    return this.amazonService.devGetCatalogItemCategoryDebug(
+      req.user.orgId,
+      req.user.userId,
+      asinTrim,
+    );
+  }
+
+  /**
    * Dev-only: inspect raw Catalog Items response for an ASIN.
    * Example:
    * GET /api/amazon/dev/catalog-item?asin=B0B7NSZTHX&marketplaceId=A1F83G8C2ARO7P
@@ -368,12 +466,15 @@ ping() {
   async topProfitableProducts(
     @Req() req: { user: { orgId: string } },
     @Query('limit') limit?: string,
+    @Query('period') period?: string,
   ) {
     const n = Number(limit ?? 10);
     const safeLimit = Number.isFinite(n) ? Math.max(1, Math.min(50, n)) : 10;
+    const periodVal = period === 'month' ? 'month' : '30d';
     return this.amazonService.getTopProfitableProducts(
       req.user.orgId,
       safeLimit,
+      periodVal,
     );
   }
 

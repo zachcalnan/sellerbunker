@@ -288,20 +288,21 @@ export class AmazonSpApiClient {
    * Catalog Items API v2022-04-01: getCatalogItem
    * GET /catalog/2022-04-01/items/{asin}
    *
-   * Used to backfill product titles (via summaries.itemName).
+   * Used to backfill product titles (via summaries.itemName) and productType/displayGroup (via productTypes).
+   * @param includedData - optional; default 'summaries,attributes,images'. Add 'productTypes' for category fields.
    */
   async getCatalogItem(
     credentials: SpApiCredentials,
     asin: string,
     marketplaceIds: string[],
+    includedData = 'summaries,attributes,images',
   ) {
     return this.signedSpApiRequest(credentials, {
       method: 'GET',
       path: `/catalog/2022-04-01/items/${encodeURIComponent(asin)}`,
       query: {
-        // Catalog Items uses comma-delimited query params for lists.
         marketplaceIds: marketplaceIds.join(','),
-        includedData: 'summaries,attributes,images',
+        includedData,
       },
     });
   }
@@ -588,20 +589,24 @@ export class AmazonSpApiClient {
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
       const fullUrl = `https://${host}${pathWithQuery}`;
-      this.logger.warn(
-        `[SP-API] request failed: ${options.method} ${fullUrl} -> ${response.statusCode}`,
-      );
-      const bodyPreview = (response.body ?? '').slice(0, 800);
-      this.logger.warn(`[SP-API] response body: ${bodyPreview}${(response.body?.length ?? 0) > 800 ? '...' : ''}`);
-      try {
-        const parsed = JSON.parse(response.body ?? '{}') as { errors?: Array<{ code?: string; message?: string; details?: string }> };
-        if (parsed?.errors?.length) {
-          parsed.errors.forEach((err, idx) => {
-            this.logger.warn(`[SP-API] error[${idx}] code=${err?.code ?? 'n/a'} message=${err?.message ?? 'n/a'} details=${err?.details ?? 'n/a'}`);
-          });
+      const isCatalog404 =
+        response.statusCode === 404 &&
+        (options.path?.includes('/catalog/') ?? false);
+      const log = isCatalog404 ? this.logger.debug?.bind(this.logger) ?? this.logger.log : this.logger.warn.bind(this.logger);
+      log(`[SP-API] request failed: ${options.method} ${fullUrl} -> ${response.statusCode}`);
+      if (!isCatalog404) {
+        const bodyPreview = (response.body ?? '').slice(0, 800);
+        this.logger.warn(`[SP-API] response body: ${bodyPreview}${(response.body?.length ?? 0) > 800 ? '...' : ''}`);
+        try {
+          const parsed = JSON.parse(response.body ?? '{}') as { errors?: Array<{ code?: string; message?: string; details?: string }> };
+          if (parsed?.errors?.length) {
+            parsed.errors.forEach((err, idx) => {
+              this.logger.warn(`[SP-API] error[${idx}] code=${err?.code ?? 'n/a'} message=${err?.message ?? 'n/a'} details=${err?.details ?? 'n/a'}`);
+            });
+          }
+        } catch {
+          // ignore parse errors
         }
-      } catch {
-        // ignore parse errors
       }
       throw new Error(
         `SP-API request failed: ${options.method} ${options.path} (${response.statusCode}) ${response.body}`,
