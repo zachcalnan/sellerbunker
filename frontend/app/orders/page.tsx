@@ -208,14 +208,14 @@ export default function OrdersPage() {
           </div>
         ) : null}
 
-        <div className="mb-4 rounded-xl border border-[var(--surface-border)] bg-[var(--surface)] px-4 py-3">
-          <div className="flex flex-wrap items-center justify-start gap-8">
-            <div className="flex items-center gap-3">
-              <label className="text-sm font-medium text-[var(--foreground)]">Period</label>
+        <div className="mb-4 rounded-xl border border-[var(--surface-border)] bg-[var(--surface)] px-3 py-2.5">
+          <div className="flex flex-wrap items-center justify-start gap-6">
+            <div className="flex items-center gap-2">
+              <label className="text-xs font-medium text-[var(--foreground)]">Period</label>
               <select
                 value={period}
                 onChange={(e) => setPeriod(e.target.value as PeriodKey)}
-                className="rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none focus:ring-2 focus:ring-[var(--foreground)]/20"
+                className="rounded-lg border border-[var(--surface-border)] bg-transparent px-2.5 py-1.5 text-xs text-[var(--foreground)] outline-none focus:ring-2 focus:ring-[var(--foreground)]/20"
               >
                 {PERIOD_OPTIONS.map((opt) => (
                   <option key={opt.value} value={opt.value}>
@@ -224,45 +224,45 @@ export default function OrdersPage() {
                 ))}
               </select>
             </div>
-            <div className="flex flex-wrap gap-6 sm:gap-8">
+            <div className="flex flex-wrap gap-5 sm:gap-6">
               <div>
-                <span className="text-xs font-medium uppercase tracking-wider text-[var(--muted-foreground)]">Orders</span>
-                <div className="text-lg font-semibold tabular-nums text-[var(--foreground)]">{periodSummary.orderCount}</div>
+                <span className="text-[10px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">Orders</span>
+                <div className="text-sm font-semibold tabular-nums text-[var(--foreground)]">{periodSummary.orderCount}</div>
               </div>
               <div>
-                <span className="text-xs font-medium uppercase tracking-wider text-[var(--muted-foreground)]">Sales</span>
-                <div className="text-lg font-semibold tabular-nums text-[var(--foreground)]">{formatCurrency(periodSummary.totalSales)}</div>
+                <span className="text-[10px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">Sales</span>
+                <div className="text-sm font-semibold tabular-nums text-[var(--foreground)]">{formatCurrency(periodSummary.totalSales)}</div>
               </div>
               <div>
-                <span className="text-xs font-medium uppercase tracking-wider text-[var(--muted-foreground)]">Profit</span>
-                <div className="text-lg font-semibold tabular-nums text-[var(--foreground)]">{formatCurrency(periodSummary.totalProfit)}</div>
+                <span className="text-[10px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">Profit</span>
+                <div className="text-sm font-semibold tabular-nums text-[var(--foreground)]">{formatCurrency(periodSummary.totalProfit)}</div>
               </div>
             </div>
           </div>
         </div>
 
         <div className="overflow-x-auto rounded-xl ring-1 ring-[var(--surface-border)]">
-          <div className="min-w-[1200px]">
-            <div className="grid grid-cols-[44px_1.2fr_0.7fr_0.6fr_1fr_0.9fr_0.5fr_0.6fr_0.5fr_0.5fr_0.5fr] gap-2 bg-[var(--surface)] px-4 py-3 text-xs font-semibold uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
+          <div className="min-w-0">
+            <div className="grid grid-cols-[36px_1fr_0.55fr_0.45fr_0.8fr_0.52fr_0.35fr_0.45fr_0.45fr_0.35fr_0.35fr] gap-1 bg-[var(--surface)] px-2.5 py-2 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
               <div />
               <div>Title</div>
               <div>SKU</div>
               <div>ASIN</div>
-              <div>Date & ID</div>
-              <div className="text-center pl-3">Amazon fees</div>
-              <div className="text-center pl-3">Qty</div>
-              <div className="text-center pl-3">Sale Price</div>
-              <div className="text-center pl-3">Profit</div>
-              <div className="text-center pl-3">ROI%</div>
-              <div className="text-center pl-3">Avail. Stock</div>
+              <div>Date / ID</div>
+              <div className="text-left">Fees</div>
+              <div className="text-center">Qty</div>
+              <div className="text-center">Price</div>
+              <div className="text-center">Profit</div>
+              <div className="text-center">ROI%</div>
+              <div className="text-center">Stock</div>
             </div>
 
             {loading ? (
-              <div className="px-4 py-6 text-sm text-[var(--muted-foreground)]">
+              <div className="px-2.5 py-4 text-xs text-[var(--muted-foreground)]">
                 Loading…
               </div>
             ) : filtered.length === 0 ? (
-              <div className="px-4 py-6 text-sm text-[var(--muted-foreground)]">
+              <div className="px-2.5 py-4 text-xs text-[var(--muted-foreground)]">
                 No orders found.
               </div>
             ) : (
@@ -271,19 +271,19 @@ export default function OrdersPage() {
                   {paginated.map((r) => (
                     <div
                       key={r.id}
-                      className="grid grid-cols-[44px_1.2fr_0.7fr_0.6fr_1fr_0.9fr_0.5fr_0.6fr_0.5fr_0.5fr_0.5fr] items-center gap-2 px-4 py-3 min-w-0 text-sm"
+                      className="grid grid-cols-[36px_1fr_0.55fr_0.45fr_0.8fr_0.52fr_0.35fr_0.45fr_0.45fr_0.35fr_0.35fr] items-center gap-1 px-2.5 py-2 min-w-0 text-[11px]"
                     >
                       <div className="flex items-center justify-center shrink-0">
                         {r.imageUrl ? (
                           <img
                             src={r.imageUrl}
                             alt={r.title ?? r.sku}
-                            className="h-9 w-9 rounded-md object-cover ring-1 ring-[var(--surface-border)]"
+                            className="h-8 w-8 rounded-md object-cover ring-1 ring-[var(--surface-border)]"
                             loading="lazy"
                             referrerPolicy="no-referrer"
                           />
                         ) : (
-                          <div className="h-9 w-9 rounded-md bg-[var(--surface)] ring-1 ring-[var(--surface-border)]" />
+                          <div className="h-8 w-8 rounded-md bg-[var(--surface)] ring-1 ring-[var(--surface-border)]" />
                         )}
                       </div>
                       <div className="truncate text-[var(--foreground)]">
@@ -296,48 +296,42 @@ export default function OrdersPage() {
                         {r.asin ?? "—"}
                       </div>
                       <div className="min-w-0">
-                        <div className="truncate text-sm text-[var(--foreground)]">
-                          <span className="font-semibold">Order date: </span>{formatDate(r.orderDate)}
-                        </div>
-                        <div className="truncate font-mono text-xs text-[var(--foreground)]">
-                          <span className="font-semibold">Order ID: </span>{r.orderId}
+                        <div className="text-[var(--foreground)]">{formatDate(r.orderDate)}</div>
+                        <div className="truncate font-mono text-[10px] text-[var(--muted-foreground)]" title={r.orderId}>
+                          {r.orderId}
                         </div>
                       </div>
-                      <div className="text-center pl-3 text-[var(--foreground)] tabular-nums min-w-0">
+                      <div className="flex flex-col text-[var(--foreground)] tabular-nums min-w-0">
                         {r.amazonFeesTotal != null && Number.isFinite(r.amazonFeesTotal) ? (
-                          <>
-                            <div className="font-semibold">
+                          <div className="space-y-0.5 text-left">
+                            <div className="font-medium">
                               {formatCurrency(r.amazonFeesTotal)}
-                              {r.feesSource === "finances" && (
-                                <span className="font-normal text-[var(--muted-foreground)] text-xs ml-1">Settled</span>
-                              )}
-                              {r.feesSource === "estimate" && (
-                                <span className="font-normal text-[var(--muted-foreground)] text-xs ml-1">Est.</span>
-                              )}
+                              {r.feesSource === "finances" && <span className="text-[9px] text-[var(--muted-foreground)] font-normal ml-0.5">Settled</span>}
+                              {r.feesSource === "estimate" && <span className="text-[9px] text-[var(--muted-foreground)] font-normal ml-0.5">Est.</span>}
                             </div>
-                            <div className="text-xs text-[var(--muted-foreground)] mt-0.5 text-center">
-                              <div><span className="font-semibold">Referral fee: </span>{r.referralFeeTotal != null ? formatCurrency(r.referralFeeTotal) : "—"}</div>
-                              <div><span className="font-semibold">FBA fee: </span>{r.fbaFeeTotal != null ? formatCurrency(r.fbaFeeTotal) : "—"}</div>
-                              <div><span className="font-semibold">Digital service fee: </span>{r.digitalServiceFeeTotal != null ? formatCurrency(r.digitalServiceFeeTotal) : "—"}</div>
+                            <div className="text-[9px] text-[var(--muted-foreground)] space-y-0.5">
+                              <div>Ref: {r.referralFeeTotal != null ? formatCurrency(r.referralFeeTotal) : "—"}</div>
+                              <div>FBA: {r.fbaFeeTotal != null ? formatCurrency(r.fbaFeeTotal) : "—"}</div>
+                              <div>Dig: {r.digitalServiceFeeTotal != null ? formatCurrency(r.digitalServiceFeeTotal) : "—"}</div>
                             </div>
-                          </>
+                          </div>
                         ) : (
                           "—"
                         )}
                       </div>
-                      <div className="text-center pl-3 text-[var(--foreground)]">
+                      <div className="text-center text-[var(--foreground)] tabular-nums">
                         {r.quantity}
                       </div>
-                      <div className="text-center pl-3 text-[var(--foreground)]">
+                      <div className="text-center text-[var(--foreground)] tabular-nums">
                         {formatCurrency(r.salePrice)}
                       </div>
-                      <div className="text-center pl-3 text-[var(--foreground)]">
+                      <div className="text-center text-[var(--foreground)] tabular-nums">
                         {r.profit != null ? formatCurrency(r.profit) : "—"}
                       </div>
-                      <div className="text-center pl-3 text-[var(--foreground)]">
+                      <div className="text-center text-[var(--foreground)] tabular-nums">
                         {r.roiPct != null ? `${r.roiPct}%` : "—"}
                       </div>
-                      <div className="text-center pl-3 text-[var(--foreground)]">
+                      <div className="text-center text-[var(--foreground)] tabular-nums">
                         {r.availableStock != null ? String(r.availableStock) : "—"}
                       </div>
                     </div>
@@ -345,8 +339,8 @@ export default function OrdersPage() {
                 </div>
 
                 {totalPages > 1 ? (
-                  <div className="flex items-center justify-between gap-4 border-t border-[var(--surface-border)] bg-[var(--surface)] px-4 py-3">
-                    <div className="text-sm text-[var(--muted-foreground)]">
+                  <div className="flex items-center justify-between gap-4 border-t border-[var(--surface-border)] bg-[var(--surface)] px-2.5 py-2">
+                    <div className="text-xs text-[var(--muted-foreground)]">
                       Page {safePage} of {totalPages}
                       <span className="ml-2">
                         ({(safePage - 1) * PAGE_SIZE + 1}–

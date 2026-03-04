@@ -339,20 +339,6 @@ export default function InventoryPage() {
         </div>
 
         <div className="overflow-hidden rounded-xl ring-1 ring-[var(--surface-border)]">
-          <div className="hidden md:grid grid-cols-[44px_1.2fr_0.9fr_1.5fr_0.75fr_0.55fr_0.55fr_0.55fr_0.55fr_0.55fr_0.55fr_0.8fr] gap-2 bg-[var(--surface)] px-4 py-3 text-xs font-semibold uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
-            <div />
-            <div>SKU</div>
-            <div>ASIN</div>
-            <div>Title</div>
-            <div>Type / Group</div>
-            <div className="text-center pl-3">Total</div>
-            <div className="text-center pl-3">Available</div>
-            <div className="text-center pl-3">Reserved</div>
-            <div className="text-center pl-3">Inbound</div>
-            <div className="text-center pl-3">Issue</div>
-            <div className="text-center pl-3">List price & profit</div>
-          </div>
-
           {loading ? (
             <div className="px-4 py-6 text-sm text-[var(--muted-foreground)]">
               Loading…
@@ -363,6 +349,21 @@ export default function InventoryPage() {
             </div>
           ) : (
             <>
+            <div className="hidden md:grid grid-cols-[40px_1.1fr_0.8fr_1.4fr_0.7fr_0.5fr_0.5fr_0.5fr_0.5fr_0.5fr_0.5fr_0.5fr_0.5fr] gap-1.5 bg-[var(--surface)] px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
+              <div />
+              <div>SKU</div>
+              <div>ASIN</div>
+              <div>Title</div>
+              <div>Type / Group</div>
+              <div className="text-center">Total</div>
+              <div className="text-center">Available</div>
+              <div className="text-center">Reserved</div>
+              <div className="text-center">Inbound</div>
+              <div className="text-center">Issue</div>
+              <div className="text-right">List price</div>
+              <div className="text-right">Profit</div>
+            </div>
+
             <div className="divide-y divide-[var(--surface-border)] bg-transparent">
               {paginated.map((r) => {
                 const isSystem = SYSTEM_SKUS.has(r.sku);
@@ -370,7 +371,6 @@ export default function InventoryPage() {
                 const price = r.currentListedPrice != null ? Number(r.currentListedPrice) : null;
                 const cogs = r.costOfGoods != null ? Number(r.costOfGoods) : 0;
                 const amazonFee = r.estimatedAmazonFeePerUnit != null ? Number(r.estimatedAmazonFeePerUnit) : 0;
-                // Estimated profit = listed price - Amazon fees (total) - COGS; show when we have a listed price
                 const estProfit =
                   price != null
                     ? Math.round((price - amazonFee - cogs) * 100) / 100
@@ -401,7 +401,7 @@ export default function InventoryPage() {
 
                 return (
                   <Fragment key={r.productId}>
-                    {/* Mobile card — clickable */}
+                    {/* Mobile card */}
                     <div
                       key={`${r.productId}-mobile`}
                       role="button"
@@ -425,21 +425,13 @@ export default function InventoryPage() {
                           )}
                         </div>
                         <div className="min-w-0 flex-1">
-                          <div className="truncate text-sm font-medium text-[var(--foreground)]">
-                            {r.title ?? r.sku}
-                          </div>
-                          <div className="mt-0.5 truncate text-xs text-[var(--muted-foreground)]">
-                            SKU {r.sku} · ASIN {r.asin ?? "—"}
-                          </div>
+                          <div className="truncate text-sm font-medium text-[var(--foreground)]">{r.title ?? r.sku}</div>
+                          <div className="mt-0.5 truncate text-xs text-[var(--muted-foreground)]">SKU {r.sku} · ASIN {r.asin ?? "—"}</div>
                           {marketplaceLine ? (
-                            <div className="mt-1 truncate text-xs text-[var(--muted-foreground)]">
-                              {marketplaceLine}
-                            </div>
+                            <div className="mt-1 truncate text-xs text-[var(--muted-foreground)]">{marketplaceLine}</div>
                           ) : null}
                           {isSystem ? (
-                            <div className="mt-1 text-xs text-[var(--muted-foreground)]">
-                              System SKU
-                            </div>
+                            <div className="mt-1 text-xs text-[var(--muted-foreground)]">System SKU</div>
                           ) : null}
                           <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-[var(--muted-foreground)]">
                             <span className="font-medium text-[var(--foreground)]">Total {num(r.totalQty)}</span>
@@ -447,12 +439,8 @@ export default function InventoryPage() {
                             <span>Reserved {num(r.reservedQty)}</span>
                             <span>Inbound {num(r.inboundQty)}</span>
                             <span>Issue {num(r.issueQty)}</span>
-                            {r.currentListedPrice != null && (
-                              <span>Price: £{Number(r.currentListedPrice).toFixed(2)}</span>
-                            )}
-                            {estProfit != null && (
-                              <span>Est profit: £{estProfit.toFixed(2)}</span>
-                            )}
+                            {r.currentListedPrice != null && <span>Price: £{Number(r.currentListedPrice).toFixed(2)}</span>}
+                            {estProfit != null && <span>Est profit: £{estProfit.toFixed(2)}</span>}
                           </div>
                         </div>
                         <svg className="h-5 w-5 shrink-0 text-[var(--muted-foreground)]" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
@@ -461,71 +449,57 @@ export default function InventoryPage() {
                       </div>
                     </div>
 
-                    {/* Desktop table row — clickable */}
+                    {/* Desktop row — one row div with 12 cells inside */}
                     <div
                       key={`${r.productId}-desktop`}
                       role="button"
                       tabIndex={0}
                       onClick={() => setDetailRow(r)}
                       onKeyDown={(e) => e.key === "Enter" && setDetailRow(r)}
-                      className="hidden md:grid grid-cols-[44px_1.2fr_0.9fr_1.5fr_0.75fr_0.55fr_0.55fr_0.55fr_0.55fr_0.55fr_0.55fr_0.8fr] items-center gap-2 px-4 py-3 cursor-pointer hover:bg-[var(--foreground)]/5 transition-colors"
+                      className="hidden md:grid grid-cols-[40px_1.1fr_0.8fr_1.4fr_0.7fr_0.5fr_0.5fr_0.5fr_0.5fr_0.5fr_0.5fr_0.5fr_0.5fr] items-center gap-1.5 px-3 py-2 cursor-pointer hover:bg-[var(--foreground)]/5 transition-colors"
                     >
                       <div className="flex items-center justify-center">
                         {r.imageUrl ? (
                           <img
                             src={r.imageUrl}
                             alt={r.title ?? r.sku}
-                            className="h-9 w-9 rounded-md object-cover ring-1 ring-[var(--surface-border)]"
+                            className="h-8 w-8 rounded-md object-cover ring-1 ring-[var(--surface-border)]"
                             loading="lazy"
                             referrerPolicy="no-referrer"
                           />
                         ) : (
-                          <div className="h-9 w-9 rounded-md bg-[var(--surface)] ring-1 ring-[var(--surface-border)]" />
+                          <div className="h-8 w-8 rounded-md bg-[var(--surface)] ring-1 ring-[var(--surface-border)]" />
                         )}
                       </div>
                       <div className="min-w-0">
-                        <div className="truncate text-sm font-medium text-[var(--foreground)]">
-                          {r.sku}
-                        </div>
+                        <div className="truncate text-[11px] font-medium text-[var(--foreground)]">{r.sku}</div>
                         {marketplaceLine ? (
-                          <div className="mt-0.5 truncate text-xs text-[var(--muted-foreground)]">
-                            {marketplaceLine}
-                          </div>
+                          <div className="mt-0.5 truncate text-[10px] text-[var(--muted-foreground)]">{marketplaceLine}</div>
                         ) : null}
                         {isSystem ? (
-                          <div className="mt-0.5 text-xs text-[var(--muted-foreground)]">
-                            System SKU
-                          </div>
+                          <div className="mt-0.5 text-[10px] text-[var(--muted-foreground)]">System SKU</div>
                         ) : null}
                       </div>
-                      <div className="truncate text-sm text-[var(--muted-foreground)]">
-                        {r.asin ?? "—"}
-                      </div>
-                      <div className="truncate text-sm text-[var(--muted-foreground)]">
-                        {r.title ?? "—"}
-                      </div>
-                      <div className="truncate text-xs text-[var(--muted-foreground)]">
+                      <div className="truncate text-[11px] text-[var(--muted-foreground)]">{r.asin ?? "—"}</div>
+                      <div className="truncate text-[11px] text-[var(--muted-foreground)]">{r.title ?? "—"}</div>
+                      <div className="truncate text-[10px] text-[var(--muted-foreground)]">
                         {[r.productType, r.displayGroup].filter(Boolean).join(" · ") || "—"}
                       </div>
-                      <div className="text-center pl-3 text-sm font-medium text-[var(--foreground)]">{num(r.totalQty)}</div>
-                      <div className="text-center pl-3 text-sm text-[var(--foreground)]">{num(r.availableQty)}</div>
-                      <div className="text-center pl-3 text-sm text-[var(--foreground)]">{num(r.reservedQty)}</div>
-                      <div className="text-center pl-3 text-sm text-[var(--foreground)]">{num(r.inboundQty)}</div>
-                      <div className="text-center pl-3 text-sm text-[var(--foreground)] flex items-center justify-center gap-1">
+                      <div className="text-center text-[11px] font-medium text-[var(--foreground)] tabular-nums">{num(r.totalQty)}</div>
+                      <div className="text-center text-[11px] text-[var(--foreground)] tabular-nums">{num(r.availableQty)}</div>
+                      <div className="text-center text-[11px] text-[var(--foreground)] tabular-nums">{num(r.reservedQty)}</div>
+                      <div className="text-center text-[11px] text-[var(--foreground)] tabular-nums">{num(r.inboundQty)}</div>
+                      <div className="text-center text-[11px] text-[var(--foreground)] tabular-nums flex items-center justify-center gap-0.5">
                         {num(r.issueQty)}
-                        <svg className="h-4 w-4 text-[var(--muted-foreground)]" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                        <svg className="h-3.5 w-3.5 text-[var(--muted-foreground)]" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                         </svg>
                       </div>
-                      <div className="text-left pl-3 text-sm text-[var(--foreground)] tabular-nums min-w-0">
-                        <div>
-                          <span className="font-semibold">Price: </span>
-                          {r.currentListedPrice != null ? `£${Number(r.currentListedPrice).toFixed(2)}` : "—"}
-                        </div>
-                        <div className="text-xs text-[var(--muted-foreground)] mt-0.5">
-                          <span className="font-semibold">Est profit: </span>
-                          {estProfit != null ? `£${estProfit.toFixed(2)}` : "—"}
-                        </div>
+                      <div className="text-right text-[11px] text-[var(--foreground)] tabular-nums min-w-0">
+                        {r.currentListedPrice != null ? `£${Number(r.currentListedPrice).toFixed(2)}` : "—"}
+                      </div>
+                      <div className="text-right text-[11px] text-[var(--foreground)] tabular-nums min-w-0">
+                        {estProfit != null ? `£${estProfit.toFixed(2)}` : "—"}
                       </div>
                     </div>
                   </Fragment>
@@ -611,14 +585,6 @@ export default function InventoryPage() {
               </div>
               <div className="flex-1 overflow-y-auto px-4 py-3 text-sm">
                 <InventoryDetailDrilldown rawJson={detailRow.rawJson} />
-                {detailRow.feeEstimateRawJson != null ? (
-                  <div className="mt-4 pt-4 border-t border-[var(--surface-border)]">
-                    <h3 className="font-medium text-[var(--foreground)] mb-2">Fee estimate raw response</h3>
-                    <pre className="bg-[var(--muted)]/30 rounded-lg p-3 text-xs overflow-x-auto overflow-y-auto max-h-64 whitespace-pre-wrap break-all">
-                      {JSON.stringify(detailRow.feeEstimateRawJson, null, 2)}
-                    </pre>
-                  </div>
-                ) : null}
               </div>
             </div>
           </div>

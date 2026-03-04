@@ -182,6 +182,10 @@ model OrderItem {
   prepIncVat           Decimal? @map("prep_inc_vat") @db.Decimal(14, 2)
   prepExVat            Decimal? @map("prep_ex_vat") @db.Decimal(14, 2)
   prepVatAmount        Decimal? @map("prep_vat_amount") @db.Decimal(14, 2)
+  // Fee VAT (always computed for later VAT balance): Amazon fees ex/incl VAT
+  amazonFeesExVat      Decimal? @map("amazon_fees_ex_vat") @db.Decimal(14, 2)
+  amazonFeesIncVat     Decimal? @map("amazon_fees_inc_vat") @db.Decimal(14, 2)
+  amazonFeesVatAmount  Decimal? @map("amazon_fees_vat_amount") @db.Decimal(14, 2)
   order                Order    @relation(fields: [orderDbId], references: [id], onDelete: Cascade)
   product              Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
   user                 User     @relation(fields: [userId], references: [id], onDelete: Cascade)

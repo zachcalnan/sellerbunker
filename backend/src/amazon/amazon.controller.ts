@@ -616,6 +616,48 @@ ping() {
   }
 
   /**
+   * Cost of Goods: list all SKUs that have inventory (from FBA sync), paginated.
+   * Example: GET /api/amazon/cost-of-goods/products?take=10&skip=0
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Get('cost-of-goods/products')
+  async listCostOfGoodsProducts(
+    @Req() req: { user: { orgId: string } },
+    @Query('take') take?: string,
+    @Query('skip') skip?: string,
+  ) {
+    const takeN = Number(take ?? 10);
+    const skipN = Number(skip ?? 0);
+    const safeTake = Number.isFinite(takeN) ? Math.max(1, Math.min(100, takeN)) : 10;
+    const safeSkip = Number.isFinite(skipN) ? Math.max(0, skipN) : 0;
+    return this.amazonService.listProductsFromInventory(req.user.orgId, {
+      take: safeTake,
+      skip: safeSkip,
+    });
+  }
+
+  /**
+   * Cost of Goods: list inventory SKUs that have at least one cost entry (Complete tab).
+   * Example: GET /api/amazon/cost-of-goods/complete?take=10&skip=0
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Get('cost-of-goods/complete')
+  async listCostOfGoodsComplete(
+    @Req() req: { user: { orgId: string } },
+    @Query('take') take?: string,
+    @Query('skip') skip?: string,
+  ) {
+    const takeN = Number(take ?? 10);
+    const skipN = Number(skip ?? 0);
+    const safeTake = Number.isFinite(takeN) ? Math.max(1, Math.min(100, takeN)) : 10;
+    const safeSkip = Number.isFinite(skipN) ? Math.max(0, skipN) : 0;
+    return this.amazonService.listProductsWithCostFromInventory(req.user.orgId, {
+      take: safeTake,
+      skip: safeSkip,
+    });
+  }
+
+  /**
    * Cost of Goods (ledger): list inbound cost entries.
    * Example: GET /api/amazon/cost-of-goods/entries?query=...&take=50&skip=0
    */
@@ -691,10 +733,10 @@ ping() {
   }
 
   /**
-   * Cost of Goods: list SKUs that appear in orders but still have no COGS.
-   * Range defaults to last 30 days when start/end are omitted.
+   * Cost of Goods: list inventory SKUs that have no cost entries in the DB
+   * (no Purchase rows and no/zero Product.costOfGoods). Paginated with take/skip.
    *
-   * Example: GET /api/amazon/cost-of-goods/missing?start=...&end=...&limit=50
+   * Example: GET /api/amazon/cost-of-goods/missing?take=10&skip=0
    */
   @UseGuards(ClerkAuthGuard)
   @Get('cost-of-goods/missing')
@@ -702,14 +744,18 @@ ping() {
     @Req() req: { user: { orgId: string } },
     @Query('start') start?: string,
     @Query('end') end?: string,
-    @Query('limit') limit?: string,
+    @Query('take') take?: string,
+    @Query('skip') skip?: string,
   ) {
-    const n = Number(limit ?? 25);
-    const safeLimit = Number.isFinite(n) ? Math.max(1, Math.min(100, n)) : 25;
+    const takeN = Number(take ?? 10);
+    const skipN = Number(skip ?? 0);
+    const safeTake = Number.isFinite(takeN) ? Math.max(1, Math.min(100, takeN)) : 10;
+    const safeSkip = Number.isFinite(skipN) ? Math.max(0, skipN) : 0;
     return this.amazonService.listMissingCostOfGoods(req.user.orgId, {
       start,
       end,
-      limit: safeLimit,
+      take: safeTake,
+      skip: safeSkip,
     });
   }
 

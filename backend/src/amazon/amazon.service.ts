@@ -72,7 +72,9 @@ export class AmazonService {
 
   /**
    * Compute profit and VAT breakdown for an order item based on org VAT settings and order date.
-   * Returns profit (ex-VAT for VAT reg, gross for non-VAT) and optional VAT fields to persist.
+   * Returns profit (ex-VAT for VAT reg, gross for non-VAT). Always computes and returns inc/excl
+   * VAT figures (and fee VAT) so we can persist them even when not VAT registered; when the user
+   * turns on VAT we can quickly compute VAT balance from stored figures.
    */
   private computeOrderItemVatAndProfit(
     revenueTotal: number,
@@ -102,7 +104,24 @@ export class AmazonService {
     prepIncVat: number | null;
     prepExVat: number | null;
     prepVatAmount: number | null;
+    amazonFeesExVat: number | null;
+    amazonFeesIncVat: number | null;
+    amazonFeesVatAmount: number | null;
   } {
+    const rate = vatSettings?.vatRatePct ?? 20;
+    const safeQty = quantity > 0 ? quantity : 1;
+    const costPerUnit = cogsTotal != null ? cogsTotal / safeQty : null;
+
+    // Fee VAT: Amazon fees are typically reported ex VAT; always compute for storage
+    const amazonFeesExVat = Math.round(itemFees * 100) / 100;
+    const amazonFeesVatAmount = itemFees > 0 ? vatAmountFromEx(itemFees, rate) : 0;
+    const amazonFeesIncVat = Math.round((amazonFeesExVat + amazonFeesVatAmount) * 100) / 100;
+    const feeVat = {
+      amazonFeesExVat,
+      amazonFeesIncVat,
+      amazonFeesVatAmount,
+    };
+
     const nil = {
       profit: null as number | null,
       salePriceIncVat: null,
@@ -117,32 +136,58 @@ export class AmazonService {
       prepIncVat: null,
       prepExVat: null,
       prepVatAmount: null,
+      ...feeVat,
     };
-    const safeQty = quantity > 0 ? quantity : 1;
-    const costPerUnit = cogsTotal != null ? cogsTotal / safeQty : null;
 
-    if (!vatSettings || vatSettings.vatRegistrationType === 'NON_VAT_REGISTERED') {
+    const notVatRegisteredOrBeforeEffective =
+      !vatSettings ||
+      vatSettings.vatRegistrationType === 'NON_VAT_REGISTERED' ||
+      (vatSettings.vatEffectiveDate != null && orderDate < vatSettings.vatEffectiveDate);
+
+    if (notVatRegisteredOrBeforeEffective) {
       const profit =
         cogsTotal != null
           ? Math.round((revenueTotal - taxCharged - cogsTotal + itemFees) * 100) / 100
           : null;
-      return { ...nil, profit };
-    }
-
-    const effective = vatSettings.vatEffectiveDate;
-    if (effective != null && orderDate < effective) {
-      const profit =
-        cogsTotal != null
-          ? Math.round((revenueTotal - taxCharged - cogsTotal + itemFees) * 100) / 100
-          : null;
-      return { ...nil, profit };
-    }
-
-    if (vatSettings.vatRegistrationType === 'VAT_STANDARD') {
-      const rate = vatSettings.vatRatePct;
+      // Still compute and store inc/excl VAT using org rate (or default 20%) for when user turns on VAT
       const salePriceIncVat = Math.round(revenueTotal * 100) / 100;
       const salePriceExVat = amountExVatFromIncl(revenueTotal, rate);
       const saleVatAmount = vatAmountFromIncl(revenueTotal, rate);
+      let unitCostIncVat = 0;
+      let unitCostExVat = 0;
+      let unitVatAmount = 0;
+      if (costPerUnit != null && costPerUnit > 0 && vatSettings?.vatCostsIncludeVat !== false) {
+        unitCostIncVat = Math.round(costPerUnit * 100) / 100;
+        unitCostExVat = amountExVatFromIncl(costPerUnit, rate);
+        unitVatAmount = vatAmountFromIncl(costPerUnit, rate);
+      } else if (costPerUnit != null && costPerUnit > 0) {
+        unitCostExVat = Math.round(costPerUnit * 100) / 100;
+        unitVatAmount = vatAmountFromEx(costPerUnit, rate);
+        unitCostIncVat = Math.round((costPerUnit + unitVatAmount) * 100) / 100;
+      }
+      return {
+        profit,
+        salePriceIncVat,
+        salePriceExVat,
+        saleVatAmount,
+        unitCostIncVat,
+        unitCostExVat,
+        unitVatAmount,
+        deliveryIncVat: 0,
+        deliveryExVat: 0,
+        deliveryVatAmount: 0,
+        prepIncVat: 0,
+        prepExVat: 0,
+        prepVatAmount: 0,
+        ...feeVat,
+      };
+    }
+
+    if (vatSettings.vatRegistrationType === 'VAT_STANDARD') {
+      const r = vatSettings.vatRatePct;
+      const salePriceIncVat = Math.round(revenueTotal * 100) / 100;
+      const salePriceExVat = amountExVatFromIncl(revenueTotal, r);
+      const saleVatAmount = vatAmountFromIncl(revenueTotal, r);
 
       let unitCostIncVat: number;
       let unitCostExVat: number;
@@ -150,11 +195,11 @@ export class AmazonService {
       if (costPerUnit != null && costPerUnit > 0) {
         if (vatSettings.vatCostsIncludeVat) {
           unitCostIncVat = Math.round(costPerUnit * 100) / 100;
-          unitCostExVat = amountExVatFromIncl(costPerUnit, rate);
-          unitVatAmount = vatAmountFromIncl(costPerUnit, rate);
+          unitCostExVat = amountExVatFromIncl(costPerUnit, r);
+          unitVatAmount = vatAmountFromIncl(costPerUnit, r);
         } else {
           unitCostExVat = Math.round(costPerUnit * 100) / 100;
-          unitVatAmount = vatAmountFromEx(costPerUnit, rate);
+          unitVatAmount = vatAmountFromEx(costPerUnit, r);
           unitCostIncVat = Math.round((costPerUnit + unitVatAmount) * 100) / 100;
         }
       } else {
@@ -181,6 +226,7 @@ export class AmazonService {
         prepIncVat: 0,
         prepExVat: 0,
         prepVatAmount: 0,
+        ...feeVat,
       };
     }
 
@@ -210,6 +256,7 @@ export class AmazonService {
         prepIncVat: 0,
         prepExVat: 0,
         prepVatAmount: 0,
+        ...feeVat,
       };
     }
 
@@ -217,7 +264,33 @@ export class AmazonService {
       cogsTotal != null
         ? Math.round((revenueTotal - taxCharged - cogsTotal + itemFees) * 100) / 100
         : null;
-    return { ...nil, profit };
+    const salePriceIncVat = Math.round(revenueTotal * 100) / 100;
+    const salePriceExVat = amountExVatFromIncl(revenueTotal, rate);
+    const saleVatAmount = vatAmountFromIncl(revenueTotal, rate);
+    let unitCostIncVat = 0;
+    let unitCostExVat = 0;
+    let unitVatAmount = 0;
+    if (costPerUnit != null && costPerUnit > 0) {
+      unitCostExVat = Math.round(costPerUnit * 100) / 100;
+      unitVatAmount = vatAmountFromEx(costPerUnit, rate);
+      unitCostIncVat = Math.round((costPerUnit + unitVatAmount) * 100) / 100;
+    }
+    return {
+      profit,
+      salePriceIncVat,
+      salePriceExVat,
+      saleVatAmount,
+      unitCostIncVat,
+      unitCostExVat,
+      unitVatAmount,
+      deliveryIncVat: 0,
+      deliveryExVat: 0,
+      deliveryVatAmount: 0,
+      prepIncVat: 0,
+      prepExVat: 0,
+      prepVatAmount: 0,
+      ...feeVat,
+    };
   }
 
   private async getAmazonCredentialsForOrg(
@@ -812,10 +885,19 @@ export class AmazonService {
         cogsTotal: true,
         prepIncVat: true,
         prepExVat: true,
+        quantity: true,
         settledReferralFeeTotal: true,
         settledFbaFeeTotal: true,
         settledDigitalServiceFeeTotal: true,
         amazonFeesTotal: true,
+        product: {
+          select: {
+            estimatedReferralFeePerUnit: true,
+            estimatedFbaFeePerUnit: true,
+            estimatedDigitalServiceFeePerUnit: true,
+            estimatedAmazonFeePerUnit: true,
+          },
+        },
       },
     });
 
@@ -823,7 +905,7 @@ export class AmazonService {
       if (v == null) return 0;
       if (typeof v === 'number' && Number.isFinite(v)) return v;
       if (typeof v === 'string') return parseFloat(v) || 0;
-      return Number(v) || 0;
+      return Number((v as any)?.toString?.() ?? 0) || 0;
     };
     const asCost = (n: number) => Math.abs(n);
 
@@ -838,10 +920,20 @@ export class AmazonService {
       totalCogs += toNum(it.cogsTotal);
       const prep = toNum(it.prepIncVat) || toNum(it.prepExVat);
       prepFees += asCost(prep);
-      referralFees += asCost(toNum(it.settledReferralFeeTotal));
-      fbaFees += asCost(toNum(it.settledFbaFeeTotal));
-      digitalServiceFees += asCost(toNum(it.settledDigitalServiceFeeTotal));
-      totalAmazonFees += asCost(toNum(it.amazonFeesTotal));
+      const qty = Number(it.quantity) || 1;
+      const product = it.product as { estimatedReferralFeePerUnit?: unknown; estimatedFbaFeePerUnit?: unknown; estimatedDigitalServiceFeePerUnit?: unknown; estimatedAmazonFeePerUnit?: unknown } | null;
+      const estReferral = toNum(product?.estimatedReferralFeePerUnit) * qty;
+      const estFba = toNum(product?.estimatedFbaFeePerUnit) * qty;
+      const estDsf = toNum(product?.estimatedDigitalServiceFeePerUnit) * qty;
+      const estTotal = toNum(product?.estimatedAmazonFeePerUnit) * qty;
+      const settledReferral = asCost(toNum(it.settledReferralFeeTotal));
+      const settledFba = asCost(toNum(it.settledFbaFeeTotal));
+      const settledDigital = asCost(toNum(it.settledDigitalServiceFeeTotal));
+      const settledTotal = asCost(toNum(it.amazonFeesTotal));
+      referralFees += settledReferral > 0 ? settledReferral : asCost(estReferral);
+      fbaFees += settledFba > 0 ? settledFba : asCost(estFba);
+      digitalServiceFees += settledDigital > 0 ? settledDigital : asCost(estDsf);
+      totalAmazonFees += settledTotal > 0 ? settledTotal : asCost(estTotal);
     }
 
     return {
@@ -859,7 +951,8 @@ export class AmazonService {
 
   /**
    * Profit & Loss for a period: revenue minus selling unit costs (COGS, prep, fees) and fixed costs (software/other subscriptions).
-   * Total profit = revenue - totalSellingCosts - totalFixedCosts (excl. corporation tax).
+   * Total profit = revenue - totalSellingCosts - totalFixedCosts.
+   * Also returns VAT adjustment: outputVat (on sales), inputVat (on costs), vatBalance = outputVat - inputVat.
    */
   async getProfitAndLoss(
     orgId: string,
@@ -877,6 +970,10 @@ export class AmazonService {
     otherSubsTotal: number;
     totalFixedCosts: number;
     totalProfit: number;
+    outputVat: number;
+    inputVat: number;
+    vatBalance: number;
+    vatRegistered: boolean;
     currency: string;
     start: string;
     end: string;
@@ -896,7 +993,26 @@ export class AmazonService {
     }
 
     const userIds = await this.getOrgMemberUserIds(orgId);
+    const toNum = (v: unknown): number => {
+      if (v == null) return 0;
+      if (typeof v === 'number' && Number.isFinite(v)) return v;
+      if (typeof v === 'string') return parseFloat(v) || 0;
+      return Number((v as any).toString?.() ?? 0) || 0;
+    };
     let revenue = 0;
+    let outputVat = 0;
+    let inputVat = 0;
+
+    // VAT settings for computing VAT when not stored on order items
+    let vatSettings: Awaited<ReturnType<AmazonService['getVatSettingsForUser']>> = null;
+    if (userIds.length > 0) {
+      try {
+        vatSettings = await this.getVatSettingsForUser(userIds[0]);
+      } catch {
+        // ignore
+      }
+    }
+
     if (userIds.length > 0) {
       const items = await (this.prisma as any).orderItem.findMany({
         where: {
@@ -904,16 +1020,89 @@ export class AmazonService {
           marketplace: 'amazon',
           orderDate: { gte: safeStart, lte: safeEnd },
         },
-        select: { revenueTotal: true },
+        select: {
+          revenueTotal: true,
+          cogsTotal: true,
+          quantity: true,
+          orderDate: true,
+          taxChargedTotal: true,
+          amazonFeesTotal: true,
+          saleVatAmount: true,
+          estimatedSaleVatAmount: true,
+          unitVatAmount: true,
+          prepVatAmount: true,
+          deliveryVatAmount: true,
+          amazonFeesVatAmount: true,
+        },
       });
-      const toNum = (v: unknown): number => {
-        if (v == null) return 0;
-        if (typeof v === 'number' && Number.isFinite(v)) return v;
-        if (typeof v === 'string') return parseFloat(v) || 0;
-        return Number((v as any).toString?.() ?? 0) || 0;
-      };
-      for (const it of items) revenue += toNum(it.revenueTotal);
+      for (const it of items) {
+        revenue += toNum(it.revenueTotal);
+        const rev = toNum(it.revenueTotal);
+        const cogs = it.cogsTotal != null ? toNum(it.cogsTotal) : null;
+        const qty = Math.max(1, Number(it.quantity) || 1);
+        const orderDateItem = it.orderDate instanceof Date ? it.orderDate : new Date(it.orderDate);
+        const taxCharged = toNum(it.taxChargedTotal);
+        const itemFees = toNum(it.amazonFeesTotal);
+
+        let saleVat = toNum(it.saleVatAmount) || toNum(it.estimatedSaleVatAmount);
+        let itemInputVat =
+          toNum(it.unitVatAmount) +
+          toNum(it.prepVatAmount) +
+          toNum(it.deliveryVatAmount) +
+          toNum(it.amazonFeesVatAmount);
+        if ((saleVat === 0 && itemInputVat === 0) && vatSettings && vatSettings.vatRegistrationType !== 'NON_VAT_REGISTERED') {
+          const vatResult = this.computeOrderItemVatAndProfit(
+            rev,
+            cogs,
+            qty,
+            orderDateItem,
+            itemFees,
+            taxCharged,
+            vatSettings,
+          );
+          saleVat = vatResult.saleVatAmount != null ? Number(vatResult.saleVatAmount.toFixed(2)) : 0;
+          itemInputVat =
+            (vatResult.unitVatAmount ?? 0) +
+            (vatResult.prepVatAmount ?? 0) +
+            (vatResult.deliveryVatAmount ?? 0) +
+            (vatResult.amazonFeesVatAmount ?? 0);
+        }
+        outputVat += saleVat;
+        inputVat += itemInputVat;
+      }
+
+      // Input VAT from purchases in the period
+      const purchases = await (this.prisma as any).purchase.findMany({
+        where: {
+          userId: { in: userIds },
+          purchaseDate: { gte: safeStart, lte: safeEnd },
+        },
+        select: {
+          totalCostIncVat: true,
+          totalCostExVat: true,
+          costsEnteredInclVat: true,
+          vatRatePct: true,
+        },
+      });
+      for (const p of purchases) {
+        const incVat = toNum(p.totalCostIncVat);
+        const exVat = p.totalCostExVat != null ? toNum(p.totalCostExVat) : null;
+        const rate = toNum(p.vatRatePct) || 20;
+        const costsInclVat = p.costsEnteredInclVat !== false;
+        let purchaseVat = 0;
+        if (exVat != null && exVat > 0) {
+          purchaseVat = Math.round((incVat - exVat) * 100) / 100;
+        } else if (incVat > 0) {
+          purchaseVat = costsInclVat
+            ? vatAmountFromIncl(incVat, rate)
+            : vatAmountFromEx(incVat, rate);
+        }
+        inputVat += purchaseVat;
+      }
     }
+    const vatBalance = Math.round((outputVat - inputVat) * 100) / 100;
+    const vatRegistered =
+      vatSettings != null && vatSettings.vatRegistrationType !== 'NON_VAT_REGISTERED';
 
     let softwareSubsTotal = 0;
     let otherSubsTotal = 0;
@@ -957,6 +1146,10 @@ export class AmazonService {
       otherSubsTotal,
       totalFixedCosts,
       totalProfit,
+      outputVat,
+      inputVat,
+      vatBalance,
+      vatRegistered,
       currency: cost.currency,
       start: cost.start,
       end: cost.end,
@@ -1416,22 +1609,23 @@ export class AmazonService {
         };
         const addFee = (feeType: string, amt: number) => {
           if (amt === 0) return;
-          if (feeType === 'ReferralFee') out.referral += amt;
-          else if (feeType === 'FBAFees' || feeType.startsWith('FBA')) out.fba += amt;
-          else if (feeType === 'VariableClosingFee' || feeType === 'DigitalServiceFee') out.digital += amt;
+          const t = (feeType || '').toLowerCase();
+          if (t === 'referralfee' || t.includes('referral') || t === 'commission') out.referral += amt;
+          else if (t === 'fbafees' || t.startsWith('fba') || t.includes('fulfillment')) out.fba += amt;
+          else if (t === 'variableclosingfee' || t === 'digitalservicefee' || t.includes('digital')) out.digital += amt;
         };
         if (!Array.isArray(list)) return out;
         for (const fc of list) {
-          const feeType = (fc?.FeeType ?? fc?.feeType ?? '') as string;
+          const feeType = (fc?.FeeType ?? fc?.feeType ?? fc?.Type ?? '') as string;
           const amt = readAmt(fc);
           if (amt !== 0) addFee(feeType, amt);
           // SP-API often nests fee components: ItemFeeList[].FeeComponent[] with FeeType/FeeAmount.
-          const components = fc?.FeeComponent ?? fc?.feeComponent;
+          const components = fc?.FeeComponent ?? fc?.feeComponent ?? fc?.FeeDetailList;
           if (Array.isArray(components)) {
             for (const comp of components) {
-              const t = (comp?.FeeType ?? comp?.feeType ?? '') as string;
-              const a = readAmt(comp);
-              if (a !== 0) addFee(t, a);
+              const ct = (comp?.FeeType ?? comp?.feeType ?? comp?.Type ?? '') as string;
+              const ca = readAmt(comp);
+              if (ca !== 0) addFee(ct, ca);
             }
           }
         }
@@ -1822,16 +2016,33 @@ export class AmazonService {
           if (vatResult.prepIncVat != null) vatData.prepIncVat = vatResult.prepIncVat;
           if (vatResult.prepExVat != null) vatData.prepExVat = vatResult.prepExVat;
           if (vatResult.prepVatAmount != null) vatData.prepVatAmount = vatResult.prepVatAmount;
+          if (vatResult.amazonFeesExVat != null) vatData.amazonFeesExVat = vatResult.amazonFeesExVat;
+          if (vatResult.amazonFeesIncVat != null) vatData.amazonFeesIncVat = vatResult.amazonFeesIncVat;
+          if (vatResult.amazonFeesVatAmount != null) vatData.amazonFeesVatAmount = vatResult.amazonFeesVatAmount;
           const updateFeesAndProfit =
             feesFromFinances || (existingItem?.feesSource as string) !== 'finances';
+          const breakdownSum = settledBreakdown
+            ? settledBreakdown.referral + settledBreakdown.fba + settledBreakdown.digital
+            : 0;
+          const hasBreakdown = settledBreakdown && breakdownSum !== 0;
+          const totalFeeAbs = Math.abs(finalFees);
           const settledFeeFields =
-            feesFromFinances && settledBreakdown
+            feesFromFinances && hasBreakdown
               ? {
-                  settledReferralFeeTotal: Number(settledBreakdown.referral.toFixed(2)),
-                  settledFbaFeeTotal: Number(settledBreakdown.fba.toFixed(2)),
-                  settledDigitalServiceFeeTotal: Number(settledBreakdown.digital.toFixed(2)),
+                  settledReferralFeeTotal: Number(settledBreakdown!.referral.toFixed(2)),
+                  settledFbaFeeTotal: Number(settledBreakdown!.fba.toFixed(2)),
+                  settledDigitalServiceFeeTotal: Number(settledBreakdown!.digital.toFixed(2)),
                 }
-              : {};
+              : feesFromFinances && totalFeeAbs > 0
+                ? (() => {
+                    const half = Number((totalFeeAbs / 2).toFixed(2));
+                    return {
+                      settledReferralFeeTotal: half,
+                      settledFbaFeeTotal: half,
+                      settledDigitalServiceFeeTotal: 0,
+                    };
+                  })()
+                : {};
           const updatePayload = {
             userId,
             productId: itemProduct.id,
@@ -2551,6 +2762,151 @@ export class AmazonService {
     }));
   }
 
+  /**
+   * Sort product IDs by available stock (desc) then sales revenue (desc) for COGS tab.
+   */
+  private async sortProductIdsByStockAndRevenue(
+    userIds: string[],
+    productIds: string[],
+  ): Promise<string[]> {
+    if (productIds.length === 0) return [];
+    const invRows = await this.prisma.inventory.findMany({
+      where: { userId: { in: userIds }, productId: { in: productIds } },
+      select: { productId: true, availableQty: true },
+    });
+    const stockByProduct = new Map(invRows.map((r) => [r.productId, r.availableQty ?? 0]));
+    const revenueRows = await (this.prisma as any).orderItem.groupBy({
+      by: ['productId'],
+      where: { userId: { in: userIds }, productId: { in: productIds }, marketplace: 'amazon' },
+      _sum: { revenueTotal: true },
+    });
+    const revenueByProduct = new Map(
+      Array.isArray(revenueRows)
+        ? revenueRows.map((r: any) => [r.productId, Number(r._sum?.revenueTotal ?? 0)])
+        : [],
+    );
+    return [...productIds].sort((a, b) => {
+      const stockA = stockByProduct.get(a) ?? 0;
+      const stockB = stockByProduct.get(b) ?? 0;
+      if (stockB !== stockA) return stockB - stockA;
+      const revA = revenueByProduct.get(a) ?? 0;
+      const revB = revenueByProduct.get(b) ?? 0;
+      return revB - revA;
+    });
+  }
+
+  /**
+   * List products that have at least one Inventory row (from FBA sync).
+   * Sorted by available stock (desc) then sales revenue (desc). Paginated.
+   * Returns every inventory SKU even if Product row is missing (placeholder sku/title then).
+   */
+  async listProductsFromInventory(
+    orgId: string,
+    opts?: { take?: number; skip?: number },
+  ): Promise<{ total: number; items: Array<{ id: string; sku: string; asin: string | null; title: string | null; imageUrl: string | null }> }> {
+    const userIds = await this.getOrgMemberUserIds(orgId);
+    const take = Math.max(1, Math.min(100, opts?.take ?? 10));
+    const skip = Math.max(0, opts?.skip ?? 0);
+
+    const invRows = await this.prisma.inventory.findMany({
+      where: { userId: { in: userIds } },
+      select: { productId: true },
+    });
+    const productIds = [...new Set(invRows.map((r) => r.productId))];
+    const total = productIds.length;
+    if (total === 0) return { total: 0, items: [] };
+
+    const sortedIds = await this.sortProductIdsByStockAndRevenue(userIds, productIds);
+    const pageIds = sortedIds.slice(skip, skip + take);
+
+    const products = await this.prisma.product.findMany({
+      where: { id: { in: pageIds } },
+      select: { id: true, sku: true, asin: true, title: true, imageUrl: true },
+    });
+    const byId = new Map(products.map((p) => [p.id, p]));
+    const items = pageIds.map((id) => {
+      const p = byId.get(id);
+      if (p) return p;
+      return { id, sku: id, asin: null as string | null, title: null as string | null, imageUrl: null as string | null };
+    });
+    return { total, items };
+  }
+
+  /**
+   * List inventory SKUs that have at least one cost entry (Purchase row or Product.costOfGoods > 0).
+   * Paginated for the "Complete" tab.
+   */
+  async listProductsWithCostFromInventory(
+    orgId: string,
+    opts?: { take?: number; skip?: number },
+  ): Promise<{ total: number; items: Array<{ id: string; sku: string; asin: string | null; title: string | null; imageUrl: string | null }> }> {
+    const userIds = await this.getOrgMemberUserIds(orgId);
+    const take = Math.max(1, Math.min(100, opts?.take ?? 10));
+    const skip = Math.max(0, opts?.skip ?? 0);
+
+    const invRows = await this.prisma.inventory.findMany({
+      where: { userId: { in: userIds } },
+      select: { productId: true },
+    });
+    const inventoryProductIds = [...new Set(invRows.map((r) => r.productId))];
+    if (inventoryProductIds.length === 0) return { total: 0, items: [] };
+
+    const purchasedDistinct = await (this.prisma as any).purchase.groupBy({
+      by: ['productId'],
+      where: { userId: { in: userIds }, productId: { in: inventoryProductIds } },
+    });
+    const hasPurchaseIds = new Set(
+      Array.isArray(purchasedDistinct)
+        ? purchasedDistinct.map((r: any) => r.productId).filter(Boolean)
+        : [],
+    );
+
+    const toNum = (value: unknown): number => {
+      if (value == null) return 0;
+      if (typeof value === 'number') return value;
+      if (typeof value === 'string') return Number(value);
+      if (typeof value === 'bigint') return Number(value);
+      if (typeof value === 'object') {
+        const anyVal = value as any;
+        if (typeof anyVal?.toNumber === 'function') return anyVal.toNumber();
+        if (typeof anyVal?.toString === 'function') return Number(anyVal.toString());
+      }
+      return Number(value as any);
+    };
+    const productsWithCogs = await this.prisma.product.findMany({
+      where: {
+        userId: { in: userIds },
+        id: { in: inventoryProductIds },
+        costOfGoods: { not: null },
+      },
+      select: { id: true, costOfGoods: true },
+    });
+    const hasCogsIds = new Set(
+      productsWithCogs.filter((p) => toNum(p.costOfGoods) > 0).map((p) => p.id),
+    );
+
+    const completeIds = inventoryProductIds.filter(
+      (id) => hasPurchaseIds.has(id) || hasCogsIds.has(id),
+    );
+    const sortedCompleteIds = await this.sortProductIdsByStockAndRevenue(userIds, completeIds);
+
+    const total = sortedCompleteIds.length;
+    const pageIds = sortedCompleteIds.slice(skip, skip + take);
+    if (pageIds.length === 0) return { total, items: [] };
+
+    const products = await this.prisma.product.findMany({
+      where: { id: { in: pageIds } },
+      select: { id: true, sku: true, asin: true, title: true, imageUrl: true },
+    });
+    const byId = new Map(products.map((p) => [p.id, p]));
+    const items = pageIds.map((id) => {
+      const p = byId.get(id);
+      if (p) return p;
+      return { id, sku: id, asin: null as string | null, title: null as string | null, imageUrl: null as string | null };
+    });
+    return { total, items };
+  }
+
   async updateProductCostOfGoods(
     orgId: string,
     productId: string,
@@ -2654,6 +3010,9 @@ export class AmazonService {
         if (vatResult.prepIncVat != null) vatData.prepIncVat = vatResult.prepIncVat;
         if (vatResult.prepExVat != null) vatData.prepExVat = vatResult.prepExVat;
         if (vatResult.prepVatAmount != null) vatData.prepVatAmount = vatResult.prepVatAmount;
+        if (vatResult.amazonFeesExVat != null) vatData.amazonFeesExVat = vatResult.amazonFeesExVat;
+        if (vatResult.amazonFeesIncVat != null) vatData.amazonFeesIncVat = vatResult.amazonFeesIncVat;
+        if (vatResult.amazonFeesVatAmount != null) vatData.amazonFeesVatAmount = vatResult.amazonFeesVatAmount;
 
         await (this.prisma as any).orderItem.update({
           where: { id: it.id },
@@ -4721,21 +5080,22 @@ try {
         };
         const addFee = (feeType: string, amt: number) => {
           if (amt === 0) return;
-          if (feeType === 'ReferralFee') out.referral += amt;
-          else if (feeType === 'FBAFees' || feeType.startsWith('FBA')) out.fba += amt;
-          else if (feeType === 'VariableClosingFee' || feeType === 'DigitalServiceFee') out.digital += amt;
+          const t = (feeType || '').toLowerCase();
+          if (t === 'referralfee' || t.includes('referral') || t === 'commission') out.referral += amt;
+          else if (t === 'fbafees' || t.startsWith('fba') || t.includes('fulfillment')) out.fba += amt;
+          else if (t === 'variableclosingfee' || t === 'digitalservicefee' || t.includes('digital')) out.digital += amt;
         };
         if (!Array.isArray(list)) return out;
         for (const fc of list) {
-          const feeType = (fc?.FeeType ?? fc?.feeType ?? '') as string;
+          const feeType = (fc?.FeeType ?? fc?.feeType ?? fc?.Type ?? '') as string;
           const amt = readAmt(fc);
           if (amt !== 0) addFee(feeType, amt);
-          const components = fc?.FeeComponent ?? fc?.feeComponent;
+          const components = fc?.FeeComponent ?? fc?.feeComponent ?? fc?.FeeDetailList;
           if (Array.isArray(components)) {
             for (const comp of components) {
-              const t = (comp?.FeeType ?? comp?.feeType ?? '') as string;
-              const a = readAmt(comp);
-              if (a !== 0) addFee(t, a);
+              const ct = (comp?.FeeType ?? comp?.feeType ?? comp?.Type ?? '') as string;
+              const ca = readAmt(comp);
+              if (ca !== 0) addFee(ct, ca);
             }
           }
         }
@@ -6199,72 +6559,40 @@ if (org?.lastFbaInventorySyncAt) {
     };
   }
 
+  /**
+   * List inventory SKUs that have no cost entries in the DB (no Purchase rows and no/zero Product.costOfGoods).
+   * Used for the "Missing" tab so users can add COGS; once they save, the SKU moves to All/Complete.
+   */
   async listMissingCostOfGoods(
     orgId: string,
-    opts?: { start?: string; end?: string; limit?: number },
+    opts?: { start?: string; end?: string; take?: number; skip?: number },
   ) {
     const userIds = await this.getOrgMemberUserIds(orgId);
+    const take = Math.max(1, Math.min(100, opts?.take ?? 10));
+    const skip = Math.max(0, opts?.skip ?? 0);
 
-    const nowSafe = new Date(Date.now() - 5 * 60 * 1000);
-    const defaultStart = new Date(nowSafe.getTime() - 30 * 24 * 60 * 60 * 1000);
-
-    const startDate = opts?.start ? new Date(opts.start) : defaultStart;
-    const endDate = opts?.end ? new Date(opts.end) : nowSafe;
-
-    if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
-      throw new BadRequestException('Invalid start/end date');
+    // All inventory productIds for this org
+    const invRows = await this.prisma.inventory.findMany({
+      where: { userId: { in: userIds } },
+      select: { productId: true },
+    });
+    const inventoryProductIds = [...new Set(invRows.map((r) => r.productId))];
+    if (inventoryProductIds.length === 0) {
+      return { missingSkusCount: 0, items: [] };
     }
 
-    // First determine which products were actually sold in this period.
-    const soldDistinct = await (this.prisma as any).orderItem.groupBy({
-      by: ['productId'],
-      where: {
-        userId: { in: userIds },
-        marketplace: 'amazon',
-        orderDate: { gte: startDate, lte: endDate },
-      },
-    });
-    const soldIds = Array.isArray(soldDistinct)
-      ? soldDistinct.map((r: any) => r.productId).filter(Boolean)
-      : [];
-
-    if (soldIds.length === 0) {
-      return {
-        startDate: startDate.toISOString(),
-        endDate: endDate.toISOString(),
-        missingSkusCount: 0,
-        items: [],
-      };
-    }
-
-    const soldProducts = await this.prisma.product.findMany({
-      where: {
-        userId: { in: userIds },
-        id: { in: soldIds },
-      },
-      select: {
-        id: true,
-        sku: true,
-        asin: true,
-        title: true,
-        imageUrl: true,
-        costOfGoods: true,
-      },
-    });
-
+    // ProductIds that have at least one Purchase (cost entry) in the org
     const purchasedDistinct = await (this.prisma as any).purchase.groupBy({
       by: ['productId'],
-      where: {
-        userId: { in: userIds },
-        productId: { in: soldIds },
-      },
+      where: { userId: { in: userIds }, productId: { in: inventoryProductIds } },
     });
-    const withLedgerEntry = new Set(
+    const hasPurchaseIds = new Set(
       Array.isArray(purchasedDistinct)
         ? purchasedDistinct.map((r: any) => r.productId).filter(Boolean)
         : [],
     );
 
+    // ProductIds where Product has costOfGoods set (non-null, > 0)
     const toNum = (value: unknown): number => {
       if (value == null) return 0;
       if (typeof value === 'number') return value;
@@ -6273,86 +6601,67 @@ if (org?.lastFbaInventorySyncAt) {
       if (typeof value === 'object') {
         const anyVal = value as any;
         if (typeof anyVal.toNumber === 'function') return anyVal.toNumber();
-        if (typeof anyVal.toString === 'function')
-          return Number(anyVal.toString());
+        if (typeof anyVal.toString === 'function') return Number(anyVal.toString());
       }
       return Number(value as any);
     };
+    const productsWithCogs = await this.prisma.product.findMany({
+      where: {
+        userId: { in: userIds },
+        id: { in: inventoryProductIds },
+        costOfGoods: { not: null },
+      },
+      select: { id: true, costOfGoods: true },
+    });
+    const hasCogsIds = new Set(
+      productsWithCogs
+        .filter((p) => toNum(p.costOfGoods) > 0)
+        .map((p) => p.id),
+    );
 
-    // A sold SKU is "missing COGS" if:
-    // - it has no ledger entries yet, OR
-    // - its derived costOfGoods is null/0 (or negative) (common placeholder).
-    const missingProducts = soldProducts
-      .filter((p) => {
-        const cost = p.costOfGoods == null ? null : toNum(p.costOfGoods);
-        const missingCost = cost == null || Number.isNaN(cost) || cost <= 0;
-        const missingLedger = !withLedgerEntry.has(p.id);
-        return missingCost || missingLedger;
-      })
-      .map((p) => ({
-        id: p.id,
-        sku: p.sku,
-        asin: p.asin,
-        title: p.title,
-        imageUrl: p.imageUrl,
-      }));
-    if (missingProducts.length === 0) {
-      return {
-        startDate: startDate.toISOString(),
-        endDate: endDate.toISOString(),
-        missingSkusCount: 0,
-        items: [],
-      };
+    // Missing = in inventory but no Purchase and no/zero costOfGoods
+    const missingIds = inventoryProductIds.filter(
+      (id) => !hasPurchaseIds.has(id) && !hasCogsIds.has(id),
+    );
+    const sortedMissingIds = await this.sortProductIdsByStockAndRevenue(userIds, missingIds);
+
+    const missingSkusCount = sortedMissingIds.length;
+    const pageIds = sortedMissingIds.slice(skip, skip + take);
+    if (pageIds.length === 0) {
+      return { missingSkusCount, items: [] };
     }
 
-    const missingIds = missingProducts.map((p) => p.id);
-
-    const where = {
-      userId: { in: userIds },
-      marketplace: 'amazon',
-      productId: { in: missingIds },
-      orderDate: { gte: startDate, lte: endDate },
-    };
-
-    const missingSkusCount = missingProducts.length;
-
-    const rows = await (this.prisma as any).orderItem.groupBy({
-      by: ['productId'],
-      where,
-      _sum: {
-        revenueTotal: true,
-        quantity: true,
-      },
-      _count: { _all: true },
-      orderBy: { _sum: { revenueTotal: 'desc' } },
-      take: opts?.limit ?? 25,
+    const products = await this.prisma.product.findMany({
+      where: { id: { in: pageIds } },
+      select: { id: true, sku: true, asin: true, title: true, imageUrl: true },
     });
+    const byId = new Map(products.map((p) => [p.id, p]));
 
-    const byId = new Map(missingProducts.map((p) => [p.id, p]));
-
-    const items = rows
-      .map((r: any) => {
-        const p = byId.get(r.productId);
-        if (!p) return null;
+    const items = pageIds.map((id) => {
+      const p = byId.get(id);
+      if (p) {
         return {
           productId: p.id,
           sku: p.sku,
           asin: p.asin,
           title: p.title,
           imageUrl: p.imageUrl,
-          revenue: Number(r._sum?.revenueTotal ?? 0),
-          units: Number(r._sum?.quantity ?? 0),
-          lineItems: r._count?._all ?? 0,
+          revenue: 0,
+          units: 0,
         };
-      })
-      .filter(Boolean);
+      }
+      return {
+        productId: id,
+        sku: id,
+        asin: null as string | null,
+        title: null as string | null,
+        imageUrl: null as string | null,
+        revenue: 0,
+        units: 0,
+      };
+    });
 
-    return {
-      startDate: startDate.toISOString(),
-      endDate: endDate.toISOString(),
-      missingSkusCount,
-      items,
-    };
+    return { missingSkusCount, items };
   }
 
   /**

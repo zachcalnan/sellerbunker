@@ -326,7 +326,6 @@ function HomeInner() {
           percentage: hasCostData ? Math.min(100, Math.round(roiPct)) : 0,
           color: "#EC4899",
           hidePercentage: !hasCostData,
-          centerTitle: "ROI",
         },
       ]
     : [];
@@ -702,61 +701,59 @@ function RecentOrders({
       )}
       {!loading && !error && orders.length > 0 && (
         <div className="max-h-44 w-full overflow-y-auto overflow-x-hidden">
-          <div className="min-w-0 w-full pr-5">
-            {/* Header row: same grid as data rows so Price/Profit/ROI align */}
-            <div className="grid w-full grid-cols-[2.25rem_minmax(0,1fr)_6rem_6rem_4rem] items-center gap-x-4 gap-y-1 border-b border-[var(--surface-border)] pb-1 pt-0 text-[9px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
-              <div aria-hidden />
-              <div />
-              <div className="text-center text-xs text-white">Price</div>
-              <div className="text-center text-xs text-white">Profit</div>
-              <div className="text-center text-xs text-white">ROI</div>
+          <div className="min-w-0 w-full pr-2">
+            {/* Header: title area left, Price/Profit/ROI grouped right (centered under headers) */}
+            <div className="flex w-full items-center gap-2 border-b border-[var(--surface-border)] pb-1 pt-0 text-[9px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
+              <span className="min-w-0 flex-1">Product</span>
+              <div className="flex shrink-0 items-center justify-end gap-1 pl-2">
+                <span className="w-14 text-center text-white">Price</span>
+                <span className="w-12 text-center text-white">Profit</span>
+                <span className="w-9 text-center text-white">ROI</span>
+              </div>
             </div>
             {orders.map((row) => {
               const revenue = row.salePrice * row.quantity;
               const title = row.title?.trim() || "—";
-              const shortTitle = title.length > 42 ? title.slice(0, 39) + "…" : title;
               return (
                 <div
                   key={row.id}
-                  className="grid w-full grid-cols-[2.25rem_minmax(0,1fr)_6rem_6rem_4rem] items-center gap-x-4 gap-y-1 border-b border-[var(--surface-border)] py-1.5 text-[10px] last:border-b-0"
+                  className="flex w-full min-w-0 flex-col gap-0.5 border-b border-[var(--surface-border)] py-1.5 last:border-b-0 sm:flex-row sm:items-center sm:gap-2"
                 >
-                  <div className="h-9 w-9 shrink-0 overflow-hidden rounded bg-[var(--surface)] ring-1 ring-[var(--surface-border)]">
-                    {row.imageUrl ? (
-                      <img
-                        src={row.imageUrl}
-                        alt=""
-                        className="h-full w-full object-cover"
-                      />
-                    ) : (
-                      <div className="flex h-full w-full items-center justify-center text-[var(--muted-foreground)]">
-                        —
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-[10px] font-medium leading-tight text-[var(--foreground)]" title={row.title ?? undefined}>
+                      {title}
+                    </div>
+                    <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[9px] text-[var(--muted-foreground)]">
+                      <div className="h-5 w-5 shrink-0 overflow-hidden rounded bg-[var(--surface)] ring-1 ring-[var(--surface-border)]">
+                        {row.imageUrl ? (
+                          <img src={row.imageUrl} alt="" className="h-full w-full object-cover" />
+                        ) : (
+                          <div className="flex h-full w-full items-center justify-center text-[8px]">—</div>
+                        )}
                       </div>
-                    )}
-                  </div>
-                  <div className="min-w-0">
-                    <div className="truncate text-xs font-medium text-[var(--foreground)]" title={row.title ?? undefined}>
-                      {shortTitle}
-                    </div>
-                    <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 truncate text-[11px] text-[var(--muted-foreground)]">
-                      <span>{formatDate(row.orderDate)}</span>
-                      <span>·</span>
-                      <span>{row.sku}</span>
-                      <span>·</span>
-                      <span>{row.asin ?? "—"}</span>
-                      <span>·</span>
-                      <span>Qty {row.quantity}</span>
-                      <span>·</span>
-                      <span>Stock {row.availableStock != null ? row.availableStock : "—"}</span>
+                      <span className="truncate">
+                        {formatDate(row.orderDate)}
+                        <span className="mx-1">·</span>
+                        {row.sku}
+                        <span className="mx-1">·</span>
+                        {row.asin ?? "—"}
+                        <span className="mx-1">·</span>
+                        Qty {row.quantity}
+                        <span className="mx-1">·</span>
+                        Stock {row.availableStock != null ? row.availableStock : "—"}
+                      </span>
                     </div>
                   </div>
-                  <div className="text-center text-xs font-medium tabular-nums text-white">
-                    {revenue != null && Number.isFinite(revenue) ? formatCurrency(revenue, currency) : "—"}
-                  </div>
-                  <div className="text-center text-xs font-medium tabular-nums text-white">
-                    {row.profit != null && Number.isFinite(row.profit) ? formatCurrency(row.profit, currency) : "—"}
-                  </div>
-                  <div className="text-center text-xs font-medium tabular-nums text-white">
-                    {row.roiPct != null && Number.isFinite(row.roiPct) ? `${row.roiPct.toFixed(1)}%` : "—"}
+                  <div className="flex shrink-0 items-center justify-end gap-1 pl-2 text-[10px] tabular-nums font-medium text-white">
+                    <span className="w-14 text-center">
+                      {revenue != null && Number.isFinite(revenue) ? formatCurrency(revenue, currency) : "—"}
+                    </span>
+                    <span className="w-12 text-center">
+                      {row.profit != null && Number.isFinite(row.profit) ? formatCurrency(row.profit, currency) : "—"}
+                    </span>
+                    <span className="w-9 text-center">
+                      {row.roiPct != null && Number.isFinite(row.roiPct) ? `${row.roiPct.toFixed(1)}%` : "—"}
+                    </span>
                   </div>
                 </div>
               );
@@ -836,38 +833,38 @@ function TopSellers({
   }, [isSignedIn, getToken, baseUrl]);
 
   return (
-    <div className="flex w-full flex-col rounded-xl p-4 ring-1 ring-[var(--surface-border)]">
-      <h2 className="mb-2 text-sm font-medium uppercase tracking-[0.2em] text-[var(--muted-foreground)]">
+    <div className="flex w-full flex-col rounded-xl p-3 ring-1 ring-[var(--surface-border)]">
+      <h2 className="mb-1.5 text-xs font-medium uppercase tracking-[0.2em] text-[var(--muted-foreground)]">
         Top Sellers (this month)
       </h2>
       {isFallbackPeriod && rows.length > 0 && (
-        <p className="mb-1.5 text-[10px] text-[var(--muted-foreground)]">
+        <p className="mb-1 text-[9px] text-[var(--muted-foreground)]">
           No sales this month — showing last 30 days
         </p>
       )}
       {loading && (
-        <p className="text-[11px] text-[var(--muted-foreground)]">Loading…</p>
+        <p className="text-[10px] text-[var(--muted-foreground)]">Loading…</p>
       )}
       {error && (
-        <p className="text-[11px] text-red-600">{error}</p>
+        <p className="text-[10px] text-red-600">{error}</p>
       )}
       {!loading && !error && rows.length === 0 && (
-        <p className="text-[11px] text-[var(--muted-foreground)]">
+        <p className="text-[10px] text-[var(--muted-foreground)]">
           No sales this month yet.
         </p>
       )}
       {!loading && !error && rows.length > 0 && (
         <div className="w-full overflow-x-auto">
-          <table className="w-full text-[11px]">
+          <table className="w-full text-[10px]">
             <thead>
-              <tr className="border-b border-[var(--surface-border)] text-[10px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
-                <th className="py-1.5 pr-2 text-left">Title</th>
-                <th className="py-1.5 px-2 text-left">SKU</th>
-                <th className="py-1.5 px-2 text-left">IMG</th>
-                <th className="py-1.5 px-2 text-left">ASIN</th>
-                <th className="py-1.5 px-2 text-right">Qty</th>
-                <th className="py-1.5 px-2 text-right">Revenue</th>
-                <th className="py-1.5 pl-2 text-right">Profit</th>
+              <tr className="border-b border-[var(--surface-border)] text-[9px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
+                <th className="py-1 pr-1.5 text-left">Title</th>
+                <th className="py-1 px-1.5 text-left">SKU</th>
+                <th className="py-1 px-1 text-left">IMG</th>
+                <th className="py-1 px-1.5 text-left">ASIN</th>
+                <th className="w-14 py-1 text-center">Qty</th>
+                <th className="w-14 py-1 text-center">Rev</th>
+                <th className="w-14 py-1 text-center">Profit</th>
               </tr>
             </thead>
             <tbody>
@@ -876,14 +873,14 @@ function TopSellers({
                   key={row.productId}
                   className="border-b border-[var(--surface-border)] last:border-b-0"
                 >
-                  <td className="max-w-[10rem] truncate py-1.5 pr-2 font-medium text-[var(--foreground)]" title={row.title ?? undefined}>
+                  <td className="max-w-[8rem] truncate py-1 pr-1.5 font-medium text-[var(--foreground)]" title={row.title ?? undefined}>
                     {row.title?.trim() || "—"}
                   </td>
-                  <td className="py-1.5 px-2 font-medium tabular-nums text-[var(--foreground)]">
+                  <td className="max-w-[5rem] truncate py-1 px-1.5 font-medium tabular-nums text-[var(--foreground)]" title={row.sku ?? undefined}>
                     {row.sku ?? "—"}
                   </td>
-                  <td className="py-1.5 px-2">
-                    <div className="h-9 w-9 overflow-hidden rounded bg-[var(--surface)] ring-1 ring-[var(--surface-border)]">
+                  <td className="py-1 px-1">
+                    <div className="h-6 w-6 overflow-hidden rounded bg-[var(--surface)] ring-1 ring-[var(--surface-border)]">
                       {row.imageUrl ? (
                         <img
                           src={row.imageUrl}
@@ -892,24 +889,24 @@ function TopSellers({
                         />
                       ) : (
                         <div
-                          className="flex h-full w-full items-center justify-center bg-[var(--surface)] text-[8px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]"
+                          className="flex h-full w-full items-center justify-center bg-[var(--surface)] text-[7px] font-medium uppercase text-[var(--muted-foreground)]"
                           title="No image"
                         >
-                          Img
+                          —
                         </div>
                       )}
                     </div>
                   </td>
-                  <td className="py-1.5 px-2 tabular-nums text-[var(--foreground)]">
+                  <td className="max-w-[4.5rem] truncate py-1 px-1.5 tabular-nums text-[var(--foreground)]" title={row.asin ?? undefined}>
                     {row.asin ?? "—"}
                   </td>
-                  <td className="py-1.5 px-2 text-right tabular-nums text-[var(--foreground)]">
+                  <td className="w-14 py-1 text-center tabular-nums text-[var(--foreground)]">
                     {row.units.toLocaleString()}
                   </td>
-                  <td className="py-1.5 px-2 text-right tabular-nums text-[var(--foreground)]">
+                  <td className="w-14 py-1 text-center tabular-nums text-[var(--foreground)]">
                     {formatCurrency(row.revenue, currency)}
                   </td>
-                  <td className="py-1.5 pl-2 text-right tabular-nums text-[var(--foreground)]">
+                  <td className="w-14 py-1 text-center tabular-nums text-[var(--foreground)]">
                     {formatCurrency(row.profit, currency)}
                   </td>
                 </tr>
@@ -1034,7 +1031,7 @@ function CostBreakdown({
     : [];
 
   const total = data
-    ? data.totalCogs + data.prepFees + data.totalAmazonFees
+    ? data.totalCogs + data.prepFees + data.referralFees + data.fbaFees + data.digitalServiceFees
     : 0;
 
   return (
@@ -1137,6 +1134,10 @@ type ProfitAndLossData = {
   otherSubsTotal: number;
   totalFixedCosts: number;
   totalProfit: number;
+  outputVat: number;
+  inputVat: number;
+  vatBalance: number;
+  vatRegistered?: boolean;
   currency: string;
   start: string;
   end: string;
@@ -1269,7 +1270,7 @@ function ProfitAndLoss({
       </div>
       {data && (
         <p className="mb-2 text-[10px] text-[var(--muted-foreground)]">
-          {data.start} – {data.end} · excl. corporation tax
+          {data.start} – {data.end}
         </p>
       )}
       {loading && (
@@ -1335,6 +1336,31 @@ function ProfitAndLoss({
               </tr>
             </tbody>
           </table>
+          <div className="mt-3 border-t border-[var(--surface-border)] pt-3">
+            <p className="mb-1.5 text-[9px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
+              VAT adjustment
+            </p>
+            <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[10px] text-[var(--muted-foreground)]">
+              <span>Output VAT</span>
+              <span className="text-right tabular-nums text-[var(--foreground)]">{fmt(data.outputVat)}</span>
+              <span>Input VAT</span>
+              <span className="text-right tabular-nums text-[var(--foreground)]">{fmt(data.inputVat)}</span>
+              <span className="font-medium text-[var(--foreground)]">VAT balance</span>
+              <span className="flex items-center justify-end gap-1">
+                <span className={`tabular-nums font-medium ${(data.vatRegistered ? data.vatBalance : 0) >= 0 ? "text-[var(--foreground)]" : "text-red-500"}`}>
+                  {fmt(data.vatRegistered ? data.vatBalance : 0)}
+                </span>
+                {!data.vatRegistered && (
+                  <span
+                    className="inline-flex h-3.5 w-3.5 shrink-0 cursor-help items-center justify-center rounded-full bg-[var(--muted-foreground)]/20 text-[8px] font-semibold text-[var(--muted-foreground)]"
+                    title="VAT balance shows as zero for non VAT registered users"
+                  >
+                    i
+                  </span>
+                )}
+              </span>
+            </div>
+          </div>
         </div>
       )}
       {!loading && !data && (
@@ -1543,7 +1569,7 @@ function InventorySummary({
     roiPct: unitCost > 0 ? ((stockValue - unitCost) / unitCost) * 100 : null,
   });
   const statuses: StatusRow[] = [
-    toStatusRow("Fulfillable", fulfillable, fulfillableValue, fulfillableCost),
+    toStatusRow("FBA Available", fulfillable, fulfillableValue, fulfillableCost),
     toStatusRow("FC Processing", fcProcessing, fcProcessingValue, fcProcessingCost),
     toStatusRow("Customer Orders", customerOrders, customerOrdersValue, customerOrdersCost),
     toStatusRow("Transshipment", transshipment, transshipmentValue, transshipmentCost),
@@ -1560,46 +1586,54 @@ function InventorySummary({
   ];
 
   return (
-    <div className="flex w-full flex-col rounded-xl p-4 ring-1 ring-[var(--surface-border)]">
-      <h2 className="mb-2 text-sm font-medium uppercase tracking-[0.2em] text-[var(--muted-foreground)]">
-        Inventory summary
-      </h2>
+    <div className="flex w-full flex-col rounded-xl p-3 ring-1 ring-[var(--surface-border)]">
+      <div className="mb-1 flex items-center gap-1">
+        <h2 className="text-[10px] font-medium uppercase tracking-[0.1em] text-[var(--muted-foreground)]">
+          Inventory summary
+        </h2>
+        <span
+          className="inline-flex h-3 w-3 shrink-0 cursor-help items-center justify-center rounded-full bg-[var(--muted-foreground)]/20 text-[8px] font-semibold text-[var(--muted-foreground)]"
+          title="Complete COGS for accurate inventory summary"
+        >
+          i
+        </span>
+      </div>
       {loading && (
-        <p className="text-[11px] text-[var(--muted-foreground)]">Loading…</p>
+        <p className="text-[9px] text-[var(--muted-foreground)]">Loading…</p>
       )}
       {error && (
-        <p className="text-[11px] text-red-600">{error}</p>
+        <p className="text-[9px] text-red-600">{error}</p>
       )}
       {!loading && !error && (
         <div className="min-w-0 w-full overflow-x-auto">
-          <table className="w-full text-[11px]">
+          <table className="w-full text-[9px]">
             <thead>
-              <tr className="border-b border-[var(--surface-border)] text-[10px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
-                <th className="py-1 pr-2 text-left">Status</th>
-                <th className="py-1 text-right">Qty</th>
-                <th className="py-1 pl-2 text-right">Stock value</th>
-                <th className="py-1 pl-2 text-right">Unit cost</th>
-                <th className="py-1 pl-2 text-right">Profit</th>
-                <th className="py-1 pl-2 text-right">ROI</th>
+              <tr className="border-b border-[var(--surface-border)] text-[8px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
+                <th className="py-0.5 pr-1 text-left">Status</th>
+                <th className="py-0.5 px-0.5 text-center">Qty</th>
+                <th className="py-0.5 px-1 text-center">Stock value</th>
+                <th className="py-0.5 px-1 text-center">Stock cost</th>
+                <th className="py-0.5 px-1 text-center">Potential profit</th>
+                <th className="py-0.5 pl-1 text-center">Potential ROI</th>
               </tr>
             </thead>
             <tbody>
               <tr className="border-b border-[var(--surface-border)] bg-[var(--surface)]/50 font-semibold">
-                <td className="py-1.5 pr-2 text-[var(--foreground)]">Total</td>
-                <td className="py-1.5 text-right tabular-nums text-[var(--foreground)]">{total.toLocaleString()}</td>
-                <td className="py-1.5 pl-2 text-right tabular-nums text-[var(--foreground)]">{formatCurrency(totalValue, currency, 2)}</td>
-                <td className="py-1.5 pl-2 text-right tabular-nums text-[var(--foreground)]">{formatCurrency(totalCost, currency, 2)}</td>
-                <td className="py-1.5 pl-2 text-right tabular-nums text-[var(--foreground)]">{formatCurrency(totalProfit, currency, 2)}</td>
-                <td className="py-1.5 pl-2 text-right tabular-nums text-[var(--foreground)]">{totalRoiPct != null ? `${totalRoiPct.toFixed(1)}%` : "—"}</td>
+                <td className="py-0.5 pr-1 text-[var(--foreground)]">Total</td>
+                <td className="py-0.5 px-0.5 text-center tabular-nums text-[var(--foreground)]">{total.toLocaleString()}</td>
+                <td className="py-0.5 px-1 text-center tabular-nums text-[var(--foreground)]">{formatCurrency(totalValue, currency, 2)}</td>
+                <td className="py-0.5 px-1 text-center tabular-nums text-[var(--foreground)]">{formatCurrency(totalCost, currency, 2)}</td>
+                <td className="py-0.5 px-1 text-center tabular-nums text-[var(--foreground)]">{formatCurrency(totalProfit, currency, 2)}</td>
+                <td className="py-0.5 pl-1 text-center tabular-nums text-[var(--foreground)]">{totalRoiPct != null ? `${totalRoiPct.toFixed(1)}%` : "—"}</td>
               </tr>
               {statuses.map(({ label, value, stockValue, unitCost, profit, roiPct }) => (
                 <tr key={label} className="border-b border-[var(--surface-border)] last:border-b-0">
-                  <td className="py-1 pr-2 text-[var(--muted-foreground)]">{label}</td>
-                  <td className="py-1 text-right font-medium tabular-nums text-[var(--foreground)]">{value.toLocaleString()}</td>
-                  <td className="py-1 pl-2 text-right tabular-nums text-[var(--foreground)]">{formatCurrency(stockValue, currency, 2)}</td>
-                  <td className="py-1 pl-2 text-right tabular-nums text-[var(--foreground)]">{formatCurrency(unitCost, currency, 2)}</td>
-                  <td className="py-1 pl-2 text-right tabular-nums text-[var(--foreground)]">{formatCurrency(profit, currency, 2)}</td>
-                  <td className="py-1 pl-2 text-right tabular-nums text-[var(--foreground)]">{roiPct != null ? `${roiPct.toFixed(1)}%` : "—"}</td>
+                  <td className="py-0.5 pr-1 text-[var(--muted-foreground)]">{label}</td>
+                  <td className="py-0.5 px-0.5 text-center font-medium tabular-nums text-[var(--foreground)]">{value.toLocaleString()}</td>
+                  <td className="py-0.5 px-1 text-center tabular-nums text-[var(--foreground)]">{formatCurrency(stockValue, currency, 2)}</td>
+                  <td className="py-0.5 px-1 text-center tabular-nums text-[var(--foreground)]">{formatCurrency(unitCost, currency, 2)}</td>
+                  <td className="py-0.5 px-1 text-center tabular-nums text-[var(--foreground)]">{formatCurrency(profit, currency, 2)}</td>
+                  <td className="py-0.5 pl-1 text-center tabular-nums text-[var(--foreground)]">{roiPct != null ? `${roiPct.toFixed(1)}%` : "—"}</td>
                 </tr>
               ))}
             </tbody>
@@ -2215,7 +2249,7 @@ function DonutCard({
             }}
           />
         </svg>
-        <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-0.5 text-center">
+        <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-start pt-10 text-center">
           {centerTitle && (
             <span className="text-[9px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
               {centerTitle}
@@ -2223,7 +2257,7 @@ function DonutCard({
           )}
           {useCustomCenter ? (
             <>
-              <span className="text-xl font-semibold leading-tight text-[var(--foreground)]">
+              <span className="text-lg font-semibold leading-none text-[var(--foreground)]">
                 {centerLine1}
               </span>
               {centerLine2 ? (
@@ -2231,23 +2265,17 @@ function DonutCard({
                   {centerLine2}
                 </span>
               ) : null}
-              <span
-                className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-normal"
-                style={{
-                  backgroundColor: `${color}20`,
-                  color,
-                }}
-              >
+              <span className="mt-1.5 inline-flex items-center rounded-full bg-[var(--surface)]/80 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-normal text-[var(--muted-foreground)]">
                 {centerLine3}
               </span>
             </>
           ) : (
             <>
-              <span className="text-lg font-semibold text-[var(--foreground)]">
+              <span className="text-lg font-semibold leading-none text-[var(--foreground)]">
                 {value}
               </span>
               {!valueOnly && (
-                <span className="mt-0.5 text-[10px] uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
+                <span className="mt-1.5 text-[9px] uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
                   {clamped.toFixed(0)}%
                 </span>
               )}

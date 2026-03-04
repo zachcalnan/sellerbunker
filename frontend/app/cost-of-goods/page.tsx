@@ -61,6 +61,21 @@ function CostOfGoodsInner() {
   >([]);
   const [missingCount, setMissingCount] = useState<number | null>(null);
 
+  const SKU_LIST_PAGE_SIZE = 10;
+  const [skuItems, setSkuItems] = useState<
+    Array<{
+      id: string;
+      sku: string;
+      asin: string | null;
+      title: string | null;
+      imageUrl: string | null;
+      revenue?: number;
+      units?: number;
+    }>
+  >([]);
+  const [skuTotal, setSkuTotal] = useState(0);
+  const [skuSkip, setSkuSkip] = useState(0);
+
   type VatSettings = {
     vatRegistrationType: string;
     vatEffectiveDate: string | null;
@@ -79,11 +94,6 @@ function CostOfGoodsInner() {
   const [query, setQuery] = useState("");
   const [showForm, setShowForm] = useState(false);
   const [editingEntry, setEditingEntry] = useState<CostEntryRow | null>(null);
-  const currencyOptions = ["GBP", "EUR", "USD", "CAD", "MXN", "BRL", "AUD", "AED"] as const;
-  const isCurrencyOption = (
-    v: string,
-  ): v is (typeof currencyOptions)[number] =>
-    (currencyOptions as readonly string[]).includes(v);
   const [productPickerQuery, setProductPickerQuery] = useState("");
 
   type VatMode = "inc" | "ex";
@@ -96,7 +106,7 @@ function CostOfGoodsInner() {
 
   const [form, setForm] = useState({
     productId: "",
-    fulfilment: "Amazon",
+    fulfilment: "FBA",
     supplier: "",
     supplierLink: "",
     bundleSize: "1",
@@ -114,7 +124,7 @@ function CostOfGoodsInner() {
   const resetNewEntryForm = (productId?: string) => {
     setForm({
       productId: productId ?? "",
-      fulfilment: "Amazon",
+      fulfilment: "FBA",
       supplier: "",
       supplierLink: "",
       bundleSize: "1",
@@ -140,34 +150,49 @@ function CostOfGoodsInner() {
       const missingQs = new URLSearchParams();
       if (startParam) missingQs.set("start", startParam);
       if (endParam) missingQs.set("end", endParam);
-      missingQs.set("limit", "50");
+      missingQs.set("take", String(SKU_LIST_PAGE_SIZE));
+      missingQs.set("skip", String(skuSkip));
 
-      const [entriesRes, productsRes, missingRes, vatRes] = await Promise.all([
-        fetch(
-          `${baseUrl}/api/amazon/cost-of-goods/entries?` +
-          new URLSearchParams({
-            query,
-            take: String(take),
-            skip: String(skip),
-          }).toString(),
-          {
-            headers: { Authorization: `Bearer ${token}` },
-          },
+      const allFetches: Promise<Response>[] = [
+        fetch(`${baseUrl}/api/amazon/cost-of-goods/entries?` +
+          new URLSearchParams({ query, take: String(take), skip: String(skip) }).toString(),
+          { headers: { Authorization: `Bearer ${token}` } },
         ),
-        fetch(`${baseUrl}/api/amazon/products`, {
-          headers: { Authorization: `Bearer ${token}` },
-        }),
-        fetch(`${baseUrl}/api/amazon/cost-of-goods/missing?${missingQs.toString()}`, {
-          headers: { Authorization: `Bearer ${token}` },
-        }),
-        fetch(`${baseUrl}/api/orgs/vat-settings`, {
-          headers: { Authorization: `Bearer ${token}` },
-        }),
-      ]);
+        fetch(`${baseUrl}/api/amazon/products`, { headers: { Authorization: `Bearer ${token}` } }),
+        fetch(`${baseUrl}/api/amazon/inventory`, { headers: { Authorization: `Bearer ${token}` } }),
+        fetch(`${baseUrl}/api/orgs/vat-settings`, { headers: { Authorization: `Bearer ${token}` } }),
+      ];
+
+      if (cogsFilter === "missing") {
+        allFetches.push(
+          fetch(`${baseUrl}/api/amazon/cost-of-goods/missing?${missingQs.toString()}`, {
+            headers: { Authorization: `Bearer ${token}` },
+          }),
+        );
+      } else if (cogsFilter === "complete") {
+        allFetches.push(
+          fetch(
+            `${baseUrl}/api/amazon/cost-of-goods/complete?` +
+            new URLSearchParams({ take: String(SKU_LIST_PAGE_SIZE), skip: String(skuSkip) }).toString(),
+            { headers: { Authorization: `Bearer ${token}` } },
+          ),
+        );
+      } else {
+        allFetches.push(
+          fetch(
+            `${baseUrl}/api/amazon/cost-of-goods/products?` +
+            new URLSearchParams({ take: String(SKU_LIST_PAGE_SIZE), skip: String(skuSkip) }).toString(),
+            { headers: { Authorization: `Bearer ${token}` } },
+          ),
+        );
+      }
+
+      const [entriesRes, productsRes, inventoryRes, vatRes, skuListRes] = await Promise.all(allFetches);
 
       if (!entriesRes.ok) throw new Error("Failed to load cost entries.");
       if (!productsRes.ok) throw new Error("Failed to load products.");
-      if (!missingRes.ok) throw new Error("Failed to load missing COGS.");
+      if (!inventoryRes.ok) throw new Error("Failed to load inventory.");
+      if (!skuListRes.ok) throw new Error("Failed to load SKU list.");
       if (vatRes.ok) {
         const vatData = (await vatRes.json()) as VatSettings;
         setVatSettings(vatData);
@@ -177,19 +202,14 @@ function CostOfGoodsInner() {
         | CostEntryRow[]
         | { total?: number; items?: CostEntryRow[] };
       const productsData = (await productsRes.json()) as ProductRow[];
-      const missingData = (await missingRes.json()) as {
-        missingSkusCount?: number;
-        items?: {
-          productId: string;
-          sku: string;
-          asin: string | null;
-          title: string | null;
-          imageUrl: string | null;
-          revenue: number;
-          units: number;
-          lineItems: number;
-        }[];
-      };
+      const inventoryData = (await inventoryRes.json()) as Array<{
+        productId: string;
+        sku: string;
+        asin: string | null;
+        title: string | null;
+        imageUrl: string | null;
+      }>;
+
       if (Array.isArray(entriesData)) {
         setEntries(entriesData);
         setEntriesTotal(entriesData.length);
@@ -197,13 +217,54 @@ function CostOfGoodsInner() {
         setEntries(Array.isArray(entriesData.items) ? entriesData.items : []);
         setEntriesTotal(Number(entriesData.total ?? 0));
       }
-      setProducts(productsData);
-      setMissing(Array.isArray(missingData.items) ? missingData.items : []);
-      setMissingCount(
-        typeof missingData.missingSkusCount === "number"
-          ? missingData.missingSkusCount
-          : null,
-      );
+
+      const inventoryAsProducts: ProductRow[] = Array.isArray(inventoryData)
+        ? inventoryData.map((r) => ({
+            id: r.productId,
+            sku: r.sku,
+            asin: r.asin,
+            title: r.title,
+            imageUrl: r.imageUrl,
+          }))
+        : [];
+      const byId = new Map<string, ProductRow>();
+      for (const p of inventoryAsProducts) byId.set(p.id, p);
+      for (const p of productsData) if (!byId.has(p.id)) byId.set(p.id, p);
+      setProducts(Array.from(byId.values()));
+
+      if (cogsFilter === "missing") {
+        const missingData = (await skuListRes.json()) as {
+          missingSkusCount?: number;
+          items?: Array<{
+            productId: string;
+            sku: string;
+            asin: string | null;
+            title: string | null;
+            imageUrl: string | null;
+            revenue: number;
+            units: number;
+          }>;
+        };
+        const items = Array.isArray(missingData.items) ? missingData.items : [];
+        setSkuItems(
+          items.map((m) => ({
+            id: m.productId,
+            sku: m.sku,
+            asin: m.asin,
+            title: m.title,
+            imageUrl: m.imageUrl,
+            revenue: m.revenue,
+            units: m.units,
+          })),
+        );
+        setSkuTotal(typeof missingData.missingSkusCount === "number" ? missingData.missingSkusCount : 0);
+        setMissingCount(typeof missingData.missingSkusCount === "number" ? missingData.missingSkusCount : null);
+        setMissing(items);
+      } else {
+        const allData = (await skuListRes.json()) as { total: number; items: ProductRow[] };
+        setSkuItems(Array.isArray(allData.items) ? allData.items : []);
+        setSkuTotal(typeof allData.total === "number" ? allData.total : 0);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Error");
     } finally {
@@ -261,7 +322,7 @@ function CostOfGoodsInner() {
 
     setForm({
       productId: editingEntry.product.id,
-      fulfilment: editingEntry.fulfilment ?? "Amazon",
+      fulfilment: "FBA",
       supplier: editingEntry.supplier ?? "",
       supplierLink: editingEntry.supplierLink ?? "",
       bundleSize: String(editingEntry.bundleSize ?? 1),
@@ -346,7 +407,7 @@ function CostOfGoodsInner() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isSignedIn, getToken, baseUrl, startParam, endParam, query, take, skip]);
+  }, [isSignedIn, getToken, baseUrl, startParam, endParam, query, take, skip, cogsFilter, skuSkip]);
 
   useEffect(() => {
     if (missingParamOn) {
@@ -366,42 +427,13 @@ function CostOfGoodsInner() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [showForm]);
 
-  const filtered = useMemo(() => entries, [entries]);
-
-  const filteredWithMissingToggle = useMemo(() => {
-    const missingIds = new Set(missing.map((m) => m.productId));
-
-    return filtered.filter((e) => {
-      if (cogsFilter === "missing") {
-        return missingIds.has(e.product.id);
-      }
-
-      if (cogsFilter === "complete") {
-        return !missingIds.has(e.product.id);
-      }
-
-      return true; // "all"
-    });
-  }, [filtered, cogsFilter, missing]);
-
-  const pagingTotal =
-    cogsFilter === "missing"
-      ? typeof missingCount === "number"
-        ? missingCount
-        : missing.length
-      : cogsFilter === "all"
-        ? entriesTotal
-        : filteredWithMissingToggle.length;
-  const pagingStart =
-    pagingTotal > 0 ? (cogsFilter === "all" ? skip + 1 : 1) : 0;
-  const pagingEnd =
-    pagingTotal > 0
-      ? cogsFilter === "all"
-        ? Math.min(skip + entries.length, entriesTotal)
-        : cogsFilter === "missing"
-          ? Math.min(missing.length, pagingTotal)
-          : filteredWithMissingToggle.length
-      : 0;
+  const pagingTotal = skuTotal;
+  const pagingStart = skuTotal > 0 ? skuSkip + 1 : 0;
+  const pagingEnd = skuTotal > 0 ? Math.min(skuSkip + skuItems.length, skuTotal) : 0;
+  const canPrevSku = skuSkip > 0;
+  const canNextSku = skuSkip + skuItems.length < skuTotal;
+  const prevSkuPage = () => setSkuSkip((s) => Math.max(0, s - SKU_LIST_PAGE_SIZE));
+  const nextSkuPage = () => setSkuSkip((s) => s + SKU_LIST_PAGE_SIZE);
 
 
   const createEntry = async () => {
@@ -414,7 +446,7 @@ function CostOfGoodsInner() {
 
       const payload = {
         productId: form.productId,
-        fulfilment: form.fulfilment.trim() || "Amazon",
+        fulfilment: form.fulfilment.trim() || "FBA",
         supplier: form.supplier.trim() || undefined,
         supplierLink: form.supplierLink.trim() || undefined,
         bundleSize: Math.max(1, Number(form.bundleSize ?? 1) || 1),
@@ -501,7 +533,7 @@ function CostOfGoodsInner() {
       if (!token) throw new Error("Not authenticated.");
 
       const payload = {
-        fulfilment: form.fulfilment.trim() || "Amazon",
+        fulfilment: form.fulfilment.trim() || "FBA",
         supplier: form.supplier.trim() || undefined,
         supplierLink: form.supplierLink.trim() || undefined,
         bundleSize: Math.max(1, Number(form.bundleSize ?? 1) || 1),
@@ -656,7 +688,7 @@ function CostOfGoodsInner() {
                   type="button"
                   onClick={() => {
                     setCogsFilter("missing");
-                    setSkip(0);
+                    setSkuSkip(0);
                   }}
                   className={[
                     "cursor-pointer h-8 px-3 text-xs",
@@ -672,7 +704,7 @@ function CostOfGoodsInner() {
                   type="button"
                   onClick={() => {
                     setCogsFilter("complete");
-                    setSkip(0);
+                    setSkuSkip(0);
                   }}
                   className={[
                     "cursor-pointer h-8 px-3 text-xs border-l border-[var(--surface-border)]",
@@ -688,7 +720,7 @@ function CostOfGoodsInner() {
                   type="button"
                   onClick={() => {
                     setCogsFilter("all");
-                    setSkip(0);
+                    setSkuSkip(0);
                   }}
                   className={[
                     "cursor-pointer h-8 px-3 text-xs border-l border-[var(--surface-border)]",
@@ -703,30 +735,12 @@ function CostOfGoodsInner() {
             </div>
 
             <div className="flex flex-wrap items-center gap-3 text-xs text-[var(--muted-foreground)]">
-              {cogsFilter === "all" ? (
-                <label className="flex h-8 items-center gap-2">
-                  <span>Items per page:</span>
-                  <select
-                    value={take}
-                    onChange={(e) => {
-                      setTake(Number(e.target.value));
-                      setSkip(0);
-                    }}
-                    className="h-8 cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-xs text-[var(--foreground)] outline-none"
-                  >
-                    {[10, 25, 50, 100].map((n) => (
-                      <option key={n} value={n}>
-                        {n}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              ) : null}
               <span>
                 {pagingTotal > 0
                   ? `${pagingStart} - ${pagingEnd} of ${pagingTotal}`
                   : "0 - 0 of 0"}
               </span>
+              <span className="text-[var(--muted-foreground)]">10 per page</span>
             </div>
           </div>
         </div>
@@ -745,84 +759,6 @@ function CostOfGoodsInner() {
         {error ? (
           <div className="mb-4 rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-700">
             {error}
-          </div>
-        ) : null}
-
-        {cogsFilter === "missing" ? (
-          <div className="mb-4 rounded-xl bg-transparent p-4 ring-1 ring-[var(--surface-border)]">
-            <div className="flex flex-col gap-1">
-              <div className="text-sm font-medium text-[var(--foreground)]">
-                SKUs needing COGS
-              </div>
-              <div className="text-xs text-[var(--muted-foreground)]">
-                {missingCount == null
-                  ? "Loading…"
-                  : missingCount === 0
-                    ? "All good — none missing in this period."
-                    : `Missing for ${missingCount} SKU${missingCount === 1 ? "" : "s"} in this period.`}
-              </div>
-            </div>
-
-            {missing.length > 0 ? (
-              <div className="mt-4 grid gap-3 md:grid-cols-2">
-                {missing.map((m) => (
-                  <div
-                    key={m.productId}
-                    className="flex items-start gap-3 rounded-lg border border-[var(--surface-border)] bg-[var(--surface)] p-3"
-                  >
-                    <div className="h-10 w-10 overflow-hidden rounded-md bg-[var(--surface)] ring-1 ring-[var(--surface-border)]">
-                      {m.imageUrl ? (
-                        // eslint-disable-next-line @next/next/no-img-element
-                        <img
-                          src={m.imageUrl}
-                          alt=""
-                          className="h-full w-full object-cover"
-                          loading="lazy"
-                        />
-                      ) : null}
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate text-sm font-medium text-[var(--foreground)]">
-                        {m.title ?? "—"}
-                      </div>
-                      <div className="mt-0.5 text-xs text-[var(--muted-foreground)]">
-                        <span className="font-mono">{m.sku}</span>
-                        {m.asin ? ` · ${m.asin}` : ""}
-                        {" · "}
-                        {m.units.toLocaleString()} units
-                        {" · "}
-                        £{m.revenue.toFixed(2)}
-                      </div>
-                      <div className="mt-2">
-                        <button
-                          type="button"
-                          className="cursor-pointer rounded-lg bg-[rgb(2,242,170)] px-3 py-2 text-xs font-medium text-black"
-                          onClick={() => {
-                            setEditingEntry(null);
-                            setShowForm(true);
-                            resetNewEntryForm(m.productId);
-                          }}
-                        >
-                          Add entry
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : null}
-
-            <div className="mt-4 flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                onClick={seedFromExisting}
-                disabled={seeding}
-                className="cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/5 disabled:cursor-not-allowed disabled:opacity-60"
-                title="Create ledger entries from existing per-SKU COGS values"
-              >
-                {seeding ? "Importing…" : "Import existing COGS"}
-              </button>
-            </div>
           </div>
         ) : null}
 
@@ -872,6 +808,14 @@ function CostOfGoodsInner() {
                       {editingEntry ? "Edit cost entry" : "Add cost entry"}
                     </div>
                   )}
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className="text-xs font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
+                    Fulfilment
+                  </span>
+                  <span className="rounded bg-[var(--background)] px-2.5 py-1 text-xs font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--surface-border)]">
+                    FBA
+                  </span>
                 </div>
                 <button
                   type="button"
@@ -955,131 +899,85 @@ function CostOfGoodsInner() {
                     </div>
                   ) : null}
 
-                  <div>
-                    <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
-                      Purchase date
-                    </label>
-                    <input
-                      type="date"
-                      value={form.purchaseDate}
-                      onChange={(e) =>
-                        setForm((prev) => ({ ...prev, purchaseDate: e.target.value }))
-                      }
-                      className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
-                      Fulfilment
-                    </label>
-                    <input
-                      value={form.fulfilment}
-                      onChange={(e) =>
-                        setForm((prev) => ({ ...prev, fulfilment: e.target.value }))
-                      }
-                      placeholder="Amazon / FBM / etc"
-                      className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
-                      Shipment ID
-                    </label>
-                    <input
-                      value={form.shipmentId}
-                      onChange={(e) =>
-                        setForm((prev) => ({ ...prev, shipmentId: e.target.value }))
-                      }
-                      placeholder="e.g. FBA15..."
-                      className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
-                      Bundle size
-                    </label>
-                    <input
-                      inputMode="numeric"
-                      value={form.bundleSize}
-                      onChange={(e) =>
-                        setForm((prev) => ({ ...prev, bundleSize: e.target.value }))
-                      }
-                      className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
-                      Qty purchased
-                    </label>
-                    <input
-                      inputMode="numeric"
-                      value={form.qtyPurchased}
-                      onChange={(e) =>
-                        setForm((prev) => ({ ...prev, qtyPurchased: e.target.value }))
-                      }
-                      className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
-                      Qty delivered
-                    </label>
-                    <input
-                      inputMode="numeric"
-                      value={form.qtyDelivered}
-                      onChange={(e) =>
-                        setForm((prev) => ({ ...prev, qtyDelivered: e.target.value }))
-                      }
-                      className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
-                    />
+                  <div className="md:col-span-3 grid grid-cols-2 gap-x-8 gap-y-0 min-w-0">
+                    <div className="min-w-0 flex flex-col">
+                      <div className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                        Purchase date
+                      </div>
+                      <div className="text-[10px] normal-case font-normal text-[var(--muted-foreground)] mt-0.5">
+                        (optional input)
+                      </div>
+                      <input
+                        type="date"
+                        value={form.purchaseDate}
+                        onChange={(e) =>
+                          setForm((prev) => ({ ...prev, purchaseDate: e.target.value }))
+                        }
+                        className="mt-1.5 w-full max-w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none box-border"
+                      />
+                    </div>
+                    <div className="min-w-0 flex flex-col">
+                      <div className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                        Qty purchased
+                      </div>
+                      <div className="text-[10px] normal-case font-normal text-[var(--muted-foreground)] mt-0.5">
+                        (optional input)
+                      </div>
+                      <input
+                        inputMode="numeric"
+                        value={form.qtyPurchased}
+                        onChange={(e) =>
+                          setForm((prev) => ({ ...prev, qtyPurchased: e.target.value }))
+                        }
+                        className="mt-1.5 w-full max-w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none box-border"
+                      />
+                    </div>
                   </div>
 
                   {/* Unit, Delivery, Prep on one line - full width of modal */}
-                  <div className="md:col-span-3 grid w-full grid-cols-3 gap-3 min-w-0">
+                  <div className="md:col-span-3 grid w-full grid-cols-3 gap-3 min-w-0 mt-5">
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center justify-between gap-1">
                         <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
-                          Unit
+                          Unit cost
                         </label>
                         {vatSettings?.vatRegistrationType === "VAT_STANDARD" && (
-                          <div className="inline-flex overflow-hidden rounded-md ring-1 ring-[var(--surface-border)]">
-                            <button
-                              type="button"
-                              className={[
-                                "cursor-pointer px-1.5 py-0.5 text-[10px]",
-                                unitVatMode === "inc"
-                                  ? "bg-[var(--surface)] text-[var(--foreground)]"
-                                  : "text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5",
-                              ].join(" ")}
-                              onClick={() => {
-                                setUnitVatMode("inc");
-                                setUnitCostExVat("");
-                              }}
-                            >
-                              Inc
-                            </button>
-                            <button
-                              type="button"
-                              className={[
-                                "cursor-pointer px-1.5 py-0.5 text-[10px]",
-                                unitVatMode === "ex"
-                                  ? "bg-[var(--surface)] text-[var(--foreground)]"
-                                  : "text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5",
-                              ].join(" ")}
-                              onClick={() => {
-                                setUnitVatMode("ex");
-                                const inc = Number(form.unitCostIncVat ?? 0) || 0;
-                                setUnitCostExVat(inc > 0 ? String(exFromInc(inc)) : "");
-                              }}
-                            >
-                              Ex
-                            </button>
-                          </div>
+                          <span className="inline-flex items-center gap-1.5">
+                            <span className="text-[9px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">VAT</span>
+                            <div className="inline-flex overflow-hidden rounded-md ring-1 ring-[var(--surface-border)]">
+                              <button
+                                type="button"
+                                className={[
+                                  "cursor-pointer px-1.5 py-0.5 text-[10px]",
+                                  unitVatMode === "inc"
+                                    ? "bg-[var(--surface)] text-[var(--foreground)]"
+                                    : "text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5",
+                                ].join(" ")}
+                                onClick={() => {
+                                  setUnitVatMode("inc");
+                                  setUnitCostExVat("");
+                                }}
+                              >
+                                Inc
+                              </button>
+                              <button
+                                type="button"
+                                className={[
+                                  "cursor-pointer px-1.5 py-0.5 text-[10px]",
+                                  unitVatMode === "ex"
+                                    ? "bg-[var(--surface)] text-[var(--foreground)]"
+                                    : "text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5",
+                                ].join(" ")}
+                                onClick={() => {
+                                  setUnitVatMode("ex");
+                                  const inc = Number(form.unitCostIncVat ?? 0) || 0;
+                                  setUnitCostExVat(inc > 0 ? String(exFromInc(inc)) : "");
+                                }}
+                              >
+                                Ex
+                              </button>
+                            </div>
+                          </span>
                         )}
                       </div>
                       <input
@@ -1101,43 +999,54 @@ function CostOfGoodsInner() {
                     </div>
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center justify-between gap-1">
-                        <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
-                          Delivery
-                        </label>
+                        <span className="flex items-center gap-1">
+                          <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                            Delivery
+                          </label>
+                          <span
+                            className="inline-flex h-3.5 w-3.5 cursor-help items-center justify-center rounded-full bg-[var(--muted-foreground)]/20 text-[10px] font-medium text-[var(--muted-foreground)]"
+                            title="Delivery cost of shipping unit(s) to myself/FC"
+                          >
+                            i
+                          </span>
+                        </span>
                         {vatSettings?.vatRegistrationType === "VAT_STANDARD" && (
-                          <div className="inline-flex overflow-hidden rounded-md ring-1 ring-[var(--surface-border)]">
-                            <button
-                              type="button"
-                              className={[
-                                "cursor-pointer px-1.5 py-0.5 text-[10px]",
-                                deliveryVatMode === "inc"
-                                  ? "bg-[var(--surface)] text-[var(--foreground)]"
-                                  : "text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5",
-                              ].join(" ")}
-                              onClick={() => {
-                                setDeliveryVatMode("inc");
-                                setDeliveryCostExVat("");
-                              }}
-                            >
-                              Inc
-                            </button>
-                            <button
-                              type="button"
-                              className={[
-                                "cursor-pointer px-1.5 py-0.5 text-[10px]",
-                                deliveryVatMode === "ex"
-                                  ? "bg-[var(--surface)] text-[var(--foreground)]"
-                                  : "text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5",
-                              ].join(" ")}
-                              onClick={() => {
-                                setDeliveryVatMode("ex");
-                                const inc = Number(form.deliveryCostIncVat ?? 0) || 0;
-                                setDeliveryCostExVat(inc > 0 ? String(exFromInc(inc)) : "");
-                              }}
-                            >
-                              Ex
-                            </button>
-                          </div>
+                          <span className="inline-flex items-center gap-1.5">
+                            <span className="text-[9px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">VAT</span>
+                            <div className="inline-flex overflow-hidden rounded-md ring-1 ring-[var(--surface-border)]">
+                              <button
+                                type="button"
+                                className={[
+                                  "cursor-pointer px-1.5 py-0.5 text-[10px]",
+                                  deliveryVatMode === "inc"
+                                    ? "bg-[var(--surface)] text-[var(--foreground)]"
+                                    : "text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5",
+                                ].join(" ")}
+                                onClick={() => {
+                                  setDeliveryVatMode("inc");
+                                  setDeliveryCostExVat("");
+                                }}
+                              >
+                                Inc
+                              </button>
+                              <button
+                                type="button"
+                                className={[
+                                  "cursor-pointer px-1.5 py-0.5 text-[10px]",
+                                  deliveryVatMode === "ex"
+                                    ? "bg-[var(--surface)] text-[var(--foreground)]"
+                                    : "text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5",
+                                ].join(" ")}
+                                onClick={() => {
+                                  setDeliveryVatMode("ex");
+                                  const inc = Number(form.deliveryCostIncVat ?? 0) || 0;
+                                  setDeliveryCostExVat(inc > 0 ? String(exFromInc(inc)) : "");
+                                }}
+                              >
+                                Ex
+                              </button>
+                            </div>
+                          </span>
                         )}
                       </div>
                       <input
@@ -1172,39 +1081,42 @@ function CostOfGoodsInner() {
                           Prep
                         </label>
                         {vatSettings?.vatRegistrationType === "VAT_STANDARD" && (
-                          <div className="inline-flex overflow-hidden rounded-md ring-1 ring-[var(--surface-border)]">
-                            <button
-                              type="button"
-                              className={[
-                                "cursor-pointer px-1.5 py-0.5 text-[10px]",
-                                prepVatMode === "inc"
-                                  ? "bg-[var(--surface)] text-[var(--foreground)]"
-                                  : "text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5",
-                              ].join(" ")}
-                              onClick={() => {
-                                setPrepVatMode("inc");
-                                setPrepCostExVat("");
-                              }}
-                            >
-                              Inc
-                            </button>
-                            <button
-                              type="button"
-                              className={[
-                                "cursor-pointer px-1.5 py-0.5 text-[10px]",
-                                prepVatMode === "ex"
-                                  ? "bg-[var(--surface)] text-[var(--foreground)]"
-                                  : "text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5",
-                              ].join(" ")}
-                              onClick={() => {
-                                setPrepVatMode("ex");
-                                const inc = Number(form.prepCostIncVat ?? 0) || 0;
-                                setPrepCostExVat(inc > 0 ? String(exFromInc(inc)) : "");
-                              }}
-                            >
-                              Ex
-                            </button>
-                          </div>
+                          <span className="inline-flex items-center gap-1.5">
+                            <span className="text-[9px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">VAT</span>
+                            <div className="inline-flex overflow-hidden rounded-md ring-1 ring-[var(--surface-border)]">
+                              <button
+                                type="button"
+                                className={[
+                                  "cursor-pointer px-1.5 py-0.5 text-[10px]",
+                                  prepVatMode === "inc"
+                                    ? "bg-[var(--surface)] text-[var(--foreground)]"
+                                    : "text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5",
+                                ].join(" ")}
+                                onClick={() => {
+                                  setPrepVatMode("inc");
+                                  setPrepCostExVat("");
+                                }}
+                              >
+                                Inc
+                              </button>
+                              <button
+                                type="button"
+                                className={[
+                                  "cursor-pointer px-1.5 py-0.5 text-[10px]",
+                                  prepVatMode === "ex"
+                                    ? "bg-[var(--surface)] text-[var(--foreground)]"
+                                    : "text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5",
+                                ].join(" ")}
+                                onClick={() => {
+                                  setPrepVatMode("ex");
+                                  const inc = Number(form.prepCostIncVat ?? 0) || 0;
+                                  setPrepCostExVat(inc > 0 ? String(exFromInc(inc)) : "");
+                                }}
+                              >
+                                Ex
+                              </button>
+                            </div>
+                          </span>
                         )}
                       </div>
                       <input
@@ -1251,28 +1163,6 @@ function CostOfGoodsInner() {
                     </div>
                   )}
 
-                  <div>
-                    <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
-                      Currency
-                    </label>
-                    <select
-                      value={form.currency}
-                      onChange={(e) =>
-                        setForm((prev) => ({ ...prev, currency: e.target.value }))
-                      }
-                      className="mt-1 w-full cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
-                    >
-                      {currencyOptions.map((c) => (
-                        <option key={c} value={c}>
-                          {c}
-                        </option>
-                      ))}
-                      {form.currency && !isCurrencyOption(form.currency) ? (
-                        <option value={form.currency}>{form.currency}</option>
-                      ) : null}
-                    </select>
-                  </div>
-
                   <div className="md:col-span-3">
                     <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
                       Supplier
@@ -1317,40 +1207,13 @@ function CostOfGoodsInner() {
           </div>
         ) : null}
 
-        {cogsFilter !== "missing" ? (
-          <div className="overflow-hidden rounded-xl ring-1 ring-[var(--surface-border)]">
+        <div className="overflow-hidden rounded-xl ring-1 ring-[var(--surface-border)]">
             {loading ? (
               <div className="px-4 py-6 text-sm text-[var(--muted-foreground)]">
                 Loading…
               </div>
-            ) : filteredWithMissingToggle.length === 0 ? (
-              <div className="px-4 py-6 text-sm text-[var(--muted-foreground)]">
-                <div>No entries found.</div>
-                <div className="mt-3 flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setEditingEntry(null);
-                      resetNewEntryForm();
-                      setShowForm(true);
-                    }}
-                    className="cursor-pointer rounded-lg bg-[rgb(2,242,170)] px-3 py-2 text-sm font-medium text-black"
-                  >
-                    Add entry
-                  </button>
-                  <button
-                    type="button"
-                    onClick={seedFromExisting}
-                    disabled={seeding}
-                    className="cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/5 disabled:cursor-not-allowed disabled:opacity-60"
-                    title="Create ledger entries from existing per-SKU COGS values"
-                  >
-                    {seeding ? "Importing…" : "Import existing COGS"}
-                  </button>
-                </div>
-              </div>
             ) : (
-              <div className="divide-y divide-[var(--surface-border)] bg-transparent">
+              <>
                 <div className="flex flex-wrap items-center justify-between gap-3 bg-[var(--surface)] px-4 py-3 text-xs text-[var(--muted-foreground)]">
                   <span>
                     {pagingTotal > 0
@@ -1360,16 +1223,16 @@ function CostOfGoodsInner() {
                   <div className="flex items-center gap-2">
                     <button
                       type="button"
-                      onClick={prevPage}
-                      disabled={cogsFilter !== "all" || !canPrev}
+                      onClick={prevSkuPage}
+                      disabled={!canPrevSku}
                       className="cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-1.5 text-xs font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/5 disabled:cursor-not-allowed disabled:opacity-60"
                     >
                       Prev
                     </button>
                     <button
                       type="button"
-                      onClick={nextPage}
-                      disabled={cogsFilter !== "all" || !canNext}
+                      onClick={nextSkuPage}
+                      disabled={!canNextSku}
                       className="cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-1.5 text-xs font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/5 disabled:cursor-not-allowed disabled:opacity-60"
                     >
                       Next
@@ -1377,191 +1240,94 @@ function CostOfGoodsInner() {
                   </div>
                 </div>
 
-              {/* Desktop header */}
-              <div className="hidden md:grid grid-cols-[2.2fr_0.8fr_1fr_1.2fr_0.6fr_0.6fr_0.8fr_0.8fr_0.8fr_1fr] gap-3 bg-[var(--surface)] px-4 py-3 text-xs font-medium uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
-                <div>Product</div>
-                <div>Fulfilment</div>
-                <div>Supplier</div>
-                <div>Costs (per unit)</div>
-                <div>Curr</div>
-                <div>VAT</div>
-                <div>Date</div>
-                <div className="text-right">Purchased</div>
-                <div className="text-right">Delivered</div>
-                <div className="text-right">Shipment</div>
-              </div>
-
-              {filteredWithMissingToggle.map((p) => {
-                const title = p.product?.title ?? p.product?.sku ?? "—";
-                const sku = p.product?.sku ?? "—";
-                const asin = p.product?.asin ?? "—";
-                const date = p.purchaseDate
-                  ? new Date(p.purchaseDate).toLocaleDateString()
-                  : "—";
-
-                const money = (n: number) => formatCurrency(n, p.currency);
-
-                return (
-                  <>
-                    {/* Mobile card */}
-                    <div
-                      key={`${p.id}-m`}
-                      className="cursor-pointer md:hidden px-4 py-3 hover:bg-[var(--foreground)]/5"
-                      onClick={() => beginEdit(p)}
-                    >
-                      <div className="flex items-start gap-3">
-                        <div className="flex aspect-square h-11 w-11 shrink-0 items-center justify-center">
-                          {p.product?.imageUrl ? (
+                {skuItems.length === 0 ? (
+                  <div className="px-4 py-6 text-sm text-[var(--muted-foreground)]">
+                    {cogsFilter === "missing" ? (
+                      <>
+                        <div>No SKUs missing COGS in this period.</div>
+                        <p className="mt-2 text-xs">
+                          Switch to &quot;All&quot; to see all inventory SKUs, or run inventory sync if you have no SKUs yet.
+                        </p>
+                      </>
+                    ) : (
+                      <div>No inventory SKUs yet. Run inventory sync on the Inventory page, then refresh.</div>
+                    )}
+                    <div className="mt-3">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingEntry(null);
+                          resetNewEntryForm();
+                          setShowForm(true);
+                        }}
+                        className="cursor-pointer rounded-lg bg-[rgb(2,242,170)] px-3 py-2 text-sm font-medium text-black"
+                      >
+                        Add entry
+                      </button>
+                    </div>
+                    {cogsFilter === "missing" ? (
+                      <button
+                        type="button"
+                        onClick={seedFromExisting}
+                        disabled={seeding}
+                        className="ml-2 cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/5 disabled:cursor-not-allowed disabled:opacity-60"
+                        title="Create ledger entries from existing per-SKU COGS values"
+                      >
+                        {seeding ? "Importing…" : "Import existing COGS"}
+                      </button>
+                    ) : null}
+                  </div>
+                ) : (
+                  <div className="grid gap-3 p-4 sm:grid-cols-2">
+                    {skuItems.map((p) => (
+                      <div
+                        key={p.id}
+                        className="flex items-start gap-3 rounded-lg border border-[var(--surface-border)] bg-[var(--surface)] p-3"
+                      >
+                        <div className="h-10 w-10 shrink-0 overflow-hidden rounded-md bg-[var(--surface)] ring-1 ring-[var(--surface-border)]">
+                          {p.imageUrl ? (
+                            // eslint-disable-next-line @next/next/no-img-element
                             <img
-                              src={p.product.imageUrl}
-                              alt={title}
-                              className="h-full w-full rounded-md object-cover ring-1 ring-[var(--surface-border)]"
+                              src={p.imageUrl}
+                              alt=""
+                              className="h-full w-full object-cover"
                               loading="lazy"
                               referrerPolicy="no-referrer"
                             />
-                          ) : (
-                            <div className="h-11 w-11 rounded-md bg-[var(--surface)] ring-1 ring-[var(--surface-border)]" />
-                          )}
+                          ) : null}
                         </div>
                         <div className="min-w-0 flex-1">
                           <div className="truncate text-sm font-medium text-[var(--foreground)]">
-                            {title}
+                            {p.title ?? "—"}
                           </div>
-                          <div className="mt-0.5 truncate text-xs text-[var(--muted-foreground)]">
-                            SKU {sku} · ASIN {asin}
+                          <div className="mt-0.5 font-mono text-xs text-[var(--muted-foreground)]">
+                            {p.sku}
+                            {p.asin ? ` · ${p.asin}` : ""}
                           </div>
-                          <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
-                            <div className="text-[var(--muted-foreground)]">
-                              Total{" "}
-                              <span className="font-medium text-[var(--foreground)]">
-                                {money(p.totalCostIncVat)}
-                              </span>
+                          {p.revenue != null && p.units != null ? (
+                            <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                              {p.units} units · £{p.revenue.toFixed(2)} revenue
                             </div>
-                            <div className="text-[var(--muted-foreground)]">
-                              Unit{" "}
-                              <span className="font-medium text-[var(--foreground)]">
-                                {money(p.unitCostIncVat)}
-                              </span>
-                            </div>
-                            <div className="text-[var(--muted-foreground)]">
-                              Delivery{" "}
-                              <span className="font-medium text-[var(--foreground)]">
-                                {money(p.deliveryCostIncVat)}
-                              </span>
-                            </div>
-                            <div className="text-[var(--muted-foreground)]">
-                              Prep{" "}
-                              <span className="font-medium text-[var(--foreground)]">
-                                {money(p.prepCostIncVat)}
-                              </span>
-                            </div>
-                          </div>
-                          <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[var(--muted-foreground)]">
-                            <span>
-                              {p.fulfilment || "Amazon"} · VAT {p.vatRatePct}%
-                            </span>
-                            <span>{date}</span>
-                            <span>
-                              {p.qtyPurchased}/{p.qtyDelivered} units
-                            </span>
-                            {p.bundleSize && p.bundleSize > 1 ? (
-                              <span>Bundle ×{p.bundleSize}</span>
-                            ) : null}
-                            {p.shipmentId ? <span>{p.shipmentId}</span> : null}
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Desktop row */}
-                    <div
-                      key={`${p.id}-d`}
-                      className="hidden cursor-pointer md:grid grid-cols-[2.2fr_0.8fr_1fr_1.2fr_0.6fr_0.6fr_0.8fr_0.8fr_0.8fr_1fr] items-center gap-3 px-4 py-3 hover:bg-[var(--foreground)]/5"
-                      onClick={() => beginEdit(p)}
-                    >
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-3">
-                          <div className="flex aspect-square h-9 w-9 shrink-0 items-center justify-center">
-                            {p.product?.imageUrl ? (
-                              <img
-                                src={p.product.imageUrl}
-                                alt={title}
-                                className="h-full w-full rounded-md object-cover ring-1 ring-[var(--surface-border)]"
-                                loading="lazy"
-                                referrerPolicy="no-referrer"
-                              />
-                            ) : (
-                              <div className="h-9 w-9 rounded-md bg-[var(--surface)] ring-1 ring-[var(--surface-border)]" />
-                            )}
-                          </div>
-                          <div className="min-w-0">
-                            <div className="truncate text-sm font-medium text-[var(--foreground)]">
-                              {title}
-                            </div>
-                            <div className="truncate text-xs text-[var(--muted-foreground)]">
-                              SKU {sku} · ASIN {asin}
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                      <div className="truncate text-sm text-[var(--muted-foreground)]">
-                        {p.fulfilment || "Amazon"}
-                      </div>
-                      <div className="min-w-0">
-                        <div className="truncate text-sm text-[var(--muted-foreground)]">
-                          {p.supplier ?? "—"}
-                        </div>
-                        {p.supplierLink ? (
-                          <a
-                            href={p.supplierLink}
-                            target="_blank"
-                            rel="noreferrer"
-                            onClick={(e) => e.stopPropagation()}
-                            className="mt-0.5 inline-block truncate text-xs text-[var(--muted-foreground)] underline underline-offset-2 hover:text-[var(--foreground)]"
+                          ) : null}
+                          <button
+                            type="button"
+                            className="mt-2 cursor-pointer rounded-lg bg-[rgb(2,242,170)] px-3 py-1.5 text-xs font-medium text-black"
+                            onClick={() => {
+                              setEditingEntry(null);
+                              setShowForm(true);
+                              resetNewEntryForm(p.id);
+                            }}
                           >
-                            {p.supplierLink}
-                          </a>
-                        ) : null}
-                      </div>
-                      <div className="text-xs text-[var(--muted-foreground)]">
-                        <div>
-                          Total{" "}
-                          <span className="font-medium text-[var(--foreground)]">
-                            {money(p.totalCostIncVat)}
-                          </span>
-                        </div>
-                        <div>
-                          Unit {money(p.unitCostIncVat)} · Delivery{" "}
-                          {money(p.deliveryCostIncVat)} · Prep{" "}
-                          {money(p.prepCostIncVat)}
+                            Add entry
+                          </button>
                         </div>
                       </div>
-                      <div className="text-sm text-[var(--muted-foreground)]">
-                        {p.currency}
-                      </div>
-                      <div className="text-sm text-[var(--muted-foreground)]">
-                        {p.vatRatePct}%
-                      </div>
-                      <div className="text-sm text-[var(--muted-foreground)]">
-                        {date}
-                      </div>
-                      <div className="text-right text-sm font-medium text-[var(--foreground)]">
-                        {p.qtyPurchased}
-                      </div>
-                      <div className="text-right text-sm font-medium text-[var(--foreground)]">
-                        {p.qtyDelivered}
-                      </div>
-                      <div className="text-right truncate text-sm text-[var(--muted-foreground)]">
-                        {p.shipmentId ?? "—"}
-                      </div>
-                    </div>
-                  </>
-                );
-              })}
-              </div>
+                    ))}
+                  </div>
+                )}
+              </>
             )}
           </div>
-        ) : null}
       </SignedIn>
     </div>
   );
