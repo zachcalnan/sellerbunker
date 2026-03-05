@@ -2,12 +2,12 @@
 
 import { useAuth } from "@clerk/nextjs";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import Link from "next/link";
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
 
-export default function ConnectAmazonPage() {
+function ConnectAmazonContent() {
   const { isSignedIn, isLoaded, getToken } = useAuth();
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -92,5 +92,19 @@ export default function ConnectAmazonPage() {
         </p>
       </div>
     </div>
+  );
+}
+
+export default function ConnectAmazonPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex min-h-screen items-center justify-center bg-[var(--background)] text-[var(--foreground)]">
+          <p className="text-[var(--muted-foreground)]">Loading…</p>
+        </div>
+      }
+    >
+      <ConnectAmazonContent />
+    </Suspense>
   );
 }

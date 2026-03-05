@@ -2,13 +2,13 @@
 
 import { useAuth } from "@clerk/nextjs";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import Link from "next/link";
 import { StripeCheckoutButton } from "@/components/stripe-checkout-button";
 
 const accentColor = "rgb(96, 165, 250)";
 
-export default function StartTrialPage() {
+function StartTrialContent() {
   const { isSignedIn, isLoaded, getToken } = useAuth();
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -186,5 +186,19 @@ export default function StartTrialPage() {
         </p>
       </div>
     </div>
+  );
+}
+
+export default function StartTrialPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex min-h-screen items-center justify-center bg-[var(--background)] text-[var(--foreground)]">
+          <p className="text-[var(--muted-foreground)]">Checking access…</p>
+        </div>
+      }
+    >
+      <StartTrialContent />
+    </Suspense>
   );
 }
