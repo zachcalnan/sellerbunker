@@ -18,7 +18,7 @@ export function getStripe(): Stripe {
     if (!secretKey) {
       throw new Error("STRIPE_SECRET_KEY is required. Add it to your .env file.");
     }
-    _stripe = new Stripe(secretKey, { apiVersion: "2024-04-10" });
+    _stripe = new Stripe(secretKey, { apiVersion: "2026-02-25.clover" });
   }
   return _stripe;
 }
