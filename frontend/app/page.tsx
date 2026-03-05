@@ -297,7 +297,7 @@ export default function LandingPage() {
               </Link>
             </SignedIn>
             <SignedOut>
-              <SignUpButton mode="redirect" forceRedirectUrl="/start-trial" signUpForceRedirectUrl="/start-trial">
+              <SignUpButton mode="redirect" forceRedirectUrl="/start-trial" signInForceRedirectUrl="/start-trial">
                 <button
                   className="rounded-lg bg-white px-4 py-2 text-sm font-medium text-black transition hover:bg-gray-100"
                 >
@@ -334,7 +334,7 @@ export default function LandingPage() {
                 </p>
                 <div className="mt-6 flex flex-wrap gap-4">
                   <SignedOut>
-                    <SignUpButton mode="redirect" forceRedirectUrl="/start-trial" signUpForceRedirectUrl="/start-trial">
+                    <SignUpButton mode="redirect" forceRedirectUrl="/start-trial" signInForceRedirectUrl="/start-trial">
                       <button
                         className="rounded-xl bg-white px-6 py-3.5 text-base font-semibold text-black shadow-lg transition hover:bg-gray-100"
                       >
@@ -663,7 +663,7 @@ export default function LandingPage() {
                   {plan.name === "Starter" ? (
                     <>
                       <SignedOut>
-                        <SignUpButton mode="redirect" forceRedirectUrl="/start-trial" signUpForceRedirectUrl="/start-trial">
+                        <SignUpButton mode="redirect" forceRedirectUrl="/start-trial" signInForceRedirectUrl="/start-trial">
                           <button
                             className="mt-6 w-full rounded-xl bg-white py-3 text-sm font-semibold text-black transition hover:bg-gray-100"
                           >
@@ -681,7 +681,7 @@ export default function LandingPage() {
                       </SignedIn>
                     </>
                   ) : (
-                    <SignUpButton mode="redirect" forceRedirectUrl="/start-trial" signUpForceRedirectUrl="/start-trial">
+                    <SignUpButton mode="redirect" forceRedirectUrl="/start-trial" signInForceRedirectUrl="/start-trial">
                       <button
                         className={`mt-6 w-full rounded-xl py-3 text-sm font-semibold transition ${
                           plan.featured ? "bg-white text-black hover:bg-gray-100" : "border border-[var(--surface-border)] text-[var(--foreground)] hover:bg-[var(--surface)]"
@@ -722,7 +722,7 @@ export default function LandingPage() {
             </p>
             <div className="mt-10">
 <SignedOut>
-              <SignUpButton mode="redirect" forceRedirectUrl="/start-trial" signUpForceRedirectUrl="/start-trial">
+              <SignUpButton mode="redirect" forceRedirectUrl="/start-trial" signInForceRedirectUrl="/start-trial">
                 <button
                   className="rounded-xl bg-white px-8 py-4 text-lg font-semibold text-black transition hover:bg-gray-100"
                 >
