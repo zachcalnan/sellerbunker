@@ -27,21 +27,33 @@ function StartTrialContent() {
     setConfirming(true);
     try {
       const token = await getToken({ template: "backend" });
-      if (token) {
-        const baseUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
-        await fetch(`${baseUrl}/api/stripe/confirm-checkout`, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ sessionId }),
-        });
+      if (!token) {
+        setConfirming(false);
+        return;
       }
+      const baseUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
+      const res = await fetch(`${baseUrl}/api/stripe/confirm-checkout`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ sessionId }),
+        credentials: "include",
+      });
+      if (res.ok) {
+        router.push("/dashboard");
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert(err?.message ?? "Could not confirm payment. Try opening the dashboard link in the same browser.");
+        router.push("/dashboard");
+      }
+    } catch (e) {
+      alert("Request failed. If you're on a custom domain, the backend may need to allow it (CORS). Opening dashboard.");
+      router.push("/dashboard");
     } finally {
       setConfirming(false);
     }
-    router.push("/dashboard");
   };
 
   // When we have session_id from Stripe success URL: confirm checkout on backend (records subscription without waiting for webhook)
@@ -60,6 +72,7 @@ function StartTrialContent() {
             "Content-Type": "application/json",
           },
           body: JSON.stringify({ sessionId }),
+          credentials: "include",
         });
         if (cancelled) return;
         if (res.ok) {

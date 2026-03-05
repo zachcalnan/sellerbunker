@@ -25,12 +25,20 @@ async function bootstrap() {
   app.use(bodyParser.json({ verify: rawBodyBuffer }));
   app.use(bodyParser.urlencoded({ verify: rawBodyBuffer, extended: true }));
 
-  // Enable CORS
+  // Enable CORS (allow frontend URL + custom domain so payment redirect works on www.sellerbunker.com)
+  const frontendUrl = configService.get('FRONTEND_URL') || 'http://localhost:3000';
+  const corsOrigins = [
+    frontendUrl,
+    'http://localhost:3000',
+    'https://www.sellerbunker.com',
+    'https://sellerbunker.com',
+  ];
+  const extraOrigins = configService.get('CORS_ORIGINS');
+  if (extraOrigins?.length) {
+    corsOrigins.push(...extraOrigins.split(',').map((o: string) => o.trim()).filter(Boolean));
+  }
   app.enableCors({
-    origin: [
-      configService.get('FRONTEND_URL') || 'http://localhost:3000',
-      'http://localhost:3000',
-    ],
+    origin: corsOrigins,
     credentials: true,
   });
 
