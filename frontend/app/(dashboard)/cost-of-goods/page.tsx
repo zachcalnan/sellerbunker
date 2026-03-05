@@ -3,6 +3,7 @@
 import { RedirectToSignIn, SignedIn, SignedOut, useAuth } from "@clerk/nextjs";
 import { useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useMemo, useState } from "react";
+import { useDisplaySettings } from "@/contexts/display-settings-context";
 
 type ProductRow = {
   id: string;
@@ -259,7 +260,12 @@ function CostOfGoodsInner() {
         );
         setSkuTotal(typeof missingData.missingSkusCount === "number" ? missingData.missingSkusCount : 0);
         setMissingCount(typeof missingData.missingSkusCount === "number" ? missingData.missingSkusCount : null);
-        setMissing(items);
+        setMissing(
+          items.map((m) => ({
+            ...m,
+            lineItems: 0,
+          })),
+        );
       } else {
         const allData = (await skuListRes.json()) as { total: number; items: ProductRow[] };
         setSkuItems(Array.isArray(allData.items) ? allData.items : []);
@@ -643,104 +649,108 @@ function CostOfGoodsInner() {
     }
   };
 
+  const { backgroundClass } = useDisplaySettings();
+
   return (
-    <div className="w-full px-6 py-10">
-      <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-semibold text-[var(--foreground)]">
-            Cost of Goods
-          </h1>
-          <p className="mt-1 text-sm text-[var(--muted-foreground)]">
-            Log inbound cost entries per SKU (unit, delivery, prep, VAT). Profit uses the latest entry per SKU.
-          </p>
-        </div>
-        <div className="flex w-full flex-col gap-3 sm:w-auto">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-            <input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search SKU / ASIN / title / shipment / supplier…"
-              className="w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none sm:w-80"
-            />
-            <button
-              type="button"
-              onClick={() => {
-                if (showForm) {
-                  setShowForm(false);
-                  setEditingEntry(null);
-                  return;
-                }
-                setEditingEntry(null);
-                resetNewEntryForm();
-                setShowForm(true);
-              }}
-              className="cursor-pointer rounded-lg bg-[rgb(2,242,170)] px-3 py-2 text-sm font-medium text-black"
-            >
-              {showForm ? "Close" : "Add entry"}
-            </button>
+    <div className={`min-h-screen w-full ${backgroundClass} px-4 py-6`}>
+      <div className="mb-4 rounded-xl border border-[var(--surface-border)] bg-[var(--surface)] px-4 py-3">
+        <div className="flex flex-wrap items-end justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-semibold text-[var(--foreground)]">
+              Cost of Goods
+            </h1>
+            <p className="mt-1 text-sm text-[var(--muted-foreground)]">
+              Log inbound cost entries per SKU (unit, delivery, prep, VAT). Profit uses the latest entry per SKU.
+            </p>
           </div>
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex items-center gap-2 text-xs text-[var(--muted-foreground)]">
-              <span className="sr-only">COGS filter</span>
-
-              <div className="inline-flex h-8 items-stretch overflow-hidden rounded-lg border border-[var(--surface-border)]">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setCogsFilter("missing");
-                    setSkuSkip(0);
-                  }}
-                  className={[
-                    "cursor-pointer h-8 px-3 text-xs",
-                    cogsFilter === "missing"
-                      ? "bg-[rgb(2,242,170)] text-black"
-                      : "bg-transparent text-[var(--foreground)]",
-                  ].join(" ")}
-                >
-                  Missing
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    setCogsFilter("complete");
-                    setSkuSkip(0);
-                  }}
-                  className={[
-                    "cursor-pointer h-8 px-3 text-xs border-l border-[var(--surface-border)]",
-                    cogsFilter === "complete"
-                      ? "bg-[rgb(2,242,170)] text-black"
-                      : "bg-transparent text-[var(--foreground)]",
-                  ].join(" ")}
-                >
-                  Complete
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    setCogsFilter("all");
-                    setSkuSkip(0);
-                  }}
-                  className={[
-                    "cursor-pointer h-8 px-3 text-xs border-l border-[var(--surface-border)]",
-                    cogsFilter === "all"
-                      ? "bg-[rgb(2,242,170)] text-black"
-                      : "bg-transparent text-[var(--foreground)]",
-                  ].join(" ")}
-                >
-                  All
-                </button>
-              </div>
+          <div className="flex w-full flex-col gap-3 sm:w-auto">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+              <input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search SKU / ASIN / title / shipment / supplier…"
+                className="w-full rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--foreground)] outline-none sm:w-80"
+              />
+              <button
+                type="button"
+                onClick={() => {
+                  if (showForm) {
+                    setShowForm(false);
+                    setEditingEntry(null);
+                    return;
+                  }
+                  setEditingEntry(null);
+                  resetNewEntryForm();
+                  setShowForm(true);
+                }}
+                className="cursor-pointer rounded-lg bg-[rgb(2,242,170)] px-3 py-2 text-sm font-medium text-black"
+              >
+                {showForm ? "Close" : "Add entry"}
+              </button>
             </div>
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex items-center gap-2 text-xs text-[var(--muted-foreground)]">
+                <span className="sr-only">COGS filter</span>
 
-            <div className="flex flex-wrap items-center gap-3 text-xs text-[var(--muted-foreground)]">
-              <span>
-                {pagingTotal > 0
-                  ? `${pagingStart} - ${pagingEnd} of ${pagingTotal}`
-                  : "0 - 0 of 0"}
-              </span>
-              <span className="text-[var(--muted-foreground)]">10 per page</span>
+                <div className="inline-flex h-8 items-stretch overflow-hidden rounded-lg border border-[var(--surface-border)]">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCogsFilter("missing");
+                      setSkuSkip(0);
+                    }}
+                    className={[
+                      "cursor-pointer h-8 px-3 text-xs",
+                      cogsFilter === "missing"
+                        ? "bg-[rgb(2,242,170)] text-black"
+                        : "bg-transparent text-[var(--foreground)]",
+                    ].join(" ")}
+                  >
+                    Missing
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCogsFilter("complete");
+                      setSkuSkip(0);
+                    }}
+                    className={[
+                      "cursor-pointer h-8 px-3 text-xs border-l border-[var(--surface-border)]",
+                      cogsFilter === "complete"
+                        ? "bg-[rgb(2,242,170)] text-black"
+                        : "bg-transparent text-[var(--foreground)]",
+                    ].join(" ")}
+                  >
+                    Complete
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCogsFilter("all");
+                      setSkuSkip(0);
+                    }}
+                    className={[
+                      "cursor-pointer h-8 px-3 text-xs border-l border-[var(--surface-border)]",
+                      cogsFilter === "all"
+                        ? "bg-[rgb(2,242,170)] text-black"
+                        : "bg-transparent text-[var(--foreground)]",
+                    ].join(" ")}
+                  >
+                    All
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-3 text-xs text-[var(--muted-foreground)]">
+                <span>
+                  {pagingTotal > 0
+                    ? `${pagingStart} - ${pagingEnd} of ${pagingTotal}`
+                    : "0 - 0 of 0"}
+                </span>
+                <span className="text-[var(--muted-foreground)]">10 per page</span>
+              </div>
             </div>
           </div>
         </div>
@@ -980,22 +990,25 @@ function CostOfGoodsInner() {
                           </span>
                         )}
                       </div>
-                      <input
-                        inputMode="decimal"
-                        value={vatSettings?.vatRegistrationType === "VAT_STANDARD" ? (unitVatMode === "inc" ? form.unitCostIncVat : unitCostExVat) : form.unitCostIncVat}
-                        onChange={(e) => {
-                          const v = e.target.value;
-                          if (vatSettings?.vatRegistrationType !== "VAT_STANDARD" || unitVatMode === "inc") {
-                            setForm((prev) => ({ ...prev, unitCostIncVat: v }));
-                            return;
-                          }
-                          setUnitCostExVat(v);
-                          const ex = Number(v ?? 0) || 0;
-                          setForm((prev) => ({ ...prev, unitCostIncVat: ex > 0 ? String(incFromEx(ex)) : "" }));
-                        }}
-                        placeholder={vatSettings?.vatRegistrationType === "VAT_STANDARD" && unitVatMode === "ex" ? "e.g. 10.28" : "e.g. 12.34"}
-                        className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-2 py-1.5 text-sm text-[var(--foreground)] outline-none"
-                      />
+                      <div className="mt-1 flex items-center rounded-lg border border-[var(--surface-border)] bg-transparent overflow-hidden">
+                        <span className="pl-2.5 text-sm text-[var(--muted-foreground)]">£</span>
+                        <input
+                          inputMode="decimal"
+                          value={vatSettings?.vatRegistrationType === "VAT_STANDARD" ? (unitVatMode === "inc" ? form.unitCostIncVat : unitCostExVat) : form.unitCostIncVat}
+                          onChange={(e) => {
+                            const v = e.target.value;
+                            if (vatSettings?.vatRegistrationType !== "VAT_STANDARD" || unitVatMode === "inc") {
+                              setForm((prev) => ({ ...prev, unitCostIncVat: v }));
+                              return;
+                            }
+                            setUnitCostExVat(v);
+                            const ex = Number(v ?? 0) || 0;
+                            setForm((prev) => ({ ...prev, unitCostIncVat: ex > 0 ? String(incFromEx(ex)) : "" }));
+                          }}
+                          placeholder={vatSettings?.vatRegistrationType === "VAT_STANDARD" && unitVatMode === "ex" ? "e.g. 10.28" : "e.g. 12.34"}
+                          className="w-full min-w-0 border-0 bg-transparent px-2 py-1.5 text-sm text-[var(--foreground)] outline-none"
+                        />
+                      </div>
                     </div>
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center justify-between gap-1">
@@ -1049,31 +1062,34 @@ function CostOfGoodsInner() {
                           </span>
                         )}
                       </div>
-                      <input
-                        inputMode="decimal"
-                        value={
-                          vatSettings?.vatRegistrationType === "VAT_STANDARD"
-                            ? deliveryVatMode === "inc"
-                              ? form.deliveryCostIncVat
-                              : deliveryCostExVat
-                            : form.deliveryCostIncVat
-                        }
-                        placeholder="0"
-                        onChange={(e) => {
-                          const v = e.target.value;
-                          if (vatSettings?.vatRegistrationType !== "VAT_STANDARD" || deliveryVatMode === "inc") {
-                            setForm((prev) => ({ ...prev, deliveryCostIncVat: v }));
-                            return;
+                      <div className="mt-1 flex items-center rounded-lg border border-[var(--surface-border)] bg-transparent overflow-hidden">
+                        <span className="pl-2.5 text-sm text-[var(--muted-foreground)]">£</span>
+                        <input
+                          inputMode="decimal"
+                          value={
+                            vatSettings?.vatRegistrationType === "VAT_STANDARD"
+                              ? deliveryVatMode === "inc"
+                                ? form.deliveryCostIncVat
+                                : deliveryCostExVat
+                              : form.deliveryCostIncVat
                           }
-                          setDeliveryCostExVat(v);
-                          const ex = Number(v ?? 0) || 0;
-                          setForm((prev) => ({
-                            ...prev,
-                            deliveryCostIncVat: ex > 0 ? String(incFromEx(ex)) : "0",
-                          }));
-                        }}
-                        className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-2 py-1.5 text-sm text-[var(--foreground)] outline-none"
-                      />
+                          placeholder="0"
+                          onChange={(e) => {
+                            const v = e.target.value;
+                            if (vatSettings?.vatRegistrationType !== "VAT_STANDARD" || deliveryVatMode === "inc") {
+                              setForm((prev) => ({ ...prev, deliveryCostIncVat: v }));
+                              return;
+                            }
+                            setDeliveryCostExVat(v);
+                            const ex = Number(v ?? 0) || 0;
+                            setForm((prev) => ({
+                              ...prev,
+                              deliveryCostIncVat: ex > 0 ? String(incFromEx(ex)) : "0",
+                            }));
+                          }}
+                          className="w-full min-w-0 border-0 bg-transparent px-2 py-1.5 text-sm text-[var(--foreground)] outline-none"
+                        />
+                      </div>
                     </div>
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center justify-between gap-1">
@@ -1119,28 +1135,31 @@ function CostOfGoodsInner() {
                           </span>
                         )}
                       </div>
-                      <input
-                        inputMode="decimal"
-                        value={
-                          vatSettings?.vatRegistrationType === "VAT_STANDARD"
-                            ? prepVatMode === "inc"
-                              ? form.prepCostIncVat
-                              : prepCostExVat
-                            : form.prepCostIncVat
-                        }
-                        placeholder="0"
-                        onChange={(e) => {
-                          const v = e.target.value;
-                          if (vatSettings?.vatRegistrationType !== "VAT_STANDARD" || prepVatMode === "inc") {
-                            setForm((prev) => ({ ...prev, prepCostIncVat: v }));
-                            return;
+                      <div className="mt-1 flex items-center rounded-lg border border-[var(--surface-border)] bg-transparent overflow-hidden">
+                        <span className="pl-2.5 text-sm text-[var(--muted-foreground)]">£</span>
+                        <input
+                          inputMode="decimal"
+                          value={
+                            vatSettings?.vatRegistrationType === "VAT_STANDARD"
+                              ? prepVatMode === "inc"
+                                ? form.prepCostIncVat
+                                : prepCostExVat
+                              : form.prepCostIncVat
                           }
-                          setPrepCostExVat(v);
-                          const ex = Number(v ?? 0) || 0;
-                          setForm((prev) => ({ ...prev, prepCostIncVat: ex > 0 ? String(incFromEx(ex)) : "0" }));
-                        }}
-                        className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-2 py-1.5 text-sm text-[var(--foreground)] outline-none"
-                      />
+                          placeholder="0"
+                          onChange={(e) => {
+                            const v = e.target.value;
+                            if (vatSettings?.vatRegistrationType !== "VAT_STANDARD" || prepVatMode === "inc") {
+                              setForm((prev) => ({ ...prev, prepCostIncVat: v }));
+                              return;
+                            }
+                            setPrepCostExVat(v);
+                            const ex = Number(v ?? 0) || 0;
+                            setForm((prev) => ({ ...prev, prepCostIncVat: ex > 0 ? String(incFromEx(ex)) : "0" }));
+                          }}
+                          className="w-full min-w-0 border-0 bg-transparent px-2 py-1.5 text-sm text-[var(--foreground)] outline-none"
+                        />
+                      </div>
                     </div>
                   </div>
 
@@ -1207,7 +1226,7 @@ function CostOfGoodsInner() {
           </div>
         ) : null}
 
-        <div className="overflow-hidden rounded-xl ring-1 ring-[var(--surface-border)]">
+        <div className="overflow-hidden rounded-xl bg-[var(--surface)] ring-1 ring-[var(--surface-border)]">
             {loading ? (
               <div className="px-4 py-6 text-sm text-[var(--muted-foreground)]">
                 Loading…

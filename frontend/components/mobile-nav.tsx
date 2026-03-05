@@ -304,9 +304,9 @@ export function MobileNav() {
     <>
       <header className="flex h-14 shrink-0 items-center justify-between gap-4 border-b border-[var(--surface-border)] bg-[var(--surface)] px-4 md:hidden">
         <Link
-          href="/"
+          href="/dashboard"
           className="flex shrink-0 items-center font-semibold tracking-tight text-[var(--foreground)] no-underline hover:opacity-80"
-          aria-label="Seller Bunker home"
+          aria-label="Seller Bunker dashboard"
         >
           <img
             src="/sellerbunker-logo.png"
@@ -366,9 +366,9 @@ export function MobileNav() {
 
               <SignedIn>
                 <Link
-                  href="/"
+                  href="/dashboard"
                   className={`flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium no-underline transition-colors ${
-                    pathname === "/"
+                    pathname === "/dashboard"
                       ? "bg-[rgb(2,242,170)] text-black"
                       : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
                   }`}

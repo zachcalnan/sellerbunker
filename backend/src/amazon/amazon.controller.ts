@@ -488,8 +488,8 @@ ping() {
     @Req() req: { user: { orgId: string } },
     @Query('limit') limit?: string,
   ) {
-    const n = Number(limit ?? 200);
-    const safeLimit = Number.isFinite(n) ? Math.max(1, Math.min(500, n)) : 200;
+    const n = Number(limit ?? 5000);
+    const safeLimit = Number.isFinite(n) ? Math.max(1, Math.min(10000, n)) : 5000;
     return this.amazonService.getReplenishProducts(req.user.orgId, safeLimit);
   }
 

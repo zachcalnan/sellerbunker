@@ -2,13 +2,10 @@ import type { Metadata } from "next";
 import { ClerkProvider } from "@clerk/nextjs";
 import { shadcn } from "@clerk/themes";
 import "./globals.css";
-import { Sidebar } from "@/components/sidebar";
-import { MobileNav } from "@/components/mobile-nav";
-import { Topbar } from "@/components/topbar";
 
 export const metadata: Metadata = {
-  title: "Seller Dashboard",
-  description: "Seller Dashboard for Amazon",
+  title: "SellerBunker — Amazon Profit Dashboard",
+  description: "Your Amazon profit, inventory, and ROI in one dashboard. Built for FBA & FBM sellers.",
 };
 
 export default function RootLayout({
@@ -41,14 +38,7 @@ export default function RootLayout({
           />
         </head>
         <body className="antialiased">
-          <MobileNav />
-          <div className="hidden md:fixed md:inset-y-0 md:left-0 md:z-10 md:flex md:w-56">
-            <Sidebar />
-          </div>
-          <main className="flex min-h-screen flex-col md:pl-56">
-            <Topbar />
-            <div className="min-h-0 flex-1">{children}</div>
-          </main>
+          {children}
         </body>
       </html>
     </ClerkProvider>

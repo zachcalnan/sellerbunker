@@ -1,2297 +1,706 @@
 "use client";
 
+import {
+  SignedIn,
+  SignedOut,
+  SignInButton,
+  SignUpButton,
+} from "@clerk/nextjs";
 import Link from "next/link";
-import { Suspense, type ReactNode, useEffect, useState } from "react";
-import { useAuth } from "@clerk/nextjs";
-import { useRouter, useSearchParams } from "next/navigation";
+import Image from "next/image";
+import { useState, useRef, useEffect } from "react";
 
-type AccountSummary = {
-  marketplace: string;
-  sellerId: string;
-  currency: string;
-  period: string;
-  revenue: number;
-  profitMargin: number;
-  unitsSold: number;
-  adSpend: number;
-  totalOrders: number;
-  orderItemsOrdersCount?: number;
-  orderItemsCoveragePct?: number;
-  activeSkus: number;
-  unitsInFba: number;
-  openShipments: number;
-  hasCostData?: boolean;
-  generatedAt: string;
-};
+const accentColor = "rgb(96, 165, 250)";
+const accentMuted = "rgba(96, 165, 250, 0.15)";
 
-type SalesPoint = {
-  date: string;
-  revenue: number;
-  orders: number;
-  profit: number;
-};
-
-type SalesSeries = {
-  currency: string;
-  points: SalesPoint[];
-};
-
-type RecentOrderRow = {
-  id: string;
-  orderId: string;
-  orderDate: string;
-  sku: string;
-  asin: string | null;
-  title: string | null;
-  imageUrl: string | null;
-  quantity: number;
-  salePrice: number;
-  profit: number | null;
-  roiPct?: number | null;
-  availableStock: number | null;
-  totalStock: number | null;
-};
-
-function HomeInner() {
-  const baseUrl =
-    process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
-
-  const { isSignedIn, getToken } = useAuth();
-  const router = useRouter();
-  const searchParams = useSearchParams();
-  const startParam = searchParams.get("start");
-  const endParam = searchParams.get("end");
-
-  const [rangePreset, setRangePreset] = useState<
-    "today" | "7d" | "30d" | "yesterday" | "all" | "custom"
-  >("30d");
-  const [trendPreset, setTrendPreset] = useState<
-    "today" | "7d" | "30d" | "yesterday" | "all" | "custom"
-  >("30d");
-  const [customStart, setCustomStart] = useState<string>("");
-  const [customEnd, setCustomEnd] = useState<string>("");
-  const [trendCustomStart, setTrendCustomStart] = useState<string>("");
-  const [trendCustomEnd, setTrendCustomEnd] = useState<string>("");
-  const [summary, setSummary] = useState<AccountSummary | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const toDateOnly = (d: Date) => d.toISOString().slice(0, 10);
-  const today = new Date();
-  const defaultEnd = toDateOnly(today);
-  const defaultStart30 = toDateOnly(
-    new Date(today.getTime() - 29 * 24 * 60 * 60 * 1000),
-  );
-  const yesterday = toDateOnly(
-    new Date(today.getTime() - 24 * 60 * 60 * 1000),
-  );
-  const allTimeStart = "2020-01-01"; // fixed "all time" start
-
-  const effectiveStart =
-    rangePreset === "today"
-      ? defaultEnd
-      : rangePreset === "7d"
-        ? toDateOnly(new Date(today.getTime() - 6 * 24 * 60 * 60 * 1000))
-        : rangePreset === "30d"
-          ? defaultStart30
-          : rangePreset === "yesterday"
-            ? yesterday
-            : rangePreset === "all"
-              ? allTimeStart
-              : (startParam ?? defaultStart30);
-  const effectiveEnd =
-    rangePreset === "today" || rangePreset === "7d" || rangePreset === "30d"
-      ? defaultEnd
-      : rangePreset === "yesterday"
-        ? yesterday
-        : rangePreset === "all"
-          ? defaultEnd
-          : (endParam ?? defaultEnd);
-
-  // Trend has its own range (separate from summary/cards)
-  const trendStart =
-    trendPreset === "today"
-      ? defaultEnd
-      : trendPreset === "7d"
-        ? toDateOnly(new Date(today.getTime() - 6 * 24 * 60 * 60 * 1000))
-        : trendPreset === "30d"
-          ? defaultStart30
-          : trendPreset === "yesterday"
-            ? yesterday
-            : trendPreset === "all"
-              ? allTimeStart
-              : (trendCustomStart || defaultStart30);
-  const trendEnd =
-    trendPreset === "today"
-      ? defaultEnd
-      : trendPreset === "7d"
-        ? defaultEnd
-        : trendPreset === "30d"
-          ? defaultEnd
-          : trendPreset === "yesterday"
-            ? yesterday
-            : trendPreset === "all"
-              ? defaultEnd
-              : (trendCustomEnd || defaultEnd);
-
-  const rangeLabel =
-    rangePreset === "today"
-      ? "Today"
-      : rangePreset === "yesterday"
-        ? "Yesterday"
-        : rangePreset === "7d"
-          ? "7 days"
-          : rangePreset === "30d"
-            ? "30 days"
-            : rangePreset === "all"
-              ? "All time"
-              : "Custom";
-  const trendLabel =
-    trendPreset === "today"
-      ? "Today"
-      : trendPreset === "yesterday"
-        ? "Yesterday"
-        : trendPreset === "7d"
-          ? "7 days"
-          : trendPreset === "30d"
-            ? "30 days"
-            : trendPreset === "all"
-              ? "All time"
-              : "Custom";
-
+function NavDropdown({ label, children }: { label: string; children: React.ReactNode }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    // Initialize preset based on URL (or defaults)
-    const start = effectiveStart;
-    const end = effectiveEnd;
-
-    const isSame = (a: string, b: string) => a === b;
-    const endIsToday = isSame(end, defaultEnd);
-    const startIsToday = isSame(start, defaultEnd);
-    const startIs7 = isSame(
-      start,
-      toDateOnly(new Date(today.getTime() - 6 * 24 * 60 * 60 * 1000)),
-    );
-    const startIs30 = isSame(start, defaultStart30);
-
-    if (startParam || endParam) {
-      const startIsYesterday = isSame(start, yesterday);
-      const endIsYesterday = isSame(end, yesterday);
-      const startIsAll = isSame(start, allTimeStart);
-      const endIsTodayForAll = isSame(end, defaultEnd);
-      if (startIsToday && endIsToday) setRangePreset("today");
-      else if (startIs7 && endIsToday) setRangePreset("7d");
-      else if (startIs30 && endIsToday) setRangePreset("30d");
-      else if (startIsYesterday && endIsYesterday)
-        setRangePreset("yesterday");
-      else if (startIsAll && endIsTodayForAll) setRangePreset("all");
-      else setRangePreset("custom");
-    } else {
-      setRangePreset("30d");
+    function handleClickOutside(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
     }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="flex items-center gap-1 rounded-lg px-3 py-2 text-sm font-medium text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:bg-[var(--foreground)]/5 transition"
+      >
+        {label}
+        <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+      {open && (
+        <div className="absolute right-0 top-full z-50 mt-1 min-w-[180px] rounded-lg border border-[var(--surface-border)] bg-[var(--surface)] py-1 shadow-lg" onClick={() => setOpen(false)}>
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
 
-    setCustomStart(start);
-    setCustomEnd(end);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [startParam, endParam]);
+function ContactForm() {
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [subject, setSubject] = useState("");
+  const [message, setMessage] = useState("");
+  const [status, setStatus] = useState<"idle" | "sending" | "success" | "error">("idle");
+  const [errorMessage, setErrorMessage] = useState("");
 
-  const setRangeInUrl = (start: string, end: string) => {
-    const next = new URLSearchParams(searchParams.toString());
-    next.set("start", start);
-    next.set("end", end);
-    router.replace(`/?${next.toString()}`);
-  };
-
-  useEffect(() => {
-    if (!isSignedIn) {
-      setSummary(null);
-      return;
-    }
-
-    const fetchSummary = async () => {
-      setLoading(true);
-      setError(null);
-
-      try {
-        const token = await getToken({ template: "backend" });
-        const res = await fetch(
-          `${baseUrl}/api/amazon/account/summary?` +
-            new URLSearchParams({
-              start: effectiveStart,
-              end: effectiveEnd,
-            }).toString(),
-          {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-          },
-        );
-
-        if (!res.ok) {
-          const message =
-            res.status === 404
-              ? "Amazon account not linked yet. Link it via the API to see live data."
-              : "Failed to load account summary.";
-          setError(message);
-          setSummary(null);
-          return;
-        }
-
-        const data = (await res.json()) as AccountSummary;
-        setSummary(data);
-      } catch {
-        setError("Unable to reach backend. Is it running?");
-        setSummary(null);
-      } finally {
-        setLoading(false);
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setStatus("sending");
+    setErrorMessage("");
+    try {
+      const res = await fetch("/api/contact", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, email, subject, message }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setStatus("error");
+        setErrorMessage(data.error ?? "Something went wrong.");
+        return;
       }
-    };
-
-    fetchSummary();
-  }, [isSignedIn, getToken, baseUrl, effectiveStart, effectiveEnd]);
-
-  const effectiveCurrency = summary?.currency ?? "USD";
-
-  const profit =
-    summary != null
-      ? summary.revenue * summary.profitMargin
-      : 0;
-  const roiPct =
-    summary != null && summary.adSpend > 0
-      ? (profit / summary.adSpend) * 100
-      : 0;
-
-  const hasCostData = summary?.hasCostData ?? false;
-  const showCogsNotice = summary != null && summary.totalOrders > 0 && !hasCostData;
-  const orderItemsCoveragePct = summary?.orderItemsCoveragePct ?? 1;
-  const orderItemsOrdersCount = summary?.orderItemsOrdersCount ?? null;
-  const showLineItemBackfillNotice =
-    summary != null &&
-    summary.totalOrders > 0 &&
-    Number.isFinite(orderItemsCoveragePct) &&
-    orderItemsCoveragePct < 0.95;
-
-  const cards = summary
-    ? [
-        {
-          label: "Profit",
-          value: hasCostData ? formatCurrency(profit, effectiveCurrency, 2) : "—",
-          percentage: hasCostData ? Math.round(summary.profitMargin * 100) : 0,
-          color: "#10B981",
-          centerLine1: hasCostData ? formatCurrency(profit, effectiveCurrency, 2) : "—",
-          centerLine2: "",
-          centerLine3: hasCostData ? `${(summary.profitMargin * 100).toFixed(1)}%` : "—",
-          note: showLineItemBackfillNotice ? (
-            <span>
-              Still backfilling SKU line items{" "}
-              {orderItemsOrdersCount != null ? (
-                <span className="font-medium text-[var(--foreground)]">
-                  ({orderItemsOrdersCount}/{summary.totalOrders})
-                </span>
-              ) : null}
-              . Profit / missing-COGS may be incomplete.
-            </span>
-          ) : showCogsNotice ? (
-            <span>
-              Set{" "}
-              <Link
-                href={`/cost-of-goods?${new URLSearchParams({
-                  start: effectiveStart,
-                  end: effectiveEnd,
-                }).toString()}`}
-                className="underline underline-offset-2"
-              >
-                COGS
-              </Link>{" "}
-              to calculate profit.
-            </span>
-          ) : null,
-        },
-        {
-          label: "Sales",
-          value: formatCurrency(summary.revenue, effectiveCurrency),
-          percentage: 0,
-          color: "#4F46E5",
-          hidePercentage: true,
-        },
-        {
-          label: "Units",
-          value: summary.unitsSold.toLocaleString(),
-          percentage: 0,
-          color: "#F97316",
-          hidePercentage: true,
-        },
-        {
-          label: "ROI",
-          value: hasCostData ? `${Math.round(roiPct)}%` : "—",
-          percentage: hasCostData ? Math.min(100, Math.round(roiPct)) : 0,
-          color: "#EC4899",
-          hidePercentage: !hasCostData,
-        },
-      ]
-    : [];
+      setStatus("success");
+      setName("");
+      setEmail("");
+      setSubject("");
+      setMessage("");
+    } catch {
+      setStatus("error");
+      setErrorMessage("Network error. Please try again.");
+    }
+  }
 
   return (
-    <div className="min-h-screen bg-[var(--background)] text-[var(--foreground)]">
-      <main className="flex min-h-screen w-full flex-col gap-10 px-6 pt-3 pb-10">
-
-        {loading && (
-          <div className="rounded-xl border border-[var(--surface-border)] bg-transparent px-4 py-3 text-xs text-[var(--muted-foreground)]">
-            Loading account summary...
+    <section id="contact" className="border-b border-[var(--surface-border)] bg-[var(--surface)]/30 py-20 sm:py-24">
+      <div className="mx-auto max-w-2xl px-4 sm:px-6 lg:px-8">
+        <h2 className="text-center text-3xl font-bold text-[var(--foreground)] sm:text-4xl">
+          Get in contact
+        </h2>
+        <p className="mx-auto mt-4 max-w-xl text-center text-[var(--muted-foreground)]">
+          Send us a message and we&apos;ll get back to you at support@sellerbunker.com.
+        </p>
+        <form onSubmit={handleSubmit} className="mt-10 flex flex-col gap-4">
+          <div>
+            <label htmlFor="contact-name" className="block text-sm font-medium text-[var(--foreground)] mb-1">
+              Name
+            </label>
+            <input
+              id="contact-name"
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className="w-full rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-4 py-2.5 text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] outline-none focus:ring-2 focus:ring-[var(--surface-border)]"
+              placeholder="Your name"
+            />
           </div>
-        )}
-        {error ? (
-          <div className="flex flex-col gap-3 rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-xs text-red-700">
-            <span>{error}</span>
-            {isSignedIn && (
-              <button
-                type="button"
-                onClick={async () => {
-                  try {
-                    const token = await getToken({ template: "backend" });
-                    if (!token) {
-                      return;
-                    }
-                    const res = await fetch(
-                      `${baseUrl}/api/amazon/connect?region=EU`,
-                      {
-                        headers: {
-                          Authorization: `Bearer ${token}`,
-                        },
-                      }
-                    );
-                    if (!res.ok) {
-                      return;
-                    }
-                    const data = (await res.json()) as { url?: string };
-                    if (data?.url) {
-                      window.location.href = data.url;
-                    }
-                  } catch {
-                    // swallow for now; the existing error message will remain
-                  }
-                }}
-                className="inline-flex w-fit items-center justify-center rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white shadow-sm transition hover:bg-emerald-700"
+          <div>
+            <label htmlFor="contact-email" className="block text-sm font-medium text-[var(--foreground)] mb-1">
+              Email <span className="text-red-400">*</span>
+            </label>
+            <input
+              id="contact-email"
+              type="email"
+              required
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              className="w-full rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-4 py-2.5 text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] outline-none focus:ring-2 focus:ring-[var(--surface-border)]"
+              placeholder="you@example.com"
+            />
+          </div>
+          <div>
+            <label htmlFor="contact-subject" className="block text-sm font-medium text-[var(--foreground)] mb-1">
+              Subject
+            </label>
+            <input
+              id="contact-subject"
+              type="text"
+              value={subject}
+              onChange={(e) => setSubject(e.target.value)}
+              className="w-full rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-4 py-2.5 text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] outline-none focus:ring-2 focus:ring-[var(--surface-border)]"
+              placeholder="What's this about?"
+            />
+          </div>
+          <div>
+            <label htmlFor="contact-message" className="block text-sm font-medium text-[var(--foreground)] mb-1">
+              Message <span className="text-red-400">*</span>
+            </label>
+            <textarea
+              id="contact-message"
+              required
+              rows={5}
+              value={message}
+              onChange={(e) => setMessage(e.target.value)}
+              className="w-full rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-4 py-2.5 text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] outline-none focus:ring-2 focus:ring-[var(--surface-border)] resize-y min-h-[120px]"
+              placeholder="Your message..."
+            />
+          </div>
+          {status === "success" && (
+            <p className="text-sm font-medium text-green-500">Message sent. We&apos;ll reply to your email soon.</p>
+          )}
+          {status === "error" && (
+            <p className="text-sm font-medium text-red-400">{errorMessage}</p>
+          )}
+          <button
+            type="submit"
+            disabled={status === "sending"}
+            className="rounded-xl px-6 py-3 text-base font-semibold text-black transition disabled:opacity-50"
+            style={{ backgroundColor: accentColor }}
+          >
+            {status === "sending" ? "Sending..." : "Send message"}
+          </button>
+        </form>
+      </div>
+    </section>
+  );
+}
+
+export default function LandingPage() {
+  return (
+    <div
+      className="min-h-screen bg-[var(--background)] text-[var(--foreground)]"
+      data-theme="dark"
+    >
+      {/* Force dark theme for landing */}
+      <style>{`
+        .landing-page { --background: #000; --foreground: #e5e7eb; --surface: #0a0a0a; --surface-border: #262626; --muted-foreground: #94a3b8; }
+      `}</style>
+
+      {/* Navigation */}
+      <header className="fixed top-0 left-0 right-0 z-50 border-b border-[var(--surface-border)] bg-[var(--background)]/95 backdrop-blur">
+        <nav className="mx-auto flex h-16 max-w-7xl items-center justify-between pl-2 pr-4 sm:h-20 sm:pl-2 sm:pr-6 lg:pl-4 lg:pr-8">
+          <Link href="/" className="-ml-2 flex shrink-0 items-center overflow-visible font-semibold no-underline hover:opacity-80 sm:-ml-2 lg:-ml-4" aria-label="SellerBunker home">
+            <img
+              src="/sellerbunker-logo.png"
+              alt="SellerBunker"
+              className="sellerbunker-logo -my-1 h-28 w-auto min-w-[400px] max-w-[560px] object-contain object-left sm:-my-2 sm:h-40 sm:min-w-[480px] sm:max-w-[720px]"
+            />
+          </Link>
+          <div className="flex items-center gap-1 sm:gap-2">
+            <NavDropdown label="Product">
+              <Link href="#features" className="block px-4 py-2 text-sm text-[var(--foreground)] hover:bg-[var(--foreground)]/5 no-underline">
+                Features
+              </Link>
+              <Link href="#dashboard-preview" className="block px-4 py-2 text-sm text-[var(--foreground)] hover:bg-[var(--foreground)]/5 no-underline">
+                See the dashboard
+              </Link>
+              <Link href="#how-it-works" className="block px-4 py-2 text-sm text-[var(--foreground)] hover:bg-[var(--foreground)]/5 no-underline">
+                How it works
+              </Link>
+              <span className="block px-4 py-2 text-sm text-[var(--muted-foreground)]/70 select-none pointer-events-none italic" aria-hidden>
+                Repricer — coming soon
+              </span>
+            </NavDropdown>
+            <NavDropdown label="Pricing">
+              <Link href="#pricing" className="block px-4 py-2 text-sm text-[var(--foreground)] hover:bg-[var(--foreground)]/5 no-underline">
+                View plans
+              </Link>
+            </NavDropdown>
+            <NavDropdown label="Get in contact">
+              <Link href="#contact" className="block px-4 py-2 text-sm text-[var(--foreground)] hover:bg-[var(--foreground)]/5 no-underline">
+                Contact form
+              </Link>
+              <a href="mailto:support@sellerbunker.com" className="block px-4 py-2 text-sm text-[var(--foreground)] hover:bg-[var(--foreground)]/5 no-underline">
+                Email us
+              </a>
+            </NavDropdown>
+            <div className="ml-2 h-6 w-px bg-[var(--surface-border)]" />
+            <SignedOut>
+              <SignInButton mode="modal">
+                <button className="text-sm font-medium text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition px-2 py-1.5 rounded-lg hover:bg-[var(--foreground)]/5">
+                  Sign in
+                </button>
+              </SignInButton>
+              <SignUpButton mode="modal">
+                <button
+                  className="rounded-lg px-4 py-2 text-sm font-medium transition text-black"
+                  style={{ backgroundColor: accentColor }}
+                >
+                  Start free trial
+                </button>
+              </SignUpButton>
+            </SignedOut>
+            <SignedIn>
+              <Link
+                href="/dashboard"
+                className="rounded-lg px-4 py-2 text-sm font-medium transition text-black no-underline"
+                style={{ backgroundColor: accentColor }}
               >
-                Connect Amazon
-              </button>
-            )}
+                Go to dashboard
+              </Link>
+            </SignedIn>
           </div>
-        ) : null}
+        </nav>
+      </header>
 
-        {summary && (
-          <section className="-mt-0.5">
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 md:gap-6">
-              {/* Left column: Performance Snapshot + Recent orders + Top Sellers + Cost Breakdown */}
-              <div className="flex min-w-0 flex-col gap-4">
-                {/* Performance Snapshot */}
-                <div className="flex w-full flex-col rounded-xl p-4 ring-1 ring-[var(--surface-border)]">
-                  <div className="mb-1 flex w-full items-center justify-between gap-2">
-                    <h2 className="text-sm font-medium uppercase tracking-[0.2em] text-[var(--muted-foreground)]">
-                      Performance Snapshot
-                    </h2>
-                    <div className="flex flex-wrap items-center justify-end gap-2 text-xs text-[var(--muted-foreground)]">
-                    <select
-                      value={rangePreset}
-                      onChange={(e) => {
-                        const v = e.target.value as
-                          | "today"
-                          | "7d"
-                          | "30d"
-                          | "yesterday"
-                          | "all"
-                          | "custom";
-                        setRangePreset(v);
-                        if (v === "custom") return;
-                        const end =
-                          v === "yesterday"
-                            ? yesterday
-                            : v === "all"
-                              ? defaultEnd
-                              : defaultEnd;
-                        const start =
-                          v === "today"
-                            ? defaultEnd
-                            : v === "7d"
-                              ? toDateOnly(
-                                  new Date(
-                                    today.getTime() - 6 * 24 * 60 * 60 * 1000,
-                                  ),
-                                )
-                              : v === "30d"
-                                ? defaultStart30
-                                : v === "yesterday"
-                                  ? yesterday
-                                  : allTimeStart;
-                        setRangeInUrl(start, end);
-                      }}
-                      className="h-8 cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-xs text-[var(--foreground)] outline-none"
+      <main className="landing-page pt-24 sm:pt-28">
+        {/* 1. Hero - no blurred background, dashboard mockup on the right */}
+        <section className="border-b border-[var(--surface-border)] bg-[var(--background)]">
+          <div className="mx-auto max-w-7xl px-4 pt-2 pb-8 sm:px-6 sm:pt-3 sm:pb-12 lg:px-8 lg:pt-4 lg:pb-16">
+            <div className="grid gap-10 lg:grid-cols-2 lg:gap-16 lg:items-center">
+              <div>
+                <h1 className="text-4xl font-bold tracking-tight text-[var(--foreground)] sm:text-5xl lg:text-6xl">
+                  Your Amazon profit.{" "}
+                  <span style={{ color: accentColor }}>Finally under control.</span>
+                </h1>
+                <p className="mt-4 max-w-xl text-lg text-[var(--muted-foreground)]">
+                  SellerBunker tracks sales, profit, inventory, and ROI in one powerful dashboard designed for serious Amazon sellers—whether you sell FBA (Fulfilled by Amazon), FBM (Fulfilled by Merchant), or both.
+                </p>
+                <div className="mt-6 flex flex-wrap gap-4">
+                  <SignedOut>
+                    <SignUpButton mode="modal">
+                      <button
+                        className="rounded-xl px-6 py-3.5 text-base font-semibold text-black shadow-lg transition hover:opacity-90"
+                        style={{ backgroundColor: accentColor }}
+                      >
+                        Start free trial
+                      </button>
+                    </SignUpButton>
+                  </SignedOut>
+                  <SignedIn>
+                    <Link
+                      href="/dashboard"
+                      className="rounded-xl px-6 py-3.5 text-base font-semibold text-black shadow-lg transition hover:opacity-90"
+                      style={{ backgroundColor: accentColor }}
                     >
-                      <option value="today">Today</option>
-                      <option value="yesterday">Yesterday</option>
-                      <option value="7d">7 days</option>
-                      <option value="30d">30 days</option>
-                      <option value="all">All time</option>
-                      <option value="custom">Custom</option>
-                    </select>
-                    {rangePreset === "custom" ? (
-                      <>
-                        <input
-                          type="date"
-                          value={customStart}
-                          onChange={(e) =>
-                            setCustomStart(e.target.value)}
-                          className="h-8 rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-xs text-[var(--foreground)] outline-none"
-                        />
-                        <span>→</span>
-                        <input
-                          type="date"
-                          value={customEnd}
-                          onChange={(e) =>
-                            setCustomEnd(e.target.value)}
-                          className="h-8 rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-xs text-[var(--foreground)] outline-none"
-                        />
-                        <button
-                          type="button"
-                          className="h-8 cursor-pointer rounded-lg bg-[rgb(2,242,170)] px-3 text-xs font-medium text-black"
-                          onClick={() => {
-                            if (!customStart || !customEnd) return;
-                            setRangeInUrl(customStart, customEnd);
+                      Go to dashboard
+                    </Link>
+                  </SignedIn>
+                </div>
+                <div className="mt-6 flex flex-wrap items-center gap-6 text-sm text-[var(--muted-foreground)]">
+                  <span className="flex items-center gap-2">
+                    <span className="inline-block h-2 w-2 rounded-full" style={{ backgroundColor: accentColor }} />
+                    Built with ease of use in mind
+                  </span>
+                </div>
+              </div>
+              <div className="relative">
+                <div className="overflow-hidden rounded-2xl border border-[var(--surface-border)] bg-[var(--surface)] shadow-2xl ring-1 ring-black/10">
+                  <div className="aspect-[16/10] flex flex-col p-4 sm:p-5">
+                    <div className="mb-4 flex items-center justify-between">
+                      <span className="text-xs font-medium uppercase tracking-widest text-[var(--muted-foreground)]">Performance snapshot</span>
+                      <span className="rounded bg-[var(--surface-border)]/50 px-2 py-1 text-[10px] text-[var(--muted-foreground)]">Last 30 days</span>
+                    </div>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 flex-1">
+                      {[
+                        { label: "Profit", value: "£2,847", color: accentColor },
+                        { label: "Sales", value: "£12,430", color: "#4F46E5" },
+                        { label: "Units", value: "1,240", color: "#F97316" },
+                        { label: "ROI", value: "34%", color: "#EC4899" },
+                      ].map((card) => (
+                        <div
+                          key={card.label}
+                          className="rounded-xl border border-[var(--surface-border)] bg-[var(--background)]/50 p-3 flex flex-col justify-center"
+                          style={{
+                            boxShadow: "inset 0 1px 0 rgba(255,255,255,0.12), 0 0 0 1px rgba(255,255,255,0.08), 0 0 20px -4px rgba(255,255,255,0.15), 0 0 0 2px rgba(255,255,255,0.2)",
                           }}
                         >
-                          Apply
-                        </button>
-                      </>
-                    ) : null}
-                    </div>
-                  </div>
-                  <div className="grid w-full grid-cols-2 gap-3 sm:grid-cols-4">
-                    {cards.map((card) => (
-                      <DonutCard key={card.label} {...card} />
-                    ))}
-                  </div>
-                </div>
-
-                {/* Recent orders */}
-                <RecentOrders
-                  baseUrl={baseUrl}
-                  isSignedIn={isSignedIn}
-                  getToken={getToken}
-                  currency={effectiveCurrency}
-                />
-
-                {/* Top categories by metric (4 pie charts by displayGroup) */}
-                <CategoryPieCharts
-                  baseUrl={baseUrl}
-                  isSignedIn={isSignedIn}
-                  getToken={getToken}
-                  currency={effectiveCurrency}
-                  start={effectiveStart}
-                  end={effectiveEnd}
-                />
-
-                {/* Top Sellers (this month) */}
-                <TopSellers
-                  baseUrl={baseUrl}
-                  isSignedIn={isSignedIn}
-                  getToken={getToken}
-                  currency={effectiveCurrency}
-                />
-
-                {/* Cost Breakdown (actual sales costs) */}
-                <CostBreakdown
-                  baseUrl={baseUrl}
-                  isSignedIn={isSignedIn}
-                  getToken={getToken}
-                  currency={effectiveCurrency}
-                />
-              </div>
-
-              {/* Right column: Sales v Profit + Inventory Summary + Category Pie Charts + Profit & Loss */}
-              <div className="flex min-w-0 flex-col gap-4">
-              <div className="flex min-w-0 w-full flex-col overflow-hidden rounded-xl p-4 ring-1 ring-[var(--surface-border)]">
-                <div className="mb-3 flex w-full items-center justify-between gap-2">
-                  <h2 className="text-sm font-medium uppercase tracking-[0.2em] text-[var(--muted-foreground)]">
-                    Sales v Profit
-                  </h2>
-                  <div className="flex flex-wrap items-center justify-end gap-2 text-xs text-[var(--muted-foreground)]">
-                    <select
-                      value={trendPreset}
-                      onChange={(e) => {
-                        const v = e.target.value as
-                          | "today"
-                          | "7d"
-                          | "30d"
-                          | "yesterday"
-                          | "all"
-                          | "custom";
-                        setTrendPreset(v);
-                        if (v === "custom") return;
-                        const end =
-                          v === "yesterday"
-                            ? yesterday
-                            : v === "all"
-                              ? defaultEnd
-                              : defaultEnd;
-                        const start =
-                          v === "today"
-                            ? defaultEnd
-                            : v === "7d"
-                              ? toDateOnly(
-                                  new Date(
-                                    today.getTime() - 6 * 24 * 60 * 60 * 1000,
-                                  ),
-                                )
-                              : v === "30d"
-                                ? defaultStart30
-                                : v === "yesterday"
-                                  ? yesterday
-                                  : allTimeStart;
-                        setTrendCustomStart(start);
-                        setTrendCustomEnd(end);
-                      }}
-                      className="h-8 cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-xs text-[var(--foreground)] outline-none"
-                    >
-                      <option value="today">Today</option>
-                      <option value="yesterday">Yesterday</option>
-                      <option value="7d">7 days</option>
-                      <option value="30d">30 days</option>
-                      <option value="all">All time</option>
-                      <option value="custom">Custom</option>
-                    </select>
-                    {trendPreset === "custom" ? (
-                      <>
-                        <input
-                          type="date"
-                          value={trendCustomStart}
-                          onChange={(e) =>
-                            setTrendCustomStart(e.target.value)}
-                          className="h-8 rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-xs text-[var(--foreground)] outline-none"
-                        />
-                        <span>→</span>
-                        <input
-                          type="date"
-                          value={trendCustomEnd}
-                          onChange={(e) =>
-                            setTrendCustomEnd(e.target.value)}
-                          className="h-8 rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-xs text-[var(--foreground)] outline-none"
-                        />
-                      </>
-                    ) : null}
-                  </div>
-                </div>
-                <SalesTrend
-                  baseUrl={baseUrl}
-                  isSignedIn={isSignedIn}
-                  getToken={getToken}
-                  currency={effectiveCurrency}
-                  start={trendStart}
-                  end={trendEnd}
-                  label={trendLabel}
-                  noWrapper
-                />
-              </div>
-
-              {/* Inventory breakdown */}
-              <InventorySummary
-                baseUrl={baseUrl}
-                isSignedIn={isSignedIn}
-                getToken={getToken}
-                currency={effectiveCurrency}
-              />
-
-              {/* Profit & Loss: just below Inventory Summary */}
-              <ProfitAndLoss
-                baseUrl={baseUrl}
-                isSignedIn={isSignedIn}
-                getToken={getToken}
-                currency={effectiveCurrency}
-              />
-              </div>
-            </div>
-          </section>
-        )}
-      </main>
-    </div>
-  );
-}
-
-export default function Home() {
-  return (
-    <Suspense
-      fallback={
-        <div className="w-full px-6 py-10 text-sm text-[var(--muted-foreground)]">
-          Loading…
-        </div>
-      }
-    >
-      <HomeInner />
-    </Suspense>
-  );
-}
-
-type RecentOrdersProps = {
-  baseUrl: string;
-  isSignedIn: boolean | undefined;
-  getToken: (args: { template?: string }) => Promise<string | null>;
-  currency: string;
-};
-
-function RecentOrders({
-  baseUrl,
-  isSignedIn,
-  getToken,
-  currency,
-}: RecentOrdersProps) {
-  const [orders, setOrders] = useState<RecentOrderRow[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!isSignedIn) {
-      setOrders([]);
-      return;
-    }
-    const fetchOrders = async () => {
-      setLoading(true);
-      setError(null);
-      try {
-        const token = await getToken({ template: "backend" });
-        const res = await fetch(`${baseUrl}/api/amazon/orders`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (!res.ok) throw new Error("Failed to load orders");
-        const data = (await res.json()) as RecentOrderRow[];
-        setOrders(Array.isArray(data) ? data.slice(0, 10) : []);
-      } catch (e) {
-        setError(e instanceof Error ? e.message : "Error");
-        setOrders([]);
-      } finally {
-        setLoading(false);
-      }
-    };
-    void fetchOrders();
-  }, [isSignedIn, getToken, baseUrl]);
-
-  const formatDate = (dateStr: string) => {
-    const d = new Date(dateStr);
-    if (Number.isNaN(d.getTime())) return "—";
-    return d.toLocaleString(undefined, {
-      month: "short",
-      day: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-  };
-
-  return (
-    <div className="flex w-full flex-col rounded-xl p-4 ring-1 ring-[var(--surface-border)]">
-      <h2 className="mb-2 text-sm font-medium uppercase tracking-[0.2em] text-[var(--muted-foreground)]">
-        Recent orders
-      </h2>
-      {loading && (
-        <p className="text-[11px] text-[var(--muted-foreground)]">Loading…</p>
-      )}
-      {error && (
-        <p className="text-[11px] text-red-600">{error}</p>
-      )}
-      {!loading && !error && orders.length === 0 && (
-        <p className="text-[11px] text-[var(--muted-foreground)]">
-          No orders yet.
-        </p>
-      )}
-      {!loading && !error && orders.length > 0 && (
-        <div className="max-h-44 w-full overflow-y-auto overflow-x-hidden">
-          <div className="min-w-0 w-full pr-2">
-            {/* Header: title area left, Price/Profit/ROI grouped right (centered under headers) */}
-            <div className="flex w-full items-center gap-2 border-b border-[var(--surface-border)] pb-1 pt-0 text-[9px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
-              <span className="min-w-0 flex-1">Product</span>
-              <div className="flex shrink-0 items-center justify-end gap-1 pl-2">
-                <span className="w-14 text-center text-white">Price</span>
-                <span className="w-12 text-center text-white">Profit</span>
-                <span className="w-9 text-center text-white">ROI</span>
-              </div>
-            </div>
-            {orders.map((row) => {
-              const revenue = row.salePrice * row.quantity;
-              const title = row.title?.trim() || "—";
-              return (
-                <div
-                  key={row.id}
-                  className="flex w-full min-w-0 flex-col gap-0.5 border-b border-[var(--surface-border)] py-1.5 last:border-b-0 sm:flex-row sm:items-center sm:gap-2"
-                >
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-[10px] font-medium leading-tight text-[var(--foreground)]" title={row.title ?? undefined}>
-                      {title}
-                    </div>
-                    <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[9px] text-[var(--muted-foreground)]">
-                      <div className="h-5 w-5 shrink-0 overflow-hidden rounded bg-[var(--surface)] ring-1 ring-[var(--surface-border)]">
-                        {row.imageUrl ? (
-                          <img src={row.imageUrl} alt="" className="h-full w-full object-cover" />
-                        ) : (
-                          <div className="flex h-full w-full items-center justify-center text-[8px]">—</div>
-                        )}
-                      </div>
-                      <span className="truncate">
-                        {formatDate(row.orderDate)}
-                        <span className="mx-1">·</span>
-                        {row.sku}
-                        <span className="mx-1">·</span>
-                        {row.asin ?? "—"}
-                        <span className="mx-1">·</span>
-                        Qty {row.quantity}
-                        <span className="mx-1">·</span>
-                        Stock {row.availableStock != null ? row.availableStock : "—"}
-                      </span>
-                    </div>
-                  </div>
-                  <div className="flex shrink-0 items-center justify-end gap-1 pl-2 text-[10px] tabular-nums font-medium text-white">
-                    <span className="w-14 text-center">
-                      {revenue != null && Number.isFinite(revenue) ? formatCurrency(revenue, currency) : "—"}
-                    </span>
-                    <span className="w-12 text-center">
-                      {row.profit != null && Number.isFinite(row.profit) ? formatCurrency(row.profit, currency) : "—"}
-                    </span>
-                    <span className="w-9 text-center">
-                      {row.roiPct != null && Number.isFinite(row.roiPct) ? `${row.roiPct.toFixed(1)}%` : "—"}
-                    </span>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-type TopSellerRow = {
-  productId: string;
-  sku: string | null;
-  asin: string | null;
-  title: string | null;
-  imageUrl: string | null;
-  units: number;
-  revenue: number;
-  profit: number;
-};
-
-type TopSellersProps = {
-  baseUrl: string;
-  isSignedIn: boolean | undefined;
-  getToken: (args: { template?: string }) => Promise<string | null>;
-  currency: string;
-};
-
-function TopSellers({
-  baseUrl,
-  isSignedIn,
-  getToken,
-  currency,
-}: TopSellersProps) {
-  const [rows, setRows] = useState<TopSellerRow[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [isFallbackPeriod, setIsFallbackPeriod] = useState(false);
-
-  useEffect(() => {
-    if (!isSignedIn) {
-      setRows([]);
-      return;
-    }
-    const fetchTop = async () => {
-      setLoading(true);
-      setError(null);
-      setIsFallbackPeriod(false);
-      try {
-        const token = await getToken({ template: "backend" });
-        let res = await fetch(
-          `${baseUrl}/api/amazon/products/top-profitable?limit=5&period=month`,
-          { headers: { Authorization: `Bearer ${token}` } },
-        );
-        if (!res.ok) throw new Error("Failed to load top sellers");
-        let data = (await res.json()) as TopSellerRow[];
-        if (Array.isArray(data) && data.length === 0) {
-          res = await fetch(
-            `${baseUrl}/api/amazon/products/top-profitable?limit=5&period=30d`,
-            { headers: { Authorization: `Bearer ${token}` } },
-          );
-          if (res.ok) {
-            data = (await res.json()) as TopSellerRow[];
-            if (Array.isArray(data) && data.length > 0) setIsFallbackPeriod(true);
-          }
-        }
-        setRows(Array.isArray(data) ? data : []);
-      } catch (e) {
-        setError(e instanceof Error ? e.message : "Error");
-        setRows([]);
-      } finally {
-        setLoading(false);
-      }
-    };
-    void fetchTop();
-  }, [isSignedIn, getToken, baseUrl]);
-
-  return (
-    <div className="flex w-full flex-col rounded-xl p-3 ring-1 ring-[var(--surface-border)]">
-      <h2 className="mb-1.5 text-xs font-medium uppercase tracking-[0.2em] text-[var(--muted-foreground)]">
-        Top Sellers (this month)
-      </h2>
-      {isFallbackPeriod && rows.length > 0 && (
-        <p className="mb-1 text-[9px] text-[var(--muted-foreground)]">
-          No sales this month — showing last 30 days
-        </p>
-      )}
-      {loading && (
-        <p className="text-[10px] text-[var(--muted-foreground)]">Loading…</p>
-      )}
-      {error && (
-        <p className="text-[10px] text-red-600">{error}</p>
-      )}
-      {!loading && !error && rows.length === 0 && (
-        <p className="text-[10px] text-[var(--muted-foreground)]">
-          No sales this month yet.
-        </p>
-      )}
-      {!loading && !error && rows.length > 0 && (
-        <div className="w-full overflow-x-auto">
-          <table className="w-full text-[10px]">
-            <thead>
-              <tr className="border-b border-[var(--surface-border)] text-[9px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
-                <th className="py-1 pr-1.5 text-left">Title</th>
-                <th className="py-1 px-1.5 text-left">SKU</th>
-                <th className="py-1 px-1 text-left">IMG</th>
-                <th className="py-1 px-1.5 text-left">ASIN</th>
-                <th className="w-14 py-1 text-center">Qty</th>
-                <th className="w-14 py-1 text-center">Rev</th>
-                <th className="w-14 py-1 text-center">Profit</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row) => (
-                <tr
-                  key={row.productId}
-                  className="border-b border-[var(--surface-border)] last:border-b-0"
-                >
-                  <td className="max-w-[8rem] truncate py-1 pr-1.5 font-medium text-[var(--foreground)]" title={row.title ?? undefined}>
-                    {row.title?.trim() || "—"}
-                  </td>
-                  <td className="max-w-[5rem] truncate py-1 px-1.5 font-medium tabular-nums text-[var(--foreground)]" title={row.sku ?? undefined}>
-                    {row.sku ?? "—"}
-                  </td>
-                  <td className="py-1 px-1">
-                    <div className="h-6 w-6 overflow-hidden rounded bg-[var(--surface)] ring-1 ring-[var(--surface-border)]">
-                      {row.imageUrl ? (
-                        <img
-                          src={row.imageUrl}
-                          alt=""
-                          className="h-full w-full object-cover"
-                        />
-                      ) : (
-                        <div
-                          className="flex h-full w-full items-center justify-center bg-[var(--surface)] text-[7px] font-medium uppercase text-[var(--muted-foreground)]"
-                          title="No image"
-                        >
-                          —
+                          <span className="text-[10px] uppercase tracking-wider text-[var(--muted-foreground)]">{card.label}</span>
+                          <span className="text-lg font-semibold" style={{ color: card.color }}>{card.value}</span>
                         </div>
-                      )}
+                      ))}
                     </div>
-                  </td>
-                  <td className="max-w-[4.5rem] truncate py-1 px-1.5 tabular-nums text-[var(--foreground)]" title={row.asin ?? undefined}>
-                    {row.asin ?? "—"}
-                  </td>
-                  <td className="w-14 py-1 text-center tabular-nums text-[var(--foreground)]">
-                    {row.units.toLocaleString()}
-                  </td>
-                  <td className="w-14 py-1 text-center tabular-nums text-[var(--foreground)]">
-                    {formatCurrency(row.revenue, currency)}
-                  </td>
-                  <td className="w-14 py-1 text-center tabular-nums text-[var(--foreground)]">
-                    {formatCurrency(row.profit, currency)}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </div>
-  );
-}
+                    <div className="mt-3 h-24 rounded-lg border border-[var(--surface-border)] bg-[var(--background)]/30 flex items-end gap-0.5 px-1 pb-1">
+                      {[40, 65, 45, 80, 55, 70, 90, 60, 75, 85, 70, 95].map((h, i) => (
+                        <div
+                          key={i}
+                          className="flex-1 rounded-t min-h-[4px] transition"
+                          style={{ height: `${h}%`, backgroundColor: accentColor, opacity: 0.8 }}
+                        />
+                      ))}
+                    </div>
+                    <p className="mt-2 text-[10px] text-[var(--muted-foreground)]">Sales v Profit · Revenue vs profit</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
 
-type CostBreakdownData = {
-  totalCogs: number;
-  prepFees: number;
-  referralFees: number;
-  fbaFees: number;
-  digitalServiceFees: number;
-  totalAmazonFees: number;
-  currency: string;
-  start: string;
-  end: string;
-};
-
-type CostBreakdownProps = {
-  baseUrl: string;
-  isSignedIn: boolean | undefined;
-  getToken: (args: { template?: string }) => Promise<string | null>;
-  currency: string;
-};
-
-type CostBreakdownPreset = "yesterday" | "today" | "7d" | "14d" | "30d" | "all" | "custom";
-
-function CostBreakdown({
-  baseUrl,
-  isSignedIn,
-  getToken,
-  currency,
-}: CostBreakdownProps) {
-  const [data, setData] = useState<CostBreakdownData | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [periodPreset, setPeriodPreset] = useState<CostBreakdownPreset>("30d");
-  const [customStart, setCustomStart] = useState("");
-  const [customEnd, setCustomEnd] = useState("");
-
-  const toDateOnly = (d: Date) => d.toISOString().slice(0, 10);
-  const today = new Date();
-  const defaultEnd = toDateOnly(today);
-  const defaultStart30 = toDateOnly(new Date(today.getTime() - 29 * 24 * 60 * 60 * 1000));
-  const yesterday = toDateOnly(new Date(today.getTime() - 24 * 60 * 60 * 1000));
-  const allTimeStart = "2020-01-01";
-
-  const effectiveStart =
-    periodPreset === "today"
-      ? defaultEnd
-      : periodPreset === "yesterday"
-        ? yesterday
-        : periodPreset === "7d"
-          ? toDateOnly(new Date(today.getTime() - 6 * 24 * 60 * 60 * 1000))
-          : periodPreset === "14d"
-            ? toDateOnly(new Date(today.getTime() - 13 * 24 * 60 * 60 * 1000))
-            : periodPreset === "30d"
-              ? defaultStart30
-              : periodPreset === "all"
-                ? allTimeStart
-                : customStart || defaultStart30;
-  const effectiveEnd =
-    periodPreset === "today" || periodPreset === "7d" || periodPreset === "14d" || periodPreset === "30d"
-      ? defaultEnd
-      : periodPreset === "yesterday"
-        ? yesterday
-        : periodPreset === "all"
-          ? defaultEnd
-          : customEnd || defaultEnd;
-
-  useEffect(() => {
-    if (!isSignedIn) {
-      setData(null);
-      return;
-    }
-    const fetchData = async () => {
-      setLoading(true);
-      try {
-        const token = await getToken({ template: "backend" });
-        const res = await fetch(
-          `${baseUrl}/api/amazon/dashboard/cost-breakdown?${new URLSearchParams({
-            start: effectiveStart,
-            end: effectiveEnd,
-          }).toString()}`,
-          { headers: { Authorization: `Bearer ${token}` } },
-        );
-        if (!res.ok) throw new Error("Failed to load cost breakdown");
-        const json = (await res.json()) as CostBreakdownData;
-        setData(json);
-      } catch {
-        setData(null);
-      } finally {
-        setLoading(false);
-      }
-    };
-    void fetchData();
-  }, [isSignedIn, getToken, baseUrl, effectiveStart, effectiveEnd]);
-
-  const cur = data?.currency ?? currency;
-  const fmt = (n: number) =>
-    new Intl.NumberFormat("en-US", {
-      style: "currency",
-      currency: cur,
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    }).format(n);
-
-  const rows: { label: string; value: number }[] = data
-    ? [
-        { label: "Total COGS", value: data.totalCogs },
-        { label: "Prep fees", value: data.prepFees },
-        { label: "Referral (sales fee)", value: data.referralFees },
-        { label: "FBA (sales fee)", value: data.fbaFees },
-        { label: "Digital service fee", value: data.digitalServiceFees },
-        { label: "Total Amazon fees", value: data.totalAmazonFees },
-      ]
-    : [];
-
-  const total = data
-    ? data.totalCogs + data.prepFees + data.referralFees + data.fbaFees + data.digitalServiceFees
-    : 0;
-
-  return (
-    <div className="flex w-full flex-col rounded-xl p-4 ring-1 ring-[var(--surface-border)]">
-      <div className="mb-2 flex w-full flex-wrap items-center justify-between gap-2">
-        <h2 className="text-sm font-medium uppercase tracking-[0.2em] text-[var(--muted-foreground)]">
-          Cost Breakdown
-        </h2>
-        <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--muted-foreground)]">
-          <select
-            value={periodPreset}
-            onChange={(e) => setPeriodPreset(e.target.value as CostBreakdownPreset)}
-            className="h-8 cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-[var(--foreground)] outline-none"
-          >
-            <option value="yesterday">Yesterday</option>
-            <option value="today">Today</option>
-            <option value="7d">7 days</option>
-            <option value="14d">Two weeks</option>
-            <option value="30d">30 days</option>
-            <option value="all">All time</option>
-            <option value="custom">Custom</option>
-          </select>
-          {periodPreset === "custom" && (
-            <>
-              <input
-                type="date"
-                value={customStart}
-                onChange={(e) => setCustomStart(e.target.value)}
-                className="h-8 rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-[var(--foreground)] outline-none"
+        {/* Dashboard demo - clean screenshot below hero */}
+        <section id="dashboard-preview" className="border-b border-[var(--surface-border)] bg-[var(--surface)]/50 py-16 sm:py-20">
+          <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+            <h2 className="text-center text-2xl font-bold text-[var(--foreground)] sm:text-3xl mb-10">
+              See your Amazon business (FBA &amp; FBM) at a glance
+            </h2>
+            <div className="overflow-hidden rounded-2xl border border-[var(--surface-border)] bg-[var(--surface)] shadow-xl w-full max-w-7xl mx-auto">
+              <Image
+                src="/dashboard-preview.png"
+                alt="SellerBunker dashboard — profit, sales, inventory and ROI"
+                width={1600}
+                height={1000}
+                className="w-full h-auto object-contain"
+                priority={false}
               />
-              <span>→</span>
-              <input
-                type="date"
-                value={customEnd}
-                onChange={(e) => setCustomEnd(e.target.value)}
-                className="h-8 rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-[var(--foreground)] outline-none"
-              />
-            </>
-          )}
-        </div>
-      </div>
-      {data && (
-        <p className="mb-2 text-[10px] text-[var(--muted-foreground)]">
-          {data.start} – {data.end} · actual sales costs (not estimated)
-        </p>
-      )}
-      {loading && (
-        <p className="text-[11px] text-[var(--muted-foreground)]">Loading…</p>
-      )}
-      {!loading && data && (
-        <div className="w-full overflow-x-auto">
-          <table className="w-full text-[11px]">
-            <thead>
-              <tr className="border-b border-[var(--surface-border)] text-[10px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
-                <th className="py-1.5 pr-2 text-left">Cost</th>
-                <th className="py-1.5 pl-2 text-right">Total</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map(({ label, value }) => (
-                <tr key={label} className="border-b border-[var(--surface-border)] last:border-b-0">
-                  <td className="py-1.5 pr-2 text-[var(--foreground)]">{label}</td>
-                  <td className="py-1.5 pl-2 text-right tabular-nums font-medium text-[var(--foreground)]">
-                    {fmt(value)}
-                  </td>
-                </tr>
-              ))}
-              <tr className="border-t-2 border-[var(--surface-border)] bg-[var(--surface)]/50 font-semibold">
-                <td className="py-1.5 pr-2 text-[var(--foreground)]">Total costs</td>
-                <td className="py-1.5 pl-2 text-right tabular-nums text-[var(--foreground)]">
-                  {fmt(total)}
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      )}
-      {!loading && !data && (
-        <p className="text-[11px] text-[var(--muted-foreground)]">No cost data for this period.</p>
-      )}
-      {!loading && data && (
-        <p className="mt-1.5 text-[10px] text-[var(--muted-foreground)]">
-          Order-related costs only. Removal &amp; storage are not stored in DB.
-        </p>
-      )}
-    </div>
-  );
-}
+            </div>
+          </div>
+        </section>
 
-type ProfitAndLossData = {
-  revenue: number;
-  totalSellingCosts: number;
-  totalCogs: number;
-  prepFees: number;
-  referralFees: number;
-  fbaFees: number;
-  digitalServiceFees: number;
-  totalAmazonFees: number;
-  softwareSubsTotal: number;
-  otherSubsTotal: number;
-  totalFixedCosts: number;
-  totalProfit: number;
-  outputVat: number;
-  inputVat: number;
-  vatBalance: number;
-  vatRegistered?: boolean;
-  currency: string;
-  start: string;
-  end: string;
-};
-
-type ProfitAndLossProps = {
-  baseUrl: string;
-  isSignedIn: boolean | undefined;
-  getToken: (args: { template?: string }) => Promise<string | null>;
-  currency: string;
-};
-
-function ProfitAndLoss({
-  baseUrl,
-  isSignedIn,
-  getToken,
-  currency,
-}: ProfitAndLossProps) {
-  const [data, setData] = useState<ProfitAndLossData | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [periodPreset, setPeriodPreset] = useState<CostBreakdownPreset>("30d");
-  const [customStart, setCustomStart] = useState("");
-  const [customEnd, setCustomEnd] = useState("");
-
-  const toDateOnly = (d: Date) => d.toISOString().slice(0, 10);
-  const today = new Date();
-  const defaultEnd = toDateOnly(today);
-  const defaultStart30 = toDateOnly(new Date(today.getTime() - 29 * 24 * 60 * 60 * 1000));
-  const yesterday = toDateOnly(new Date(today.getTime() - 24 * 60 * 60 * 1000));
-  const allTimeStart = "2020-01-01";
-
-  const effectiveStart =
-    periodPreset === "today"
-      ? defaultEnd
-      : periodPreset === "yesterday"
-        ? yesterday
-        : periodPreset === "7d"
-          ? toDateOnly(new Date(today.getTime() - 6 * 24 * 60 * 60 * 1000))
-          : periodPreset === "14d"
-            ? toDateOnly(new Date(today.getTime() - 13 * 24 * 60 * 60 * 1000))
-            : periodPreset === "30d"
-              ? defaultStart30
-              : periodPreset === "all"
-                ? allTimeStart
-                : customStart || defaultStart30;
-  const effectiveEnd =
-    periodPreset === "today" || periodPreset === "7d" || periodPreset === "14d" || periodPreset === "30d"
-      ? defaultEnd
-      : periodPreset === "yesterday"
-        ? yesterday
-        : periodPreset === "all"
-          ? defaultEnd
-          : customEnd || defaultEnd;
-
-  useEffect(() => {
-    if (!isSignedIn) {
-      setData(null);
-      return;
-    }
-    const fetchData = async () => {
-      setLoading(true);
-      try {
-        const token = await getToken({ template: "backend" });
-        const res = await fetch(
-          `${baseUrl}/api/amazon/dashboard/profit-and-loss?${new URLSearchParams({
-            start: effectiveStart,
-            end: effectiveEnd,
-          }).toString()}`,
-          { headers: { Authorization: `Bearer ${token}` } },
-        );
-        if (!res.ok) throw new Error("Failed to load profit & loss");
-        const json = (await res.json()) as ProfitAndLossData;
-        setData(json);
-      } catch {
-        setData(null);
-      } finally {
-        setLoading(false);
-      }
-    };
-    void fetchData();
-  }, [isSignedIn, getToken, baseUrl, effectiveStart, effectiveEnd]);
-
-  const cur = data?.currency ?? currency;
-  const fmt = (n: number) =>
-    new Intl.NumberFormat("en-US", {
-      style: "currency",
-      currency: cur,
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    }).format(n);
-
-  return (
-    <div className="flex w-full flex-col rounded-xl p-4 ring-1 ring-[var(--surface-border)]">
-      <div className="mb-2 flex w-full flex-wrap items-center justify-between gap-2">
-        <h2 className="text-sm font-medium uppercase tracking-[0.2em] text-[var(--muted-foreground)]">
-          Profit &amp; Loss
-        </h2>
-        <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--muted-foreground)]">
-          <select
-            value={periodPreset}
-            onChange={(e) => setPeriodPreset(e.target.value as CostBreakdownPreset)}
-            className="h-8 cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-[var(--foreground)] outline-none"
-          >
-            <option value="yesterday">Yesterday</option>
-            <option value="today">Today</option>
-            <option value="7d">7 days</option>
-            <option value="14d">Two weeks</option>
-            <option value="30d">30 days</option>
-            <option value="all">All time</option>
-            <option value="custom">Custom</option>
-          </select>
-          {periodPreset === "custom" && (
-            <>
-              <input
-                type="date"
-                value={customStart}
-                onChange={(e) => setCustomStart(e.target.value)}
-                className="h-8 rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-[var(--foreground)] outline-none"
-              />
-              <span>→</span>
-              <input
-                type="date"
-                value={customEnd}
-                onChange={(e) => setCustomEnd(e.target.value)}
-                className="h-8 rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-[var(--foreground)] outline-none"
-              />
-            </>
-          )}
-        </div>
-      </div>
-      {data && (
-        <p className="mb-2 text-[10px] text-[var(--muted-foreground)]">
-          {data.start} – {data.end}
-        </p>
-      )}
-      {loading && (
-        <p className="text-[11px] text-[var(--muted-foreground)]">Loading…</p>
-      )}
-      {!loading && data && (
-        <div className="w-full overflow-x-auto">
-          <table className="w-full text-[11px]">
-            <tbody>
-              <tr className="border-b border-[var(--surface-border)]">
-                <td className="py-1.5 pr-2 text-[var(--foreground)]">Revenue</td>
-                <td className="py-1.5 pl-2 text-right tabular-nums font-medium text-[var(--foreground)]">
-                  {fmt(data.revenue)}
-                </td>
-              </tr>
-              <tr className="text-[10px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
-                <td colSpan={2} className="pt-2 pb-0.5">Selling unit costs</td>
-              </tr>
-              <tr className="border-b border-[var(--surface-border)]">
-                <td className="py-0.5 pr-2 pl-2 text-[var(--foreground)]">COGS</td>
-                <td className="py-0.5 pl-2 text-right tabular-nums text-[var(--foreground)]">{fmt(data.totalCogs)}</td>
-              </tr>
-              <tr className="border-b border-[var(--surface-border)]">
-                <td className="py-0.5 pr-2 pl-2 text-[var(--foreground)]">Prep fees</td>
-                <td className="py-0.5 pl-2 text-right tabular-nums text-[var(--foreground)]">{fmt(data.prepFees)}</td>
-              </tr>
-              <tr className="border-b border-[var(--surface-border)]">
-                <td className="py-0.5 pr-2 pl-2 text-[var(--foreground)]">Referral</td>
-                <td className="py-0.5 pl-2 text-right tabular-nums text-[var(--foreground)]">{fmt(data.referralFees)}</td>
-              </tr>
-              <tr className="border-b border-[var(--surface-border)]">
-                <td className="py-0.5 pr-2 pl-2 text-[var(--foreground)]">FBA</td>
-                <td className="py-0.5 pl-2 text-right tabular-nums text-[var(--foreground)]">{fmt(data.fbaFees)}</td>
-              </tr>
-              <tr className="border-b border-[var(--surface-border)]">
-                <td className="py-0.5 pr-2 pl-2 text-[var(--foreground)]">Digital service fee</td>
-                <td className="py-0.5 pl-2 text-right tabular-nums text-[var(--foreground)]">{fmt(data.digitalServiceFees)}</td>
-              </tr>
-              <tr className="border-b border-[var(--surface-border)] font-medium">
-                <td className="py-1 pr-2 pl-2 text-[var(--foreground)]">Total selling costs</td>
-                <td className="py-1 pl-2 text-right tabular-nums text-[var(--foreground)]">{fmt(data.totalSellingCosts)}</td>
-              </tr>
-              <tr className="text-[10px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
-                <td colSpan={2} className="pt-2 pb-0.5">Fixed costs</td>
-              </tr>
-              <tr className="border-b border-[var(--surface-border)]">
-                <td className="py-0.5 pr-2 pl-2 text-[var(--foreground)]">Software subscriptions</td>
-                <td className="py-0.5 pl-2 text-right tabular-nums text-[var(--foreground)]">{fmt(data.softwareSubsTotal)}</td>
-              </tr>
-              <tr className="border-b border-[var(--surface-border)]">
-                <td className="py-0.5 pr-2 pl-2 text-[var(--foreground)]">Other subscriptions</td>
-                <td className="py-0.5 pl-2 text-right tabular-nums text-[var(--foreground)]">{fmt(data.otherSubsTotal)}</td>
-              </tr>
-              <tr className="border-b border-[var(--surface-border)] font-medium">
-                <td className="py-1 pr-2 pl-2 text-[var(--foreground)]">Total fixed costs</td>
-                <td className="py-1 pl-2 text-right tabular-nums text-[var(--foreground)]">{fmt(data.totalFixedCosts)}</td>
-              </tr>
-              <tr className="border-t-2 border-[var(--surface-border)] bg-[var(--surface)]/50 font-semibold">
-                <td className="py-1.5 pr-2 text-[var(--foreground)]">Total profit</td>
-                <td className={`py-1.5 pl-2 text-right tabular-nums ${data.totalProfit >= 0 ? "text-[var(--foreground)]" : "text-red-500"}`}>
-                  {fmt(data.totalProfit)}
-                </td>
-              </tr>
-            </tbody>
-          </table>
-          <div className="mt-3 border-t border-[var(--surface-border)] pt-3">
-            <p className="mb-1.5 text-[9px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
-              VAT adjustment
+        {/* 2. Problem section */}
+        <section className="border-b border-[var(--surface-border)] bg-[var(--surface)]/30 py-20 sm:py-24">
+          <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+            <h2 className="text-center text-3xl font-bold text-[var(--foreground)] sm:text-4xl">
+              Stop guessing your Amazon profits
+            </h2>
+            <p className="mx-auto mt-4 max-w-2xl text-center text-lg text-[var(--muted-foreground)]">
+              SellerBunker replaces messy spreadsheets and confusing Amazon reports with one clear dashboard—for FBA and FBM sellers alike.
             </p>
-            <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[10px] text-[var(--muted-foreground)]">
-              <span>Output VAT</span>
-              <span className="text-right tabular-nums text-[var(--foreground)]">{fmt(data.outputVat)}</span>
-              <span>Input VAT</span>
-              <span className="text-right tabular-nums text-[var(--foreground)]">{fmt(data.inputVat)}</span>
-              <span className="font-medium text-[var(--foreground)]">VAT balance</span>
-              <span className="flex items-center justify-end gap-1">
-                <span className={`tabular-nums font-medium ${(data.vatRegistered ? data.vatBalance : 0) >= 0 ? "text-[var(--foreground)]" : "text-red-500"}`}>
-                  {fmt(data.vatRegistered ? data.vatBalance : 0)}
-                </span>
-                {!data.vatRegistered && (
-                  <span
-                    className="inline-flex h-3.5 w-3.5 shrink-0 cursor-help items-center justify-center rounded-full bg-[var(--muted-foreground)]/20 text-[8px] font-semibold text-[var(--muted-foreground)]"
-                    title="VAT balance shows as zero for non VAT registered users"
-                  >
-                    i
+            <ul className="mx-auto mt-12 grid max-w-4xl gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {[
+                "Amazon reports are confusing",
+                "You don't know your true profit",
+                "Inventory is hard to track",
+                "Reordering decisions are guesswork",
+                "You manage everything in spreadsheets",
+              ].map((problem) => (
+                <li
+                  key={problem}
+                  className="flex items-center gap-3 rounded-xl border border-[var(--surface-border)] bg-[var(--background)] px-4 py-3"
+                >
+                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[var(--foreground)]" style={{ backgroundColor: accentMuted }}>
+                    <span className="text-sm" style={{ color: accentColor }}>✕</span>
                   </span>
-                )}
-              </span>
+                  <span className="text-[var(--foreground)]">{problem}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </section>
+
+        {/* 3. Dashboard highlight */}
+        <section className="border-b border-[var(--surface-border)] py-20 sm:py-24">
+          <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+            <h2 className="text-center text-3xl font-bold text-[var(--foreground)] sm:text-4xl">
+              See your entire Amazon business in one dashboard
+            </h2>
+            <p className="mx-auto mt-4 max-w-2xl text-center text-lg text-[var(--muted-foreground)]">
+              Instantly understand how your products are performing with real-time sales, profit, and ROI tracking.
+            </p>
+            <div className="mt-16 grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
+              {[
+                { title: "Profit tracking", desc: "True profit after fees & COGS" },
+                { title: "Sales performance", desc: "Revenue and units sold" },
+                { title: "ROI & margins", desc: "Per product and category" },
+                { title: "Inventory summary", desc: "FBA status and stock value" },
+                { title: "Recent orders", desc: "Profit per order at a glance" },
+                { title: "Category performance", desc: "Sales, profit, ROI by category" },
+                { title: "Sales vs profit charts", desc: "Time range filters" },
+                { title: "Performance snapshot", desc: "Key metrics in one view" },
+              ].map((item) => (
+                <div
+                  key={item.title}
+                  className="rounded-xl border border-[var(--surface-border)] bg-[var(--surface)] p-5"
+                >
+                  <h3 className="font-semibold text-[var(--foreground)]" style={{ color: accentColor }}>{item.title}</h3>
+                  <p className="mt-1 text-sm text-[var(--muted-foreground)]">{item.desc}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        {/* 4. Features */}
+        <section id="features" className="border-b border-[var(--surface-border)] bg-[var(--surface)]/30 py-20 sm:py-24">
+          <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+            <h2 className="text-center text-3xl font-bold text-[var(--foreground)] sm:text-4xl">
+              Built for how you sell
+            </h2>
+            <div className="mt-16 grid gap-8 md:grid-cols-2 lg:grid-cols-3">
+              <div className="rounded-2xl border border-[var(--surface-border)] bg-[var(--background)] p-6">
+                <h3 className="text-lg font-semibold text-[var(--foreground)]">Profit analytics</h3>
+                <p className="mt-2 text-[var(--muted-foreground)]">
+                  Track real profit after Amazon fees, cost of goods, shipping, and VAT — in one place.
+                </p>
+              </div>
+              <div className="rounded-2xl border border-[var(--surface-border)] bg-[var(--background)] p-6">
+                <h3 className="text-lg font-semibold text-[var(--foreground)]">Inventory tracking</h3>
+                <p className="mt-2 text-[var(--muted-foreground)]">
+                  Never run out of stock again. FBA inventory tracking, stock value, and potential profit visibility.
+                </p>
+              </div>
+              <div className="rounded-2xl border border-[var(--surface-border)] bg-[var(--background)] p-6">
+                <h3 className="text-lg font-semibold text-[var(--foreground)]">Order tracking</h3>
+                <p className="mt-2 text-[var(--muted-foreground)]">
+                  Monitor recent orders, profit per order, and ROI per product.
+                </p>
+              </div>
+              <div className="rounded-2xl border border-[var(--surface-border)] bg-[var(--background)] p-6">
+                <h3 className="text-lg font-semibold text-[var(--foreground)]">Replenishment tools</h3>
+                <p className="mt-2 text-[var(--muted-foreground)]">
+                  Know exactly when to reorder based on sales velocity.
+                </p>
+              </div>
+              <div className="rounded-2xl border border-[var(--surface-border)] bg-[var(--background)] p-6">
+                <h3 className="text-lg font-semibold text-[var(--foreground)]">Sales vs profit analytics</h3>
+                <p className="mt-2 text-[var(--muted-foreground)]">
+                  Visualize performance with sales vs profit charts, snapshots, and time range filters.
+                </p>
+              </div>
+              <div className="rounded-2xl border border-[var(--surface-border)] bg-[var(--background)] p-6">
+                <h3 className="text-lg font-semibold text-[var(--foreground)]">Cost breakdown & P&amp;L</h3>
+                <p className="mt-2 text-[var(--muted-foreground)]">
+                  COGS, referral, FBA fees, VAT adjustment — all in one profit &amp; loss view.
+                </p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* 5. How it works */}
+        <section id="how-it-works" className="border-b border-[var(--surface-border)] py-20 sm:py-24">
+          <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+            <h2 className="text-center text-3xl font-bold text-[var(--foreground)] sm:text-4xl">
+              How it works
+            </h2>
+            <div className="mt-16 grid gap-10 md:grid-cols-3">
+              {[
+                { step: 1, title: "Connect Amazon", desc: "Secure Amazon SP-API integration. Link your seller account in minutes." },
+                { step: 2, title: "Import your data", desc: "SellerBunker pulls your last 30 days of order data by default—or up to two years of history—plus inventory and fees." },
+                { step: 3, title: "Track profit", desc: "Instantly see true profit and business performance in your dashboard." },
+              ].map(({ step, title, desc }) => (
+                <div key={step} className="relative text-center">
+                  <div
+                    className="mx-auto flex h-14 w-14 items-center justify-center rounded-full text-xl font-bold text-black"
+                    style={{ backgroundColor: accentColor }}
+                  >
+                    {step}
+                  </div>
+                  <h3 className="mt-4 text-lg font-semibold text-[var(--foreground)]">{title}</h3>
+                  <p className="mt-2 text-[var(--muted-foreground)]">{desc}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        {/* 6. Who it's for */}
+        <section className="border-b border-[var(--surface-border)] bg-[var(--surface)]/30 py-20 sm:py-24">
+          <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+            <h2 className="text-center text-3xl font-bold text-[var(--foreground)] sm:text-4xl">
+              For every type of Amazon seller (FBA &amp; FBM)
+            </h2>
+            <p className="mx-auto mt-4 max-w-2xl text-center text-[var(--muted-foreground)]">
+              Whether you fulfill through Amazon (FBA) or ship yourself (FBM), SellerBunker gives you one view of profit, inventory, and orders.
+            </p>
+            <div className="mt-16 grid gap-8 md:grid-cols-3">
+              {[
+                { title: "Online arbitrage (FBA & FBM)", desc: "Track profit across many SKUs. See which products actually make money." },
+                { title: "Wholesale sellers (FBA & FBM)", desc: "Monitor inventory and margins at scale. Reorder before you run out." },
+                { title: "Private label (FBA & FBM)", desc: "Understand performance across products. Optimize based on real profit." },
+              ].map((item) => (
+                <div
+                  key={item.title}
+                  className="rounded-2xl border border-[var(--surface-border)] bg-[var(--background)] p-6 text-center"
+                >
+                  <h3 className="text-lg font-semibold text-[var(--foreground)]">{item.title}</h3>
+                  <p className="mt-2 text-[var(--muted-foreground)]">{item.desc}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        {/* 7. Comparison */}
+        <section className="border-b border-[var(--surface-border)] py-20 sm:py-24">
+          <div className="mx-auto max-w-4xl px-4 sm:px-6 lg:px-8">
+            <h2 className="text-center text-3xl font-bold text-[var(--foreground)] sm:text-4xl">
+              SellerBunker vs spreadsheets
+            </h2>
+            <div className="mt-12 overflow-hidden rounded-2xl border border-[var(--surface-border)]">
+              <table className="w-full text-left text-sm">
+                <thead>
+                  <tr className="border-b border-[var(--surface-border)] bg-[var(--surface)]">
+                    <th className="px-6 py-4 font-semibold text-[var(--foreground)]">Feature</th>
+                    <th className="px-6 py-4 font-semibold text-[var(--foreground)]">SellerBunker</th>
+                    <th className="px-6 py-4 font-semibold text-[var(--muted-foreground)]">Spreadsheets</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {[
+                    { feature: "Profit tracking", sb: "✓ Automated", other: "Manual" },
+                    { feature: "Inventory view", sb: "✓ Clear", other: "Messy" },
+                    { feature: "Sales analytics", sb: "✓ Built-in", other: "Limited" },
+                    { feature: "ROI tracking", sb: "✓ Automatic", other: "Manual" },
+                  ].map((row) => (
+                    <tr key={row.feature} className="border-b border-[var(--surface-border)] last:border-0">
+                      <td className="px-6 py-4 text-[var(--foreground)]">{row.feature}</td>
+                      <td className="px-6 py-4 font-medium" style={{ color: accentColor }}>{row.sb}</td>
+                      <td className="px-6 py-4 text-[var(--muted-foreground)]">{row.other}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        {/* 8. Pricing */}
+        <section id="pricing" className="border-b border-[var(--surface-border)] bg-[var(--surface)]/30 py-20 sm:py-24">
+          <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+            <h2 className="text-center text-3xl font-bold text-[var(--foreground)] sm:text-4xl">
+              Simple pricing
+            </h2>
+            <p className="mx-auto mt-4 max-w-xl text-center text-[var(--muted-foreground)]">
+              Start with a free trial. No credit card required.
+            </p>
+            <div className="mt-16 grid gap-8 md:grid-cols-3">
+              {[
+                { name: "Starter", price: "£14.99", period: "month", orders: "Up to 500 orders", note: "Testing price for initial users", priceSubline: "Two weeks free, then", cta: "Start free trial", featured: true, badge: "For initial testing" },
+                { name: "Growth", price: "TBC", period: "", orders: "Up to 5,000 orders per month", cta: "Start free trial", featured: false },
+                { name: "Pro", price: "TBC", period: "", orders: "Unlimited orders per month", cta: "Start free trial", featured: false },
+              ].map((plan) => (
+                <div
+                  key={plan.name}
+                  className={`rounded-2xl border p-6 ${
+                    plan.featured
+                      ? "border-[var(--surface-border)] ring-2"
+                      : "border-[var(--surface-border)] bg-[var(--background)]"
+                  }`}
+                  style={plan.featured ? { borderColor: accentColor, boxShadow: `0 0 0 1px ${accentColor}` } : undefined}
+                >
+                  {plan.featured && (
+                    <span className="inline-block rounded-full px-3 py-0.5 text-xs font-medium text-black" style={{ backgroundColor: accentColor }}>
+                      {"badge" in plan && plan.badge ? plan.badge : "Most popular"}
+                    </span>
+                  )}
+                  <h3 className="mt-4 text-xl font-semibold text-[var(--foreground)]">{plan.name}</h3>
+                  {"priceSubline" in plan && plan.priceSubline && (
+                    <p className="mt-2 text-sm text-[var(--muted-foreground)]">{plan.priceSubline}</p>
+                  )}
+                  <p className="mt-1">
+                    <span className="text-3xl font-bold text-[var(--foreground)]">{plan.price}</span>
+                    {plan.period ? <span className="text-[var(--muted-foreground)]">/{plan.period}</span> : null}
+                  </p>
+                  <p className="mt-2 text-sm text-[var(--muted-foreground)]">{plan.orders}</p>
+                  {"note" in plan && plan.note && (
+                    <p className="mt-1 text-xs text-[var(--muted-foreground)] italic">{plan.note}</p>
+                  )}
+                  <SignUpButton mode="modal">
+                    <button
+                      className={`mt-6 w-full rounded-xl py-3 text-sm font-semibold transition ${
+                        plan.featured ? "text-black" : "border border-[var(--surface-border)] text-[var(--foreground)] hover:bg-[var(--surface)]"
+                      }`}
+                      style={plan.featured ? { backgroundColor: accentColor } : undefined}
+                    >
+                      {plan.cta}
+                    </button>
+                  </SignUpButton>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        {/* Contact form */}
+        <ContactForm />
+        {/* 9. Social proof placeholder */}
+        <section className="border-b border-[var(--surface-border)] py-20 sm:py-24">
+          <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+            <h2 className="text-center text-3xl font-bold text-[var(--foreground)] sm:text-4xl">
+              Trusted by Amazon sellers
+            </h2>
+            <p className="mx-auto mt-6 max-w-2xl text-center text-[var(--muted-foreground)]">
+              Built by real Amazon FBA and FBM sellers—ex developers and market professionals—who know what you need to run your business.
+            </p>
+          </div>
+        </section>
+
+        {/* 10. Final CTA */}
+        <section className="py-20 sm:py-28">
+          <div className="mx-auto max-w-4xl px-4 text-center sm:px-6 lg:px-8">
+            <h2 className="text-3xl font-bold text-[var(--foreground)] sm:text-4xl">
+              Take control of your Amazon profits today
+            </h2>
+            <p className="mt-4 text-lg text-[var(--muted-foreground)]">
+              Start your free trial. Connect Amazon (FBA or FBM). See your true profit in minutes.
+            </p>
+            <div className="mt-10">
+              <SignedOut>
+                <SignUpButton mode="modal">
+                  <button
+                    className="rounded-xl px-8 py-4 text-lg font-semibold text-black transition hover:opacity-90"
+                    style={{ backgroundColor: accentColor }}
+                  >
+                    Start free trial
+                  </button>
+                </SignUpButton>
+              </SignedOut>
+              <SignedIn>
+                <Link
+                  href="/dashboard"
+                  className="inline-block rounded-xl px-8 py-4 text-lg font-semibold text-black transition hover:opacity-90"
+                  style={{ backgroundColor: accentColor }}
+                >
+                  Go to dashboard
+                </Link>
+              </SignedIn>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <footer className="border-t border-[var(--surface-border)] py-4">
+        <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+          <div className="flex flex-col items-center justify-between gap-3 sm:flex-row sm:gap-4">
+            <img
+              src="/sellerbunker-logo.png"
+              alt="SellerBunker"
+              className="sellerbunker-logo h-12 w-auto max-w-[140px] object-contain object-left opacity-90 sm:h-14 sm:max-w-[160px]"
+            />
+            <div className="text-center sm:text-left">
+              <p className="text-xs text-[var(--muted-foreground)]">
+                The profit command center for Amazon FBA &amp; FBM sellers.
+              </p>
+              <p className="mt-1 text-[10px] text-[var(--muted-foreground)]/80">
+                Repricer coming soon once beta testing of the dashboard is complete.
+              </p>
+            </div>
+            <div className="flex items-center gap-4">
+              <a
+                href="https://discord.gg/sellerbunker"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition"
+                aria-label="Join Discord"
+              >
+                <svg className="h-5 w-5 sm:h-6 sm:w-6" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+                  <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028 14.09 14.09 0 0 0 1.226-1.994.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/>
+                </svg>
+              </a>
+              <a
+                href="https://www.tiktok.com/@sellerbunker"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition"
+                aria-label="Join TikTok"
+              >
+                <svg className="h-5 w-5 sm:h-6 sm:w-6" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+                  <path d="M19.59 6.69a4.83 4.83 0 0 1-3.77-4.25V2h-3.45v13.67a2.89 2.89 0 0 1-5.2 1.74 2.89 2.89 0 0 1 2.31-4.64 2.93 2.93 0 0 1 .88.13V9.4a6.84 6.84 0 0 0-1-.05A6.33 6.33 0 0 0 5 20.1a6.34 6.34 0 0 0 10.86-4.43v-7a8.16 8.16 0 0 0 4.77 1.52v-3.4a4.85 4.85 0 0 1-1-.1z"/>
+                </svg>
+              </a>
+              <a
+                href="https://www.instagram.com/sellerbunker"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition"
+                aria-label="Join Instagram"
+              >
+                <svg className="h-5 w-5 sm:h-6 sm:w-6" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+                  <path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zM12 0C8.741 0 8.333.014 7.053.072 2.695.272.273 2.69.073 7.052.014 8.333 0 8.741 0 12c0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98C8.333 23.986 8.741 24 12 24c3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98C15.668.014 15.259 0 12 0zm0 5.838a6.162 6.162 0 1 0 0 12.324 6.162 6.162 0 0 0 0-12.324zM12 16a4 4 0 1 1 0-8 4 4 0 0 1 0 8zm6.406-11.845a1.44 1.44 0 1 0 0 2.881 1.44 1.44 0 0 0 0-2.881z"/>
+                </svg>
+              </a>
             </div>
           </div>
         </div>
-      )}
-      {!loading && !data && (
-        <p className="text-[11px] text-[var(--muted-foreground)]">No P&amp;L data for this period.</p>
-      )}
+      </footer>
     </div>
   );
 }
-
-type InventorySummaryRow = {
-  availableQty: number | null;
-  reservedQty: number | null;
-  inboundQty: number | null;
-  issueQty: number | null;
-  totalQty: number | null;
-  currentListedPrice?: number | null;
-  costOfGoods?: number | null;
-  byMarketplace?: Array<{
-    fulfillableQty: number;
-    inboundQty: number;
-    reservedQty: number;
-    researchingQty: number;
-    unfulfillableQty: number;
-    currentQty: number;
-    fcProcessingQty?: number;
-    customerOrdersQty?: number;
-    transshipmentQty?: number;
-    inboundWorkingQty?: number;
-    inboundShippedQty?: number;
-    inboundReceivingQty?: number;
-    warehouseDamagedQty?: number;
-    expiredQty?: number;
-  }>;
-};
-
-type InventorySummaryProps = {
-  baseUrl: string;
-  isSignedIn: boolean | undefined;
-  getToken: (args: { template?: string }) => Promise<string | null>;
-  currency: string;
-};
-
-function InventorySummary({
-  baseUrl,
-  isSignedIn,
-  getToken,
-  currency,
-}: InventorySummaryProps) {
-  const [rows, setRows] = useState<InventorySummaryRow[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!isSignedIn) {
-      setRows([]);
-      return;
-    }
-    const fetchInventory = async () => {
-      setLoading(true);
-      setError(null);
-      try {
-        const token = await getToken({ template: "backend" });
-        const res = await fetch(`${baseUrl}/api/amazon/inventory`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (!res.ok) throw new Error("Failed to load inventory");
-        const data = (await res.json()) as InventorySummaryRow[];
-        setRows(Array.isArray(data) ? data : []);
-      } catch (e) {
-        setError(e instanceof Error ? e.message : "Error");
-        setRows([]);
-      } finally {
-        setLoading(false);
-      }
-    };
-    void fetchInventory();
-  }, [isSignedIn, getToken, baseUrl]);
-
-  const n = (v: number | null | undefined) => (v != null && Number.isFinite(v) ? v : 0);
-  const total = rows.reduce((sum, r) => sum + n(r.totalQty), 0);
-  const price = (r: InventorySummaryRow) => n(r.currentListedPrice);
-  const cogs = (r: InventorySummaryRow) => n(r.costOfGoods);
-
-  let fulfillable = 0;
-  let fulfillableValue = 0;
-  let fulfillableCost = 0;
-  let reserved = 0;
-  let reservedValue = 0;
-  let reservedCost = 0;
-  let inbound = 0;
-  let inboundValue = 0;
-  let inboundCost = 0;
-  let researching = 0;
-  let researchingValue = 0;
-  let researchingCost = 0;
-  let unfulfillable = 0;
-  let unfulfillableValue = 0;
-  let unfulfillableCost = 0;
-  let current = 0;
-  let currentValue = 0;
-  let currentCost = 0;
-  let fcProcessing = 0;
-  let fcProcessingValue = 0;
-  let fcProcessingCost = 0;
-  let customerOrders = 0;
-  let customerOrdersValue = 0;
-  let customerOrdersCost = 0;
-  let transshipment = 0;
-  let transshipmentValue = 0;
-  let transshipmentCost = 0;
-  let inboundWorking = 0;
-  let inboundWorkingValue = 0;
-  let inboundWorkingCost = 0;
-  let inboundShipped = 0;
-  let inboundShippedValue = 0;
-  let inboundShippedCost = 0;
-  let inboundReceiving = 0;
-  let inboundReceivingValue = 0;
-  let inboundReceivingCost = 0;
-  let warehouseDamaged = 0;
-  let warehouseDamagedValue = 0;
-  let warehouseDamagedCost = 0;
-  let expired = 0;
-  let expiredValue = 0;
-  let expiredCost = 0;
-
-  rows.forEach((r) => {
-    const p = price(r);
-    const c = cogs(r);
-    const av = n(r.availableQty);
-    const rv = n(r.reservedQty);
-    const inv = n(r.inboundQty);
-    fulfillable += av;
-    fulfillableValue += p * av;
-    fulfillableCost += c * av;
-    reserved += rv;
-    reservedValue += p * rv;
-    reservedCost += c * rv;
-    inbound += inv;
-    inboundValue += p * inv;
-    inboundCost += c * inv;
-
-    r.byMarketplace?.forEach((m) => {
-      const rq = n(m.researchingQty);
-      const uq = n(m.unfulfillableQty);
-      const cq = n(m.currentQty);
-      const fcp = n(m.fcProcessingQty);
-      const co = n(m.customerOrdersQty);
-      const ts = n(m.transshipmentQty);
-      const iw = n(m.inboundWorkingQty);
-      const ish = n(m.inboundShippedQty);
-      const ir = n(m.inboundReceivingQty);
-      const wd = n(m.warehouseDamagedQty);
-      const ex = n(m.expiredQty);
-
-      researching += rq;
-      researchingValue += p * rq;
-      researchingCost += c * rq;
-      unfulfillable += uq;
-      unfulfillableValue += p * uq;
-      unfulfillableCost += c * uq;
-      current += cq;
-      currentValue += p * cq;
-      currentCost += c * cq;
-      fcProcessing += fcp;
-      fcProcessingValue += p * fcp;
-      fcProcessingCost += c * fcp;
-      customerOrders += co;
-      customerOrdersValue += p * co;
-      customerOrdersCost += c * co;
-      transshipment += ts;
-      transshipmentValue += p * ts;
-      transshipmentCost += c * ts;
-      inboundWorking += iw;
-      inboundWorkingValue += p * iw;
-      inboundWorkingCost += c * iw;
-      inboundShipped += ish;
-      inboundShippedValue += p * ish;
-      inboundShippedCost += c * ish;
-      inboundReceiving += ir;
-      inboundReceivingValue += p * ir;
-      inboundReceivingCost += c * ir;
-      warehouseDamaged += wd;
-      warehouseDamagedValue += p * wd;
-      warehouseDamagedCost += c * wd;
-      expired += ex;
-      expiredValue += p * ex;
-      expiredCost += c * ex;
-    });
-  });
-
-  // Total value/cost from product-level totalQty to avoid double-counting
-  const totalValue = rows.reduce((sum, r) => sum + price(r) * n(r.totalQty), 0);
-  const totalCost = rows.reduce((sum, r) => sum + cogs(r) * n(r.totalQty), 0);
-  const totalProfit = totalValue - totalCost;
-  const totalRoiPct = totalCost > 0 ? (totalProfit / totalCost) * 100 : null;
-
-  // Granular statuses from FBA API (details=true): show all breakdowns we store; profit = value - cost, ROI = profit/cost
-  type StatusRow = { label: string; value: number; stockValue: number; unitCost: number; profit: number; roiPct: number | null };
-  const toStatusRow = (label: string, value: number, stockValue: number, unitCost: number): StatusRow => ({
-    label,
-    value,
-    stockValue,
-    unitCost,
-    profit: stockValue - unitCost,
-    roiPct: unitCost > 0 ? ((stockValue - unitCost) / unitCost) * 100 : null,
-  });
-  const statuses: StatusRow[] = [
-    toStatusRow("FBA Available", fulfillable, fulfillableValue, fulfillableCost),
-    toStatusRow("FC Processing", fcProcessing, fcProcessingValue, fcProcessingCost),
-    toStatusRow("Customer Orders", customerOrders, customerOrdersValue, customerOrdersCost),
-    toStatusRow("Transshipment", transshipment, transshipmentValue, transshipmentCost),
-    toStatusRow("Reserved", reserved, reservedValue, reservedCost),
-    toStatusRow("Inbound Working", inboundWorking, inboundWorkingValue, inboundWorkingCost),
-    toStatusRow("Inbound Shipped", inboundShipped, inboundShippedValue, inboundShippedCost),
-    toStatusRow("Inbound Receiving", inboundReceiving, inboundReceivingValue, inboundReceivingCost),
-    toStatusRow("Inbound", inbound, inboundValue, inboundCost),
-    toStatusRow("Researching", researching, researchingValue, researchingCost),
-    toStatusRow("Unfulfillable", unfulfillable, unfulfillableValue, unfulfillableCost),
-    toStatusRow("Warehouse Damaged", warehouseDamaged, warehouseDamagedValue, warehouseDamagedCost),
-    toStatusRow("Expired", expired, expiredValue, expiredCost),
-    toStatusRow("Current", current > 0 ? current : total, current > 0 ? currentValue : totalValue, current > 0 ? currentCost : totalCost),
-  ];
-
-  return (
-    <div className="flex w-full flex-col rounded-xl p-3 ring-1 ring-[var(--surface-border)]">
-      <div className="mb-1 flex items-center gap-1">
-        <h2 className="text-[10px] font-medium uppercase tracking-[0.1em] text-[var(--muted-foreground)]">
-          Inventory summary
-        </h2>
-        <span
-          className="inline-flex h-3 w-3 shrink-0 cursor-help items-center justify-center rounded-full bg-[var(--muted-foreground)]/20 text-[8px] font-semibold text-[var(--muted-foreground)]"
-          title="Complete COGS for accurate inventory summary"
-        >
-          i
-        </span>
-      </div>
-      {loading && (
-        <p className="text-[9px] text-[var(--muted-foreground)]">Loading…</p>
-      )}
-      {error && (
-        <p className="text-[9px] text-red-600">{error}</p>
-      )}
-      {!loading && !error && (
-        <div className="min-w-0 w-full overflow-x-auto">
-          <table className="w-full text-[9px]">
-            <thead>
-              <tr className="border-b border-[var(--surface-border)] text-[8px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
-                <th className="py-0.5 pr-1 text-left">Status</th>
-                <th className="py-0.5 px-0.5 text-center">Qty</th>
-                <th className="py-0.5 px-1 text-center">Stock value</th>
-                <th className="py-0.5 px-1 text-center">Stock cost</th>
-                <th className="py-0.5 px-1 text-center">Potential profit</th>
-                <th className="py-0.5 pl-1 text-center">Potential ROI</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr className="border-b border-[var(--surface-border)] bg-[var(--surface)]/50 font-semibold">
-                <td className="py-0.5 pr-1 text-[var(--foreground)]">Total</td>
-                <td className="py-0.5 px-0.5 text-center tabular-nums text-[var(--foreground)]">{total.toLocaleString()}</td>
-                <td className="py-0.5 px-1 text-center tabular-nums text-[var(--foreground)]">{formatCurrency(totalValue, currency, 2)}</td>
-                <td className="py-0.5 px-1 text-center tabular-nums text-[var(--foreground)]">{formatCurrency(totalCost, currency, 2)}</td>
-                <td className="py-0.5 px-1 text-center tabular-nums text-[var(--foreground)]">{formatCurrency(totalProfit, currency, 2)}</td>
-                <td className="py-0.5 pl-1 text-center tabular-nums text-[var(--foreground)]">{totalRoiPct != null ? `${totalRoiPct.toFixed(1)}%` : "—"}</td>
-              </tr>
-              {statuses.map(({ label, value, stockValue, unitCost, profit, roiPct }) => (
-                <tr key={label} className="border-b border-[var(--surface-border)] last:border-b-0">
-                  <td className="py-0.5 pr-1 text-[var(--muted-foreground)]">{label}</td>
-                  <td className="py-0.5 px-0.5 text-center font-medium tabular-nums text-[var(--foreground)]">{value.toLocaleString()}</td>
-                  <td className="py-0.5 px-1 text-center tabular-nums text-[var(--foreground)]">{formatCurrency(stockValue, currency, 2)}</td>
-                  <td className="py-0.5 px-1 text-center tabular-nums text-[var(--foreground)]">{formatCurrency(unitCost, currency, 2)}</td>
-                  <td className="py-0.5 px-1 text-center tabular-nums text-[var(--foreground)]">{formatCurrency(profit, currency, 2)}</td>
-                  <td className="py-0.5 pl-1 text-center tabular-nums text-[var(--foreground)]">{roiPct != null ? `${roiPct.toFixed(1)}%` : "—"}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </div>
-  );
-}
-
-type DonutCardProps = {
-  label: string;
-  value: string;
-  percentage: number;
-  color: string;
-  /** Small title shown above the value in the center (e.g. "Profit", "ROI") */
-  centerTitle?: string;
-  /** Override center: line 1 (amount, biggest), line 2 ("Profit on Sales"), line 3 (percent) */
-  centerLine1?: string;
-  centerLine2?: string;
-  centerLine3?: string;
-  /** Optional helper note shown under the label (e.g. when a metric requires setup). */
-  note?: ReactNode;
-  /** When true, show only value (no %); ring stays empty. Use for metrics without a meaningful %. */
-  hidePercentage?: boolean;
-};
-
-type SalesTrendProps = {
-  baseUrl: string;
-  isSignedIn: boolean | undefined;
-  getToken: (args: { template?: string }) => Promise<string | null>;
-  currency: string;
-  start: string;
-  end: string;
-  label: string;
-  /** When true, do not render outer box/title (parent provides them) */
-  noWrapper?: boolean;
-};
-
-function SalesTrend({
-  baseUrl,
-  isSignedIn,
-  getToken,
-  currency,
-  start,
-  end,
-  label,
-  noWrapper = false,
-}: SalesTrendProps) {
-  const [sales, setSales] = useState<SalesSeries | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
-
-  useEffect(() => {
-    if (!isSignedIn) {
-      setSales(null);
-      return;
-    }
-
-    const fetchSales = async () => {
-      setLoading(true);
-      setError(null);
-
-      try {
-        const token = await getToken({ template: "backend" });
-        const res = await fetch(
-          `${baseUrl}/api/amazon/sales/timeseries?` +
-            new URLSearchParams({ start, end }).toString(),
-          {
-            headers: {
-              Authorization: `Bearer ${token}`,
-            },
-          },
-        );
-
-        if (!res.ok) {
-          setError("Failed to load sales trend.");
-          setSales(null);
-          return;
-        }
-
-        const data = (await res.json()) as SalesSeries;
-        setSales(data);
-      } catch {
-        setError("Unable to load sales trend.");
-        setSales(null);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    fetchSales();
-  }, [isSignedIn, getToken, baseUrl, start, end]);
-
-  if (!sales && !loading && !error) {
-    return null;
-  }
-
-  const points = sales?.points ?? [];
-  const maxValue =
-    points.length > 0
-      ? points.reduce(
-          (m, p) => Math.max(m, p.revenue, p.profit),
-          0
-        )
-      : 0;
-  const allZero = points.length > 0 && maxValue === 0;
-
-  const height = 250;
-  const paddingX = 12; // room for y-axis labels (right-aligned so they don’t overlap bars)
-  const paddingBottom = 48; // room for x-axis line + rotated date labels underneath
-  const paddingTop = 12; // room for hover labels
-
-  const width = 400;
-  const barAreaHeight = height - paddingTop - paddingBottom;
-  const barAreaWidth = width - paddingX * 2;
-  const numPoints = Math.max(1, points.length);
-  const bucketWidth = barAreaWidth / numPoints;
-  const barWidth = bucketWidth * 0.88; // one overlapping stacked bar per day
-  const revenueColor = "rgb(2, 242, 170)"; // teal
-  const profitColor = "rgb(251, 191, 36)"; // amber
-
-  const content = (
-    <>
-      <div className="mb-3 flex items-center justify-between">
-        <div>
-          {!noWrapper && (
-            <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
-              Sales v Profit
-            </p>
-          )}
-          <p className={`text-[11px] text-[var(--muted-foreground)] ${noWrapper ? "" : "mt-0.5"}`}>
-            {label} · Revenue vs profit ({currency})
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <span className="inline-flex items-center gap-1.5 text-[10px] text-[var(--muted-foreground)]">
-            <span className="inline-block h-2 w-2 rounded-sm" style={{ backgroundColor: revenueColor }} />
-            Revenue
-          </span>
-          <span className="inline-flex items-center gap-1.5 text-[10px] text-[var(--muted-foreground)]">
-            <span className="inline-block h-2 w-2 rounded-sm" style={{ backgroundColor: profitColor }} />
-            Profit
-          </span>
-          {loading && (
-            <span className="text-[11px] text-[var(--muted-foreground)]">
-              Loading…
-            </span>
-          )}
-        </div>
-      </div>
-      {error && (
-        <p className="text-[11px] text-red-600">{error}</p>
-      )}
-      {!error && (points.length === 0 || allZero) && !loading && (
-        <p className="text-[11px] text-[var(--muted-foreground)]">
-          No orders found for the selected period yet.
-        </p>
-      )}
-      {points.length > 0 && !allZero && (
-        <div className="w-full">
-        <svg
-          viewBox={`-50 0 ${width + 50} ${height}`}
-          className="mt-2 h-[18rem] min-h-[12rem] w-full"
-          preserveAspectRatio="none"
-        >
-          {/* X-axis line */}
-          <line
-            x1={paddingX}
-            y1={paddingTop + barAreaHeight}
-            x2={width - paddingX}
-            y2={paddingTop + barAreaHeight}
-            stroke="currentColor"
-            strokeWidth={1}
-            opacity={0.4}
-          />
-          {/* Y-axis line */}
-          <line
-            x1={paddingX}
-            y1={paddingTop}
-            x2={paddingX}
-            y2={paddingTop + barAreaHeight}
-            stroke="currentColor"
-            strokeWidth={1}
-            opacity={0.4}
-          />
-          {/* Y-axis grid / labels – compact format, right-aligned to avoid overlap */}
-          {maxValue > 0 &&
-            [0, 0.5, 1].map((ratio, idx) => {
-              const value = maxValue * ratio;
-              const y =
-                paddingTop +
-                (1 - ratio) * barAreaHeight;
-              const compactLabel =
-                value >= 1000
-                  ? `${(value / 1000).toFixed(1)}k`
-                  : value >= 1
-                    ? Math.round(value).toString()
-                    : value > 0
-                      ? value.toFixed(1)
-                      : "0";
-              return (
-                <g key={`y-${idx}`}>
-                  <line
-                    x1={paddingX}
-                    x2={width - paddingX}
-                    y1={y}
-                    y2={y}
-                    stroke="currentColor"
-                    strokeWidth={0.5}
-                    opacity={0.15}
-                  />
-                  <text
-                    x={paddingX - 2}
-                    y={y + 3}
-                    textAnchor="end"
-                    fontSize="7"
-                    fill="currentColor"
-                  >
-                    {compactLabel}
-                  </text>
-                </g>
-              );
-            })}
-
-          {points.map((p, idx) => {
-            const bucketLeft = paddingX + idx * bucketWidth;
-            const barX = bucketLeft + (bucketWidth - barWidth) / 2;
-            const revenueRatio = maxValue > 0 ? p.revenue / maxValue : 0;
-            const profitRatio = maxValue > 0 ? p.profit / maxValue : 0;
-            const revenueHeight = revenueRatio * barAreaHeight;
-            const profitHeight = profitRatio * barAreaHeight;
-            const barBottomY = paddingTop + barAreaHeight;
-            const profitSegmentTopY = barBottomY - profitHeight;
-            const barTopY = barBottomY - revenueHeight;
-            const isHovered = hoveredIndex === idx;
-
-            return (
-              <g
-                key={p.date}
-                onMouseEnter={() => setHoveredIndex(idx)}
-                onMouseLeave={() => setHoveredIndex(null)}
-              >
-                {/* Profit (amber) – bottom segment, drawn first */}
-                <rect
-                  x={barX}
-                  y={profitSegmentTopY}
-                  width={barWidth}
-                  height={profitHeight}
-                  fill={isHovered ? profitColor : "rgba(251, 191, 36, 0.7)"}
-                  rx={2}
-                  className="cursor-pointer"
-                />
-                {/* Revenue extends above profit (green) – overlapping, revenue = profit + (revenue - profit) */}
-                {revenueHeight > profitHeight && (
-                  <rect
-                    x={barX}
-                    y={barTopY}
-                    width={barWidth}
-                    height={revenueHeight - profitHeight}
-                    fill={isHovered ? revenueColor : "rgba(2, 242, 170, 0.6)"}
-                    rx={2}
-                    className="cursor-pointer"
-                  />
-                )}
-              </g>
-            );
-          })}
-          {hoveredIndex !== null && points[hoveredIndex] && (
-            (() => {
-              const p = points[hoveredIndex];
-              const x =
-                paddingX +
-                hoveredIndex * bucketWidth +
-                bucketWidth / 2;
-              const revenueRatio = maxValue > 0 ? p.revenue / maxValue : 0;
-              const revenueHeight = revenueRatio * barAreaHeight;
-              const y = paddingTop + (barAreaHeight - revenueHeight);
-              const isZero = p.revenue === 0 && p.profit === 0;
-              const label = isZero
-                ? "Zero sales"
-                : `Revenue: ${formatCurrency(p.revenue, currency)} · Profit: ${formatCurrency(p.profit, currency)}`;
-              const approxWidth = Math.min(label.length * 5.5, 140);
-              const padding = 6;
-              const rectWidth = approxWidth + padding * 2;
-              const rectY = Math.max(4, y - 22);
-              const textY = rectY + 11;
-
-              return (
-                <g>
-                  <rect
-                    x={x - rectWidth / 2}
-                    y={rectY}
-                    width={rectWidth}
-                    height={20}
-                    rx={3}
-                    fill="var(--surface)"
-                    stroke="var(--surface-border)"
-                    strokeWidth={0.5}
-                  />
-                  <text
-                    x={x}
-                    y={textY}
-                    textAnchor="middle"
-                    fontSize="8"
-                    fill="var(--foreground)"
-                  >
-                    {label}
-                  </text>
-                </g>
-              );
-            })()
-          )}
-          {/* Date labels: drawn in SVG so they sit under the x-axis and fit in the padding area */}
-          {points.map((p, idx) => {
-            if (idx % 2 !== 0) return null;
-            const x =
-              paddingX +
-              idx * bucketWidth +
-              bucketWidth / 2;
-            const labelY = paddingTop + barAreaHeight + 14; // just under the x-axis line
-            const [, month, day] = p.date.split("-");
-            const label = `${day}/${month}`;
-            return (
-              <text
-                key={`${p.date}-label`}
-                x={x}
-                y={labelY}
-                textAnchor="end"
-                fontSize="9"
-                fontFamily="system-ui, sans-serif"
-                fontWeight="600"
-                fontStyle="normal"
-                fill="var(--foreground)"
-                transform={`rotate(-55 ${x} ${labelY})`}
-              >
-                {label}
-              </text>
-            );
-          })}
-        </svg>
-      </div>
-      )}
-    </>
-  );
-  return noWrapper ? (
-    content
-  ) : (
-    <div className="rounded-xl bg-transparent p-4 ring-1 ring-[var(--surface-border)]">
-      {content}
-    </div>
-  );
-}
-
-type CategoryBreakdown = {
-  sales: Array<{ category: string; value: number }>;
-  profit: Array<{ category: string; value: number }>;
-  roi: Array<{ category: string; value: number }>;
-  units: Array<{ category: string; value: number }>;
-  currency: string;
-};
-
-type CategoryPieChartsProps = {
-  baseUrl: string;
-  isSignedIn: boolean | undefined;
-  getToken: (args: { template?: string }) => Promise<string | null>;
-  currency: string;
-  start: string;
-  end: string;
-};
-
-const PIE_COLORS = ["#4F46E5", "#10B981", "#F59E0B", "#EC4899"];
-
-function CategoryPieChart({
-  title,
-  data,
-  currency,
-  formatValue,
-}: {
-  title: string;
-  data: Array<{ category: string; value: number }>;
-  currency: string;
-  formatValue: (v: number) => string;
-}) {
-  const total = data.reduce((s, d) => s + d.value, 0);
-  const hasData = total > 0 && data.length > 0;
-  const size = 80;
-  const cx = size / 2;
-  const cy = size / 2;
-  const r = 32;
-
-  let cumulative = 0;
-  const segments = hasData
-    ? data.map((d, i) => {
-        const pct = total > 0 ? d.value / total : 0;
-        const startAngle = cumulative * 2 * Math.PI;
-        cumulative += pct;
-        const endAngle = cumulative * 2 * Math.PI;
-        const x1 = cx + r * Math.sin(startAngle);
-        const y1 = cy - r * Math.cos(startAngle);
-        const x2 = cx + r * Math.sin(endAngle);
-        const y2 = cy - r * Math.cos(endAngle);
-        const large = pct > 0.5 ? 1 : 0;
-        const path = `M ${cx} ${cy} L ${x1} ${y1} A ${r} ${r} 0 ${large} 1 ${x2} ${y2} Z`;
-        return { path, color: PIE_COLORS[i % PIE_COLORS.length], ...d };
-      })
-    : [];
-
-  return (
-    <div className="flex min-w-0 flex-1 flex-col rounded-lg border border-[var(--surface-border)] bg-[var(--surface)]/30 p-2">
-      <h3 className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
-        {title}
-      </h3>
-      {hasData ? (
-        <div className="flex min-w-0 items-start gap-2">
-          <svg viewBox={`0 0 ${size} ${size}`} className="h-14 w-14 shrink-0 sm:h-16 sm:w-16">
-            {segments.map((seg, i) => (
-              <path
-                key={i}
-                d={seg.path}
-                fill={seg.color}
-                stroke="var(--background)"
-                strokeWidth={1}
-              />
-            ))}
-          </svg>
-          <ul className="min-w-0 flex-1 space-y-0.5 text-[10px]">
-            {segments.map((seg, i) => (
-              <li
-                key={i}
-                className="flex items-center justify-between gap-1.5 text-[var(--foreground)]"
-              >
-                <span className="flex min-w-0 items-center gap-1 truncate">
-                  <span
-                    className="h-1.5 w-1.5 shrink-0 rounded-full"
-                    style={{ backgroundColor: seg.color }}
-                  />
-                  <span className="truncate">{seg.category}</span>
-                </span>
-                <span className="shrink-0 tabular-nums font-medium">
-                  {formatValue(seg.value)}
-                </span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      ) : (
-        <p className="py-2 text-[10px] text-[var(--muted-foreground)]">No data</p>
-      )}
-    </div>
-  );
-}
-
-function CategoryPieCharts({
-  baseUrl,
-  isSignedIn,
-  getToken,
-  currency,
-  start,
-  end,
-}: CategoryPieChartsProps) {
-  const [data, setData] = useState<CategoryBreakdown | null>(null);
-  const [loading, setLoading] = useState(false);
-
-  useEffect(() => {
-    if (!isSignedIn) {
-      setData(null);
-      return;
-    }
-    const fetchData = async () => {
-      setLoading(true);
-      try {
-        const token = await getToken({ template: "backend" });
-        const res = await fetch(
-          `${baseUrl}/api/amazon/dashboard/category-breakdown?${new URLSearchParams({
-            start,
-            end,
-          }).toString()}`,
-          { headers: { Authorization: `Bearer ${token}` } },
-        );
-        if (!res.ok) throw new Error("Failed to load category breakdown");
-        const json = (await res.json()) as CategoryBreakdown;
-        setData(json);
-      } catch {
-        setData(null);
-      } finally {
-        setLoading(false);
-      }
-    };
-    void fetchData();
-  }, [isSignedIn, getToken, baseUrl, start, end]);
-
-  if (loading) {
-    return (
-      <div className="flex w-full flex-col rounded-xl p-3 ring-1 ring-[var(--surface-border)]">
-        <h2 className="mb-2 text-xs font-medium uppercase tracking-[0.2em] text-[var(--muted-foreground)]">
-          Top categories by metric
-        </h2>
-        <p className="text-[10px] text-[var(--muted-foreground)]">Loading…</p>
-      </div>
-    );
-  }
-
-  const cur = data?.currency ?? currency;
-  const formatCur = (n: number) =>
-    new Intl.NumberFormat("en-US", {
-      style: "currency",
-      currency: cur,
-      minimumFractionDigits: 0,
-      maximumFractionDigits: 0,
-    }).format(n);
-  const formatPct = (n: number) => `${Math.round(n)}%`;
-  const formatNum = (n: number) => n.toLocaleString();
-
-  return (
-    <div className="flex w-full flex-col rounded-xl p-3 ring-1 ring-[var(--surface-border)]">
-      <h2 className="mb-2 text-xs font-medium uppercase tracking-[0.2em] text-[var(--muted-foreground)]">
-        Top categories by metric
-      </h2>
-      <div className="grid grid-cols-2 gap-2 sm:gap-3">
-        <CategoryPieChart
-          title="Sales"
-          data={data?.sales ?? []}
-          currency={cur}
-          formatValue={formatCur}
-        />
-        <CategoryPieChart
-          title="Profit"
-          data={data?.profit ?? []}
-          currency={cur}
-          formatValue={formatCur}
-        />
-        <CategoryPieChart
-          title="ROI"
-          data={data?.roi ?? []}
-          currency={cur}
-          formatValue={formatPct}
-        />
-        <CategoryPieChart
-          title="Units sold"
-          data={data?.units ?? []}
-          currency={cur}
-          formatValue={formatNum}
-        />
-      </div>
-    </div>
-  );
-}
-
-function formatCurrency(amount: number, currency: string, decimals = 0) {
-  try {
-    return new Intl.NumberFormat("en-US", {
-      style: "currency",
-      currency,
-      minimumFractionDigits: decimals,
-      maximumFractionDigits: decimals,
-    }).format(amount);
-  } catch {
-    return `$${amount.toLocaleString()}`;
-  }
-}
-
-function DonutCard({
-  label,
-  value,
-  percentage,
-  color,
-  centerTitle,
-  centerLine1,
-  centerLine2,
-  centerLine3,
-  note,
-  hidePercentage,
-}: DonutCardProps) {
-  const radius = 54;
-  const strokeWidth = 12;
-  const circumference = 2 * Math.PI * radius;
-  const clamped = Math.max(0, Math.min(100, percentage));
-  const offset = circumference * (1 - clamped / 100);
-  const useCustomCenter =
-    centerLine1 != null && centerLine2 != null && centerLine3 != null;
-  const valueOnly = hidePercentage === true;
-
-  const ringGreen = "rgb(2, 242, 170)";
-  return (
-    <div className="flex flex-col items-center gap-2 rounded-xl bg-transparent p-2">
-      <div className="relative flex h-28 w-28 items-center justify-center">
-        <svg
-          viewBox="0 0 120 120"
-          className="h-full w-full -rotate-90"
-        >
-          <circle
-            cx="60"
-            cy="60"
-            r={radius}
-            stroke={ringGreen}
-            strokeWidth={strokeWidth}
-            fill="none"
-          />
-          <circle
-            cx="60"
-            cy="60"
-            r={radius}
-            stroke={color}
-            strokeWidth={strokeWidth}
-            strokeLinecap="round"
-            fill="none"
-            style={{
-              strokeDasharray: `${circumference} ${circumference}`,
-              strokeDashoffset: offset,
-              transition: "stroke-dashoffset 0.6s ease-out",
-            }}
-          />
-        </svg>
-        <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-start pt-10 text-center">
-          {centerTitle && (
-            <span className="text-[9px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
-              {centerTitle}
-            </span>
-          )}
-          {useCustomCenter ? (
-            <>
-              <span className="text-lg font-semibold leading-none text-[var(--foreground)]">
-                {centerLine1}
-              </span>
-              {centerLine2 ? (
-                <span className="text-[10px] text-[var(--muted-foreground)]">
-                  {centerLine2}
-                </span>
-              ) : null}
-              <span className="mt-1.5 inline-flex items-center rounded-full bg-[var(--surface)]/80 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-normal text-[var(--muted-foreground)]">
-                {centerLine3}
-              </span>
-            </>
-          ) : (
-            <>
-              <span className="text-lg font-semibold leading-none text-[var(--foreground)]">
-                {value}
-              </span>
-              {!valueOnly && (
-                <span className="mt-1.5 text-[9px] uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
-                  {clamped.toFixed(0)}%
-                </span>
-              )}
-            </>
-          )}
-        </div>
-      </div>
-      <div className="flex flex-col items-center gap-1 text-center">
-        <p className="text-xs font-medium text-[var(--muted-foreground)]">
-          {label}
-        </p>
-        {note ? (
-          <p className="text-[11px] text-[var(--muted-foreground)]">{note}</p>
-        ) : null}
-      </div>
-    </div>
-  );
-}
-

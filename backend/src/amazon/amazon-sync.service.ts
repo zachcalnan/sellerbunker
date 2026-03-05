@@ -47,8 +47,22 @@ export class AmazonSyncService implements OnModuleInit {
       },
     );
 
+    // Fee estimate refresh: once per day (default 6 AM) to avoid rate limits
+    const feeEstimateCron =
+      process.env.FEE_ESTIMATE_REFRESH_CRON ?? '0 6 * * *';
+    await this.queue.add(
+      'fee-estimate-refresh',
+      {},
+      {
+        repeat: {
+          pattern: feeEstimateCron,
+        },
+        jobId: 'fee-estimate-refresh',
+      },
+    );
+
     this.logger.log(
-      `Scheduled Amazon sync jobs (ordersEveryMs=${ordersEveryMs}, inventoryEveryMs=${inventoryEveryMs})`,
+      `Scheduled Amazon sync jobs (ordersEveryMs=${ordersEveryMs}, inventoryEveryMs=${inventoryEveryMs}, feeEstimateCron=${feeEstimateCron})`,
     );
   }
 

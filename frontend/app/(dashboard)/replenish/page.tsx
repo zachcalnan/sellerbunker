@@ -2,6 +2,7 @@
 
 import { useAuth, SignedIn, SignedOut, SignInButton } from "@clerk/nextjs";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useDisplaySettings } from "@/contexts/display-settings-context";
 
 type ReplenishRow = {
   productId: string;
@@ -15,7 +16,7 @@ type ReplenishRow = {
   estimatedProfit: number;
 };
 
-const PAGE_SIZE = 24;
+const PAGE_SIZE = 12;
 
 function formatDate(iso: string | null): string {
   if (!iso) return "—";
@@ -30,6 +31,7 @@ function formatDate(iso: string | null): string {
 }
 
 export default function ReplenishPage() {
+  const baseUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
   const { isSignedIn, getToken } = useAuth();
 
   const [rows, setRows] = useState<ReplenishRow[]>([]);
@@ -43,7 +45,7 @@ export default function ReplenishPage() {
     setError(null);
     try {
       const token = await getToken({ template: "backend" });
-      const res = await fetch("/api/amazon/replenish?limit=200", {
+      const res = await fetch(`${baseUrl}/api/amazon/replenish?limit=10000`, {
         headers: { Authorization: `Bearer ${token}` },
         credentials: "include",
       });
@@ -59,7 +61,7 @@ export default function ReplenishPage() {
     } finally {
       setLoading(false);
     }
-  }, [getToken]);
+  }, [getToken, baseUrl]);
 
   useEffect(() => {
     if (!isSignedIn) {
@@ -92,10 +94,12 @@ export default function ReplenishPage() {
     setPage(1);
   }, [query]);
 
+  const { backgroundClass } = useDisplaySettings();
+
   return (
-    <div className="flex flex-col gap-4 p-4 md:p-6">
+    <div className={`flex min-h-screen flex-col gap-3 ${backgroundClass} p-3 md:p-4`}>
       <SignedOut>
-        <div className="flex flex-col items-center justify-center gap-4 py-12">
+        <div className="flex flex-col items-center justify-center gap-4 py-8">
           <p className="text-[var(--muted-foreground)]">
             Sign in to view replenishment suggestions.
           </p>
@@ -108,22 +112,23 @@ export default function ReplenishPage() {
       </SignedOut>
 
       <SignedIn>
-        <h1 className="text-xl font-semibold text-[var(--foreground)]">
-          Replenish
-        </h1>
-        <p className="text-sm text-[var(--muted-foreground)]">
-          Best-selling products from your existing order data, sorted by out of stock first, then most sold, then estimated profit.
-        </p>
-
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-          <input
-            type="search"
-            placeholder="Search by SKU, ASIN or title…"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            className="max-w-md rounded-lg border border-[var(--surface-border)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[rgb(2,242,170)]"
-            aria-label="Search replenish list"
-          />
+        <div className="rounded-xl border border-[var(--surface-border)] bg-[var(--surface)] px-4 py-3">
+          <h1 className="text-xl font-semibold text-[var(--foreground)]">
+            Replenish
+          </h1>
+          <p className="mt-1 text-sm text-[var(--muted-foreground)]">
+            Best-selling products from your existing order data, sorted by out of stock first, then most sold, then estimated profit.
+          </p>
+          <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center">
+            <input
+              type="search"
+              placeholder="Search by SKU, ASIN or title…"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              className="max-w-md rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[rgb(2,242,170)]"
+              aria-label="Search replenish list"
+            />
+          </div>
         </div>
 
         {error && (
@@ -133,11 +138,11 @@ export default function ReplenishPage() {
         )}
 
         {loading ? (
-          <div className="py-8 text-center text-sm text-[var(--muted-foreground)]">
+          <div className="py-6 text-center text-sm text-[var(--muted-foreground)]">
             Loading…
           </div>
         ) : filtered.length === 0 ? (
-          <div className="rounded-lg border border-[var(--surface-border)] bg-[var(--surface)] px-4 py-8 text-center text-sm text-[var(--muted-foreground)]">
+          <div className="rounded-lg border border-[var(--surface-border)] bg-[var(--surface)] px-4 py-6 text-center text-sm text-[var(--muted-foreground)]">
             No products with orders found in your database.
           </div>
         ) : (

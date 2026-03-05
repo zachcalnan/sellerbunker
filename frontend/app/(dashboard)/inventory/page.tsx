@@ -2,6 +2,7 @@
 
 import { useAuth, SignedIn, SignedOut, SignInButton } from "@clerk/nextjs";
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { useDisplaySettings } from "@/contexts/display-settings-context";
 
 type InventoryRow = {
   productId: string;
@@ -235,60 +236,64 @@ export default function InventoryPage() {
     setPage(1);
   }, [query, showSystem]);
 
+  const { backgroundClass } = useDisplaySettings();
+
   return (
-    <div className="w-full px-6 py-10">
-      <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-semibold text-[var(--foreground)]">
-            Inventory
-          </h1>
-          <p className="mt-1 text-sm text-[var(--muted-foreground)]">
-            FBA inventory only (fulfillable units) matched by SKU.
-          </p>
-        </div>
-        <div className="flex w-full flex-col gap-3 sm:w-auto sm:flex-row sm:items-center">
-          <div className="flex items-center justify-between gap-3 sm:justify-start">
-            <label className="flex items-center gap-2 text-sm text-[var(--muted-foreground)]">
-              <input
-                type="checkbox"
-                checked={showSystem}
-                onChange={(e) => setShowSystem(e.target.checked)}
-              />
-              Show system SKUs
-            </label>
+    <div className={`min-h-screen w-full ${backgroundClass} px-4 py-6`}>
+      <div className="mb-4 rounded-xl border border-[var(--surface-border)] bg-[var(--surface)] px-4 py-3">
+        <div className="flex flex-wrap items-end justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-semibold text-[var(--foreground)]">
+              Inventory
+            </h1>
+            <p className="mt-1 text-sm text-[var(--muted-foreground)]">
+              FBA inventory only (fulfillable units) matched by SKU.
+            </p>
           </div>
+          <div className="flex w-full flex-col gap-3 sm:w-auto sm:flex-row sm:items-center">
+            <div className="flex items-center justify-between gap-3 sm:justify-start">
+              <label className="flex items-center gap-2 text-sm text-[var(--muted-foreground)]">
+                <input
+                  type="checkbox"
+                  checked={showSystem}
+                  onChange={(e) => setShowSystem(e.target.checked)}
+                />
+                Show system SKUs
+              </label>
+            </div>
 
-          <input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search SKU / ASIN / title…"
-            className="w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none sm:w-72"
-          />
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search SKU / ASIN / title…"
+              className="w-full rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--foreground)] outline-none sm:w-72"
+            />
 
-          <div className="flex flex-wrap items-center gap-2 sm:flex-nowrap">
-            <button
-              type="button"
-              onClick={syncNow}
-              disabled={!isSignedIn || syncing}
-              className="cursor-pointer rounded-lg bg-[rgb(2,242,170)] px-3 py-2 text-sm font-medium text-black disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {syncing ? "Syncing…" : "Sync now"}
-            </button>
-            <button
-              type="button"
-              onClick={backfillTitles}
-              disabled={!isSignedIn || backfillingTitles}
-              className="cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/5 disabled:cursor-not-allowed disabled:opacity-60"
-              title="Backfill missing titles via Catalog Items API"
-            >
-              {backfillingTitles ? "Backfilling…" : "Backfill titles"}
-            </button>
+            <div className="flex flex-wrap items-center gap-2 sm:flex-nowrap">
+              <button
+                type="button"
+                onClick={syncNow}
+                disabled={!isSignedIn || syncing}
+                className="cursor-pointer rounded-lg bg-[rgb(2,242,170)] px-3 py-2 text-sm font-medium text-black disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {syncing ? "Syncing…" : "Sync now"}
+              </button>
+              <button
+                type="button"
+                onClick={backfillTitles}
+                disabled={!isSignedIn || backfillingTitles}
+                className="cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/5 disabled:cursor-not-allowed disabled:opacity-60"
+                title="Backfill missing titles via Catalog Items API"
+              >
+                {backfillingTitles ? "Backfilling…" : "Backfill titles"}
+              </button>
+            </div>
           </div>
         </div>
       </div>
 
       <SignedOut>
-        <div className="rounded-xl border border-[var(--surface-border)] bg-transparent p-4 text-sm text-[var(--muted-foreground)]">
+        <div className="rounded-xl border border-[var(--surface-border)] bg-[var(--surface)] p-4 text-sm text-[var(--muted-foreground)]">
           <div className="mb-3">Sign in to view Inventory.</div>
           <SignInButton>
             <button className="cursor-pointer rounded-lg bg-[rgb(2,242,170)] px-3 py-2 text-sm font-medium text-black">
@@ -338,7 +343,7 @@ export default function InventoryPage() {
           </div>
         </div>
 
-        <div className="overflow-hidden rounded-xl ring-1 ring-[var(--surface-border)]">
+        <div className="overflow-hidden rounded-xl bg-[var(--surface)] ring-1 ring-[var(--surface-border)]">
           {loading ? (
             <div className="px-4 py-6 text-sm text-[var(--muted-foreground)]">
               Loading…
@@ -349,19 +354,23 @@ export default function InventoryPage() {
             </div>
           ) : (
             <>
-            <div className="hidden md:grid grid-cols-[40px_1.1fr_0.8fr_1.4fr_0.7fr_0.5fr_0.5fr_0.5fr_0.5fr_0.5fr_0.5fr_0.5fr_0.5fr] gap-1.5 bg-[var(--surface)] px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
+            <div className="hidden md:grid grid-cols-[40px_1.6fr_0.9fr_0.7fr_0.65fr_0.5fr_0.5fr_0.5fr_0.5fr_0.5fr_0.5fr_0.5fr_0.5fr_32px] gap-2 bg-[var(--surface)] px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
               <div />
-              <div>SKU</div>
-              <div>ASIN</div>
-              <div>Title</div>
-              <div>Type / Group</div>
+              <div className="text-left">Title</div>
+              <div className="text-left">SKU</div>
+              <div className="text-left">ASIN</div>
+              <div className="text-left">Type / Group</div>
               <div className="text-center">Total</div>
               <div className="text-center">Available</div>
               <div className="text-center">Reserved</div>
               <div className="text-center">Inbound</div>
               <div className="text-center">Issue</div>
-              <div className="text-right">List price</div>
+              <div className="text-left pl-2">
+                <div>List</div>
+                <div>price</div>
+              </div>
               <div className="text-right">Profit</div>
+              <div />
             </div>
 
             <div className="divide-y divide-[var(--surface-border)] bg-transparent">
@@ -456,7 +465,7 @@ export default function InventoryPage() {
                       tabIndex={0}
                       onClick={() => setDetailRow(r)}
                       onKeyDown={(e) => e.key === "Enter" && setDetailRow(r)}
-                      className="hidden md:grid grid-cols-[40px_1.1fr_0.8fr_1.4fr_0.7fr_0.5fr_0.5fr_0.5fr_0.5fr_0.5fr_0.5fr_0.5fr_0.5fr] items-center gap-1.5 px-3 py-2 cursor-pointer hover:bg-[var(--foreground)]/5 transition-colors"
+                      className="hidden md:grid grid-cols-[40px_1.6fr_0.9fr_0.7fr_0.65fr_0.5fr_0.5fr_0.5fr_0.5fr_0.5fr_0.5fr_0.5fr_0.5fr_32px] items-center gap-2 px-3 py-2 cursor-pointer hover:bg-[var(--foreground)]/5 transition-colors"
                     >
                       <div className="flex items-center justify-center">
                         {r.imageUrl ? (
@@ -471,6 +480,9 @@ export default function InventoryPage() {
                           <div className="h-8 w-8 rounded-md bg-[var(--surface)] ring-1 ring-[var(--surface-border)]" />
                         )}
                       </div>
+                      <div className="min-w-0 truncate text-[11px] text-[var(--foreground)] text-left">
+                        {r.title ?? "—"}
+                      </div>
                       <div className="min-w-0">
                         <div className="truncate text-[11px] font-medium text-[var(--foreground)]">{r.sku}</div>
                         {marketplaceLine ? (
@@ -480,26 +492,27 @@ export default function InventoryPage() {
                           <div className="mt-0.5 text-[10px] text-[var(--muted-foreground)]">System SKU</div>
                         ) : null}
                       </div>
-                      <div className="truncate text-[11px] text-[var(--muted-foreground)]">{r.asin ?? "—"}</div>
-                      <div className="truncate text-[11px] text-[var(--muted-foreground)]">{r.title ?? "—"}</div>
-                      <div className="truncate text-[10px] text-[var(--muted-foreground)]">
+                      <div className="truncate text-[11px] text-[var(--muted-foreground)] text-left">{r.asin ?? "—"}</div>
+                      <div className="truncate text-[10px] text-[var(--muted-foreground)] text-left">
                         {[r.productType, r.displayGroup].filter(Boolean).join(" · ") || "—"}
                       </div>
                       <div className="text-center text-[11px] font-medium text-[var(--foreground)] tabular-nums">{num(r.totalQty)}</div>
                       <div className="text-center text-[11px] text-[var(--foreground)] tabular-nums">{num(r.availableQty)}</div>
                       <div className="text-center text-[11px] text-[var(--foreground)] tabular-nums">{num(r.reservedQty)}</div>
                       <div className="text-center text-[11px] text-[var(--foreground)] tabular-nums">{num(r.inboundQty)}</div>
-                      <div className="text-center text-[11px] text-[var(--foreground)] tabular-nums flex items-center justify-center gap-0.5">
+                      <div className="text-center text-[11px] text-[var(--foreground)] tabular-nums">
                         {num(r.issueQty)}
-                        <svg className="h-3.5 w-3.5 text-[var(--muted-foreground)]" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                        </svg>
                       </div>
-                      <div className="text-right text-[11px] text-[var(--foreground)] tabular-nums min-w-0">
+                      <div className="text-left text-[11px] text-[var(--foreground)] tabular-nums min-w-0 pl-2">
                         {r.currentListedPrice != null ? `£${Number(r.currentListedPrice).toFixed(2)}` : "—"}
                       </div>
                       <div className="text-right text-[11px] text-[var(--foreground)] tabular-nums min-w-0">
                         {estProfit != null ? `£${estProfit.toFixed(2)}` : "—"}
+                      </div>
+                      <div className="flex items-center justify-center">
+                        <svg className="h-4 w-4 text-[var(--muted-foreground)]" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                        </svg>
                       </div>
                     </div>
                   </Fragment>

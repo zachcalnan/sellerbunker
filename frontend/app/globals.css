@@ -52,6 +52,28 @@ body {
   font-family: Arial, Helvetica, sans-serif;
 }
 
+/* Dashboard page backgrounds with subtle shine */
+.bg-dark-shine {
+  background-color: #404040;
+  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.04) 0%, transparent 35%);
+}
+.bg-light-shine {
+  background-color: #f5f5f5;
+  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.6) 0%, transparent 40%);
+}
+.bg-blue-shine {
+  background-color: #bfdbfe;
+  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.4) 0%, transparent 45%);
+}
+.bg-pink-shine {
+  background-color: #fbcfe8;
+  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.4) 0%, transparent 45%);
+}
+.bg-green-shine {
+  background-color: #a7f3d0;
+  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.4) 0%, transparent 45%);
+}
+
 /* UserButton popover: light mode */
 .cl-userButtonPopoverCard {
   background: #ffffff !important;

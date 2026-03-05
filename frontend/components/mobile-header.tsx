@@ -13,9 +13,9 @@ export function MobileHeader() {
   return (
     <header className="flex h-16 shrink-0 items-center justify-between gap-4 border-b border-[var(--surface-border)] bg-[var(--surface)] px-4 md:hidden">
       <Link
-        href="/"
+        href="/dashboard"
         className="flex shrink-0 items-center font-semibold text-[var(--foreground)] no-underline hover:opacity-80"
-        aria-label="Seller Bunker home"
+        aria-label="Seller Bunker dashboard"
       >
         <img
           src="/sellerbunker-logo.png"

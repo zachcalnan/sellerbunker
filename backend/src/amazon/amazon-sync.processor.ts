@@ -64,5 +64,32 @@ export class AmazonSyncProcessor extends WorkerHost {
     if (job.name === 'orders-batch-sync') {
       await this.amazonService.syncRecentOrdersForAllSellers();
     }
+
+    if (job.name === 'fee-estimate-refresh') {
+      this.logger.log('[AmazonSync] Running fee estimate refresh for all orgs');
+
+      const orgs = await this.prisma.organization.findMany({
+        select: { id: true },
+      });
+
+      const errors: Array<{ orgId: string; error: string }> = [];
+      for (const org of orgs) {
+        try {
+          await this.amazonService.refreshFeeEstimatesForOrg(org.id);
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          errors.push({ orgId: org.id, error: msg });
+          this.logger.error(
+            `[AmazonSync] Fee estimate refresh failed for org ${org.id}: ${msg}`,
+          );
+        }
+      }
+
+      if (errors.length) {
+        throw new Error(
+          `[AmazonSync] fee-estimate-refresh completed with ${errors.length} errors`,
+        );
+      }
+    }
   }
 }

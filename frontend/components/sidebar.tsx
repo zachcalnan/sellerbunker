@@ -175,7 +175,7 @@ const NAV_ITEMS: {
   disabled?: boolean;
   tooltip?: string;
 }[] = [
-  { label: "Dashboard", href: "/", icon: DashboardIcon },
+  { label: "Dashboard", href: "/dashboard", icon: DashboardIcon },
   { label: "Cost of Goods", href: "/cost-of-goods", icon: CostOfGoodsIcon },
   { label: "Inventory", href: "/inventory", icon: InventoryIcon },
   { label: "Orders", href: "/orders", icon: OrdersIcon },
@@ -269,9 +269,9 @@ export function Sidebar() {
     <aside className="flex h-screen w-full flex-col border-r border-[var(--surface-border)] bg-[var(--surface)]">
       <div className="flex shrink-0 items-start justify-start overflow-hidden pl-0 pr-1 -pt-0.5 pb-0">
         <Link
-          href="/"
+          href="/dashboard"
           className="-ml-1 flex shrink-0 items-start overflow-hidden font-semibold tracking-tight text-[var(--foreground)] no-underline hover:opacity-80"
-          aria-label="Seller Bunker home"
+          aria-label="Seller Bunker dashboard"
         >
           <img
             src="/sellerbunker-logo.png"

@@ -3,6 +3,7 @@
 import { useAuth, SignedIn, SignedOut, SignInButton } from "@clerk/nextjs";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
+import { useDisplaySettings } from "@/contexts/display-settings-context";
 
 const VAT_TYPES = [
   { value: "NON_VAT_REGISTERED", label: "Non VAT registered" },
@@ -100,8 +101,10 @@ export default function SettingsPage() {
 
   const isFlatRate = form.vatRegistrationType === "VAT_FLAT_RATE";
 
+  const { backgroundClass } = useDisplaySettings();
+
   return (
-    <div className="flex flex-col gap-6 p-4 md:p-6">
+    <div className={`flex min-h-screen flex-col gap-6 ${backgroundClass} p-4 md:p-6`}>
       <SignedOut>
         <div className="flex flex-col items-center justify-center gap-4 py-12">
           <p className="text-[var(--muted-foreground)]">Sign in to change settings.</p>

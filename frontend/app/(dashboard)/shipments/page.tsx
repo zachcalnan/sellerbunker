@@ -2,6 +2,7 @@
 
 import { useAuth, SignedIn, SignedOut, SignInButton } from "@clerk/nextjs";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useDisplaySettings } from "@/contexts/display-settings-context";
 
 type ShipmentRow = {
   id: string;
@@ -172,8 +173,10 @@ export default function ShipmentsPage() {
     [filtered, safePage]
   );
 
+  const { backgroundClass } = useDisplaySettings();
+
   return (
-    <div className="flex flex-col gap-4 p-4 md:p-6">
+    <div className={`flex min-h-screen flex-col gap-4 ${backgroundClass} p-4 md:p-6`}>
       <SignedOut>
         <div className="flex flex-col items-center justify-center gap-4 py-12">
           <p className="text-[var(--muted-foreground)]">Sign in to view FBA shipments.</p>
@@ -187,31 +190,32 @@ export default function ShipmentsPage() {
 
       <SignedIn>
         <div className="flex flex-col gap-4">
-          <h1 className="text-xl font-semibold text-[var(--foreground)]">FBA Shipments</h1>
-
-          <div className="rounded-lg border border-[var(--surface-border)] bg-[var(--surface)] px-4 py-3 text-sm text-[var(--foreground)]">
-            You have <span className="font-semibold tabular-nums">{totalMissingUnits}</span> unit{totalMissingUnits !== 1 ? "s" : ""} missing from what was sent compared to what was received in Amazon.
+          <div className="rounded-xl border border-[var(--surface-border)] bg-[var(--surface)] px-4 py-3">
+            <div className="flex flex-wrap items-end justify-between gap-4">
+              <h1 className="text-xl font-semibold text-[var(--foreground)]">FBA Shipments</h1>
+              <div className="flex flex-1 flex-col gap-2 sm:flex-row sm:items-center sm:justify-end">
+                <input
+                  type="search"
+                  placeholder="Search by Shipment ID, name, status, FC…"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  className="max-w-md rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[rgb(2,242,170)]"
+                  aria-label="Search shipments"
+                />
+                <button
+                  type="button"
+                  onClick={syncNow}
+                  disabled={syncing}
+                  className="shrink-0 rounded-lg bg-[rgb(2,242,170)] px-4 py-2 text-sm font-medium text-black hover:opacity-90 disabled:opacity-60"
+                >
+                  {syncing ? "Syncing…" : "Sync shipments"}
+                </button>
+              </div>
+            </div>
           </div>
 
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex flex-1 flex-col gap-2 sm:flex-row sm:items-center">
-              <input
-                type="search"
-                placeholder="Search by Shipment ID, name, status, FC…"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                className="max-w-md rounded-lg border border-[var(--surface-border)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[rgb(2,242,170)]"
-                aria-label="Search shipments"
-              />
-              <button
-                type="button"
-                onClick={syncNow}
-                disabled={syncing}
-                className="shrink-0 rounded-lg bg-[rgb(2,242,170)] px-4 py-2 text-sm font-medium text-black hover:opacity-90 disabled:opacity-60"
-              >
-                {syncing ? "Syncing…" : "Sync shipments"}
-              </button>
-            </div>
+          <div className="rounded-lg border border-[var(--surface-border)] bg-[var(--surface)] px-4 py-3 text-sm text-[var(--foreground)]">
+            <span className="font-semibold tabular-nums">{totalMissingUnits}</span> unit{totalMissingUnits !== 1 ? "s" : ""} missing by Amazon
           </div>
 
           {error && (

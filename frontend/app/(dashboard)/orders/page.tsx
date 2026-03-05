@@ -2,6 +2,7 @@
 
 import { useAuth, SignedIn, SignedOut, SignInButton } from "@clerk/nextjs";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useDisplaySettings } from "@/contexts/display-settings-context";
 
 type OrderRow = {
   id: string;
@@ -40,9 +41,7 @@ export default function OrdersPage() {
 
   const [rows, setRows] = useState<OrderRow[]>([]);
   const [loading, setLoading] = useState(false);
-  const [refreshingFees, setRefreshingFees] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
   const [period, setPeriod] = useState<PeriodKey>("today");
@@ -122,71 +121,38 @@ export default function OrdersPage() {
     setPage(1);
   }, [query]);
 
-  const refreshFeeEstimates = async () => {
-    setRefreshingFees(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const token = await getToken();
-      const res = await fetch(`${baseUrl}/api/amazon/fees-estimate/refresh`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error((body as { message?: string })?.message ?? "Failed to refresh fee estimates.");
-      }
-      const data = (await res.json()) as { skipped?: boolean; reason?: string; updatedCount?: number; errorCount?: number };
-      if (data.skipped && data.reason === "already_run_today") {
-        setNotice("Fee estimates were already refreshed in the last 24 hours. Try again tomorrow.");
-      } else if (data.updatedCount != null) {
-        setNotice(`Updated fee estimates for ${data.updatedCount} product(s).${data.errorCount ? ` ${data.errorCount} error(s).` : ""}`);
-        await load();
-      }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to refresh fee estimates.");
-    } finally {
-      setRefreshingFees(false);
-    }
-  };
-
   const formatDate = (d: string) => new Date(d).toLocaleDateString(undefined, { dateStyle: "short" });
   const formatCurrency = (n: number) =>
     new Intl.NumberFormat(undefined, { style: "currency", currency: "GBP", minimumFractionDigits: 2 }).format(n);
   const nil = (v: string | number | null | undefined) => (v == null || v === "" ? "—" : String(v));
 
+  const { backgroundClass } = useDisplaySettings();
+
   return (
-    <div className="w-full px-6 py-10">
-      <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-semibold text-[var(--foreground)]">
-            Orders
-          </h1>
-          <p className="mt-1 text-sm text-[var(--muted-foreground)]">
-            Order line items, most recent first.
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search SKU / ASIN / title / order ID…"
-            className="w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none sm:w-72"
-          />
-          <button
-            type="button"
-            onClick={refreshFeeEstimates}
-            disabled={!isSignedIn || refreshingFees}
-            className="cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/5 disabled:cursor-not-allowed disabled:opacity-60"
-            title="Refresh estimated Amazon fees (once per day)"
-          >
-            {refreshingFees ? "Refreshing…" : "Refresh fee estimates"}
-          </button>
+    <div className={`min-h-screen w-full ${backgroundClass} px-4 py-6`}>
+      <div className="mb-4 rounded-xl border border-[var(--surface-border)] bg-[var(--surface)] px-4 py-3">
+        <div className="flex flex-wrap items-end justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-semibold text-[var(--foreground)]">
+              Orders
+            </h1>
+            <p className="mt-1 text-sm text-[var(--muted-foreground)]">
+              Order line items, most recent first.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search SKU / ASIN / title / order ID…"
+              className="w-full rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--foreground)] outline-none sm:w-72"
+            />
+          </div>
         </div>
       </div>
 
       <SignedOut>
-        <div className="rounded-xl border border-[var(--surface-border)] bg-transparent p-4 text-sm text-[var(--muted-foreground)]">
+        <div className="rounded-xl border border-[var(--surface-border)] bg-[var(--surface)] p-4 text-sm text-[var(--muted-foreground)]">
           <div className="mb-3">Sign in to view Orders.</div>
           <SignInButton>
             <button className="cursor-pointer rounded-lg bg-[rgb(2,242,170)] px-3 py-2 text-sm font-medium text-black">
@@ -197,11 +163,6 @@ export default function OrdersPage() {
       </SignedOut>
 
       <SignedIn>
-        {notice ? (
-          <div className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
-            {notice}
-          </div>
-        ) : null}
         {error ? (
           <div className="mb-4 rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-700">
             {error}
@@ -241,7 +202,7 @@ export default function OrdersPage() {
           </div>
         </div>
 
-        <div className="overflow-x-auto rounded-xl ring-1 ring-[var(--surface-border)]">
+        <div className="overflow-x-auto rounded-xl bg-[var(--surface)] ring-1 ring-[var(--surface-border)]">
           <div className="min-w-0">
             <div className="grid grid-cols-[36px_1fr_0.55fr_0.45fr_0.8fr_0.52fr_0.35fr_0.45fr_0.45fr_0.35fr_0.35fr] gap-1 bg-[var(--surface)] px-2.5 py-2 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
               <div />
@@ -331,7 +292,15 @@ export default function OrdersPage() {
                       <div className="text-center text-[var(--foreground)] tabular-nums">
                         {r.roiPct != null ? `${r.roiPct}%` : "—"}
                       </div>
-                      <div className="text-center text-[var(--foreground)] tabular-nums">
+                      <div
+                        className={`text-center tabular-nums ${
+                          r.availableStock != null
+                            ? r.availableStock <= 0
+                              ? "text-red-600"
+                              : "text-green-600"
+                            : "text-[var(--foreground)]"
+                        }`}
+                      >
                         {r.availableStock != null ? String(r.availableStock) : "—"}
                       </div>
                     </div>

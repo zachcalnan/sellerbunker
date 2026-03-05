@@ -2639,18 +2639,39 @@ export class AmazonService {
   }
 
   /**
-   * Best-selling products for replenishment: out of stock first, then by most sold, then by estimated profit.
-   * Uses all order data already in the DB (no date filter). OrderItem first; if none, falls back to Order.
+   * Replenishment list: all products with stock value zero (out of stock), sorted by most sold first, then estimated profit.
+   * Includes every SKU that has availableQty <= 0 (or no inventory record). Order stats are attached when present.
    */
-  async getReplenishProducts(orgId: string, limit = 200) {
+  async getReplenishProducts(orgId: string, limit = 5000) {
     const userIds = await this.getOrgMemberUserIds(orgId);
 
+    // All products for org, with inventory (so we can filter by stock)
+    const products = await this.prisma.product.findMany({
+      where: { userId: { in: userIds } },
+      select: {
+        id: true,
+        sku: true,
+        asin: true,
+        title: true,
+        imageUrl: true,
+        inventory: { select: { availableQty: true } },
+      },
+    });
+
+    // Only products with zero stock (availableQty <= 0 or no inventory row)
+    const zeroStockProducts = products.filter((p) => (p.inventory?.availableQty ?? 0) <= 0);
+    if (zeroStockProducts.length === 0) return [];
+
+    const productIds = zeroStockProducts.map((p) => p.id);
+
+    // Order stats for all products (so we can sort zero-stock by sales/profit)
     let orderStats: { productId: string; _sum: { quantity?: number; profit?: number; totalProfit?: number }; _max: { orderDate: Date } }[];
     const orderItemStats = await (this.prisma as any).orderItem.groupBy({
       by: ['productId'],
       where: {
         userId: { in: userIds },
         marketplace: 'amazon',
+        productId: { in: productIds },
       },
       _sum: { quantity: true, profit: true },
       _max: { orderDate: true },
@@ -2663,6 +2684,7 @@ export class AmazonService {
         where: {
           userId: { in: userIds },
           marketplace: 'amazon',
+          productId: { in: productIds },
         },
         _sum: { quantity: true, totalProfit: true },
         _max: { orderDate: true },
@@ -2674,21 +2696,6 @@ export class AmazonService {
       }));
     }
 
-    const productIds = orderStats.map((r: any) => r.productId);
-    if (productIds.length === 0) return [];
-
-    const products = await this.prisma.product.findMany({
-      where: { id: { in: productIds }, userId: { in: userIds } },
-      select: {
-        id: true,
-        sku: true,
-        asin: true,
-        title: true,
-        imageUrl: true,
-        inventory: { select: { availableQty: true } },
-      },
-    });
-
     const statsByProductId = new Map(
       orderStats.map((r: any) => [
         r.productId,
@@ -2699,41 +2706,28 @@ export class AmazonService {
         },
       ]),
     );
-    const productMap = new Map(products.map((p) => [p.id, p]));
 
-    const combined = productIds
-      .map((productId: string) => {
-        const p = productMap.get(productId);
-        const stats = statsByProductId.get(productId);
-        if (!p || !stats) return null;
-        const availableQty = p.inventory?.availableQty ?? 0;
-        const outOfStock = availableQty <= 0;
-        return {
-          productId: p.id,
-          imageUrl: p.imageUrl ?? null,
-          title: p.title ?? null,
-          sku: p.sku,
-          asin: p.asin ?? null,
-          lastSold: stats.lastSold ? (stats.lastSold as Date).toISOString() : null,
-          outOfStock,
-          unitsSold: stats.unitsSold,
-          estimatedProfit: stats.estimatedProfit,
-        };
-      })
-      .filter(Boolean) as {
-      productId: string;
-      imageUrl: string | null;
-      title: string | null;
-      sku: string;
-      asin: string | null;
-      lastSold: string | null;
-      outOfStock: boolean;
-      unitsSold: number;
-      estimatedProfit: number;
-    }[];
+    const combined = zeroStockProducts.map((p) => {
+      const stats = statsByProductId.get(p.id) ?? {
+        unitsSold: 0,
+        estimatedProfit: 0,
+        lastSold: null as Date | null,
+      };
+      return {
+        productId: p.id,
+        imageUrl: p.imageUrl ?? null,
+        title: p.title ?? null,
+        sku: p.sku,
+        asin: p.asin ?? null,
+        lastSold: stats.lastSold ? (stats.lastSold as Date).toISOString() : null,
+        outOfStock: true,
+        unitsSold: stats.unitsSold,
+        estimatedProfit: stats.estimatedProfit,
+      };
+    });
 
+    // Most sold with zero stock first, then by estimated profit
     combined.sort((a, b) => {
-      if (a.outOfStock !== b.outOfStock) return a.outOfStock ? -1 : 1;
       if (b.unitsSold !== a.unitsSold) return b.unitsSold - a.unitsSold;
       return b.estimatedProfit - a.estimatedProfit;
     });
