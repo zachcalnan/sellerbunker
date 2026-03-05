@@ -5,6 +5,7 @@ import {
   SignedOut,
   SignInButton,
   SignUpButton,
+  useAuth,
 } from "@clerk/nextjs";
 import Link from "next/link";
 import Image from "next/image";
@@ -12,6 +13,89 @@ import { useState, useRef, useEffect } from "react";
 
 const accentColor = "rgb(96, 165, 250)";
 const accentMuted = "rgba(96, 165, 250, 0.15)";
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
+
+/** Shows Sign in + Dashboard (→ sign-in page) when signed out OR signed in with no subscription; else Dashboard → /dashboard */
+function NavAuthButtons() {
+  const { isSignedIn, isLoaded, getToken } = useAuth();
+  const [hasSubscription, setHasSubscription] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    if (!isLoaded || !isSignedIn) {
+      setHasSubscription(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const token = await getToken({ template: "backend" });
+        if (!token || cancelled) return;
+        const res = await fetch(`${API_URL}/api/subscription/status`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (cancelled) return;
+        if (res.ok) {
+          const data = (await res.json()) as { hasAccess?: boolean };
+          setHasSubscription(!!data.hasAccess);
+        } else {
+          setHasSubscription(false);
+        }
+      } catch {
+        if (!cancelled) setHasSubscription(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [isLoaded, isSignedIn, getToken]);
+
+  // Signed out: always show Sign in + Dashboard (both go to sign-in page so they see login/sign-up)
+  if (!isLoaded || !isSignedIn) {
+    return (
+      <div className="flex items-center gap-2">
+        <SignInButton mode="redirect" forceRedirectUrl="/start-trial">
+          <button className="text-sm font-medium text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition px-2 py-1.5 rounded-lg hover:bg-[var(--foreground)]/5">
+            Sign in
+          </button>
+        </SignInButton>
+        <a
+          href="/sign-in"
+          className="rounded-lg bg-white px-4 py-2 text-sm font-medium text-black no-underline transition hover:bg-gray-100"
+        >
+          Dashboard
+        </a>
+      </div>
+    );
+  }
+
+  // Signed in with subscription: Dashboard → /dashboard
+  if (hasSubscription === true) {
+    return (
+      <Link
+        href="/dashboard"
+        className="rounded-lg bg-white px-4 py-2 text-sm font-medium text-black no-underline transition hover:bg-gray-100"
+      >
+        Dashboard
+      </Link>
+    );
+  }
+
+  // Signed in but no subscription (or still loading): show Sign in + Dashboard so they go to sign-in page first
+  return (
+    <div className="flex items-center gap-2">
+      <SignInButton mode="redirect" forceRedirectUrl="/start-trial">
+        <button className="text-sm font-medium text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition px-2 py-1.5 rounded-lg hover:bg-[var(--foreground)]/5">
+          Sign in
+        </button>
+      </SignInButton>
+      <a
+        href="/sign-in"
+        className="rounded-lg bg-white px-4 py-2 text-sm font-medium text-black no-underline transition hover:bg-gray-100"
+      >
+        Dashboard
+      </a>
+    </div>
+  );
+}
 
 function NavDropdown({ label, children }: { label: string; children: React.ReactNode }) {
   const [open, setOpen] = useState(false);
@@ -176,12 +260,12 @@ export default function LandingPage() {
 
       {/* Navigation */}
       <header className="fixed top-0 left-0 right-0 z-50 border-b border-[var(--surface-border)] bg-[var(--background)]/95 backdrop-blur">
-        <nav className="mx-auto flex h-16 max-w-7xl items-center justify-between pl-2 pr-4 sm:h-20 sm:pl-2 sm:pr-6 lg:pl-4 lg:pr-8">
+        <nav className="mx-auto flex h-14 max-w-7xl items-center justify-between pl-2 pr-4 sm:h-16 sm:pl-2 sm:pr-6 lg:pl-4 lg:pr-8">
           <Link href="/" className="-ml-2 flex shrink-0 items-center overflow-visible font-semibold no-underline hover:opacity-80 sm:-ml-2 lg:-ml-4" aria-label="SellerBunker home">
             <img
               src="/sellerbunker-logo.png"
               alt="SellerBunker"
-              className="sellerbunker-logo -my-1 h-28 w-auto min-w-[400px] max-w-[560px] object-contain object-left sm:-my-2 sm:h-40 sm:min-w-[480px] sm:max-w-[720px]"
+              className="sellerbunker-logo mt-0.5 -mb-1 h-24 w-auto min-w-[360px] max-w-[520px] object-contain object-left sm:mt-1 sm:-mb-2 sm:h-36 sm:min-w-[432px] sm:max-w-[648px]"
             />
           </Link>
           <div className="flex items-center gap-1 sm:gap-2">
@@ -204,6 +288,23 @@ export default function LandingPage() {
                 View plans
               </Link>
             </NavDropdown>
+            <SignedIn>
+              <Link
+                href="/start-trial"
+                className="rounded-lg bg-white px-4 py-2 text-sm font-medium text-black no-underline transition hover:bg-gray-100"
+              >
+                Start 14 day free trial
+              </Link>
+            </SignedIn>
+            <SignedOut>
+              <SignUpButton mode="redirect" forceRedirectUrl="/start-trial" signUpForceRedirectUrl="/start-trial">
+                <button
+                  className="rounded-lg bg-white px-4 py-2 text-sm font-medium text-black transition hover:bg-gray-100"
+                >
+                  Start 14 day free trial
+                </button>
+              </SignUpButton>
+            </SignedOut>
             <NavDropdown label="Get in contact">
               <Link href="#contact" className="block px-4 py-2 text-sm text-[var(--foreground)] hover:bg-[var(--foreground)]/5 no-underline">
                 Contact form
@@ -213,35 +314,12 @@ export default function LandingPage() {
               </a>
             </NavDropdown>
             <div className="ml-2 h-6 w-px bg-[var(--surface-border)]" />
-            <SignedOut>
-              <SignInButton mode="modal">
-                <button className="text-sm font-medium text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition px-2 py-1.5 rounded-lg hover:bg-[var(--foreground)]/5">
-                  Sign in
-                </button>
-              </SignInButton>
-              <SignUpButton mode="modal">
-                <button
-                  className="rounded-lg px-4 py-2 text-sm font-medium transition text-black"
-                  style={{ backgroundColor: accentColor }}
-                >
-                  Start free trial
-                </button>
-              </SignUpButton>
-            </SignedOut>
-            <SignedIn>
-              <Link
-                href="/dashboard"
-                className="rounded-lg px-4 py-2 text-sm font-medium transition text-black no-underline"
-                style={{ backgroundColor: accentColor }}
-              >
-                Go to dashboard
-              </Link>
-            </SignedIn>
+            <NavAuthButtons />
           </div>
         </nav>
       </header>
 
-      <main className="landing-page pt-24 sm:pt-28">
+      <main className="landing-page pt-20 sm:pt-24">
         {/* 1. Hero - no blurred background, dashboard mockup on the right */}
         <section className="border-b border-[var(--surface-border)] bg-[var(--background)]">
           <div className="mx-auto max-w-7xl px-4 pt-2 pb-8 sm:px-6 sm:pt-3 sm:pb-12 lg:px-8 lg:pt-4 lg:pb-16">
@@ -256,10 +334,9 @@ export default function LandingPage() {
                 </p>
                 <div className="mt-6 flex flex-wrap gap-4">
                   <SignedOut>
-                    <SignUpButton mode="modal">
+                    <SignUpButton mode="redirect" forceRedirectUrl="/start-trial" signUpForceRedirectUrl="/start-trial">
                       <button
-                        className="rounded-xl px-6 py-3.5 text-base font-semibold text-black shadow-lg transition hover:opacity-90"
-                        style={{ backgroundColor: accentColor }}
+                        className="rounded-xl bg-white px-6 py-3.5 text-base font-semibold text-black shadow-lg transition hover:bg-gray-100"
                       >
                         Start free trial
                       </button>
@@ -553,8 +630,8 @@ export default function LandingPage() {
             </p>
             <div className="mt-16 grid gap-8 md:grid-cols-3">
               {[
-                { name: "Starter", price: "£14.99", period: "month", orders: "Up to 500 orders", note: "Testing price for initial users", priceSubline: "Two weeks free, then", cta: "Start free trial", featured: true, badge: "For initial testing" },
-                { name: "Growth", price: "TBC", period: "", orders: "Up to 5,000 orders per month", cta: "Start free trial", featured: false },
+                { name: "Starter", price: "£14.99", period: "month", orders: "Up to 5,000 orders per month", note: "Testing price for initial users", priceSubline: "Two weeks free, then", cta: "Start free trial", featured: true, badge: "For initial testing" },
+                { name: "Growth", price: "TBC", period: "", orders: "5,000 – 50,000 orders per month", cta: "Start free trial", featured: false },
                 { name: "Pro", price: "TBC", period: "", orders: "Unlimited orders per month", cta: "Start free trial", featured: false },
               ].map((plan) => (
                 <div
@@ -583,16 +660,37 @@ export default function LandingPage() {
                   {"note" in plan && plan.note && (
                     <p className="mt-1 text-xs text-[var(--muted-foreground)] italic">{plan.note}</p>
                   )}
-                  <SignUpButton mode="modal">
-                    <button
-                      className={`mt-6 w-full rounded-xl py-3 text-sm font-semibold transition ${
-                        plan.featured ? "text-black" : "border border-[var(--surface-border)] text-[var(--foreground)] hover:bg-[var(--surface)]"
-                      }`}
-                      style={plan.featured ? { backgroundColor: accentColor } : undefined}
-                    >
-                      {plan.cta}
-                    </button>
-                  </SignUpButton>
+                  {plan.name === "Starter" ? (
+                    <>
+                      <SignedOut>
+                        <SignUpButton mode="redirect" forceRedirectUrl="/start-trial" signUpForceRedirectUrl="/start-trial">
+                          <button
+                            className="mt-6 w-full rounded-xl bg-white py-3 text-sm font-semibold text-black transition hover:bg-gray-100"
+                          >
+                            {plan.cta}
+                          </button>
+                        </SignUpButton>
+                      </SignedOut>
+                      <SignedIn>
+                        <Link
+                          href="/start-trial"
+                          className="mt-6 flex w-full items-center justify-center rounded-xl bg-white py-3 text-sm font-semibold text-black transition hover:bg-gray-100"
+                        >
+                          {plan.cta}
+                        </Link>
+                      </SignedIn>
+                    </>
+                  ) : (
+                    <SignUpButton mode="redirect" forceRedirectUrl="/start-trial" signUpForceRedirectUrl="/start-trial">
+                      <button
+                        className={`mt-6 w-full rounded-xl py-3 text-sm font-semibold transition ${
+                          plan.featured ? "bg-white text-black hover:bg-gray-100" : "border border-[var(--surface-border)] text-[var(--foreground)] hover:bg-[var(--surface)]"
+                        }`}
+                      >
+                        {plan.cta}
+                      </button>
+                    </SignUpButton>
+                  )}
                 </div>
               ))}
             </div>
@@ -623,16 +721,15 @@ export default function LandingPage() {
               Start your free trial. Connect Amazon (FBA or FBM). See your true profit in minutes.
             </p>
             <div className="mt-10">
-              <SignedOut>
-                <SignUpButton mode="modal">
-                  <button
-                    className="rounded-xl px-8 py-4 text-lg font-semibold text-black transition hover:opacity-90"
-                    style={{ backgroundColor: accentColor }}
-                  >
-                    Start free trial
-                  </button>
-                </SignUpButton>
-              </SignedOut>
+<SignedOut>
+              <SignUpButton mode="redirect" forceRedirectUrl="/start-trial" signUpForceRedirectUrl="/start-trial">
+                <button
+                  className="rounded-xl bg-white px-8 py-4 text-lg font-semibold text-black transition hover:bg-gray-100"
+                >
+                  Start free trial
+                </button>
+              </SignUpButton>
+            </SignedOut>
               <SignedIn>
                 <Link
                   href="/dashboard"

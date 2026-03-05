@@ -1,7 +1,9 @@
 "use client";
 
-import { useAuth } from "@clerk/nextjs";
+import { SignOutButton, useAuth, useUser } from "@clerk/nextjs";
 import { useCallback, useEffect, useState } from "react";
+
+const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
 import {
   useDisplaySettings,
   type BackgroundTheme,
@@ -63,6 +65,7 @@ type SettingsModalProps = {
 
 export function SettingsModal({ open, onClose }: SettingsModalProps) {
   const { getToken } = useAuth();
+  const { user } = useUser();
   const {
     backgroundTheme,
     ringColor,
@@ -83,8 +86,11 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
   const [displayRingColor, setDisplayRingColor] = useState(ringColor);
   const [displayApplied, setDisplayApplied] = useState(false);
 
-  type SectionKey = "vat" | "display" | "subscription";
+  type SectionKey = "details" | "vat" | "display" | "subscription";
   const [openSection, setOpenSection] = useState<SectionKey | null>(null);
+  const [amazonSellerId, setAmazonSellerId] = useState<string | null | "loading">(null);
+  const [subscriptionPlan, setSubscriptionPlan] = useState<string | null | "loading">(null);
+  const [subscriptionLockoutAt, setSubscriptionLockoutAt] = useState<string | null>(null);
 
   const loadVat = useCallback(async () => {
     setVatLoading(true);
@@ -109,6 +115,28 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
     }
   }, [getToken]);
 
+  const loadAmazonAccount = useCallback(async () => {
+    setAmazonSellerId("loading");
+    try {
+      const token = await getToken({ template: "backend" });
+      if (!token) {
+        setAmazonSellerId(null);
+        return;
+      }
+      const res = await fetch(`${BASE_URL}/api/amazon/account/summary`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const data = (await res.json()) as { sellerId?: string };
+        setAmazonSellerId(data.sellerId ?? null);
+      } else {
+        setAmazonSellerId(null);
+      }
+    } catch {
+      setAmazonSellerId(null);
+    }
+  }, [getToken]);
+
   useEffect(() => {
     if (open) {
       void loadVat();
@@ -116,8 +144,48 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
       setDisplayRingColor(ringColor);
       setDisplayApplied(false);
       setOpenSection(null);
+      setAmazonSellerId(null);
+      setSubscriptionPlan(null);
+      setSubscriptionLockoutAt(null);
     }
   }, [open, loadVat, backgroundTheme, ringColor]);
+
+  useEffect(() => {
+    if (open && openSection === "details") {
+      void loadAmazonAccount();
+    }
+  }, [open, openSection, loadAmazonAccount]);
+
+  const loadSubscription = useCallback(async () => {
+    setSubscriptionPlan("loading");
+    try {
+      const token = await getToken({ template: "backend" });
+      if (!token) {
+        setSubscriptionPlan(null);
+        return;
+      }
+      const res = await fetch(`${BASE_URL}/api/subscription/status`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const data = (await res.json()) as { plan?: string | null; lockoutAt?: string | null };
+        setSubscriptionPlan(data.plan ?? null);
+        setSubscriptionLockoutAt(data.lockoutAt ?? null);
+      } else {
+        setSubscriptionPlan(null);
+        setSubscriptionLockoutAt(null);
+      }
+    } catch {
+      setSubscriptionPlan(null);
+      setSubscriptionLockoutAt(null);
+    }
+  }, [getToken]);
+
+  useEffect(() => {
+    if (open && openSection === "subscription") {
+      void loadSubscription();
+    }
+  }, [open, openSection, loadSubscription]);
 
   const saveVat = async () => {
     setVatSaving(true);
@@ -166,7 +234,7 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
 
   return (
     <div
-      className="fixed inset-0 z-[200] flex items-start justify-center bg-black/50 p-4 pt-[10vh]"
+      className="fixed inset-0 z-[200] flex justify-end bg-black/50"
       role="dialog"
       aria-modal="true"
       aria-labelledby="settings-modal-title"
@@ -175,7 +243,7 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
       }}
     >
       <div
-        className="max-h-[80vh] w-full max-w-lg overflow-y-auto rounded-xl border border-[var(--surface-border)] bg-[var(--surface)] shadow-xl"
+        className="h-full w-full max-w-md overflow-y-auto border-l border-[var(--surface-border)] bg-[var(--surface)] shadow-xl"
         onMouseDown={(e) => e.stopPropagation()}
       >
         <div className="sticky top-0 flex items-center justify-between border-b border-[var(--surface-border)] bg-[var(--surface)] px-4 py-3">
@@ -195,6 +263,42 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
         </div>
 
         <div className="space-y-0">
+          {/* My details */}
+          <section className="border-b border-[var(--surface-border)]">
+            <button
+              type="button"
+              onClick={() => setOpenSection((s) => (s === "details" ? null : "details"))}
+              className="flex w-full items-center justify-between px-4 py-3 text-left hover:bg-[var(--foreground)]/5"
+              aria-expanded={openSection === "details"}
+            >
+              <h3 className="text-sm font-semibold uppercase tracking-wider text-[var(--foreground)]">
+                My details
+              </h3>
+              <svg
+                className={`h-5 w-5 shrink-0 text-[var(--muted-foreground)] transition-transform ${openSection === "details" ? "rotate-180" : ""}`}
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+              </svg>
+            </button>
+            {openSection === "details" && (
+              <div className="border-t border-[var(--surface-border)] px-4 pb-4 pt-2">
+                <p className="text-sm font-medium text-[var(--foreground)]">Logged in as</p>
+                <p className="mt-2 text-sm text-[var(--muted-foreground)]">
+                  {user?.primaryEmailAddress?.emailAddress ?? user?.emailAddresses?.[0]?.emailAddress ?? "—"}
+                </p>
+                <p className="mt-3 text-sm font-medium text-[var(--foreground)]">Amazon account</p>
+                <p className="mt-1 text-sm text-[var(--muted-foreground)]">
+                  {amazonSellerId === "loading"
+                    ? "Loading…"
+                    : amazonSellerId ?? "Not connected"}
+                </p>
+              </div>
+            )}
+          </section>
+
           {/* VAT settings */}
           <section className="border-b border-[var(--surface-border)]">
             <button
@@ -387,11 +491,39 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
             </button>
             {openSection === "subscription" && (
             <div className="border-t border-[var(--surface-border)] px-4 pb-4 pt-2">
-            <p className="text-sm text-[var(--muted-foreground)]">
-              Manage your plan and billing. (Coming soon.)
-            </p>
+              <p className="text-sm font-medium text-[var(--foreground)]">Your plan</p>
+              <p className="mt-1 text-sm text-[var(--muted-foreground)]">
+                {subscriptionPlan === "loading"
+                  ? "Loading…"
+                  : subscriptionPlan ?? "No active subscription"}
+              </p>
+              {subscriptionLockoutAt && (
+                <p className="mt-2 text-sm text-amber-600 dark:text-amber-400">
+                  You will be locked out as of{" "}
+                  {new Date(subscriptionLockoutAt).toLocaleDateString(undefined, {
+                    dateStyle: "long",
+                  })}
+                </p>
+              )}
+              <p className="mt-3 text-xs text-[var(--muted-foreground)]">
+                Manage your plan and billing. (Coming soon.)
+              </p>
             </div>
             )}
+          </section>
+
+          {/* Log out */}
+          <section className="border-t border-[var(--surface-border)]">
+            <div className="px-4 py-4">
+              <SignOutButton signOutOptions={{ redirectUrl: "/" }}>
+                <button
+                  type="button"
+                  className="w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-4 py-2.5 text-sm font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/5"
+                >
+                  Log out
+                </button>
+              </SignOutButton>
+            </div>
           </section>
         </div>
       </div>

@@ -25,9 +25,26 @@ model User {
   purchases      Purchase[]
   sellerAccounts SellerAccount[]
   shipments      Shipment[]
+  subscriptions  Subscription[]
   activeOrg      Organization?            @relation("ActiveOrg", fields: [activeOrgId], references: [id])
 
   @@map("users")
+}
+
+model Subscription {
+  id                   String    @id @default(uuid())
+  userId               String    @map("user_id")
+  stripeSubscriptionId String?   @map("stripe_subscription_id")
+  stripeCustomerId     String?   @map("stripe_customer_id")
+  status               String    @default("active") // active | trialing | canceled | past_due etc.
+  trialEndAt           DateTime? @map("trial_end_at")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
+  user                 User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId])
+  @@index([userId])
+  @@map("subscriptions")
 }
 
 model Organization {

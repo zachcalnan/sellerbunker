@@ -56,7 +56,7 @@ export class ClerkAuthGuard implements CanActivate {
       orgId = headerOrgId;
     }
 
-    req.user = { userId: user.id, email: user.email, orgId };
+    req.user = { userId: user.id, email: user.email, orgId, clerkId: user.clerkId ?? undefined };
     return true;
   }
 }

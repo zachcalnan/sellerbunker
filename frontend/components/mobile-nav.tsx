@@ -246,15 +246,31 @@ export function MobileNav() {
     setConnectingAmazon(true);
     try {
       const token = await getToken({ template: "backend" });
-      if (!token) return;
+      if (!token) {
+        setConnectingAmazon(false);
+        alert("Please sign in again and try connecting.");
+        return;
+      }
       const res = await fetch(`${BASE_URL}/api/amazon/connect?region=EU`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      if (!res.ok) return;
-      const data = (await res.json()) as { url?: string };
-      if (data?.url) {
-        window.open(data.url, "_blank", "noopener,noreferrer");
+      const data = (await res.json()) as { url?: string; message?: string };
+      if (!res.ok) {
+        setConnectingAmazon(false);
+        const msg = data?.message ?? res.statusText ?? "Connection request failed.";
+        alert(`Could not start Amazon connection: ${msg}`);
+        return;
       }
+      if (data?.url) {
+        window.location.href = data.url;
+      } else {
+        setConnectingAmazon(false);
+        alert("Could not get Amazon sign-in link. Please try again or contact support.");
+      }
+    } catch (e) {
+      setConnectingAmazon(false);
+      const msg = e instanceof Error ? e.message : "Network or server error.";
+      alert(`Could not start Amazon connection: ${msg}`);
     } finally {
       setConnectingAmazon(false);
     }

@@ -1,3 +1,4 @@
+import { join } from 'path';
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { BullModule } from '@nestjs/bullmq';
@@ -10,12 +11,18 @@ import { AuthModule } from './auth/auth.module';
 import { UsersModule } from './users/users.module';
 import { ClerkModule } from './clerk/clerk.module';
 import { OrgsModule } from './orgs/orgs.module';
+import { SubscriptionModule } from './subscription/subscription.module';
+import { StripeModule } from './stripe/stripe.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
-      envFilePath: 'backend/.env',
+      // Load .env from backend dir when run from backend/ or from repo root
+      envFilePath: [
+        join(process.cwd(), '.env'),
+        join(process.cwd(), 'backend', '.env'),
+      ],
     }),
     BullModule.forRootAsync({
       useFactory: (config: ConfigService) => {
@@ -36,6 +43,8 @@ import { OrgsModule } from './orgs/orgs.module';
     OrgsModule,
     AuthModule,
     ClerkModule,
+    SubscriptionModule,
+    StripeModule,
   ],
   controllers: [AppController],
   providers: [AppService],

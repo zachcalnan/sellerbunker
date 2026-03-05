@@ -30,6 +30,8 @@ export default function RootLayout({
       appearance={{
         theme: shadcn,
       }}
+      signInFallbackRedirectUrl="/start-trial"
+      signUpFallbackRedirectUrl="/start-trial"
     >
       <html lang="en" suppressHydrationWarning>
         <head>

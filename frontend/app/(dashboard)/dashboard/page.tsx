@@ -231,8 +231,8 @@ function HomeInner() {
         if (!res.ok) {
           const message =
             res.status === 404
-              ? "Amazon account not linked yet. Link it via the API to see live data."
-              : "Failed to load account summary.";
+              ? "Start by connecting your Amazon account to SellerBunker."
+              : "Start by connecting your Amazon account to SellerBunker.";
           setError(message);
           setSummary(null);
           return;
@@ -355,25 +355,24 @@ function HomeInner() {
                   try {
                     const token = await getToken({ template: "backend" });
                     if (!token) {
+                      alert("Please sign in again and try connecting.");
                       return;
                     }
-                    const res = await fetch(
-                      `${baseUrl}/api/amazon/connect?region=EU`,
-                      {
-                        headers: {
-                          Authorization: `Bearer ${token}`,
-                        },
-                      }
-                    );
+                    const res = await fetch(`${baseUrl}/api/amazon/connect?region=EU`, {
+                      headers: { Authorization: `Bearer ${token}` },
+                    });
+                    const data = (await res.json()) as { url?: string; message?: string };
                     if (!res.ok) {
+                      alert(`Could not start Amazon connection: ${data?.message ?? res.statusText ?? "Please try again."}`);
                       return;
                     }
-                    const data = (await res.json()) as { url?: string };
                     if (data?.url) {
                       window.location.href = data.url;
+                    } else {
+                      alert("Could not get Amazon sign-in link. Please try again or contact support.");
                     }
-                  } catch {
-                    // swallow for now; the existing error message will remain
+                  } catch (e) {
+                    alert(`Could not start Amazon connection: ${e instanceof Error ? e.message : "Please try again."}`);
                   }
                 }}
                 className="inline-flex w-fit items-center justify-center rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white shadow-sm transition hover:bg-emerald-700"

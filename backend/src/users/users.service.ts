@@ -44,15 +44,35 @@ export class UsersService {
     email?: string;
   }): Promise<User> {
     const { clerkId, email } = params;
+    if (!clerkId || typeof clerkId !== 'string') {
+      throw new Error('createFromClerk requires a non-empty clerkId');
+    }
     // Fallback email if Clerk token doesn't include one yet.
-    // This keeps the schema happy (email is required & unique) while
-    // still keying identity off clerkId.
     const emailToUse =
       email && email.length > 0 ? email : `${clerkId}@placeholder.local`;
 
+    // 1) Already have a user with this clerkId -> return them
+    const byClerk = await this.prisma.user.findUnique({
+      where: { clerkId },
+    });
+    if (byClerk) return byClerk;
+
+    // 2) A user with this email already exists (e.g. from earlier sign-up) -> link clerkId and return
+    const byEmail = await this.prisma.user.findUnique({
+      where: { email: emailToUse },
+    });
+    if (byEmail) {
+      const updated = await this.prisma.user.update({
+        where: { id: byEmail.id },
+        data: { clerkId },
+      });
+      return updated;
+    }
+
+    // 3) New user -> create
     return this.prisma.user.create({
       data: {
-        clerkId: clerkId,
+        clerkId,
         email: emailToUse,
         passwordHash: '',
       },

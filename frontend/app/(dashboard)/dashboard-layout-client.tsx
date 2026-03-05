@@ -6,6 +6,7 @@ import { MobileNav } from "@/components/mobile-nav";
 import { Topbar } from "@/components/topbar";
 import { FullscreenProvider, useFullscreen } from "@/contexts/fullscreen-context";
 import { DisplaySettingsProvider } from "@/contexts/display-settings-context";
+import { SubscriptionGate } from "@/components/subscription-gate";
 
 function DashboardLayoutInner({
   children,
@@ -57,10 +58,12 @@ export default function DashboardLayoutClient({
   children: React.ReactNode;
 }) {
   return (
-    <DisplaySettingsProvider>
-      <FullscreenProvider>
-        <DashboardLayoutInner>{children}</DashboardLayoutInner>
-      </FullscreenProvider>
-    </DisplaySettingsProvider>
+    <SubscriptionGate>
+      <DisplaySettingsProvider>
+        <FullscreenProvider>
+          <DashboardLayoutInner>{children}</DashboardLayoutInner>
+        </FullscreenProvider>
+      </DisplaySettingsProvider>
+    </SubscriptionGate>
   );
 }

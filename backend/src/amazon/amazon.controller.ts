@@ -10,6 +10,7 @@ import {
   Query,
   Req,
   Res,
+  ServiceUnavailableException,
   UseGuards,
 } from '@nestjs/common';
 import type { Response } from 'express';
@@ -45,11 +46,17 @@ ping() {
     @Req() req: { user: { userId: string } },
     @Query('region') region?: string,
   ) {
-    const redirectUrl = await this.amazonService.getAmazonConnectUrl(
-      req.user.userId,
-      region ?? 'EU',
-    );
-    return { url: redirectUrl };
+    try {
+      const redirectUrl = await this.amazonService.getAmazonConnectUrl(
+        req.user.userId,
+        region ?? 'EU',
+      );
+      return { url: redirectUrl };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Amazon connect failed';
+      this.logger.warn(`getAmazonConnectUrl failed: ${message}`);
+      throw new ServiceUnavailableException(message);
+    }
   }
 
   /**
