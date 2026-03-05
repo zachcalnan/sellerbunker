@@ -19,7 +19,6 @@ export default function RootLayout({
   try {
     var stored = localStorage.getItem('theme');
     if (stored === 'dark' || stored === 'light') theme = stored;
-    else if (window.matchMedia('(prefers-color-scheme: light)').matches) theme = 'light';
   } catch (e) {}
   document.documentElement.dataset.theme = theme;
 })();
@@ -30,8 +29,11 @@ export default function RootLayout({
       appearance={{
         theme: shadcn,
       }}
+      signInUrl="/sign-in"
+      signUpUrl="/sign-up"
       signInFallbackRedirectUrl="/start-trial"
       signUpFallbackRedirectUrl="/start-trial"
+      signUpForceRedirectUrl="/start-trial"
     >
       <html lang="en" suppressHydrationWarning>
         <head>
