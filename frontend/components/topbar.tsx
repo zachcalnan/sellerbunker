@@ -10,6 +10,7 @@ import { useFullscreen } from "@/contexts/fullscreen-context";
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
 const FLASH_DISMISSED_KEY = "topbar-notification-flash-dismissed";
+const INITIAL_SYNC_DISMISSED_KEY = "sellerbunker_initial_sync_dismissed";
 
 function toDateOnly(d: Date) {
   return d.toISOString().slice(0, 10);
@@ -24,6 +25,12 @@ export function Topbar() {
     if (typeof window === "undefined") return false;
     return sessionStorage.getItem(FLASH_DISMISSED_KEY) === "1";
   });
+  const [syncProgress, setSyncProgress] = useState<number | null>(null);
+  const [syncDismissed, setSyncDismissed] = useState(() => {
+    if (typeof window === "undefined") return true;
+    return localStorage.getItem(INITIAL_SYNC_DISMISSED_KEY) === "1";
+  });
+  const [hasSeenSyncInProgress, setHasSeenSyncInProgress] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   const fetchMissing = useCallback(async () => {
@@ -54,9 +61,55 @@ export function Topbar() {
     void fetchMissing();
   }, [isSignedIn, fetchMissing]);
 
+  const fetchSyncProgress = useCallback(async () => {
+    if (!isSignedIn || syncDismissed) return;
+    try {
+      const token = await getToken({ template: "backend" });
+      if (!token) return;
+      const res = await fetch(`${BASE_URL}/api/amazon/sync-progress`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) return;
+      const data = (await res.json()) as { progress?: number; done?: boolean };
+      const p = Number(data.progress);
+      if (Number.isFinite(p)) {
+        const progressNum = Math.min(100, Math.max(0, p));
+        setSyncProgress(progressNum);
+        if (progressNum < 100) setHasSeenSyncInProgress(true);
+      }
+    } catch {
+      setSyncProgress(100);
+    }
+  }, [isSignedIn, syncDismissed, getToken]);
+
+  useEffect(() => {
+    if (!isSignedIn || syncDismissed) {
+      setSyncProgress(null);
+      return;
+    }
+    void fetchSyncProgress();
+    const t = setInterval(fetchSyncProgress, 8000);
+    return () => clearInterval(t);
+  }, [isSignedIn, syncDismissed, fetchSyncProgress]);
+
+  const dismissSyncProgress = () => {
+    try {
+      localStorage.setItem(INITIAL_SYNC_DISMISSED_KEY, "1");
+    } catch {}
+    setSyncDismissed(true);
+    setSyncProgress(null);
+  };
+
   const hasMissing = (missingCount ?? 0) > 0;
+  const showSyncBox =
+    !syncDismissed &&
+    syncProgress !== null &&
+    syncProgress > 0 &&
+    (syncProgress < 100 || hasSeenSyncInProgress);
+  const syncComplete = showSyncBox && syncProgress >= 100;
 
   return (
+    <>
     <header
       className="hidden md:flex h-14 shrink-0 items-center justify-between gap-4 border-b border-[var(--surface-border)] bg-[var(--surface)] px-4"
       role="banner"
@@ -120,6 +173,38 @@ export function Topbar() {
             className="absolute left-0 top-full z-50 mt-1 min-w-[220px] rounded-lg border border-[var(--surface-border)] bg-[var(--surface)] px-3 py-2.5 text-sm shadow-lg"
             role="tooltip"
           >
+            {showSyncBox && (
+              <div className="mb-3 border-b border-[var(--surface-border)] pb-3">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-medium text-[var(--foreground)]">
+                    {syncComplete ? "Sync complete" : "Syncing your data…"}
+                  </span>
+                  {syncComplete && (
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); dismissSyncProgress(); }}
+                      className="rounded p-0.5 text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/10 hover:text-[var(--foreground)]"
+                      aria-label="Dismiss"
+                    >
+                      <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+                  )}
+                </div>
+                <div
+                  className={`mt-1.5 h-2 w-full overflow-hidden rounded-full ${syncComplete ? "bg-emerald-500/30" : "bg-[var(--foreground)]/10"}`}
+                >
+                  <div
+                    className={`h-full rounded-full transition-all duration-300 ${syncComplete ? "bg-emerald-500" : "bg-[var(--foreground)]/40"}`}
+                    style={{ width: `${syncProgress ?? 0}%` }}
+                  />
+                </div>
+                {!syncComplete && (
+                  <p className="mt-1 text-[11px] text-[var(--muted-foreground)]">{syncProgress ?? 0}%</p>
+                )}
+              </div>
+            )}
             {missingCount != null ? (
               hasMissing ? (
                 <div className="flex flex-col gap-2">
@@ -197,5 +282,30 @@ export function Topbar() {
         </div>
       </div>
     </header>
+    {showSyncBox && (
+      <div className="hidden md:flex items-center gap-3 border-b border-[var(--surface-border)] bg-[var(--surface)] px-4 py-2 text-sm">
+        <span className="shrink-0 font-medium text-[var(--foreground)]">
+          {syncComplete ? "Sync complete" : "Syncing your data…"}
+        </span>
+        <div className="min-w-[120px] flex-1 max-w-[200px] h-2 overflow-hidden rounded-full bg-[var(--foreground)]/10">
+          <div
+            className={`h-full rounded-full transition-all duration-300 ${syncComplete ? "bg-emerald-500" : "bg-[var(--foreground)]/40"}`}
+            style={{ width: `${syncProgress ?? 0}%` }}
+          />
+        </div>
+        <span className="shrink-0 tabular-nums text-[var(--muted-foreground)]">{syncProgress ?? 0}%</span>
+        <button
+          type="button"
+          onClick={dismissSyncProgress}
+          className="shrink-0 rounded p-1 text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/10 hover:text-[var(--foreground)]"
+          aria-label="Dismiss"
+        >
+          <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
+      </div>
+    )}
+    </>
   );
 }

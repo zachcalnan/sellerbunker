@@ -47,6 +47,19 @@ export class AmazonSyncService implements OnModuleInit {
       },
     );
 
+    const shipmentsEveryMs =
+      Number(process.env.AMAZON_SHIPMENTS_SYNC_EVERY_MS) || 2 * 60 * 60 * 1000;
+    await this.queue.add(
+      'shipments-batch-sync',
+      {},
+      {
+        repeat: {
+          every: shipmentsEveryMs,
+        },
+        jobId: 'shipments-batch-sync',
+      },
+    );
+
     // Fee estimate refresh: once per day (default 6 AM) to avoid rate limits
     const feeEstimateCron =
       process.env.FEE_ESTIMATE_REFRESH_CRON ?? '0 6 * * *';
@@ -62,7 +75,7 @@ export class AmazonSyncService implements OnModuleInit {
     );
 
     this.logger.log(
-      `Scheduled Amazon sync jobs (ordersEveryMs=${ordersEveryMs}, inventoryEveryMs=${inventoryEveryMs}, feeEstimateCron=${feeEstimateCron})`,
+      `Scheduled Amazon sync jobs (orders=${ordersEveryMs}ms, inventory=${inventoryEveryMs}ms, shipments=${shipmentsEveryMs}ms, feeCron=${feeEstimateCron})`,
     );
   }
 

@@ -78,6 +78,32 @@ function HomeInner() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const amazonConnectedParam = searchParams.get("amazon_connected") === "1";
+  const [showAmazonConnectThankYou, setShowAmazonConnectThankYou] = useState(false);
+  useEffect(() => {
+    if (!amazonConnectedParam) return;
+    try {
+      if (localStorage.getItem("sellerbunker_amazon_connect_thanks_seen") === "1") {
+        return;
+      }
+      setShowAmazonConnectThankYou(true);
+    } catch {
+      setShowAmazonConnectThankYou(true);
+    }
+  }, [amazonConnectedParam]);
+  const dismissAmazonConnectThankYou = () => {
+    try {
+      localStorage.setItem("sellerbunker_amazon_connect_thanks_seen", "1");
+    } catch {
+      /* ignore */
+    }
+    setShowAmazonConnectThankYou(false);
+    const next = new URLSearchParams(searchParams.toString());
+    next.delete("amazon_connected");
+    const q = next.toString();
+    router.replace(q ? `/dashboard?${q}` : "/dashboard");
+  };
+
   const toDateOnly = (d: Date) => d.toISOString().slice(0, 10);
   const today = new Date();
   const defaultEnd = toDateOnly(today);
@@ -338,6 +364,28 @@ function HomeInner() {
 
   return (
     <div className={`min-h-screen ${backgroundClass} text-[var(--foreground)]`}>
+      {showAmazonConnectThankYou && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/50 p-4">
+          <div className="relative w-full max-w-md rounded-2xl border border-[var(--surface-border)] bg-[var(--surface)] p-6 shadow-xl">
+            <button
+              type="button"
+              onClick={dismissAmazonConnectThankYou}
+              className="absolute right-3 top-3 rounded p-1 text-[var(--muted-foreground)] transition hover:bg-[var(--foreground)]/10 hover:text-[var(--foreground)]"
+              aria-label="Close"
+            >
+              <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+            <h2 className="pr-8 text-lg font-semibold text-[var(--foreground)]">
+              Thank you for connecting
+            </h2>
+            <p className="mt-2 text-sm text-[var(--muted-foreground)]">
+              Please allow up to an hour for SellerBunker to sync your data.
+            </p>
+          </div>
+        </div>
+      )}
       <main className="flex min-h-screen w-full flex-col gap-6 px-4 pt-2 pb-6">
 
         {loading && (

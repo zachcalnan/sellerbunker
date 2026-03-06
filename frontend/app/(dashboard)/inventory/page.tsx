@@ -48,7 +48,6 @@ export default function InventoryPage() {
 
   const [rows, setRows] = useState<InventoryRow[]>([]);
   const [loading, setLoading] = useState(false);
-  const [syncing, setSyncing] = useState(false);
   const [backfillingTitles, setBackfillingTitles] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -83,37 +82,6 @@ export default function InventoryPage() {
     }
     void load();
   }, [isSignedIn, load]);
-
-  const syncNow = async () => {
-    setSyncing(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const token = await getToken();
-      const res = await fetch(`${baseUrl}/api/amazon/inventory/sync`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) {
-        const contentType = res.headers.get("content-type") ?? "";
-        if (contentType.includes("application/json")) {
-          const body = (await res.json()) as { message?: unknown };
-          const message =
-            typeof body?.message === "string"
-              ? body.message
-              : "Failed to sync.";
-          throw new Error(message);
-        }
-        const msg = await res.text();
-        throw new Error(msg || "Failed to sync.");
-      }
-      await load();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to sync.");
-    } finally {
-      setSyncing(false);
-    }
-  };
 
   const backfillTitles = async () => {
     setBackfillingTitles(true);
@@ -270,14 +238,9 @@ export default function InventoryPage() {
             />
 
             <div className="flex flex-wrap items-center gap-2 sm:flex-nowrap">
-              <button
-                type="button"
-                onClick={syncNow}
-                disabled={!isSignedIn || syncing}
-                className="cursor-pointer rounded-lg bg-[rgb(2,242,170)] px-3 py-2 text-sm font-medium text-black disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {syncing ? "Syncing…" : "Sync now"}
-              </button>
+              <p className="text-xs text-[var(--muted-foreground)]">
+                Inventory syncs automatically every 2 hours.
+              </p>
               <button
                 type="button"
                 onClick={backfillTitles}
@@ -612,7 +575,7 @@ function InventoryDetailDrilldown({ rawJson }: { rawJson: unknown }) {
   const payloads = Array.isArray(rawJson) ? rawJson : rawJson != null ? [rawJson] : [];
   if (payloads.length === 0) {
     return (
-      <p className="text-[var(--muted-foreground)]">No inventory detail data. Run a sync to populate.</p>
+      <p className="text-[var(--muted-foreground)]">No inventory detail data yet. Data syncs automatically every 2 hours.</p>
     );
   }
 

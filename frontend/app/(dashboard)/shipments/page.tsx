@@ -42,7 +42,6 @@ export default function ShipmentsPage() {
 
   const [rows, setRows] = useState<ShipmentRow[]>([]);
   const [loading, setLoading] = useState(false);
-  const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [rawResponses, setRawResponses] = useState<unknown[] | null>(null);
@@ -80,40 +79,6 @@ export default function ShipmentsPage() {
     }
     void load();
   }, [isSignedIn, load]);
-
-  const syncNow = async () => {
-    setSyncing(true);
-    setError(null);
-    setNotice(null);
-    setRawResponses(null);
-    try {
-      const token = await getToken();
-      const res = await fetch(`${baseUrl}/api/amazon/shipments/sync`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) {
-        const contentType = res.headers.get("content-type") ?? "";
-        if (contentType.includes("application/json")) {
-          const body = (await res.json()) as { message?: unknown };
-          const message =
-            typeof body?.message === "string" ? body.message : "Failed to sync.";
-          throw new Error(message);
-        }
-        const msg = await res.text();
-        throw new Error(msg || "Failed to sync.");
-      }
-      const result = (await res.json()) as { synced?: number; errors?: string[]; rawResponses?: unknown[] };
-      if (result.synced != null) setNotice(`Synced ${result.synced} shipment(s).`);
-      if (result.errors?.length) setNotice((n) => `${n ?? ""} ${result.errors!.join("; ")}`.trim());
-      setRawResponses(result.rawResponses ?? null);
-      await load();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to sync.");
-    } finally {
-      setSyncing(false);
-    }
-  };
 
   const saveManualCheckIn = async () => {
     if (!manualCheckInModal || !manualCheckInDate.trim()) return;
@@ -202,14 +167,9 @@ export default function ShipmentsPage() {
                   className="max-w-md rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[rgb(2,242,170)]"
                   aria-label="Search shipments"
                 />
-                <button
-                  type="button"
-                  onClick={syncNow}
-                  disabled={syncing}
-                  className="shrink-0 rounded-lg bg-[rgb(2,242,170)] px-4 py-2 text-sm font-medium text-black hover:opacity-90 disabled:opacity-60"
-                >
-                  {syncing ? "Syncing…" : "Sync shipments"}
-                </button>
+                <p className="text-xs text-[var(--muted-foreground)] shrink-0">
+                  Shipments sync automatically every 2 hours.
+                </p>
               </div>
             </div>
           </div>
@@ -273,7 +233,7 @@ export default function ShipmentsPage() {
               </div>
             ) : filtered.length === 0 ? (
               <div className="px-4 py-6 text-sm text-[var(--muted-foreground)]">
-                No shipments found. Use &quot;Sync shipments&quot; to pull from Amazon.
+                No shipments found. Data syncs automatically every 2 hours.
               </div>
             ) : (
               <>

@@ -291,7 +291,7 @@ export default function LandingPage() {
             <SignedIn>
               <Link
                 href="/start-trial"
-                className="rounded-lg bg-white px-4 py-2 text-sm font-medium text-black no-underline transition hover:bg-gray-100"
+                className="rounded-lg bg-transparent px-4 py-2 text-sm font-medium text-white no-underline transition border-t-2 border-b-2 border-white hover:bg-white/10"
               >
                 Start 14 day free trial
               </Link>
@@ -299,7 +299,7 @@ export default function LandingPage() {
             <SignedOut>
               <SignUpButton mode="redirect" forceRedirectUrl="/start-trial" signInForceRedirectUrl="/start-trial">
                 <button
-                  className="rounded-lg bg-white px-4 py-2 text-sm font-medium text-black transition hover:bg-gray-100"
+                  className="rounded-lg bg-transparent px-4 py-2 text-sm font-medium text-white transition border-t-2 border-b-2 border-white hover:bg-white/10"
                 >
                   Start 14 day free trial
                 </button>
@@ -539,9 +539,9 @@ export default function LandingPage() {
             </h2>
             <div className="mt-16 grid gap-10 md:grid-cols-3">
               {[
-                { step: 1, title: "Connect Amazon", desc: "Secure Amazon SP-API integration. Link your seller account in minutes." },
-                { step: 2, title: "Import your data", desc: "SellerBunker pulls your last 30 days of order data by default—or up to two years of history—plus inventory and fees." },
-                { step: 3, title: "Track profit", desc: "Instantly see true profit and business performance in your dashboard." },
+                { step: 1, title: "Connect Amazon", desc: "Secure Amazon API integration. Create an account and link your Amazon seller account in minutes." },
+                { step: 2, title: "Import your data", desc: "SellerBunker pulls your listings, fees, shipments and last 30 days of order data by default—you can specify up to two years of order data, please email us." },
+                { step: 3, title: "Track profit", desc: "After an initial sync, fill out your costs (unit cost, prep, delivery, etc.) and instantly see true profit and business performance in your dashboard." },
               ].map(({ step, title, desc }) => (
                 <div key={step} className="relative text-center">
                   <div

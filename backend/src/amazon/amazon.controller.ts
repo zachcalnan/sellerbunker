@@ -20,6 +20,7 @@ import { LinkAmazonAccountDto } from './dto/link-amazon-account.dto';
 import { CreatePurchaseDto } from './dto/create-purchase.dto';
 import { UpdatePurchaseDto } from './dto/update-purchase.dto';
 import { ClerkAuthGuard } from '../auth/clerk-auth.guard';
+import { RedisService } from '../redis/redis.service';
 import { AmazonSyncService } from './amazon-sync.service';
 
 @Controller('amazon')
@@ -29,6 +30,7 @@ export class AmazonController {
     private readonly amazonService: AmazonService,
     private readonly amazonSyncService: AmazonSyncService,
     private readonly configService: ConfigService,
+    private readonly redis: RedisService,
   ) {}
 
   @Get('ping')
@@ -99,11 +101,12 @@ ping() {
         this.logger.warn(`Failed to enqueue initial Amazon sync: ${msg}`);
       }
 
-      const frontendUrl =
+      const frontendBase =
         this.configService.get<string>('FRONTEND_URL') ||
         'http://localhost:3000';
-
-      return res.redirect(frontendUrl);
+      const dashboardUrl =
+        frontendBase.replace(/\/$/, '') + '/dashboard?amazon_connected=1';
+      return res.redirect(dashboardUrl);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       this.logger.error(`OAuth callback failed: ${msg}`);
@@ -142,6 +145,31 @@ ping() {
       req.user.userId,
       { start, end },
     );
+  }
+
+  /**
+   * Initial sync progress (0–100) for the post-connect full-sync. Used by topbar to show progress bar.
+   * Returns { progress: number, done: boolean }. Once 100 or key expired, done is true.
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Get('sync-progress')
+  async getSyncProgress(@Req() req: { user: { userId: string } }) {
+    const key = `amazon-initial-sync:${req.user.userId}`;
+    const raw = await this.redis.get(key);
+    if (!raw) {
+      return { progress: 100, done: true };
+    }
+    try {
+      const { progress } = JSON.parse(raw) as { progress?: number };
+      const p = Number(progress);
+      const progressNum = Number.isFinite(p) ? Math.min(100, Math.max(0, p)) : 100;
+      return {
+        progress: progressNum,
+        done: progressNum >= 100,
+      };
+    } catch {
+      return { progress: 100, done: true };
+    }
   }
 
   @UseGuards(ClerkAuthGuard)
