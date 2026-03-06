@@ -44,8 +44,6 @@ export default function ShipmentsPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [rawResponses, setRawResponses] = useState<unknown[] | null>(null);
-  const [showRaw, setShowRaw] = useState(false);
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
   const [manualCheckInModal, setManualCheckInModal] = useState<{ shipmentId: string; shipmentName: string | null } | null>(null);
@@ -57,7 +55,7 @@ export default function ShipmentsPage() {
     setLoading(true);
     setError(null);
     try {
-      const token = await getToken();
+      const token = await getToken({ template: "backend" });
       const res = await fetch(`${baseUrl}/api/amazon/shipments`, {
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -85,7 +83,7 @@ export default function ShipmentsPage() {
     setManualCheckInSaving(true);
     setManualCheckInError(null);
     try {
-      const token = await getToken();
+      const token = await getToken({ template: "backend" });
       const res = await fetch(`${baseUrl}/api/amazon/shipments/${encodeURIComponent(manualCheckInModal.shipmentId)}/checked-in`, {
         method: "PATCH",
         headers: {
@@ -167,9 +165,6 @@ export default function ShipmentsPage() {
                   className="max-w-md rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[rgb(2,242,170)]"
                   aria-label="Search shipments"
                 />
-                <p className="text-xs text-[var(--muted-foreground)] shrink-0">
-                  Shipments sync automatically every 2 hours.
-                </p>
               </div>
             </div>
           </div>
@@ -186,23 +181,6 @@ export default function ShipmentsPage() {
           {notice && (
             <div className="rounded-lg border border-[var(--surface-border)] bg-[var(--surface)] px-4 py-2 text-sm text-[var(--muted-foreground)]">
               {notice}
-            </div>
-          )}
-
-          {rawResponses != null && rawResponses.length > 0 && (
-            <div className="rounded-lg border border-[var(--surface-border)] bg-[var(--surface)] overflow-hidden">
-              <button
-                type="button"
-                onClick={() => setShowRaw((s) => !s)}
-                className="w-full px-4 py-2 text-left text-sm font-medium text-[var(--foreground)] hover:bg-[var(--surface-hover)]"
-              >
-                {showRaw ? "Hide" : "Show"} raw API response ({rawResponses.length} page{rawResponses.length !== 1 ? "s" : ""})
-              </button>
-              {showRaw && (
-                <pre className="max-h-[60vh] overflow-auto border-t border-[var(--surface-border)] bg-[var(--background)] p-4 text-xs text-[var(--muted-foreground)] whitespace-pre-wrap break-all">
-                  {JSON.stringify(rawResponses, null, 2)}
-                </pre>
-              )}
             </div>
           )}
 

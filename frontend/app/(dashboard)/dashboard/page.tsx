@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Suspense, type ReactNode, useEffect, useState } from "react";
+import { Suspense, type ReactNode, useCallback, useEffect, useState } from "react";
 import { useAuth } from "@clerk/nextjs";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useDisplaySettings } from "@/contexts/display-settings-context";
@@ -77,12 +77,16 @@ function HomeInner() {
   const [summary, setSummary] = useState<AccountSummary | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** When we have 0 orders: true = sync is 100% (no contradiction with topbar), false/null = still syncing */
+  const [syncCompleteWhenZero, setSyncCompleteWhenZero] = useState<boolean | null>(null);
 
   const amazonConnectedParam = searchParams.get("amazon_connected") === "1";
   const [showAmazonConnectThankYou, setShowAmazonConnectThankYou] = useState(false);
   useEffect(() => {
     if (!amazonConnectedParam) return;
     try {
+      sessionStorage.setItem("sellerbunker_initial_sync_pending", "1");
+      window.dispatchEvent(new CustomEvent("sellerbunker-initial-sync-pending"));
       if (localStorage.getItem("sellerbunker_amazon_connect_thanks_seen") === "1") {
         return;
       }
@@ -229,16 +233,13 @@ function HomeInner() {
     router.replace(`/dashboard?${next.toString()}`);
   };
 
-  useEffect(() => {
-    if (!isSignedIn) {
-      setSummary(null);
-      return;
-    }
-
-    const fetchSummary = async () => {
-      setLoading(true);
-      setError(null);
-
+  const fetchSummary = useCallback(
+    async (opts?: { silent?: boolean }) => {
+      if (!isSignedIn) return;
+      if (!opts?.silent) {
+        setLoading(true);
+        setError(null);
+      }
       try {
         const token = await getToken({ template: "backend" });
         const res = await fetch(
@@ -248,12 +249,11 @@ function HomeInner() {
               end: effectiveEnd,
             }).toString(),
           {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
           },
         );
-
         if (!res.ok) {
           const message =
             res.status === 404
@@ -263,19 +263,78 @@ function HomeInner() {
           setSummary(null);
           return;
         }
-
         const data = (await res.json()) as AccountSummary;
         setSummary(data);
       } catch {
-        setError("Unable to reach backend. Is it running?");
-        setSummary(null);
+        if (!opts?.silent) {
+          setError("Unable to reach backend. Is it running?");
+          setSummary(null);
+        }
       } finally {
-        setLoading(false);
+        if (!opts?.silent) setLoading(false);
+      }
+    },
+    [isSignedIn, getToken, baseUrl, effectiveStart, effectiveEnd],
+  );
+
+  useEffect(() => {
+    if (!isSignedIn) {
+      setSummary(null);
+      return;
+    }
+    fetchSummary();
+  }, [isSignedIn, fetchSummary]);
+
+  // After connecting Amazon, sync runs in the background. Poll summary until we have data
+  // so the dashboard updates without a manual refresh.
+  const isPostConnect =
+    amazonConnectedParam ||
+    (typeof window !== "undefined" &&
+      sessionStorage.getItem("sellerbunker_initial_sync_pending") === "1");
+  useEffect(() => {
+    if (!isPostConnect || !summary || summary.totalOrders > 0) return;
+    const maxPolls = 20;
+    let polls = 0;
+    const interval = setInterval(async () => {
+      polls += 1;
+      if (polls > maxPolls) {
+        clearInterval(interval);
+        return;
+      }
+      await fetchSummary({ silent: true });
+      // Stop when summary.totalOrders > 0 (effect deps change and cleanup runs)
+    }, 12000);
+    return () => clearInterval(interval);
+  }, [isPostConnect, fetchSummary, summary?.totalOrders]);
+
+  // When we have 0 orders, check if sync is already 100% so we don't show "Syncing..." when topbar says "Sync complete"
+  useEffect(() => {
+    if (!isSignedIn || !summary || summary.totalOrders > 0) {
+      setSyncCompleteWhenZero(null);
+      return;
+    }
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const token = await getToken({ template: "backend" });
+        const res = await fetch(`${baseUrl}/api/amazon/sync-progress`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok || cancelled) return;
+        const data = (await res.json()) as { progress?: number; done?: boolean };
+        if (cancelled) return;
+        const p = Number(data?.progress);
+        const done = data?.done === true || (Number.isFinite(p) && p >= 100);
+        setSyncCompleteWhenZero(done);
+      } catch {
+        if (!cancelled) setSyncCompleteWhenZero(null);
       }
     };
-
-    fetchSummary();
-  }, [isSignedIn, getToken, baseUrl, effectiveStart, effectiveEnd]);
+    void check();
+    return () => {
+      cancelled = true;
+    };
+  }, [isSignedIn, getToken, baseUrl, summary?.totalOrders]);
 
   const effectiveCurrency = summary?.currency ?? "USD";
 
@@ -393,6 +452,25 @@ function HomeInner() {
             Loading account summary...
           </div>
         )}
+        {summary && summary.totalOrders === 0 && !error && (
+          <div className="flex flex-col gap-3 rounded-xl border border-amber-500/50 bg-amber-500/10 px-4 py-3 text-sm text-[var(--foreground)]">
+            {syncCompleteWhenZero === true ? (
+              <>
+                <p className="font-medium">Sync complete. No orders in the selected period.</p>
+                <p className="text-[var(--muted-foreground)]">
+                  Try a different date range above.
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="font-medium">Syncing your data…</p>
+                <p className="text-[var(--muted-foreground)]">
+                  Numbers will update here when ready. This can take up to an hour.
+                </p>
+              </>
+            )}
+          </div>
+        )}
         {error ? (
           <div className="flex flex-col gap-3 rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-xs text-red-700">
             <span>{error}</span>
@@ -406,7 +484,10 @@ function HomeInner() {
                       alert("Please sign in again and try connecting.");
                       return;
                     }
-                    const res = await fetch(`${baseUrl}/api/amazon/connect?region=EU`, {
+                    const returnOrigin = typeof window !== 'undefined' ? window.location.origin : '';
+                    const params = new URLSearchParams({ region: 'EU' });
+                    if (returnOrigin) params.set('returnOrigin', returnOrigin);
+                    const res = await fetch(`${baseUrl}/api/amazon/connect?${params}`, {
                       headers: { Authorization: `Bearer ${token}` },
                     });
                     const data = (await res.json()) as { url?: string; message?: string };

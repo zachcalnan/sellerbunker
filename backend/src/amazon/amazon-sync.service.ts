@@ -1,11 +1,17 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
+import { RedisService } from '../redis/redis.service';
+
+const SYNC_PROGRESS_TTL = 24 * 60 * 60; // 24h, must match amazon-sync.processor
 
 @Injectable()
 export class AmazonSyncService implements OnModuleInit {
   private readonly logger = new Logger(AmazonSyncService.name);
-  constructor(@InjectQueue('amazon-sync') private readonly queue: Queue) {}
+  constructor(
+    @InjectQueue('amazon-sync') private readonly queue: Queue,
+    private readonly redis: RedisService,
+  ) {}
 
   /**
    * Configure periodic batch sync when the module starts.
@@ -74,8 +80,19 @@ export class AmazonSyncService implements OnModuleInit {
       },
     );
 
+    const titlesBackfillEveryMs =
+      Number(process.env.AMAZON_TITLES_BACKFILL_EVERY_MS) || 4 * 60 * 60 * 1000;
+    await this.queue.add(
+      'product-titles-backfill',
+      {},
+      {
+        repeat: { every: titlesBackfillEveryMs },
+        jobId: 'product-titles-backfill',
+      },
+    );
+
     this.logger.log(
-      `Scheduled Amazon sync jobs (orders=${ordersEveryMs}ms, inventory=${inventoryEveryMs}ms, shipments=${shipmentsEveryMs}ms, feeCron=${feeEstimateCron})`,
+      `Scheduled Amazon sync jobs (orders=${ordersEveryMs}ms, inventory=${inventoryEveryMs}ms, shipments=${shipmentsEveryMs}ms, feeCron=${feeEstimateCron}, titlesBackfill=${titlesBackfillEveryMs}ms)`,
     );
   }
 
@@ -86,6 +103,15 @@ export class AmazonSyncService implements OnModuleInit {
    */
   async enqueueFullSync(userId: string): Promise<void> {
     this.logger.log(`Enqueuing full-sync job (userId=${userId})`);
+    // Set progress to 0 immediately so the dashboard shows "Syncing..." until the worker
+    // actually runs and updates it. Otherwise GET /sync-progress returns 100 when the key
+    // is missing and the UI would show "Sync complete" before any sync runs.
+    const progressKey = `amazon-initial-sync:${userId}`;
+    await this.redis.set(
+      progressKey,
+      JSON.stringify({ progress: 0 }),
+      SYNC_PROGRESS_TTL,
+    );
     await this.queue.add(
       'full-sync',
       { userId },

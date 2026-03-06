@@ -67,25 +67,46 @@ export class AmazonSyncProcessor extends WorkerHost {
 
     if (job.name === 'full-sync') {
       const { userId } = job.data as AmazonSyncJobData;
-      await this.setInitialSyncProgress(userId, 0);
-      // 1) Orders first – populates orders and order items for dashboard summary
-      await this.amazonService.syncRecentOrdersToDb(userId);
-      await this.setInitialSyncProgress(userId, 25);
-      // 2) FBA inventory – stock levels and catalog
-      const user = await this.prisma.user.findUnique({
-        where: { id: userId },
-        select: { activeOrgId: true },
-      });
-      if (user?.activeOrgId) {
-        await this.amazonService.syncFbaInventory(user.activeOrgId, userId);
-        await this.setInitialSyncProgress(userId, 50);
-        // 3) Shipments – FBA shipment list and status
-        await this.amazonService.syncShipments(user.activeOrgId, userId);
-        await this.setInitialSyncProgress(userId, 75);
-        // 4) Fee estimates – so profit/COGS calculations can use FBA fees
-        await this.amazonService.refreshFeeEstimatesForOrg(user.activeOrgId);
+      try {
+        this.logger.log(`[full-sync] Starting for userId=${userId}`);
+        await this.setInitialSyncProgress(userId, 0);
+        // 1) Orders first – populates orders and order items for dashboard summary
+        await this.amazonService.syncRecentOrdersToDb(userId);
+        await this.setInitialSyncProgress(userId, 25);
+        // 2) FBA inventory, shipments, fee estimates – use activeOrgId or first org the user belongs to
+        const user = await this.prisma.user.findUnique({
+          where: { id: userId },
+          select: { activeOrgId: true },
+        });
+        let orgIdForSync = user?.activeOrgId ?? null;
+        if (!orgIdForSync) {
+          const membership = await this.prisma.organizationMembership.findFirst({
+            where: { userId },
+            select: { orgId: true },
+          });
+          orgIdForSync = membership?.orgId ?? null;
+          if (orgIdForSync) {
+            this.logger.log(`[full-sync] userId=${userId} has no activeOrgId; using first org ${orgIdForSync} for inventory/shipments/fees`);
+          }
+        }
+        if (orgIdForSync) {
+          await this.amazonService.syncFbaInventory(orgIdForSync, userId);
+          await this.setInitialSyncProgress(userId, 50);
+          // 3) Shipments – FBA shipment list and status
+          await this.amazonService.syncShipments(orgIdForSync, userId);
+          await this.setInitialSyncProgress(userId, 75);
+          // 4) Fee estimates – so profit/COGS calculations can use FBA fees
+          await this.amazonService.refreshFeeEstimatesForOrg(orgIdForSync);
+        } else {
+          this.logger.warn(`[full-sync] userId=${userId} has no activeOrgId and no org membership; skipping inventory/shipments/fees`);
+        }
+        await this.setInitialSyncProgress(userId, 100);
+        this.logger.log(`[full-sync] Completed for userId=${userId}`);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.logger.error(`[full-sync] Failed for userId=${userId}: ${msg}`, err instanceof Error ? err.stack : undefined);
+        throw err;
       }
-      await this.setInitialSyncProgress(userId, 100);
     }
 
     if (job.name === 'orders-batch-sync') {
@@ -146,6 +167,37 @@ export class AmazonSyncProcessor extends WorkerHost {
       if (errors.length) {
         throw new Error(
           `[AmazonSync] fee-estimate-refresh completed with ${errors.length} errors`,
+        );
+      }
+    }
+
+    if (job.name === 'product-titles-backfill') {
+      this.logger.log('[AmazonSync] Running product titles/images backfill for all orgs');
+
+      const orgs = await this.prisma.organization.findMany({
+        select: { id: true },
+      });
+
+      const limit = Math.min(200, Math.max(50, Number(process.env.AMAZON_TITLES_BACKFILL_LIMIT) || 100));
+      const errors: Array<{ orgId: string; error: string }> = [];
+      for (const org of orgs) {
+        try {
+          const result = await this.amazonService.backfillProductTitles(org.id, limit);
+          this.logger.log(
+            `[AmazonSync] Titles backfill org ${org.id}: updated=${result?.updated ?? 0} skipped=${result?.skipped ?? 0} errors=${result?.errorsCount ?? 0}`,
+          );
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          errors.push({ orgId: org.id, error: msg });
+          this.logger.error(
+            `[AmazonSync] Titles backfill failed for org ${org.id}: ${msg}`,
+          );
+        }
+      }
+
+      if (errors.length) {
+        throw new Error(
+          `[AmazonSync] product-titles-backfill completed with ${errors.length} errors`,
         );
       }
     }

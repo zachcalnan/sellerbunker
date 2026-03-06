@@ -1320,14 +1320,55 @@ export class AmazonService {
     const createdAfterIso = startDate.toISOString().split('.')[0] + 'Z';
     const createdBeforeIso = nowSafe.toISOString().split('.')[0] + 'Z';
 
-    const marketplaceIds =
-      credentials.region === 'eu' ? ['A1F83G8C2ARO7P'] : ['ATVPDKIKX0DER'];
+    // EU: request all EU marketplaces (UK, DE, FR, IT, ES, etc.); optionally narrow to seller participations.
+    const regionMarketplaceIds: Record<string, string[]> = {
+      eu: [
+        'A1F83G8C2ARO7P', // UK
+        'A1PA6795UKMFR9', // DE
+        'A13V1IB3VIYZZH', // FR
+        'APJ6JRA9NG5V4', // IT
+        'A1RKKUPIHCS9HS', // ES
+        'A28R8C7NBKEWEA', // IE
+        'A1805IZSGTT6HS', // NL
+        'AMEN7PMS3EDWL', // BE
+        'A2NODRKZP88ZB9', // SE
+        'A1C3SOZRARQ6R3', // PL
+      ],
+      na: ['ATVPDKIKX0DER', 'A2EUQ1WTGCTBG2', 'A1AM78C64UM0Y8', 'A2Q3Y263D00KWC'], // US, CA, MX, BR
+      fe: ['A19VAU5U5O7RUS', 'A39IBJ37TRP1C6', 'A1VC38T7YXB528'], // SG, AU, JP
+    };
+    const region = credentials.region ?? 'eu';
+    const allowedInRegion = new Set(
+      regionMarketplaceIds[region] ?? regionMarketplaceIds.eu,
+    );
+    let marketplaceIds = regionMarketplaceIds[region] ?? regionMarketplaceIds.eu;
 
-    // Inventory sync lives in syncFbaInventory. Keep order sync focused on orders only.
+    try {
+      const res = (await this.spApiClient.getMarketplaceParticipations(
+        credentials,
+      )) as any;
+      const payload = res?.payload ?? res?.Payload ?? res ?? {};
+      const list: any[] = payload?.payload ?? payload?.Payload ?? payload ?? [];
+      const ids = Array.isArray(list)
+        ? list
+            .map((p) => p?.marketplace?.id ?? p?.Marketplace?.Id ?? null)
+            .filter((v) => typeof v === 'string' && v.length > 0 && allowedInRegion.has(v as string))
+        : [];
+      if (ids.length > 0) {
+        marketplaceIds = Array.from(new Set([...marketplaceIds, ...ids]));
+      }
+    } catch {
+      // Fall back to full region list
+    }
 
-
-
-
+    const debug = ['1', 'true', 'yes'].includes(
+      (this.configService.get<string>('SPAPI_DEBUG_LOGS') ?? '').toLowerCase(),
+    );
+    if (debug) {
+      this.logger.debug(
+        `[syncRecentOrdersToDb] region=${region} marketplaces=${marketplaceIds.length} (${marketplaceIds.slice(0, 3).join(',')}${marketplaceIds.length > 3 ? '...' : ''})`,
+      );
+    }
 
     type SpApiOrder = {
       AmazonOrderId?: string;
@@ -1339,27 +1380,36 @@ export class AmazonService {
       NumberOfItemsUnshipped?: number;
     };
 
-    const data = (await this.spApiClient.getOrders(credentials, {
-      createdAfter: createdAfterIso,
-      createdBefore: createdBeforeIso,
-      marketplaceIds,
-      orderStatuses: ['Shipped', 'Unshipped', 'PartiallyShipped', 'Canceled'],
-    })) as {
-      payload?: {
-        Orders?: SpApiOrder[];
-      };
-    };
-
-    const orders = data.payload?.Orders ?? [];
-
-    const debug = ['1', 'true', 'yes'].includes(
-      (this.configService.get<string>('SPAPI_DEBUG_LOGS') ?? '').toLowerCase(),
-    );
-    if (debug) {
-      this.logger.debug(
-        `[AmazonService.syncRecentOrdersToDb] fetched orders=${orders.length} (userId=${userId})`,
+    const allOrders: SpApiOrder[] = [];
+    let nextToken: string | undefined;
+    try {
+      do {
+        // Use LastUpdatedAfter/Before; do NOT send OrderStatuses (many accounts return 0 when that filter is set)
+        const data = (await this.spApiClient.getOrders(credentials, nextToken
+          ? { nextToken }
+          : {
+              lastUpdatedAfter: createdAfterIso,
+              lastUpdatedBefore: createdBeforeIso,
+              marketplaceIds,
+            })) as { payload?: { Orders?: SpApiOrder[]; NextToken?: string }; Payload?: { Orders?: SpApiOrder[]; NextToken?: string } };
+        const page = data?.payload ?? data?.Payload;
+        const pageOrders = page?.Orders ?? [];
+        allOrders.push(...pageOrders);
+        nextToken = page?.NextToken ?? undefined;
+      } while (nextToken);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.warn(
+        `[syncRecentOrdersToDb] getOrders failed (userId=${userId}): ${msg}`,
       );
+      throw err;
     }
+
+    const orders = allOrders;
+
+    this.logger.log(
+      `[syncRecentOrdersToDb] getOrders returned ${orders.length} orders (paginated; userId=${userId} lastUpdatedAfter=${createdAfterIso} marketplaces=${marketplaceIds.length})`,
+    );
 
     if (orders.length === 0) {
       // Still advance the cursor so we don't keep re-querying the same window.
@@ -2285,6 +2335,23 @@ export class AmazonService {
             `[AmazonService.syncRecentOrdersToDb] catalog category backfill failed: ${e instanceof Error ? e.message : String(e)}`,
           );
         }
+        // Backfill product title and imageUrl from Catalog API so orders page can show product images.
+        try {
+          const titleResult = await this.backfillProductTitles(
+            membership.orgId,
+            20,
+            userId,
+          );
+          if (titleResult?.updated != null && titleResult.updated > 0) {
+            this.logger.log(
+              `[AmazonService.syncRecentOrdersToDb] product title/image backfill: updated=${titleResult.updated} (orders page images)`,
+            );
+          }
+        } catch (e) {
+          this.logger.warn(
+            `[AmazonService.syncRecentOrdersToDb] product title/image backfill failed: ${e instanceof Error ? e.message : String(e)}`,
+          );
+        }
       }
     }
   }
@@ -2294,9 +2361,6 @@ export class AmazonService {
    * Intended to be triggered periodically by a BullMQ repeatable job.
    */
   async syncRecentOrdersForAllSellers(): Promise<void> {
-    const debug = ['1', 'true', 'yes'].includes(
-      (this.configService.get<string>('SPAPI_DEBUG_LOGS') ?? '').toLowerCase(),
-    );
     const accounts = await this.prisma.sellerAccount.findMany({
       where: {
         marketplace: 'amazon',
@@ -2307,13 +2371,13 @@ export class AmazonService {
       },
     });
 
+    this.logger.log(
+      `[syncRecentOrdersForAllSellers] found ${accounts.length} seller account(s), syncing orders`,
+    );
+
     for (const { userId } of accounts) {
       try {
-        if (debug) {
-          this.logger.debug(
-            `[AmazonService.syncRecentOrdersForAllSellers] syncing userId=${userId}`,
-          );
-        }
+        this.logger.log(`[syncRecentOrdersForAllSellers] syncing orders for userId=${userId}`);
         await this.syncRecentOrdersToDb(userId);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -3062,45 +3126,312 @@ export class AmazonService {
   }
 
   /**
+   * Dev-only: call SP-API getOrders (no persist) and return count + debug. Tries multiple request variants.
+   */
+  async testOrdersApiFetch(
+    orgId: string,
+    preferredUserId?: string,
+  ): Promise<{
+    orderCount: number;
+    createdAfter: string;
+    createdBefore: string;
+    marketplaceCount: number;
+    sampleOrderIds: string[];
+    responseKeys?: string[];
+    payloadKeys?: string[];
+    tried?: string[];
+    error?: string;
+  }> {
+    try {
+      const userIds = await this.getOrgMemberUserIds(orgId);
+      const withAccount = await this.prisma.sellerAccount.findFirst({
+        where: {
+          userId: userIds.length && preferredUserId && userIds.includes(preferredUserId) ? preferredUserId : { in: userIds },
+          marketplace: 'amazon',
+          isActive: true,
+        },
+        select: { userId: true },
+      });
+      if (!withAccount) {
+        return { orderCount: 0, createdAfter: '', createdBefore: '', marketplaceCount: 0, sampleOrderIds: [], error: 'No seller account for org' };
+      }
+      const credentials = await this.getAmazonCredentialsForUser(withAccount.userId);
+      const nowSafe = new Date(Date.now() - 5 * 60 * 1000);
+      const start = new Date(nowSafe.getTime() - 30 * 24 * 60 * 60 * 1000);
+      const afterIso = start.toISOString().split('.')[0] + 'Z';
+      const beforeIso = nowSafe.toISOString().split('.')[0] + 'Z';
+      // Client uses UK-only for EU; we pass 1 marketplace so marketplaceCount in response is accurate
+      const marketplaceIds = credentials.region === 'eu' ? ['A1F83G8C2ARO7P'] : (credentials.region === 'na' ? ['ATVPDKIKX0DER'] : ['A1VC38T7YXB528']);
+      const orderStatuses = ['Shipped', 'Unshipped', 'PartiallyShipped', 'Canceled'];
+      const tried: string[] = [];
+      let data: any = null;
+      let lastError: string | null = null;
+
+      const parseOrders = (d: any): Array<{ AmazonOrderId?: string }> => {
+        if (!d || typeof d !== 'object') return [];
+        const p = d.payload ?? d.Payload ?? d;
+        if (!p || typeof p !== 'object') return [];
+        const list = p.Orders ?? p.orders;
+        return Array.isArray(list) ? list : [];
+      };
+
+      const getNextToken = (d: any): string | undefined => {
+        if (!d || typeof d !== 'object') return undefined;
+        const p = d.payload ?? d.Payload ?? d;
+        return p?.NextToken ?? undefined;
+      };
+
+      /** Fetch all pages via NextToken and return aggregated orders + first response metadata. */
+      const fetchAllOrders = async (params: Parameters<typeof this.spApiClient.getOrders>[1]): Promise<{ data: any; orders: Array<{ AmazonOrderId?: string }> }> => {
+        const orders: Array<{ AmazonOrderId?: string }> = [];
+        let next: string | undefined;
+        let firstData: any = null;
+        do {
+          const reqParams = next ? { nextToken: next } : (params ?? {});
+          const res = await this.spApiClient.getOrders(credentials, reqParams);
+          if (!firstData) firstData = res;
+          orders.push(...parseOrders(res));
+          next = getNextToken(res);
+        } while (next);
+        return { data: firstData, orders };
+      };
+
+      // 1) LastUpdatedAfter/Before, with OrderStatuses
+      try {
+        tried.push('LastUpdatedAfter+OrderStatuses');
+        const { data: res1, orders: orders1 } = await fetchAllOrders({
+          lastUpdatedAfter: afterIso,
+          lastUpdatedBefore: beforeIso,
+          marketplaceIds,
+          orderStatuses,
+        });
+        data = res1;
+        if (orders1.length > 0) {
+          return {
+            orderCount: orders1.length,
+            createdAfter: afterIso,
+            createdBefore: beforeIso,
+            marketplaceCount: marketplaceIds.length,
+            sampleOrderIds: orders1.slice(0, 5).map((o) => o?.AmazonOrderId ?? '').filter(Boolean),
+            responseKeys: data ? Object.keys(data) : [],
+            payloadKeys: data?.payload ? Object.keys(data.payload) : data?.Payload ? Object.keys(data.Payload) : undefined,
+            tried,
+          };
+        }
+      } catch (e) {
+        lastError = e instanceof Error ? e.message : String(e);
+      }
+
+      // 2) LastUpdatedAfter/Before, NO OrderStatuses (wider filter)
+      try {
+        tried.push('LastUpdatedAfter+noOrderStatuses');
+        const { data: res2, orders: orders2 } = await fetchAllOrders({
+          lastUpdatedAfter: afterIso,
+          lastUpdatedBefore: beforeIso,
+          marketplaceIds,
+        });
+        data = res2;
+        if (orders2.length > 0) {
+          return {
+            orderCount: orders2.length,
+            createdAfter: afterIso,
+            createdBefore: beforeIso,
+            marketplaceCount: marketplaceIds.length,
+            sampleOrderIds: orders2.slice(0, 5).map((o) => o?.AmazonOrderId ?? '').filter(Boolean),
+            responseKeys: data ? Object.keys(data) : [],
+            payloadKeys: data?.payload ? Object.keys(data.payload) : data?.Payload ? Object.keys(data.Payload) : undefined,
+            tried,
+          };
+        }
+      } catch (e) {
+        lastError = e instanceof Error ? e.message : String(e);
+      }
+
+      // 3) CreatedAfter/CreatedBefore, with OrderStatuses
+      try {
+        tried.push('CreatedAfter+OrderStatuses');
+        const { data: res3, orders: orders3 } = await fetchAllOrders({
+          createdAfter: afterIso,
+          createdBefore: beforeIso,
+          marketplaceIds,
+          orderStatuses,
+        });
+        data = res3;
+        if (orders3.length > 0) {
+          return {
+            orderCount: orders3.length,
+            createdAfter: afterIso,
+            createdBefore: beforeIso,
+            marketplaceCount: marketplaceIds.length,
+            sampleOrderIds: orders3.slice(0, 5).map((o) => o?.AmazonOrderId ?? '').filter(Boolean),
+            responseKeys: data ? Object.keys(data) : [],
+            payloadKeys: data?.payload ? Object.keys(data.payload) : data?.Payload ? Object.keys(data.Payload) : undefined,
+            tried,
+          };
+        }
+      } catch (e) {
+        lastError = e instanceof Error ? e.message : String(e);
+      }
+
+      const orders = data ? parseOrders(data) : [];
+      return {
+        orderCount: orders.length,
+        createdAfter: afterIso,
+        createdBefore: beforeIso,
+        marketplaceCount: marketplaceIds.length,
+        sampleOrderIds: orders.slice(0, 5).map((o) => o?.AmazonOrderId ?? '').filter(Boolean),
+        responseKeys: data ? Object.keys(data) : [],
+        payloadKeys: data?.payload ? Object.keys(data.payload) : data?.Payload ? Object.keys(data.Payload) : undefined,
+        tried,
+        error: lastError ?? (orders.length === 0 ? 'All variants returned 0 orders' : undefined),
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`[testOrdersApiFetch] failed: ${msg}`);
+      return {
+        orderCount: 0,
+        createdAfter: '',
+        createdBefore: '',
+        marketplaceCount: 0,
+        sampleOrderIds: [],
+        error: msg,
+      };
+    }
+  }
+
+  /**
+   * Dev-only: return counts to debug "zero orders" (org members + orders + order_items for that org).
+   * Includes whether org members have a seller account (Amazon connected) so we can see if sync runs for them.
+   */
+  async getOrdersDebug(orgId: string): Promise<{
+    orgId: string;
+    orgMemberCount: number;
+    memberUserIds: string[];
+    orderCount: number;
+    orderItemCount: number;
+    memberHasSellerAccount: boolean;
+    message?: string;
+  }> {
+    let userIds: string[];
+    try {
+      userIds = await this.getOrgMemberUserIds(orgId);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return {
+        orgId,
+        orgMemberCount: 0,
+        memberUserIds: [],
+        orderCount: 0,
+        orderItemCount: 0,
+        memberHasSellerAccount: false,
+        message: `getOrgMemberUserIds failed: ${msg}`,
+      };
+    }
+    if (userIds.length === 0) {
+      return { orgId, orgMemberCount: 0, memberUserIds: [], orderCount: 0, orderItemCount: 0, memberHasSellerAccount: false, message: 'No org members' };
+    }
+    const [orderCount, orderItemCount, sellerAccounts] = await Promise.all([
+      this.prisma.order.count({
+        where: { userId: { in: userIds }, marketplace: 'amazon' },
+      }),
+      this.prisma.orderItem.count({
+        where: { userId: { in: userIds }, marketplace: 'amazon' },
+      }),
+      this.prisma.sellerAccount.findMany({
+        where: { userId: { in: userIds }, marketplace: 'amazon', isActive: true },
+        select: { userId: true },
+      }),
+    ]);
+    const memberHasSellerAccount = sellerAccounts.length > 0;
+    return { orgId, orgMemberCount: userIds.length, memberUserIds: userIds, orderCount, orderItemCount, memberHasSellerAccount };
+  }
+
+  /**
    * List order items for the org (most recent first). Each row uses stored amazonFeesTotal and profit:
    * when Finances API has settled (feesSource='finances') those are exact concluded values for past sales.
    */
   async listOrders(orgId: string) {
-    const userIds = await this.getOrgMemberUserIds(orgId);
-    const items = await this.prisma.orderItem.findMany({
-      where: { userId: { in: userIds }, marketplace: 'amazon' },
-      orderBy: [{ orderDate: 'desc' }],
-      select: {
-        id: true,
-        orderId: true,
-        orderDate: true,
-        sku: true,
-        asin: true,
-        quantity: true,
-        revenueTotal: true,
-        taxChargedTotal: true,
-        amazonFeesTotal: true,
-        feesSource: true,
-        settledReferralFeeTotal: true,
-        settledFbaFeeTotal: true,
-        settledDigitalServiceFeeTotal: true,
-        profit: true,
-        cogsTotal: true,
-        productId: true,
-        product: {
+    let userIds: string[];
+    try {
+      userIds = await this.getOrgMemberUserIds(orgId);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`[listOrders] getOrgMemberUserIds failed (orgId=${orgId}): ${msg}`);
+      return [];
+    }
+    this.logger.log(`[listOrders] orgId=${orgId} orgMemberCount=${userIds.length}`);
+    if (userIds.length === 0) {
+      this.logger.log(`[listOrders] returning []: no org members for orgId=${orgId}`);
+      return [];
+    }
+    let items: Awaited<
+      ReturnType<
+        typeof this.prisma.orderItem.findMany<{
+          where: { userId: { in: string[] }; marketplace: string };
+          orderBy: [{ orderDate: 'desc' }];
           select: {
-            title: true,
-            imageUrl: true,
-            id: true,
-            estimatedReferralFeePerUnit: true,
-            estimatedFbaFeePerUnit: true,
-            estimatedDigitalServiceFeePerUnit: true,
-            estimatedAmazonFeePerUnit: true,
+            id: true;
+            orderId: true;
+            orderDate: true;
+            sku: true;
+            asin: true;
+            quantity: true;
+            revenueTotal: true;
+            taxChargedTotal: true;
+            amazonFeesTotal: true;
+            feesSource: true;
+            settledReferralFeeTotal: true;
+            settledFbaFeeTotal: true;
+            settledDigitalServiceFeeTotal: true;
+            profit: true;
+            cogsTotal: true;
+            productId: true;
+            product: { select: { title: true; imageUrl: true; id: true; estimatedReferralFeePerUnit: true; estimatedFbaFeePerUnit: true; estimatedDigitalServiceFeePerUnit: true; estimatedAmazonFeePerUnit: true } };
+          };
+        }>
+      >
+    >;
+    try {
+      items = await this.prisma.orderItem.findMany({
+        where: { userId: { in: userIds }, marketplace: 'amazon' },
+        orderBy: [{ orderDate: 'desc' }],
+        select: {
+          id: true,
+          orderId: true,
+          orderDate: true,
+          sku: true,
+          asin: true,
+          quantity: true,
+          revenueTotal: true,
+          taxChargedTotal: true,
+          amazonFeesTotal: true,
+          feesSource: true,
+          settledReferralFeeTotal: true,
+          settledFbaFeeTotal: true,
+          settledDigitalServiceFeeTotal: true,
+          profit: true,
+          cogsTotal: true,
+          productId: true,
+          product: {
+            select: {
+              title: true,
+              imageUrl: true,
+              id: true,
+              estimatedReferralFeePerUnit: true,
+              estimatedFbaFeePerUnit: true,
+              estimatedDigitalServiceFeePerUnit: true,
+              estimatedAmazonFeePerUnit: true,
+            },
           },
         },
-      },
-    });
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`[listOrders] orderItem.findMany failed (orgId=${orgId}): ${msg}`);
+      return [];
+    }
 
+    this.logger.log(`[listOrders] orgId=${orgId} orderItemCount=${items.length}`);
     const productIds = [...new Set(items.map((i) => i.productId).filter(Boolean))];
     const inventoryByProductId = new Map<
       string,
@@ -3111,15 +3442,19 @@ export class AmazonService {
       { referralPerUnit: number | null; fbaPerUnit: number | null; digitalServicePerUnit: number | null; amazonFeePerUnit: number | null }
     >();
     if (productIds.length > 0) {
-      const inv = await this.prisma.inventory.findMany({
-        where: { productId: { in: productIds } },
-        select: { productId: true, availableQty: true, totalQty: true },
-      });
-      for (const row of inv) {
-        inventoryByProductId.set(row.productId, {
-          availableQty: row.availableQty,
-          totalQty: row.totalQty,
+      try {
+        const inv = await this.prisma.inventory.findMany({
+          where: { productId: { in: productIds } },
+          select: { productId: true, availableQty: true, totalQty: true },
         });
+        for (const row of inv) {
+          inventoryByProductId.set(row.productId, {
+            availableQty: row.availableQty,
+            totalQty: row.totalQty,
+          });
+        }
+      } catch {
+        // Non-fatal: proceed without inventory data
       }
       try {
         const placeholders = productIds.map((_, i) => `$${i + 1}`).join(',');
@@ -3189,7 +3524,8 @@ export class AmazonService {
       return Number.isFinite(n) ? n : null;
     };
 
-    return items.map((it) => {
+    try {
+      return items.map((it) => {
       const productRaw = (it as any).product ?? null;
       const product = productRaw as { title?: string | null; imageUrl?: string | null; estimatedReferralFeePerUnit?: unknown; estimatedFbaFeePerUnit?: unknown; estimatedDigitalServiceFeePerUnit?: unknown; estimatedAmazonFeePerUnit?: unknown } | null;
       const inv = inventoryByProductId.get(it.productId) ?? null;
@@ -3271,27 +3607,33 @@ export class AmazonService {
         profit != null && cogsTotal != null && cogsTotal > 0
           ? (profit / cogsTotal) * 100
           : null;
+      const orderDate = it.orderDate instanceof Date ? it.orderDate.toISOString() : String(it.orderDate ?? '');
       return {
-        id: it.id,
-        orderId: it.orderId,
-        orderDate: it.orderDate,
-        sku: it.sku,
-        asin: it.asin ?? null,
-        title: product?.title ?? null,
-        imageUrl: product?.imageUrl ?? null,
-        quantity: it.quantity,
+        id: String(it.id),
+        orderId: String(it.orderId),
+        orderDate,
+        sku: String(it.sku),
+        asin: it.asin != null ? String(it.asin) : null,
+        title: product?.title != null ? String(product.title) : null,
+        imageUrl: product?.imageUrl != null ? String(product.imageUrl) : null,
+        quantity: Number(it.quantity) || 0,
         salePrice: Math.round(salePrice * 100) / 100,
         profit: profit != null ? Math.round(profit * 100) / 100 : null,
         roiPct: roiPct != null ? Math.round(roiPct * 10) / 10 : null,
         amazonFeesTotal: Number.isFinite(finalFeesForDisplay) ? Math.round(finalFeesForDisplay * 100) / 100 : 0,
-        referralFeeTotal,
-        fbaFeeTotal,
-        digitalServiceFeeTotal,
-        feesSource,
+        referralFeeTotal: referralFeeTotal ?? null,
+        fbaFeeTotal: fbaFeeTotal ?? null,
+        digitalServiceFeeTotal: digitalServiceFeeTotal ?? null,
+        feesSource: feesSource != null ? String(feesSource) : null,
         availableStock: inv?.availableQty ?? null,
         totalStock: inv?.totalQty ?? null,
       };
     });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`[listOrders] mapping order items failed (orgId=${orgId}): ${msg}`);
+      return [];
+    }
   }
 
   async listInventory(orgId: string) {
@@ -3836,7 +4178,8 @@ export class AmazonService {
 
     // ——— Phase 2: For each shipment ID, fetch items + transport and update DB ———
     this.logger.log(`[syncShipments] Phase 2: enriching ${listRows.length} shipment(s) with items and transport.`);
-    let transportDetailsSkipped = false; // set true after first 403 to avoid spamming Unauthorized
+    // Transport details are often 403 for historic/closed shipments; only request for statuses that typically have transport data.
+    const STATUSES_WITH_TRANSPORT = ['WORKING', 'READY_TO_SHIP', 'SHIPPED', 'IN_TRANSIT', 'DELIVERED'];
     for (let i = 0; i < listRows.length; i++) {
       const row = listRows[i];
       const shipmentId = row.ShipmentId ?? row.shipmentId ?? row.ShipmentIdentifier ?? row.shipmentIdentifier;
@@ -3869,7 +4212,9 @@ export class AmazonService {
       let pickupDate: Date | null = null;
       let transportStatus: string | null = null;
       let deliveryDate: Date | null = null;
-      if (!transportDetailsSkipped) {
+      const rowStatus = (row.ShipmentStatus ?? row.shipmentStatus ?? row.Status ?? row.status ?? '') as string;
+      const requestTransport = STATUSES_WITH_TRANSPORT.includes(rowStatus.toUpperCase());
+      if (requestTransport) {
         try {
           if (throttleMs > 0) await new Promise((r) => setTimeout(r, Math.floor(throttleMs / 2)));
           const transportRes = (await this.spApiClient.getFbaInboundTransportDetails(credentials, String(shipmentId))) as any;
@@ -3880,18 +4225,13 @@ export class AmazonService {
           deliveryDate = parseDate(transport.DeliveryDate ?? transport.deliveryDate ?? transport.EstimatedDeliveryDate ?? transport.estimatedDeliveryDate) ?? null;
         } catch (e) {
           const msg = (e as Error).message ?? String(e);
-          this.logger.warn(
-            `[syncShipments] transportDetails error for shipmentId=${shipmentId} (raw=${JSON.stringify(shipmentId)}): ${msg}`,
-          );
           const is403 = msg.includes('403') || msg.includes('Unauthorized');
           if (is403) {
-            transportDetailsSkipped = true;
-            this.logger.warn(
-              `[syncShipments] Phase 2 transportDetails returned 403 Unauthorized. Your SP-API app may not have the FBA Inbound Transport role. ` +
-              `Add the role in Seller Central (SP-API app) to get Sent date / Delivered to FC. Skipping transportDetails for remaining ${listRows.length - i - 1} shipment(s).`,
+            this.logger.debug(
+              `[syncShipments] transportDetails 403 for ${shipmentId} (often unavailable for historic/closed shipments)`,
             );
-            errors.push('Transport details (Sent date, Delivered to FC): 403 Unauthorized – add FBA Inbound Transport role to your SP-API app in Seller Central.');
           } else {
+            this.logger.warn(`[syncShipments] transportDetails error for shipmentId=${shipmentId}: ${msg}`);
             errors.push(`Shipment ${shipmentId} transportDetails: ${msg}`);
           }
         }
@@ -4152,9 +4492,11 @@ try {
           const pageCount = res?.payload?.inventorySummaries?.length ?? 0;
           const hasNext =
             !!(res?.pagination?.nextToken ?? res?.pagination?.NextToken ?? res?.Pagination?.nextToken ?? res?.Pagination?.NextToken ?? res?.nextToken ?? res?.NextToken ?? (res?.payload && (res.payload as any).nextToken) ?? (res?.payload && (res.payload as any).NextToken));
-          this.logger.log(
-            `[FBA ${marketplaceId}] Page: received ${pageCount} summaries, hasNextPage=${hasNext}, totalSkusSoFar=${inventoryBySku.size}`,
-          );
+          if (debug) {
+            this.logger.debug(
+              `[FBA ${marketplaceId}] Page: received ${pageCount} summaries, hasNextPage=${hasNext}, totalSkusSoFar=${inventoryBySku.size}`,
+            );
+          }
 
           } catch (e: any) {
             const status = e?.response?.status ?? e?.status ?? null;
@@ -4280,9 +4622,11 @@ inventoryBySku.set(key, existing);
             break;
           }
           nextToken = token;
-          this.logger.log(
-            `[FBA ${marketplaceId}] Pagination: fetching next page (nextToken length=${token.length}, totalSkusSoFar=${inventoryBySku.size})`,
-          );
+          if (debug) {
+            this.logger.debug(
+              `[FBA ${marketplaceId}] Pagination: fetching next page (nextToken length=${token.length}, totalSkusSoFar=${inventoryBySku.size})`,
+            );
+          }
         }
       }
 
@@ -6741,11 +7085,13 @@ if (org?.lastFbaInventorySyncAt) {
 
   /**
    * Builds the Amazon Seller Central consent URL for a given user and region.
-   * The user is encoded into the state payload so we can resolve them on callback.
+   * The user and optional returnOrigin are encoded into the state payload so we can
+   * resolve them on callback and redirect the user back to the frontend they started from.
    */
   async getAmazonConnectUrl(
     userId: string,
     regionCode: string,
+    returnOrigin?: string,
   ): Promise<string> {
     const applicationId = this.configService.get<string>('AMAZON_APP_ID');
     const redirectUri = this.configService.get<string>('AMAZON_REDIRECT_URI');
@@ -6761,6 +7107,7 @@ if (org?.lastFbaInventorySyncAt) {
     const statePayload = {
       userId,
       region: regionCode,
+      ...(returnOrigin && { returnOrigin }),
     };
     const state = Buffer.from(JSON.stringify(statePayload)).toString(
       'base64url',
@@ -6773,6 +7120,38 @@ if (org?.lastFbaInventorySyncAt) {
     url.searchParams.set('version', 'beta');
 
     return url.toString();
+  }
+
+  /**
+   * Returns the origin to redirect the user to after OAuth.
+   * If returnOrigin was passed when starting the flow (e.g. from localhost), and it is
+   * allowed, use it so the user lands back where they started. Otherwise use defaultFrontendUrl.
+   * Note: The callback and sync run on whichever backend received the callback (e.g. production).
+   * To run sync locally, point AMAZON_REDIRECT_URI to your local backend (e.g. via ngrok).
+   */
+  getRedirectOriginAfterOAuth(
+    returnOrigin: string | undefined,
+    defaultFrontendUrl: string,
+  ): string {
+    if (!returnOrigin || typeof returnOrigin !== 'string') {
+      return defaultFrontendUrl;
+    }
+    const origin = returnOrigin.trim().replace(/\/$/, '');
+    if (!origin) return defaultFrontendUrl;
+    try {
+      const u = new URL(origin);
+      const host = u.hostname.toLowerCase();
+      if (host === 'localhost' || host === '127.0.0.1') {
+        return origin;
+      }
+      const defaultUrl = new URL(defaultFrontendUrl.replace(/\/$/, '') || 'http://localhost:3000');
+      if (host === defaultUrl.hostname.toLowerCase()) {
+        return origin;
+      }
+    } catch {
+      /* ignore invalid URL */
+    }
+    return defaultFrontendUrl;
   }
 
   /**

@@ -48,7 +48,7 @@ function NavAuthButtons() {
     return () => { cancelled = true; };
   }, [isLoaded, isSignedIn, getToken]);
 
-  // Signed out: always show Sign in + Dashboard (both go to sign-in page so they see login/sign-up)
+  // Signed out: Sign in → sign-in page; Dashboard → sign-up page
   if (!isLoaded || !isSignedIn) {
     return (
       <div className="flex items-center gap-2">
@@ -58,7 +58,7 @@ function NavAuthButtons() {
           </button>
         </SignInButton>
         <a
-          href="/sign-in"
+          href="/sign-up"
           className="rounded-lg bg-white px-4 py-2 text-sm font-medium text-black no-underline transition hover:bg-gray-100"
         >
           Dashboard
@@ -79,7 +79,7 @@ function NavAuthButtons() {
     );
   }
 
-  // Signed in but no subscription (or still loading): show Sign in + Dashboard so they go to sign-in page first
+  // Signed in but no subscription (or still loading): Sign in → sign-in; Dashboard → sign-up
   return (
     <div className="flex items-center gap-2">
       <SignInButton mode="redirect" forceRedirectUrl="/start-trial">
@@ -88,7 +88,7 @@ function NavAuthButtons() {
         </button>
       </SignInButton>
       <a
-        href="/sign-in"
+        href="/sign-up"
         className="rounded-lg bg-white px-4 py-2 text-sm font-medium text-black no-underline transition hover:bg-gray-100"
       >
         Dashboard

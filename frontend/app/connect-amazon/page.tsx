@@ -32,7 +32,10 @@ function ConnectAmazonContent() {
         alert("Please sign in again and try connecting.");
         return;
       }
-      const res = await fetch(`${BASE_URL}/api/amazon/connect?region=EU`, {
+      const returnOrigin = typeof window !== 'undefined' ? window.location.origin : '';
+      const params = new URLSearchParams({ region: 'EU' });
+      if (returnOrigin) params.set('returnOrigin', returnOrigin);
+      const res = await fetch(`${BASE_URL}/api/amazon/connect?${params}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       const data = (await res.json()) as { url?: string; message?: string };

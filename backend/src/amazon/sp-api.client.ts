@@ -44,11 +44,22 @@ export class AmazonSpApiClient {
   private defaultMarketplaceIdsForRegion(region: SpApiRegion): string[] {
     switch (region) {
       case 'na':
-        return ['ATVPDKIKX0DER']; // US
+        return ['ATVPDKIKX0DER', 'A2EUQ1WTGCTBG2', 'A1AM78C64UM0Y8', 'A2Q3Y263D00KWC']; // US, CA, MX, BR
       case 'eu':
-        return ['A1F83G8C2ARO7P']; // UK
+        return [
+          'A1F83G8C2ARO7P', // UK
+          'A1PA6795UKMFR9', // DE
+          'A13V1IB3VIYZZH', // FR
+          'APJ6JRA9NG5V4', // IT
+          'A1RKKUPIHCS9HS', // ES
+          'A28R8C7NBKEWEA', // IE
+          'A1805IZSGTT6HS', // NL
+          'AMEN7PMS3EDWL', // BE
+          'A2NODRKZP88ZB9', // SE
+          'A1C3SOZRARQ6R3', // PL
+        ];
       case 'fe':
-        return ['A1VC38T7YXB528']; // JP
+        return ['A1VC38T7YXB528', 'A19VAU5U5O7RUS', 'A39IBJ37TRP1C6']; // JP, SG, AU
       default:
         return ['ATVPDKIKX0DER'];
     }
@@ -75,14 +86,20 @@ export class AmazonSpApiClient {
     params?: {
       createdAfter?: string;
       createdBefore?: string;
+      lastUpdatedAfter?: string;
+      lastUpdatedBefore?: string;
       marketplaceIds?: string[];
       orderStatuses?: string[];
+      nextToken?: string;
     },
   ) {
     const {
       createdAfter,
       createdBefore,
+      lastUpdatedAfter,
+      lastUpdatedBefore,
       orderStatuses,
+      nextToken,
     } = params ?? {};
 
     const marketplaceIds =
@@ -94,20 +111,28 @@ export class AmazonSpApiClient {
 
     const query: Record<string, unknown> = {};
 
-    if (isSandbox && !createdAfter && !createdBefore && !orderStatuses) {
-      // Default sandbox test case if no explicit range is requested
-      query.CreatedAfter = 'TEST_CASE_200';
-      query.MarketplaceIds = ['A1F83G8C2ARO7P'];
+    if (nextToken) {
+      query.NextToken = nextToken;
     } else {
-      if (createdAfter) {
-        query.CreatedAfter = createdAfter;
-      }
-      if (createdBefore) {
-        query.CreatedBefore = createdBefore;
-      }
-      query.MarketplaceIds = marketplaceIds;
-      if (orderStatuses) {
-        query.OrderStatuses = orderStatuses;
+      // Orders API: MarketplaceIds as comma-separated. For EU use UK-only.
+      const ids = Array.isArray(marketplaceIds) ? marketplaceIds : [String(marketplaceIds ?? '')];
+      const euUkOnly = credentials.region === 'eu' ? ['A1F83G8C2ARO7P'] : ids;
+      const marketplaceIdsStr = euUkOnly.join(',');
+      if (isSandbox && !createdAfter && !createdBefore && !orderStatuses) {
+        query.CreatedAfter = 'TEST_CASE_200';
+        query.MarketplaceIds = 'A1F83G8C2ARO7P';
+      } else {
+        if (lastUpdatedAfter) {
+          query.LastUpdatedAfter = lastUpdatedAfter;
+          if (lastUpdatedBefore) query.LastUpdatedBefore = lastUpdatedBefore;
+        } else {
+          if (createdAfter) query.CreatedAfter = createdAfter;
+          if (createdBefore) query.CreatedBefore = createdBefore;
+        }
+        query.MarketplaceIds = marketplaceIdsStr;
+        if (orderStatuses?.length) {
+          query.OrderStatuses = orderStatuses;
+        }
       }
     }
 
@@ -496,6 +521,9 @@ export class AmazonSpApiClient {
         `[SP-API shipments] full path with query: ${canonicalUri}?${canonicalQuerystring}`,
       );
     }
+    if (options.path === '/orders/v0/orders' && this.isDebugEnabled()) {
+      this.logger.debug(`[SP-API getOrders] query: ${queryString}`);
+    }
     if (this.isDebugEnabled()) {
       this.logger.debug(`SP-API request host=${host} awsRegion=${region}`);
     }
@@ -559,15 +587,8 @@ export class AmazonSpApiClient {
       : canonicalUri;
 
     const fullUrl = `https://${host}${pathWithQuery}`;
-    console.log('CANONICAL PATH USED FOR SIGNING:', canonicalUri);
-    console.log('FINAL REQUEST URL:', fullUrl);
-    if (canonicalQuerystring) {
-      console.log('CANONICAL QUERY STRING (sorted):', canonicalQuerystring);
-    }
-    this.logger.log(`[SP-API] CANONICAL PATH USED FOR SIGNING: ${canonicalUri}`);
-    this.logger.log(`[SP-API] FINAL REQUEST URL: ${fullUrl}`);
-    if (canonicalQuerystring) {
-      this.logger.log(`[SP-API] CANONICAL QUERY STRING (sorted): ${canonicalQuerystring}`);
+    if (this.isDebugEnabled()) {
+      this.logger.log(`[SP-API] ${options.method} ${canonicalUri}`);
     }
 
     const response = await this.httpRequest({
@@ -592,9 +613,18 @@ export class AmazonSpApiClient {
       const isCatalog404 =
         response.statusCode === 404 &&
         (options.path?.includes('/catalog/') ?? false);
-      const log = isCatalog404 ? this.logger.debug?.bind(this.logger) ?? this.logger.log : this.logger.warn.bind(this.logger);
-      log(`[SP-API] request failed: ${options.method} ${fullUrl} -> ${response.statusCode}`);
-      if (!isCatalog404) {
+      const isListings404 =
+        response.statusCode === 404 &&
+        (options.path?.includes('/listings/') ?? false) &&
+        (response.body ?? '').includes('NOT_FOUND');
+      // Listings 404 NOT_FOUND = SKU not listed in that marketplace (expected). Do not log - not related to Orders API.
+      const useDebugLog = isCatalog404;
+      const log = useDebugLog ? this.logger.debug?.bind(this.logger) ?? this.logger.log : this.logger.warn.bind(this.logger);
+      if (!isListings404) {
+        log(`[SP-API] request failed: ${options.method} ${fullUrl} -> ${response.statusCode}`);
+      }
+      // Skip response body / error detail logs for Listings 404 NOT_FOUND (expected for unlisted SKUs).
+      if (!useDebugLog && !isListings404) {
         const bodyPreview = (response.body ?? '').slice(0, 800);
         this.logger.warn(`[SP-API] response body: ${bodyPreview}${(response.body?.length ?? 0) > 800 ? '...' : ''}`);
         try {

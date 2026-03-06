@@ -11,6 +11,7 @@ import { useFullscreen } from "@/contexts/fullscreen-context";
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
 const FLASH_DISMISSED_KEY = "topbar-notification-flash-dismissed";
 const INITIAL_SYNC_DISMISSED_KEY = "sellerbunker_initial_sync_dismissed";
+const INITIAL_SYNC_PENDING_KEY = "sellerbunker_initial_sync_pending";
 
 function toDateOnly(d: Date) {
   return d.toISOString().slice(0, 10);
@@ -31,6 +32,7 @@ export function Topbar() {
     return localStorage.getItem(INITIAL_SYNC_DISMISSED_KEY) === "1";
   });
   const [hasSeenSyncInProgress, setHasSeenSyncInProgress] = useState(false);
+  const [syncPendingFromSession, setSyncPendingFromSession] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   const fetchMissing = useCallback(async () => {
@@ -83,30 +85,49 @@ export function Topbar() {
   }, [isSignedIn, syncDismissed, getToken]);
 
   useEffect(() => {
+    const checkPending = () => {
+      try {
+        if (sessionStorage.getItem(INITIAL_SYNC_PENDING_KEY) === "1") {
+          setSyncPendingFromSession(true);
+        }
+      } catch {}
+    };
+    const onSyncPending = () => setSyncPendingFromSession(true);
+    window.addEventListener("sellerbunker-initial-sync-pending", onSyncPending);
     if (!isSignedIn || syncDismissed) {
       setSyncProgress(null);
-      return;
+      setSyncPendingFromSession(false);
+      return () => window.removeEventListener("sellerbunker-initial-sync-pending", onSyncPending);
     }
+    checkPending();
+    const pendingInterval = setInterval(checkPending, 500);
     void fetchSyncProgress();
-    const t = setInterval(fetchSyncProgress, 8000);
-    return () => clearInterval(t);
+    const progressInterval = setInterval(fetchSyncProgress, 3000);
+    return () => {
+      window.removeEventListener("sellerbunker-initial-sync-pending", onSyncPending);
+      clearInterval(pendingInterval);
+      clearInterval(progressInterval);
+    };
   }, [isSignedIn, syncDismissed, fetchSyncProgress]);
 
   const dismissSyncProgress = () => {
     try {
       localStorage.setItem(INITIAL_SYNC_DISMISSED_KEY, "1");
+      sessionStorage.removeItem(INITIAL_SYNC_PENDING_KEY);
     } catch {}
     setSyncDismissed(true);
+    setSyncPendingFromSession(false);
     setSyncProgress(null);
   };
 
   const hasMissing = (missingCount ?? 0) > 0;
-  const showSyncBox =
-    !syncDismissed &&
-    syncProgress !== null &&
-    syncProgress > 0 &&
-    (syncProgress < 100 || hasSeenSyncInProgress);
-  const syncComplete = showSyncBox && syncProgress >= 100;
+  const hasSyncActivity =
+    syncPendingFromSession ||
+    (syncProgress !== null &&
+      syncProgress > 0 &&
+      (syncProgress < 100 || hasSeenSyncInProgress));
+  const showSyncBox = hasSyncActivity && (!syncDismissed || syncPendingFromSession);
+  const syncComplete = showSyncBox && (syncProgress ?? 0) >= 100;
 
   return (
     <>
@@ -283,21 +304,26 @@ export function Topbar() {
       </div>
     </header>
     {showSyncBox && (
-      <div className="hidden md:flex items-center gap-3 border-b border-[var(--surface-border)] bg-[var(--surface)] px-4 py-2 text-sm">
+      <div
+        className="flex items-center gap-3 border-b-2 border-emerald-500/60 bg-[var(--surface)] px-4 py-2.5 text-sm shadow-sm"
+        role="status"
+        aria-live="polite"
+        aria-label={syncComplete ? "Sync complete" : `Syncing your data, ${syncProgress ?? 0}%`}
+      >
         <span className="shrink-0 font-medium text-[var(--foreground)]">
           {syncComplete ? "Sync complete" : "Syncing your data…"}
         </span>
-        <div className="min-w-[120px] flex-1 max-w-[200px] h-2 overflow-hidden rounded-full bg-[var(--foreground)]/10">
+        <div className="min-w-[140px] flex-1 max-w-[240px] h-2.5 overflow-hidden rounded-full bg-[var(--foreground)]/15">
           <div
-            className={`h-full rounded-full transition-all duration-300 ${syncComplete ? "bg-emerald-500" : "bg-[var(--foreground)]/40"}`}
+            className={`h-full rounded-full transition-all duration-300 ${syncComplete ? "bg-emerald-500" : "bg-emerald-500/80"}`}
             style={{ width: `${syncProgress ?? 0}%` }}
           />
         </div>
-        <span className="shrink-0 tabular-nums text-[var(--muted-foreground)]">{syncProgress ?? 0}%</span>
+        <span className="shrink-0 tabular-nums text-sm font-medium text-[var(--foreground)]">{syncProgress ?? 0}%</span>
         <button
           type="button"
           onClick={dismissSyncProgress}
-          className="shrink-0 rounded p-1 text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/10 hover:text-[var(--foreground)]"
+          className="shrink-0 rounded p-1.5 text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/10 hover:text-[var(--foreground)]"
           aria-label="Dismiss"
         >
           <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">

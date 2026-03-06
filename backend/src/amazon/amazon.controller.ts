@@ -47,11 +47,13 @@ ping() {
   async connectAmazon(
     @Req() req: { user: { userId: string } },
     @Query('region') region?: string,
+    @Query('returnOrigin') returnOrigin?: string,
   ) {
     try {
       const redirectUrl = await this.amazonService.getAmazonConnectUrl(
         req.user.userId,
         region ?? 'EU',
+        returnOrigin?.trim() || undefined,
       );
       return { url: redirectUrl };
     } catch (err) {
@@ -84,26 +86,28 @@ ping() {
         state,
       });
 
+      const decoded = Buffer.from(state, 'base64url').toString('utf8');
+      const stateData = JSON.parse(decoded) as { userId?: string; returnOrigin?: string };
+
       // Kick off an initial background sync for this user so their dashboard
       // can start populating without blocking the OAuth callback response.
       try {
-        const decoded = Buffer.from(state, 'base64url').toString('utf8');
-        const { userId } = JSON.parse(decoded) as { userId?: string };
-        if (userId) {
+        if (stateData.userId) {
           this.logger.log(
-            `[AmazonController] Enqueuing initial full-sync after OAuth (userId=${userId})`,
+            `[AmazonController] Enqueuing initial full-sync after OAuth (userId=${stateData.userId})`,
           );
-          await this.amazonSyncService.enqueueFullSync(userId);
+          await this.amazonSyncService.enqueueFullSync(stateData.userId);
         }
       } catch (syncErr) {
         // Non-fatal: logging is enough, the link itself has already succeeded.
         const msg = syncErr instanceof Error ? syncErr.message : String(syncErr);
-        this.logger.warn(`Failed to enqueue initial Amazon sync: ${msg}`);
+        this.logger.warn(`Failed to enqueue initial Amazon sync: ${msg}. User can trigger sync from dashboard.`);
       }
 
-      const frontendBase =
-        this.configService.get<string>('FRONTEND_URL') ||
-        'http://localhost:3000';
+      const frontendBase = this.amazonService.getRedirectOriginAfterOAuth(
+        stateData.returnOrigin,
+        this.configService.get<string>('FRONTEND_URL') || 'http://localhost:3000',
+      );
       const dashboardUrl =
         frontendBase.replace(/\/$/, '') + '/dashboard?amazon_connected=1';
       return res.redirect(dashboardUrl);
@@ -276,6 +280,26 @@ ping() {
   @Get('orders')
   listOrders(@Req() req: { user: { orgId: string } }) {
     return this.amazonService.listOrders(req.user.orgId);
+  }
+
+  /**
+   * Dev-only: diagnostic counts for orders (org members + order_items) to debug "zero orders".
+   * GET /api/amazon/dev/orders-debug
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Get('dev/orders-debug')
+  async ordersDebug(@Req() req: { user: { orgId: string } }) {
+    return this.amazonService.getOrdersDebug(req.user.orgId);
+  }
+
+  /**
+   * Dev-only: call SP-API getOrders (no persist), return order count. Verifies API returns data.
+   * GET /api/amazon/dev/orders-test-fetch
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Get('dev/orders-test-fetch')
+  async ordersTestFetch(@Req() req: { user: { orgId: string; userId: string } }) {
+    return this.amazonService.testOrdersApiFetch(req.user.orgId, req.user.userId);
   }
 
   /**
