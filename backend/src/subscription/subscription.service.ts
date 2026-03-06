@@ -53,6 +53,21 @@ export class SubscriptionService {
     });
   }
 
+  /** Remove subscription when Clerk account is deleted so re-sign-up must go through payment again. */
+  async deleteByClerkId(clerkId: string): Promise<void> {
+    const user = await this.prisma.user.findUnique({
+      where: { clerkId },
+    });
+    if (!user) return;
+    await this.prisma.subscription.deleteMany({
+      where: { userId: user.id },
+    });
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: { clerkId: null },
+    });
+  }
+
   async recordFromCheckout(params: {
     clerkUserId: string;
     stripeSubscriptionId?: string;

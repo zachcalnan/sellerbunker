@@ -18,6 +18,7 @@ function StartTrialContent() {
   const justPaid = searchParams.get("checkout") === "success";
   const sessionId = searchParams.get("session_id") ?? undefined;
   const [confirming, setConfirming] = useState(false);
+  const [confirmError, setConfirmError] = useState<string | null>(null);
 
   const confirmAndGoToDashboard = async () => {
     if (!sessionId) {
@@ -61,10 +62,13 @@ function StartTrialContent() {
     if (!sessionId || !isLoaded || !isSignedIn) return;
     const baseUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
     let cancelled = false;
-    (async () => {
+    const runConfirm = async (attempt = 0) => {
       try {
         const token = await getToken({ template: "backend" });
-        if (!token || cancelled) return;
+        if (!token || cancelled) {
+          if (attempt < 3) setTimeout(() => runConfirm(attempt + 1), 800);
+          return;
+        }
         const res = await fetch(`${baseUrl}/api/stripe/confirm-checkout`, {
           method: "POST",
           headers: {
@@ -76,13 +80,21 @@ function StartTrialContent() {
         });
         if (cancelled) return;
         if (res.ok) {
+          setConfirmError(null);
           setHasAccess(true);
           router.replace("/dashboard");
+          return;
         }
-      } catch {
-        // ignore
+        const err = await res.json().catch(() => ({}));
+        const msg = (err as { message?: string })?.message ?? res.statusText ?? `HTTP ${res.status}`;
+        setConfirmError(msg);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : "Network or CORS error";
+        setConfirmError(msg);
+        if (attempt < 2) setTimeout(() => runConfirm(attempt + 1), 1500);
       }
-    })();
+    };
+    runConfirm();
     return () => { cancelled = true; };
   }, [sessionId, isLoaded, isSignedIn, router, getToken]);
 
@@ -151,6 +163,11 @@ function StartTrialContent() {
       <div className="flex min-h-screen flex-col items-center justify-center gap-4 bg-[var(--background)] px-4 text-center text-[var(--foreground)]">
         <p className="text-[var(--muted-foreground)]">Setting up your account…</p>
         <p className="text-sm text-[var(--muted-foreground)]">Redirecting you to the dashboard.</p>
+        {confirmError && (
+          <p className="mt-2 max-w-md text-xs text-amber-500">
+            {confirmError}
+          </p>
+        )}
         <p className="mt-4 text-sm text-[var(--muted-foreground)]">
           <button
             type="button"
