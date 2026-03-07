@@ -87,13 +87,16 @@ function HomeInner() {
     try {
       sessionStorage.setItem("sellerbunker_initial_sync_pending", "1");
       window.dispatchEvent(new CustomEvent("sellerbunker-initial-sync-pending"));
-      if (localStorage.getItem("sellerbunker_amazon_connect_thanks_seen") === "1") {
-        return;
+      if (localStorage.getItem("sellerbunker_amazon_connect_thanks_seen") !== "1") {
+        setShowAmazonConnectThankYou(true);
       }
-      setShowAmazonConnectThankYou(true);
     } catch {
       setShowAmazonConnectThankYou(true);
     }
+    const next = new URLSearchParams(searchParams.toString());
+    next.delete("amazon_connected");
+    const q = next.toString();
+    router.replace(q ? `/dashboard?${q}` : "/dashboard");
   }, [amazonConnectedParam]);
   const dismissAmazonConnectThankYou = () => {
     try {
