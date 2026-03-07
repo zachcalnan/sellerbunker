@@ -2,13 +2,15 @@ import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Logger } from '@nestjs/common';
 import type { Job } from 'bullmq';
 import { AmazonService } from './amazon.service';
+import { AmazonSyncService } from './amazon-sync.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
 
 const SYNC_PROGRESS_TTL = 24 * 60 * 60; // 24h
 
 interface AmazonSyncJobData {
-  userId: string;
+  userId?: string;
+  orgId?: string;
 }
 
 @Processor('amazon-sync')
@@ -16,6 +18,7 @@ export class AmazonSyncProcessor extends WorkerHost {
   private readonly logger = new Logger(AmazonSyncProcessor.name);
   constructor(
     private readonly amazonService: AmazonService,
+    private readonly amazonSyncService: AmazonSyncService,
     private readonly prisma: PrismaService,
     private readonly redis: RedisService,
   ) {
@@ -24,6 +27,11 @@ export class AmazonSyncProcessor extends WorkerHost {
 
   private async setInitialSyncProgress(userId: string, progress: number): Promise<void> {
     const key = `amazon-initial-sync:${userId}`;
+    await this.redis.set(key, JSON.stringify({ progress }), SYNC_PROGRESS_TTL);
+  }
+
+  private async setFeeSyncProgress(userId: string, progress: number): Promise<void> {
+    const key = `amazon-fee-sync:${userId}`;
     await this.redis.set(key, JSON.stringify({ progress }), SYNC_PROGRESS_TTL);
   }
 
@@ -67,6 +75,9 @@ export class AmazonSyncProcessor extends WorkerHost {
 
     if (job.name === 'full-sync') {
       const { userId } = job.data as AmazonSyncJobData;
+      if (!userId) {
+        throw new Error('Missing userId for full-sync job');
+      }
       try {
         this.logger.log(`[full-sync] Starting for userId=${userId}`);
         await this.setInitialSyncProgress(userId, 0);
@@ -95,20 +106,7 @@ export class AmazonSyncProcessor extends WorkerHost {
           // 3) Shipments – FBA shipment list and status
           await this.amazonService.syncShipments(orgIdForSync, userId);
           await this.setInitialSyncProgress(userId, 75);
-          // 4) Fee estimates – so profit/COGS calculations can use FBA fees
-          let lastFeeProgress = 75;
-          await this.amazonService.refreshFeeEstimatesForOrg(orgIdForSync, {
-            onProgress: async ({ processed, total }) => {
-              if (total <= 0) return;
-              const nextProgress = Math.min(
-                99,
-                75 + Math.floor((processed / total) * 25),
-              );
-              if (nextProgress <= lastFeeProgress) return;
-              lastFeeProgress = nextProgress;
-              await this.setInitialSyncProgress(userId, nextProgress);
-            },
-          });
+          await this.amazonSyncService.enqueueFeeSync(userId, orgIdForSync);
         } else {
           this.logger.warn(`[full-sync] userId=${userId} has no activeOrgId and no org membership; skipping inventory/shipments/fees`);
         }
@@ -117,6 +115,39 @@ export class AmazonSyncProcessor extends WorkerHost {
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         this.logger.error(`[full-sync] Failed for userId=${userId}: ${msg}`, err instanceof Error ? err.stack : undefined);
+        throw err;
+      }
+    }
+
+    if (job.name === 'fee-sync') {
+      const { userId, orgId } = job.data as AmazonSyncJobData;
+      if (!userId || !orgId) {
+        throw new Error('Missing userId or orgId for fee-sync job');
+      }
+      try {
+        this.logger.log(`[fee-sync] Starting for userId=${userId}, orgId=${orgId}`);
+        let lastFeeProgress = 0;
+        await this.setFeeSyncProgress(userId, 0);
+        await this.amazonService.refreshFeeEstimatesForOrg(orgId, {
+          onProgress: async ({ processed, total }) => {
+            if (total <= 0) return;
+            const nextProgress = Math.min(
+              99,
+              Math.floor((processed / total) * 100),
+            );
+            if (nextProgress <= lastFeeProgress) return;
+            lastFeeProgress = nextProgress;
+            await this.setFeeSyncProgress(userId, nextProgress);
+          },
+        });
+        await this.setFeeSyncProgress(userId, 100);
+        this.logger.log(`[fee-sync] Completed for userId=${userId}, orgId=${orgId}`);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.logger.error(
+          `[fee-sync] Failed for userId=${userId}, orgId=${orgId}: ${msg}`,
+          err instanceof Error ? err.stack : undefined,
+        );
         throw err;
       }
     }

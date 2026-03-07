@@ -13,6 +13,8 @@ const FLASH_DISMISSED_KEY = "topbar-notification-flash-dismissed";
 const INITIAL_SYNC_DISMISSED_KEY = "sellerbunker_initial_sync_dismissed";
 const INITIAL_SYNC_PENDING_KEY = "sellerbunker_initial_sync_pending";
 
+type SyncStage = "core" | "fees" | "complete";
+
 function toDateOnly(d: Date) {
   return d.toISOString().slice(0, 10);
 }
@@ -27,6 +29,8 @@ export function Topbar() {
     return sessionStorage.getItem(FLASH_DISMISSED_KEY) === "1";
   });
   const [syncProgress, setSyncProgress] = useState<number | null>(null);
+  const [feeSyncProgress, setFeeSyncProgress] = useState<number | null>(null);
+  const [syncStage, setSyncStage] = useState<SyncStage>("complete");
   const [syncDismissed, setSyncDismissed] = useState(() => {
     if (typeof window === "undefined") return true;
     return localStorage.getItem(INITIAL_SYNC_DISMISSED_KEY) === "1";
@@ -72,15 +76,33 @@ export function Topbar() {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) return;
-      const data = (await res.json()) as { progress?: number; done?: boolean };
+      const data = (await res.json()) as {
+        progress?: number;
+        done?: boolean;
+        stage?: SyncStage;
+        feeProgress?: number;
+        feeDone?: boolean;
+      };
       const p = Number(data.progress);
       if (Number.isFinite(p)) {
         const progressNum = Math.min(100, Math.max(0, p));
         setSyncProgress(progressNum);
-        if (progressNum < 100) setHasSeenSyncInProgress(true);
       }
+      const feeP = Number(data.feeProgress);
+      if (Number.isFinite(feeP)) {
+        setFeeSyncProgress(Math.min(100, Math.max(0, feeP)));
+      }
+      const stage = data.stage === "core" || data.stage === "fees" || data.stage === "complete"
+        ? data.stage
+        : Number.isFinite(p) && p < 100
+          ? "core"
+          : "complete";
+      setSyncStage(stage);
+      if (stage !== "complete") setHasSeenSyncInProgress(true);
     } catch {
       setSyncProgress(100);
+      setFeeSyncProgress(100);
+      setSyncStage("complete");
     }
   }, [isSignedIn, syncDismissed, getToken]);
 
@@ -96,6 +118,8 @@ export function Topbar() {
     window.addEventListener("sellerbunker-initial-sync-pending", onSyncPending);
     if (!isSignedIn || syncDismissed) {
       setSyncProgress(null);
+      setFeeSyncProgress(null);
+      setSyncStage("complete");
       setSyncPendingFromSession(false);
       return () => window.removeEventListener("sellerbunker-initial-sync-pending", onSyncPending);
     }
@@ -118,16 +142,29 @@ export function Topbar() {
     setSyncDismissed(true);
     setSyncPendingFromSession(false);
     setSyncProgress(null);
+    setFeeSyncProgress(null);
+    setSyncStage("complete");
   };
 
   const hasMissing = (missingCount ?? 0) > 0;
+  const feeSyncActive = syncStage === "fees";
+  const visibleSyncProgress = feeSyncActive
+    ? (feeSyncProgress ?? 0)
+    : (syncProgress ?? 0);
+  const syncTitle = syncStage === "complete"
+    ? "Sync complete"
+    : feeSyncActive
+      ? "Improving profit calculations…"
+      : "Syncing your data…";
+  const syncDetail = feeSyncActive
+    ? "Orders, inventory, and shipments are ready."
+    : null;
   const hasSyncActivity =
     syncPendingFromSession ||
-    (syncProgress !== null &&
-      syncProgress > 0 &&
-      (syncProgress < 100 || hasSeenSyncInProgress));
+    syncStage !== "complete" ||
+    ((syncProgress !== null || feeSyncProgress !== null) && hasSeenSyncInProgress);
   const showSyncBox = hasSyncActivity && (!syncDismissed || syncPendingFromSession);
-  const syncComplete = showSyncBox && (syncProgress ?? 0) >= 100;
+  const syncComplete = showSyncBox && syncStage === "complete";
 
   return (
     <>
@@ -198,7 +235,7 @@ export function Topbar() {
               <div className="mb-3 border-b border-[var(--surface-border)] pb-3">
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-xs font-medium text-[var(--foreground)]">
-                    {syncComplete ? "Sync complete" : "Syncing your data…"}
+                    {syncTitle}
                   </span>
                   {syncComplete && (
                     <button
@@ -214,15 +251,30 @@ export function Topbar() {
                   )}
                 </div>
                 <div
-                  className={`mt-1.5 h-2 w-full overflow-hidden rounded-full ${syncComplete ? "bg-emerald-500/30" : "bg-[var(--foreground)]/10"}`}
+                  className={`mt-1.5 h-2 w-full overflow-hidden rounded-full ${
+                    syncComplete
+                      ? "bg-emerald-500/30"
+                      : feeSyncActive
+                        ? "bg-sky-500/20"
+                        : "bg-[var(--foreground)]/10"
+                  }`}
                 >
                   <div
-                    className={`h-full rounded-full transition-all duration-300 ${syncComplete ? "bg-emerald-500" : "bg-[var(--foreground)]/40"}`}
-                    style={{ width: `${syncProgress ?? 0}%` }}
+                    className={`h-full rounded-full transition-all duration-300 ${
+                      syncComplete
+                        ? "bg-emerald-500"
+                        : feeSyncActive
+                          ? "bg-sky-500/80"
+                          : "bg-[var(--foreground)]/40"
+                    }`}
+                    style={{ width: `${visibleSyncProgress}%` }}
                   />
                 </div>
+                {syncDetail && (
+                  <p className="mt-1 text-[11px] text-[var(--muted-foreground)]">{syncDetail}</p>
+                )}
                 {!syncComplete && (
-                  <p className="mt-1 text-[11px] text-[var(--muted-foreground)]">{syncProgress ?? 0}%</p>
+                  <p className="mt-1 text-[11px] text-[var(--muted-foreground)]">{visibleSyncProgress}%</p>
                 )}
               </div>
             )}
@@ -250,10 +302,6 @@ export function Topbar() {
       </div>
 
       <div className="flex items-center gap-4">
-        <span className="font-semibold tracking-tight text-[var(--foreground)]">
-          <span className="font-bold">SELLER</span>
-          <span className="font-normal"> BUNKER</span>
-        </span>
         <button
           type="button"
           onClick={() => setFullscreen(true)}
@@ -305,21 +353,44 @@ export function Topbar() {
     </header>
     {showSyncBox && (
       <div
-        className="flex items-center gap-3 border-b-2 border-emerald-500/60 bg-[var(--surface)] px-4 py-2.5 text-sm shadow-sm"
+        className={`flex items-center gap-3 bg-[var(--surface)] px-4 py-2.5 text-sm shadow-sm ${
+          feeSyncActive
+            ? "border-b border-sky-500/35"
+            : "border-b-2 border-emerald-500/60"
+        }`}
         role="status"
         aria-live="polite"
-        aria-label={syncComplete ? "Sync complete" : `Syncing your data, ${syncProgress ?? 0}%`}
+        aria-label={
+          syncComplete
+            ? "Sync complete"
+            : feeSyncActive
+              ? `Improving profit calculations, ${visibleSyncProgress}%`
+              : `Syncing your data, ${visibleSyncProgress}%`
+        }
       >
-        <span className="shrink-0 font-medium text-[var(--foreground)]">
-          {syncComplete ? "Sync complete" : "Syncing your data…"}
-        </span>
-        <div className="min-w-[140px] flex-1 max-w-[240px] h-2.5 overflow-hidden rounded-full bg-[var(--foreground)]/15">
+        <div className="min-w-0 shrink-0">
+          <span className="font-medium text-[var(--foreground)]">
+            {syncTitle}
+          </span>
+          {syncDetail && (
+            <p className="text-xs text-[var(--muted-foreground)]">{syncDetail}</p>
+          )}
+        </div>
+        <div className={`min-w-[140px] flex-1 max-w-[240px] h-2.5 overflow-hidden rounded-full ${
+          feeSyncActive ? "bg-sky-500/20" : "bg-[var(--foreground)]/15"
+        }`}>
           <div
-            className={`h-full rounded-full transition-all duration-300 ${syncComplete ? "bg-emerald-500" : "bg-emerald-500/80"}`}
-            style={{ width: `${syncProgress ?? 0}%` }}
+            className={`h-full rounded-full transition-all duration-300 ${
+              syncComplete
+                ? "bg-emerald-500"
+                : feeSyncActive
+                  ? "bg-sky-500/80"
+                  : "bg-emerald-500/80"
+            }`}
+            style={{ width: `${visibleSyncProgress}%` }}
           />
         </div>
-        <span className="shrink-0 tabular-nums text-sm font-medium text-[var(--foreground)]">{syncProgress ?? 0}%</span>
+        <span className="shrink-0 tabular-nums text-sm font-medium text-[var(--foreground)]">{visibleSyncProgress}%</span>
         <button
           type="button"
           onClick={dismissSyncProgress}

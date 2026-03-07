@@ -13,6 +13,50 @@ export class AmazonSyncService implements OnModuleInit {
     private readonly redis: RedisService,
   ) {}
 
+  private async enqueueUniqueJob(
+    jobName: string,
+    stableJobId: string,
+    data: Record<string, unknown>,
+    logPrefix: string,
+  ): Promise<void> {
+    let jobId = stableJobId;
+    const existingJob = await this.queue.getJob(stableJobId);
+    if (existingJob) {
+      const state = await existingJob.getState();
+      if (state === 'active') {
+        this.logger.log(
+          `${logPrefix} already running (jobId=${existingJob.id})`,
+        );
+        return;
+      }
+
+      this.logger.warn(
+        `Replacing stale ${logPrefix} job (state=${state}, jobId=${existingJob.id})`,
+      );
+      try {
+        await existingJob.remove();
+      } catch (error) {
+        jobId = `${stableJobId}-${Date.now()}`;
+        const message =
+          error instanceof Error ? error.message : String(error);
+        this.logger.warn(
+          `Could not remove existing ${logPrefix} job; queueing fallback jobId=${jobId} instead (${message})`,
+        );
+      }
+    }
+
+    await this.queue.add(jobName, data, {
+      attempts: 5,
+      backoff: {
+        type: 'exponential',
+        delay: 5000,
+      },
+      removeOnComplete: true,
+      removeOnFail: 500,
+      jobId,
+    });
+  }
+
   /**
    * Configure periodic batch sync when the module starts.
    * This enqueues a repeatable job that will run every 10 minutes.
@@ -112,51 +156,27 @@ export class AmazonSyncService implements OnModuleInit {
       JSON.stringify({ progress: 0 }),
       SYNC_PROGRESS_TTL,
     );
-    const stableJobId = `full-sync-${userId}`;
-    let jobId = stableJobId;
-    const existingJob = await this.queue.getJob(stableJobId);
-    if (existingJob) {
-      const state = await existingJob.getState();
-      if (state === 'active') {
-        this.logger.log(
-          `Full-sync already running (userId=${userId}, jobId=${existingJob.id})`,
-        );
-        return;
-      }
-
-      this.logger.warn(
-        `Replacing stale full-sync job (userId=${userId}, state=${state}, jobId=${existingJob.id})`,
-      );
-      try {
-        await existingJob.remove();
-      } catch (error) {
-        jobId = `${stableJobId}-${Date.now()}`;
-        const message =
-          error instanceof Error ? error.message : String(error);
-        this.logger.warn(
-          `Could not remove existing full-sync job; queueing fallback jobId=${jobId} instead (${message})`,
-        );
-      }
-    }
-
-    await this.queue.add(
+    await this.redis.del(`amazon-fee-sync:${userId}`);
+    await this.enqueueUniqueJob(
       'full-sync',
+      `full-sync-${userId}`,
       { userId },
-      {
-        // retries if Amazon/SP-API fails
-        attempts: 5,
-        backoff: {
-          type: 'exponential',
-          delay: 5000,
-        },
+      `Full-sync for userId=${userId}`,
+    );
+  }
 
-        // keep Redis clean
-        removeOnComplete: true,
-        removeOnFail: 500,
-
-        // dedupe: prevent multiple concurrent full-syncs per user
-        jobId,
-      },
+  async enqueueFeeSync(userId: string, orgId: string): Promise<void> {
+    this.logger.log(`Enqueuing fee-sync job (userId=${userId}, orgId=${orgId})`);
+    await this.redis.set(
+      `amazon-fee-sync:${userId}`,
+      JSON.stringify({ progress: 0 }),
+      SYNC_PROGRESS_TTL,
+    );
+    await this.enqueueUniqueJob(
+      'fee-sync',
+      `fee-sync-${userId}`,
+      { userId, orgId },
+      `Fee-sync for userId=${userId}`,
     );
   }
 }

@@ -158,22 +158,34 @@ ping() {
   @UseGuards(ClerkAuthGuard)
   @Get('sync-progress')
   async getSyncProgress(@Req() req: { user: { userId: string } }) {
-    const key = `amazon-initial-sync:${req.user.userId}`;
-    const raw = await this.redis.get(key);
-    if (!raw) {
-      return { progress: 100, done: true };
-    }
-    try {
-      const { progress } = JSON.parse(raw) as { progress?: number };
-      const p = Number(progress);
-      const progressNum = Number.isFinite(p) ? Math.min(100, Math.max(0, p)) : 100;
-      return {
-        progress: progressNum,
-        done: progressNum >= 100,
-      };
-    } catch {
-      return { progress: 100, done: true };
-    }
+    const parseProgress = (raw: string | null): number | null => {
+      if (!raw) return null;
+      try {
+        const { progress } = JSON.parse(raw) as { progress?: number };
+        const p = Number(progress);
+        return Number.isFinite(p) ? Math.min(100, Math.max(0, p)) : null;
+      } catch {
+        return null;
+      }
+    };
+
+    const [coreRaw, feeRaw] = await Promise.all([
+      this.redis.get(`amazon-initial-sync:${req.user.userId}`),
+      this.redis.get(`amazon-fee-sync:${req.user.userId}`),
+    ]);
+    const coreProgress = parseProgress(coreRaw) ?? 100;
+    const feeProgress = parseProgress(feeRaw);
+    const done = coreProgress >= 100;
+    const feeDone = feeProgress == null || feeProgress >= 100;
+    const stage = !done ? 'core' : !feeDone ? 'fees' : 'complete';
+
+    return {
+      progress: coreProgress,
+      done,
+      stage,
+      feeProgress: feeProgress ?? 100,
+      feeDone,
+    };
   }
 
   @UseGuards(ClerkAuthGuard)
