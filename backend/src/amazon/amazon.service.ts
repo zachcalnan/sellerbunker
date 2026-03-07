@@ -4864,7 +4864,12 @@ try {
    * Estimated fees and estimated profit (based on current listed price + fee estimate) are distinct from concluded
    * fees and profit (actual amounts after sale, from Finances API / order items).
    */
-  async refreshFeeEstimatesForOrg(orgId: string): Promise<{
+  async refreshFeeEstimatesForOrg(
+    orgId: string,
+    options?: {
+      onProgress?: (progress: { processed: number; total: number }) => void | Promise<void>;
+    },
+  ): Promise<{
     skipped?: boolean;
     reason?: string;
     updatedCount?: number;
@@ -4940,6 +4945,8 @@ try {
     let updatedCount = 0;
     let errorCount = 0;
     let totalProcessed = 0;
+
+    await options?.onProgress?.({ processed: 0, total: totalProductCount });
 
     // Paginate until all products are processed (same pattern as FBA inventory: loop until no more pages).
     while (true) {
@@ -5107,7 +5114,16 @@ try {
     }
 
       totalProcessed += toProcess.length;
-      if (toProcess.length < batchSize) break;
+      await options?.onProgress?.({
+        processed: Math.min(totalProcessed, totalProductCount),
+        total: totalProductCount,
+      });
+      if (
+        toProcess.length < batchSize ||
+        totalProcessed >= totalProductCount
+      ) {
+        break;
+      }
     }
 
     await this.prisma.organization.update({

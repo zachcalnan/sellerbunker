@@ -96,7 +96,19 @@ export class AmazonSyncProcessor extends WorkerHost {
           await this.amazonService.syncShipments(orgIdForSync, userId);
           await this.setInitialSyncProgress(userId, 75);
           // 4) Fee estimates – so profit/COGS calculations can use FBA fees
-          await this.amazonService.refreshFeeEstimatesForOrg(orgIdForSync);
+          let lastFeeProgress = 75;
+          await this.amazonService.refreshFeeEstimatesForOrg(orgIdForSync, {
+            onProgress: async ({ processed, total }) => {
+              if (total <= 0) return;
+              const nextProgress = Math.min(
+                99,
+                75 + Math.floor((processed / total) * 25),
+              );
+              if (nextProgress <= lastFeeProgress) return;
+              lastFeeProgress = nextProgress;
+              await this.setInitialSyncProgress(userId, nextProgress);
+            },
+          });
         } else {
           this.logger.warn(`[full-sync] userId=${userId} has no activeOrgId and no org membership; skipping inventory/shipments/fees`);
         }
