@@ -9,7 +9,7 @@ import {
   useClerk,
 } from "@clerk/nextjs";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 function DashboardIcon({ className }: { className?: string }) {
@@ -192,6 +192,7 @@ export function Sidebar() {
   const { isSignedIn, getToken } = useAuth();
   const { signOut } = useClerk();
   const pathname = usePathname();
+  const router = useRouter();
   const [amazonConnected, setAmazonConnected] = useState<boolean | null>(null);
   const [connectingAmazon, setConnectingAmazon] = useState(false);
   const [disconnectingAmazon, setDisconnectingAmazon] = useState(false);
@@ -268,7 +269,15 @@ export function Sidebar() {
         method: "POST",
         headers: { Authorization: `Bearer ${token}` },
       });
-      if (res.ok) await fetchAmazonStatus();
+      if (res.ok) {
+        try {
+          sessionStorage.removeItem("sellerbunker_initial_sync_pending");
+          window.dispatchEvent(new CustomEvent("sellerbunker-amazon-disconnected"));
+        } catch {}
+        setAmazonConnected(false);
+        await fetchAmazonStatus();
+        router.refresh();
+      }
     } finally {
       setDisconnectingAmazon(false);
     }

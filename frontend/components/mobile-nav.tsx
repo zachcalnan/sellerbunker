@@ -9,7 +9,7 @@ import {
   useClerk,
 } from "@clerk/nextjs";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { LanguageSelector } from "./language-selector";
 import { ThemeToggle } from "./theme-toggle";
@@ -215,6 +215,7 @@ function CloseIcon({ className }: { className?: string }) {
 
 export function MobileNav() {
   const pathname = usePathname();
+  const router = useRouter();
   const [open, setOpen] = useState(false);
   const { isSignedIn, getToken } = useAuth();
   const { signOut } = useClerk();
@@ -294,7 +295,15 @@ export function MobileNav() {
         method: "POST",
         headers: { Authorization: `Bearer ${token}` },
       });
-      if (res.ok) await fetchAmazonStatus();
+      if (res.ok) {
+        try {
+          sessionStorage.removeItem("sellerbunker_initial_sync_pending");
+          window.dispatchEvent(new CustomEvent("sellerbunker-amazon-disconnected"));
+        } catch {}
+        setAmazonConnected(false);
+        await fetchAmazonStatus();
+        router.refresh();
+      }
     } finally {
       setDisconnectingAmazon(false);
     }

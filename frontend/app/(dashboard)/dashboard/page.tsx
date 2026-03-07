@@ -53,6 +53,9 @@ type RecentOrderRow = {
   totalStock: number | null;
 };
 
+const POST_CONNECT_REFRESH_PENDING_KEY =
+  "sellerbunker_post_connect_refresh_pending";
+
 function HomeInner() {
   const baseUrl =
     process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
@@ -85,8 +88,8 @@ function HomeInner() {
   useEffect(() => {
     if (!amazonConnectedParam) return;
     try {
-      sessionStorage.setItem("sellerbunker_initial_sync_pending", "1");
-      window.dispatchEvent(new CustomEvent("sellerbunker-initial-sync-pending"));
+      sessionStorage.removeItem("sellerbunker_initial_sync_pending");
+      sessionStorage.setItem(POST_CONNECT_REFRESH_PENDING_KEY, "1");
       if (localStorage.getItem("sellerbunker_amazon_connect_thanks_seen") !== "1") {
         setShowAmazonConnectThankYou(true);
       }
@@ -288,19 +291,45 @@ function HomeInner() {
     fetchSummary();
   }, [isSignedIn, fetchSummary]);
 
+  useEffect(() => {
+    if (!isSignedIn) return;
+    const handleAmazonDisconnected = () => {
+      setShowAmazonConnectThankYou(false);
+      void fetchSummary({ silent: true });
+    };
+    window.addEventListener(
+      "sellerbunker-amazon-disconnected",
+      handleAmazonDisconnected,
+    );
+    return () =>
+      window.removeEventListener(
+        "sellerbunker-amazon-disconnected",
+        handleAmazonDisconnected,
+      );
+  }, [isSignedIn, fetchSummary]);
+
   // After connecting Amazon, sync runs in the background. Poll summary until we have data
   // so the dashboard updates without a manual refresh.
   const isPostConnect =
     amazonConnectedParam ||
     (typeof window !== "undefined" &&
-      sessionStorage.getItem("sellerbunker_initial_sync_pending") === "1");
+      sessionStorage.getItem(POST_CONNECT_REFRESH_PENDING_KEY) === "1");
   useEffect(() => {
-    if (!isPostConnect || !summary || summary.totalOrders > 0) return;
+    if (!isPostConnect) return;
+    if (summary?.totalOrders && summary.totalOrders > 0) {
+      try {
+        sessionStorage.removeItem(POST_CONNECT_REFRESH_PENDING_KEY);
+      } catch {}
+      return;
+    }
     const maxPolls = 20;
     let polls = 0;
     const interval = setInterval(async () => {
       polls += 1;
       if (polls > maxPolls) {
+        try {
+          sessionStorage.removeItem(POST_CONNECT_REFRESH_PENDING_KEY);
+        } catch {}
         clearInterval(interval);
         return;
       }
