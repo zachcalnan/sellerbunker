@@ -59,4 +59,13 @@
 - Database: `docker exec -it seller-dashboard-postgres psql -U root -d sellertoolkit`
 - Redis: `docker exec -it seller-dashboard-redis redis-cli ping`
 
+## Render Test Stack
+
+For an isolated Render-based test environment, use:
+
+- `render.yaml`
+- `backend/.env.render.example`
+- `frontend/.env.render.example`
+- `docs/render-test-environment.md`
+
 

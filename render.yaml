@@ -1,0 +1,88 @@
+services:
+  - type: web
+    name: seller-bunker-test-backend
+    runtime: node
+    rootDir: backend
+    buildCommand: npm ci && npm run build
+    preDeployCommand: npm run db:deploy
+    startCommand: npm run start:prod
+    healthCheckPath: /api
+    autoDeploy: false
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: seller-bunker-test-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: seller-bunker-test-redis
+          property: connectionString
+      - key: FRONTEND_URL
+        value: https://seller-bunker-test-frontend.onrender.com
+      - key: JWT_SECRET
+        generateValue: true
+      - key: ENABLE_AMAZON_SYNC_SCHEDULER
+        value: "false"
+      - key: CLERK_SECRET_KEY
+        sync: false
+      - key: CLERK_WEBHOOK_SECRET
+        sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: AMAZON_APP_ID
+        sync: false
+      - key: AMAZON_REDIRECT_URI
+        value: https://seller-bunker-test-backend.onrender.com/api/amazon/oauth/callback
+      - key: LWA_CLIENT_ID
+        sync: false
+      - key: LWA_CLIENT_SECRET
+        sync: false
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: AWS_ROLE_ARN
+        sync: false
+      - key: SPAPI_USE_SANDBOX
+        sync: false
+      - key: SPAPI_DEBUG_LOGS
+        value: "false"
+
+  - type: web
+    name: seller-bunker-test-frontend
+    runtime: node
+    rootDir: frontend
+    buildCommand: npm ci && npm run build
+    startCommand: npm run start
+    autoDeploy: false
+    envVars:
+      - key: NEXT_PUBLIC_API_URL
+        value: https://seller-bunker-test-backend.onrender.com
+      - key: NEXT_PUBLIC_APP_URL
+        value: https://seller-bunker-test-frontend.onrender.com
+      - key: NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY
+        sync: false
+      - key: CLERK_SECRET_KEY
+        sync: false
+      - key: CLERK_WEBHOOK_SECRET
+        sync: false
+      - key: CLERK_WEBHOOK_SIGNING_SECRET
+        sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_BASIC_PLAN_PRODUCT_ID
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: RESEND_FROM_EMAIL
+        sync: false
+
+  - type: keyvalue
+    name: seller-bunker-test-redis
+    ipAllowList: []
+
+databases:
+  - name: seller-bunker-test-db

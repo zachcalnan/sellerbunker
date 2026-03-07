@@ -19,6 +19,10 @@ out/
 .env.development.local
 .env.test.local
 .env.production.local
+!.env*.example
+!**/.env*.example
+!backend/.env.render.example
+!frontend/.env.render.example
 
 # IDE
 .vscode/

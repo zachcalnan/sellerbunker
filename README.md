@@ -120,6 +120,14 @@ FRONTEND_URL=http://localhost:3000
 NEXT_PUBLIC_API_URL=http://localhost:3001
 ```
 
+## Render Test Environment
+
+The repo now includes:
+
+- `render.yaml` for provisioning an isolated test frontend, backend, Postgres, and Redis stack on Render
+- `backend/.env.render.example` and `frontend/.env.render.example` for test/staging env templates
+- `docs/render-test-environment.md` for the full setup order, Clerk checklist, and Amazon enablement checklist
+
 ## 📝 Next Steps
 
 1. ✅ Database schema created
