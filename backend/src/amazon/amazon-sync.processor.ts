@@ -104,7 +104,19 @@ export class AmazonSyncProcessor extends WorkerHost {
           await this.amazonService.syncFbaInventory(orgIdForSync, userId);
           await this.setInitialSyncProgress(userId, 50);
           // 3) Shipments – FBA shipment list and status
-          await this.amazonService.syncShipments(orgIdForSync, userId);
+          let lastShipmentProgress = 50;
+          await this.amazonService.syncShipments(orgIdForSync, userId, {
+            onProgress: async ({ processed, total }) => {
+              if (total <= 0) return;
+              const nextProgress = Math.min(
+                75,
+                50 + Math.floor((processed / total) * 25),
+              );
+              if (nextProgress <= lastShipmentProgress) return;
+              lastShipmentProgress = nextProgress;
+              await this.setInitialSyncProgress(userId, nextProgress);
+            },
+          });
           await this.setInitialSyncProgress(userId, 75);
           await this.amazonSyncService.enqueueFeeSync(userId, orgIdForSync);
         } else {

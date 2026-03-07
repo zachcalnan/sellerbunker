@@ -147,11 +147,18 @@ export function Topbar() {
   };
 
   const hasMissing = (missingCount ?? 0) > 0;
+  const awaitingFirstSyncPoll =
+    syncPendingFromSession &&
+    syncProgress === null &&
+    feeSyncProgress === null &&
+    syncStage === "complete";
   const feeSyncActive = syncStage === "fees";
   const visibleSyncProgress = feeSyncActive
     ? (feeSyncProgress ?? 0)
     : (syncProgress ?? 0);
-  const syncTitle = syncStage === "complete"
+  const syncTitle = awaitingFirstSyncPoll
+    ? "Syncing your data…"
+    : syncStage === "complete"
     ? "Sync complete"
     : feeSyncActive
       ? "Improving profit calculations…"
@@ -164,7 +171,7 @@ export function Topbar() {
     syncStage !== "complete" ||
     ((syncProgress !== null || feeSyncProgress !== null) && hasSeenSyncInProgress);
   const showSyncBox = hasSyncActivity && (!syncDismissed || syncPendingFromSession);
-  const syncComplete = showSyncBox && syncStage === "complete";
+  const syncComplete = showSyncBox && syncStage === "complete" && !awaitingFirstSyncPoll;
 
   return (
     <>

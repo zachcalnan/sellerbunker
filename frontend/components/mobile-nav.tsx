@@ -337,10 +337,6 @@ export function MobileNav() {
             className="sellerbunker-logo h-16 w-auto min-w-[130px] object-contain object-left"
           />
         </Link>
-        <span className="flex-1 text-center font-semibold tracking-tight text-[var(--foreground)]">
-          <span className="font-bold">SELLER</span>
-          <span className="font-normal"> BUNKER</span>
-        </span>
         <button
           type="button"
           onClick={() => setOpen(true)}

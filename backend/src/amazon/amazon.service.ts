@@ -3913,7 +3913,13 @@ export class AmazonService {
    * Sync FBA inbound shipments from SP-API and upsert into shipments table.
    * Returns raw API payloads for debugging (getShipments response per page).
    */
-  async syncShipments(orgId: string, preferredUserId?: string): Promise<{
+  async syncShipments(
+    orgId: string,
+    preferredUserId?: string,
+    options?: {
+      onProgress?: (progress: { processed: number; total: number }) => void | Promise<void>;
+    },
+  ): Promise<{
     synced: number;
     errors: string[];
     rawResponses?: unknown[];
@@ -3940,6 +3946,22 @@ export class AmazonService {
     const rawResponses: unknown[] = [];
     let synced = 0;
     const throttleMs = Math.max(200, Number(this.configService.get<string>('SPAPI_THROTTLE_MS')) || 800);
+    let lastReportedProcessed = -1;
+    let lastReportedTotal = -1;
+    const reportProgress = async (processed: number, total: number) => {
+      if (!options?.onProgress) return;
+      const safeTotal = Math.max(0, total);
+      const safeProcessed = Math.max(0, Math.min(processed, safeTotal));
+      if (
+        safeProcessed === lastReportedProcessed &&
+        safeTotal === lastReportedTotal
+      ) {
+        return;
+      }
+      lastReportedProcessed = safeProcessed;
+      lastReportedTotal = safeTotal;
+      await options.onProgress({ processed: safeProcessed, total: safeTotal });
+    };
 
     const parseDate = (v: unknown): Date | null => {
       if (v == null) return null;
@@ -4022,6 +4044,7 @@ export class AmazonService {
     // ——— Phase 1: First getShipments request must include all statuses so we get every shipment ID ———
     const listRows: any[] = [];
     let nextToken: string | undefined;
+    await reportProgress(0, 100);
     this.logger.log(
       `[syncShipments] Phase 1: getShipments with all ${ALL_SHIPMENT_STATUSES.length} statuses (required for full list): ${ALL_SHIPMENT_STATUSES.join(',')}`,
     );
@@ -4053,6 +4076,9 @@ export class AmazonService {
     } while (nextToken);
 
     this.logger.log(`[syncShipments] Phase 1 done: ${listRows.length} shipment(s) from API. Saving to DB.`);
+    if (listRows.length === 0) {
+      await reportProgress(100, 100);
+    }
 
     // Statuses that mean "checked in at FC" – we record lastUpdatedDate as checkedInDate when we see these
     const CHECKED_IN_STATUSES = ['CLOSED', 'RECEIVING', 'Closed', 'Receiving'];
@@ -4169,6 +4195,13 @@ export class AmazonService {
           create: createPayload,
         });
         synced += 1;
+        if (listRows.length > 0) {
+          const stageProgress = Math.min(
+            40,
+            Math.floor((synced / listRows.length) * 40),
+          );
+          await reportProgress(stageProgress, 100);
+        }
         this.logger.log(`[syncShipments] saved list data for ${shipmentId} (${synced}/${listRows.length})`);
       } catch (e) {
         const msg = (e as Error).message ?? String(e);
@@ -4259,8 +4292,14 @@ export class AmazonService {
         const msg = (e as Error).message ?? String(e);
         this.logger.warn(`[syncShipments] Phase 2 DB update failed for ${shipmentId}: ${msg}`);
       }
+      if (listRows.length > 0) {
+        const stageProgress =
+          40 + Math.floor(((i + 1) / listRows.length) * 60);
+        await reportProgress(Math.min(100, stageProgress), 100);
+      }
     }
 
+    await reportProgress(100, 100);
     this.logger.log(`[syncShipments] done: synced=${synced} errors=${errors.length}${errors.length ? ` [${errors.join('; ')}]` : ''}`);
     return { synced, errors, rawResponses };
   }
