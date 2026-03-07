@@ -112,6 +112,33 @@ export class AmazonSyncService implements OnModuleInit {
       JSON.stringify({ progress: 0 }),
       SYNC_PROGRESS_TTL,
     );
+    const stableJobId = `full-sync-${userId}`;
+    let jobId = stableJobId;
+    const existingJob = await this.queue.getJob(stableJobId);
+    if (existingJob) {
+      const state = await existingJob.getState();
+      if (state === 'active') {
+        this.logger.log(
+          `Full-sync already running (userId=${userId}, jobId=${existingJob.id})`,
+        );
+        return;
+      }
+
+      this.logger.warn(
+        `Replacing stale full-sync job (userId=${userId}, state=${state}, jobId=${existingJob.id})`,
+      );
+      try {
+        await existingJob.remove();
+      } catch (error) {
+        jobId = `${stableJobId}-${Date.now()}`;
+        const message =
+          error instanceof Error ? error.message : String(error);
+        this.logger.warn(
+          `Could not remove existing full-sync job; queueing fallback jobId=${jobId} instead (${message})`,
+        );
+      }
+    }
+
     await this.queue.add(
       'full-sync',
       { userId },
@@ -128,7 +155,7 @@ export class AmazonSyncService implements OnModuleInit {
         removeOnFail: 500,
 
         // dedupe: prevent multiple concurrent full-syncs per user
-        jobId: `full-sync-${userId}`,
+        jobId,
       },
     );
   }
