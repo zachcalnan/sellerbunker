@@ -99,6 +99,12 @@ export function Topbar() {
           : "complete";
       setSyncStage(stage);
       if (stage !== "complete") setHasSeenSyncInProgress(true);
+      if (stage === "complete" && data.feeDone !== false) {
+        try {
+          sessionStorage.removeItem(INITIAL_SYNC_PENDING_KEY);
+        } catch {}
+        setSyncPendingFromSession(false);
+      }
     } catch {
       setSyncProgress(100);
       setFeeSyncProgress(100);
