@@ -7,6 +7,8 @@ import Link from "next/link";
 import { StripeCheckoutButton } from "@/components/stripe-checkout-button";
 
 const accentColor = "rgb(96, 165, 250)";
+const BILLING_BYPASSED =
+  (process.env.NEXT_PUBLIC_BYPASS_BILLING ?? "").toLowerCase() === "true";
 
 function StartTrialContent() {
   const { isSignedIn, isLoaded, getToken } = useAuth();
@@ -104,6 +106,12 @@ function StartTrialContent() {
       router.replace("/");
       return;
     }
+    if (BILLING_BYPASSED) {
+      setHasAccess(true);
+      setChecking(false);
+      router.replace("/dashboard");
+      return;
+    }
     const baseUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
     async function check() {
       try {
@@ -192,6 +200,14 @@ function StartTrialContent() {
 
   if (hasAccess) {
     return null;
+  }
+
+  if (BILLING_BYPASSED) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-[var(--background)] text-[var(--foreground)]">
+        <p className="text-[var(--muted-foreground)]">Redirecting to dashboard…</p>
+      </div>
+    );
   }
 
   return (

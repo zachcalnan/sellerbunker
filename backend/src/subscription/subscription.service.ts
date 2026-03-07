@@ -5,8 +5,14 @@ import { PrismaService } from '../prisma/prisma.service';
 export class SubscriptionService {
   constructor(private readonly prisma: PrismaService) {}
 
+  private isBillingBypassed(): boolean {
+    const flag = (process.env.BYPASS_BILLING ?? '').toLowerCase();
+    return ['1', 'true', 'yes', 'on'].includes(flag);
+  }
+
   /** True if user has an active/trialing subscription, or canceled but still within trial end. */
   async hasAccess(userId: string): Promise<boolean> {
+    if (this.isBillingBypassed()) return true;
     const sub = await this.prisma.subscription.findUnique({
       where: { userId },
     });
@@ -18,6 +24,7 @@ export class SubscriptionService {
 
   /** Returns the user's subscription plan name for display (e.g. "Basic plan"). Defaults to Basic when they have access. */
   async getPlanName(userId: string): Promise<string | null> {
+    if (this.isBillingBypassed()) return 'Test access';
     const sub = await this.prisma.subscription.findUnique({
       where: { userId },
     });
@@ -28,6 +35,7 @@ export class SubscriptionService {
 
   /** When the user will lose access (trial end or period end). Used to show "You will be locked out as of [date]". */
   async getLockoutAt(userId: string): Promise<Date | null> {
+    if (this.isBillingBypassed()) return null;
     const sub = await this.prisma.subscription.findUnique({
       where: { userId },
     });

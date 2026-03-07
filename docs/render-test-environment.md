@@ -19,6 +19,7 @@ The backend is wired to:
 - use the test Redis instance for `REDIS_URL`
 - run Prisma migrations before each deploy with `npm run db:deploy`
 - keep `ENABLE_AMAZON_SYNC_SCHEDULER=false` by default so test jobs do not start automatically
+- bypass billing with `BYPASS_BILLING=true` so test users can reach the dashboard without Stripe
 
 The frontend is wired to:
 
@@ -38,6 +39,7 @@ Required now for a basic isolated test stack:
 - `FRONTEND_URL`
 - `JWT_SECRET`
 - `ENABLE_AMAZON_SYNC_SCHEDULER`
+- `BYPASS_BILLING`
 
 Required now if test sign-in is enabled with Clerk:
 
@@ -87,6 +89,7 @@ Required now for a basic isolated test stack:
 
 - `NEXT_PUBLIC_API_URL`
 - `NEXT_PUBLIC_APP_URL`
+- `NEXT_PUBLIC_BYPASS_BILLING`
 
 Required now if test sign-in is enabled with Clerk:
 
@@ -124,6 +127,8 @@ These values are intentionally prewired in `render.yaml`:
 - backend `FRONTEND_URL` -> `https://seller-bunker-test-frontend.onrender.com`
 - frontend `NEXT_PUBLIC_API_URL` -> `https://seller-bunker-test-backend.onrender.com`
 - frontend `NEXT_PUBLIC_APP_URL` -> `https://seller-bunker-test-frontend.onrender.com`
+- backend `BYPASS_BILLING` -> `true`
+- frontend `NEXT_PUBLIC_BYPASS_BILLING` -> `true`
 - backend `AMAZON_REDIRECT_URI` -> `https://seller-bunker-test-backend.onrender.com/api/amazon/oauth/callback`
 
 If you rename the Render services, update these values to match the new URLs.

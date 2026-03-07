@@ -5,6 +5,8 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 const START_TRIAL_PATH = "/start-trial";
+const BILLING_BYPASSED =
+  (process.env.NEXT_PUBLIC_BYPASS_BILLING ?? "").toLowerCase() === "true";
 
 export function SubscriptionGate({ children }: { children: React.ReactNode }) {
   const { isSignedIn, isLoaded, getToken } = useAuth();
@@ -12,6 +14,10 @@ export function SubscriptionGate({ children }: { children: React.ReactNode }) {
   const [allowed, setAllowed] = useState<boolean | null>(null);
 
   useEffect(() => {
+    if (BILLING_BYPASSED) {
+      setAllowed(true);
+      return;
+    }
     if (!isLoaded || !isSignedIn) {
       if (isLoaded && !isSignedIn) setAllowed(true);
       return;
