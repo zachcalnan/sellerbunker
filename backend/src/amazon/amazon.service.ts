@@ -5772,13 +5772,8 @@ try {
       return cur ?? {};
     };
 
-    // Pull real marketplaces from SP-API
-const participations: any =
-  await this.spApiClient.getMarketplaceParticipations(credentials);
-
-
-// Extract marketplace IDs where seller is active
-let marketplaceIds = ['A1F83G8C2ARO7P']; // UK ONLY
+    // Extract marketplace IDs where seller is active.
+    let marketplaceIds = ['A1F83G8C2ARO7P']; // UK ONLY
 
     try {
       const res = (await this.spApiClient.getMarketplaceParticipations(
@@ -5803,31 +5798,6 @@ let marketplaceIds = ['A1F83G8C2ARO7P']; // UK ONLY
     if ((credentials.region ?? 'eu') === 'eu') {
       marketplaceIds = ['A1F83G8C2ARO7P'];
     }
-const now = new Date();
-
-const org = await this.prisma.organization.findUnique({
-  where: { id: orgId },
-  select: { lastFbaInventorySyncAt: true },
-});
-
-if (org?.lastFbaInventorySyncAt) {
-  const secondsAgo =
-    (now.getTime() - org.lastFbaInventorySyncAt.getTime()) / 1000;
-
-  if (secondsAgo < 60) {
-    const debug = ['1', 'true', 'yes'].includes(
-      (this.configService.get<string>('SPAPI_DEBUG_LOGS') ?? '').toLowerCase(),
-    );
-    if (debug) {
-      this.logger.debug(
-        `[syncFbaInventory] Skipping - last successful sync was ${Math.round(secondsAgo / 60)} min ago`,
-      );
-    }
-    return;
-  }
-}
-
-/* ===== END COOLDOWN BLOCK ===== */
     // Titles are marketplace-scoped, and the returned list order can be arbitrary.
     // Prefer the seller's primary marketplace(s) first to avoid filling titles
     // with (valid) but unexpected languages from other marketplaces.
@@ -5853,18 +5823,92 @@ if (org?.lastFbaInventorySyncAt) {
       return a.localeCompare(b);
     });
 
-    const userIds = await this.getOrgMemberUserIds(orgId);
+    // Catalog API: 2 req/sec per account. 500ms between calls keeps us under limit.
+    const catalogThrottleMs =
+      Number(this.configService.get<string>('SPAPI_CATALOG_THROTTLE_MS')) ||
+      500;
 
-    const products = await this.prisma.product.findMany({
+    const userIds = await this.getOrgMemberUserIds(orgId);
+    const needsBackfill = {
+      userId: { in: userIds },
+      asin: { not: null },
+      OR: [{ title: null }, { imageUrl: null }],
+    };
+
+    // Prioritize products visible on dashboard: recent orders, top sellers, replenish
+    const nowSafe = new Date(Date.now() - 5 * 60 * 1000);
+    const startDate = new Date(
+      nowSafe.getTime() - 30 * 24 * 60 * 60 * 1000,
+    );
+    const dateFilter = { orderDate: { gte: startDate, lte: nowSafe } };
+
+    const byProfit = await (this.prisma as any).orderItem.groupBy({
+      by: ['productId'],
       where: {
         userId: { in: userIds },
-        asin: { not: null },
-        OR: [{ title: null }, { imageUrl: null }],
+        marketplace: 'amazon',
+        ...dateFilter,
+        profit: { not: null },
       },
-      take: limit,
-      orderBy: { updatedAt: 'desc' },
-      select: { id: true, asin: true, title: true, imageUrl: true },
+      _sum: { profit: true, quantity: true },
+      orderBy: { _sum: { profit: 'desc' } },
+      take: Math.max(limit * 2, 200),
     });
+    const profitProductIds = byProfit
+      .map((r: any) => r.productId)
+      .filter(Boolean);
+    const byUnits = await (this.prisma as any).orderItem.groupBy({
+      by: ['productId'],
+      where: {
+        userId: { in: userIds },
+        marketplace: 'amazon',
+        ...dateFilter,
+        ...(profitProductIds.length > 0
+          ? { productId: { notIn: profitProductIds } }
+          : {}),
+      },
+      _sum: { quantity: true },
+      orderBy: { _sum: { quantity: 'desc' } },
+      take: limit,
+    });
+    const dashboardProductIds = [
+      ...profitProductIds,
+      ...byUnits.map((r: any) => r.productId).filter(Boolean),
+    ];
+
+    const invRows = await this.prisma.inventory.findMany({
+      where: { userId: { in: userIds } },
+      select: { productId: true },
+      distinct: ['productId'],
+    });
+    const invProductIds = invRows.map((r) => r.productId);
+
+    const allNeedingBackfill = await this.prisma.product.findMany({
+      where: needsBackfill,
+      select: { id: true, asin: true, title: true, imageUrl: true, updatedAt: true },
+    });
+    const byId = new Map(allNeedingBackfill.map((p) => [p.id, p]));
+    const dashboardSet = new Set(dashboardProductIds);
+    const invSet = new Set(invProductIds);
+
+    const orderedIds: string[] = [
+      ...dashboardProductIds.filter((id) => byId.has(id)),
+      ...invProductIds.filter(
+        (id) => byId.has(id) && !dashboardSet.has(id),
+      ),
+      ...allNeedingBackfill
+        .filter((p) => !dashboardSet.has(p.id) && !invSet.has(p.id))
+        .sort(
+          (a, b) =>
+            b.updatedAt.getTime() - a.updatedAt.getTime(),
+        )
+        .map((p) => p.id),
+    ];
+
+    const products = orderedIds
+      .slice(0, limit)
+      .map((id) => byId.get(id)!)
+      .filter(Boolean);
 
     let updated = 0;
     let skipped = 0;
@@ -6045,7 +6089,9 @@ if (org?.lastFbaInventorySyncAt) {
             imageUrl = imageFromPayload(payload, marketplaceId);
           }
 
-          if (title && imageUrl) break;
+          const done = !!(title && imageUrl);
+          await new Promise((r) => setTimeout(r, catalogThrottleMs));
+          if (done) break;
         }
 
         // If we couldn't find either title or image, there's nothing to update.

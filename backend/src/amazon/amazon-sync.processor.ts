@@ -103,6 +103,31 @@ export class AmazonSyncProcessor extends WorkerHost {
         if (orgIdForSync) {
           await this.amazonService.syncFbaInventory(orgIdForSync, userId);
           await this.setInitialSyncProgress(userId, 50);
+          const initialTitlesBackfillLimit = Math.min(
+            300,
+            Math.max(
+              0,
+              Number(process.env.AMAZON_INITIAL_TITLES_BACKFILL_LIMIT) || 100,
+            ),
+          );
+          if (initialTitlesBackfillLimit > 0) {
+            try {
+              const result = await this.amazonService.backfillProductTitles(
+                orgIdForSync,
+                initialTitlesBackfillLimit,
+                userId,
+              );
+              this.logger.log(
+                `[full-sync] Initial titles backfill for userId=${userId}: requested=${result?.requested ?? 0} updated=${result?.updated ?? 0} skipped=${result?.skipped ?? 0} errors=${result?.errorsCount ?? 0}`,
+              );
+            } catch (titleErr) {
+              const msg =
+                titleErr instanceof Error ? titleErr.message : String(titleErr);
+              this.logger.warn(
+                `[full-sync] Initial titles backfill failed for userId=${userId}: ${msg}`,
+              );
+            }
+          }
           // 3) Shipments – FBA shipment list and status
           let lastShipmentProgress = 50;
           await this.amazonService.syncShipments(orgIdForSync, userId, {
