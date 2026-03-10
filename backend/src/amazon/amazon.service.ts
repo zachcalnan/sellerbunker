@@ -4979,7 +4979,8 @@ try {
     };
 
     const listingCurrency = credentials.region === 'eu' ? 'GBP' : credentials.region === 'fe' ? 'JPY' : 'USD';
-    const delayMs = 2000;
+    // Delay between each Product Fees API call to avoid 429. Configurable via FEE_ESTIMATE_DELAY_MS (default 1000ms).
+    const delayMs = Math.max(500, Number(this.configService.get<string>('FEE_ESTIMATE_DELAY_MS')) || 1000);
     const retryWaitMs = 60000;
     let updatedCount = 0;
     let errorCount = 0;

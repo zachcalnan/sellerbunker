@@ -2,7 +2,7 @@
 
 import { useAuth } from "@clerk/nextjs";
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { LanguageSelector } from "./language-selector";
 import { ThemeToggle } from "./theme-toggle";
 import { SettingsModal } from "./settings-modal";
@@ -38,6 +38,7 @@ export function Topbar() {
   const [hasSeenSyncInProgress, setHasSeenSyncInProgress] = useState(false);
   const [syncPendingFromSession, setSyncPendingFromSession] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const syncCompleteFiredRef = useRef(false);
 
   const fetchMissing = useCallback(async () => {
     if (!isSignedIn) return;
@@ -120,7 +121,10 @@ export function Topbar() {
         }
       } catch {}
     };
-    const onSyncPending = () => setSyncPendingFromSession(true);
+    const onSyncPending = () => {
+      setSyncPendingFromSession(true);
+      setSyncDismissed(false); // show the bar again when we've just connected Amazon
+    };
     window.addEventListener("sellerbunker-initial-sync-pending", onSyncPending);
     if (!isSignedIn || syncDismissed) {
       setSyncProgress(null);
@@ -178,6 +182,13 @@ export function Topbar() {
     ((syncProgress !== null || feeSyncProgress !== null) && hasSeenSyncInProgress);
   const showSyncBox = hasSyncActivity && (!syncDismissed || syncPendingFromSession);
   const syncComplete = showSyncBox && syncStage === "complete" && !awaitingFirstSyncPoll;
+
+  useEffect(() => {
+    if (syncComplete && !syncCompleteFiredRef.current && typeof window !== "undefined") {
+      syncCompleteFiredRef.current = true;
+      window.dispatchEvent(new CustomEvent("sellerbunker-sync-complete"));
+    }
+  }, [syncComplete]);
 
   return (
     <>

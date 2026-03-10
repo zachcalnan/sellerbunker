@@ -52,7 +52,13 @@ function StartTrialContent() {
         router.push("/dashboard");
       }
     } catch (e) {
-      alert("Request failed. If you're on a custom domain, the backend may need to allow it (CORS). Opening dashboard.");
+      const msg = e instanceof Error ? e.message : String(e);
+      const isNetworkFailure = /failed to fetch|networkerror|load failed/i.test(msg);
+      alert(
+        isNetworkFailure
+          ? "Could not reach the backend. Make sure it's running (e.g. on port 3001) and that NEXT_PUBLIC_API_URL in the frontend points to it."
+          : "Request failed. If you're on a custom domain, the backend may need to allow it (CORS). Opening dashboard."
+      );
       router.push("/dashboard");
     } finally {
       setConfirming(false);
@@ -92,7 +98,12 @@ function StartTrialContent() {
         setConfirmError(msg);
       } catch (e) {
         const msg = e instanceof Error ? e.message : "Network or CORS error";
-        setConfirmError(msg);
+        const isNetworkFailure = /failed to fetch|networkerror|load failed/i.test(msg) || (e instanceof TypeError && (e as TypeError).message?.toLowerCase().includes("fetch"));
+        setConfirmError(
+          isNetworkFailure
+            ? "Could not reach the server. Make sure the backend is running (e.g. port 3001) and NEXT_PUBLIC_API_URL points to it."
+            : msg
+        );
         if (attempt < 2) setTimeout(() => runConfirm(attempt + 1), 1500);
       }
     };

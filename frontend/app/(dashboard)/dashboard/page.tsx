@@ -88,8 +88,12 @@ function HomeInner() {
   useEffect(() => {
     if (!amazonConnectedParam) return;
     try {
-      sessionStorage.removeItem("sellerbunker_initial_sync_pending");
       sessionStorage.setItem(POST_CONNECT_REFRESH_PENDING_KEY, "1");
+      // Tell the topbar to show the sync progress bar and start polling
+      sessionStorage.setItem("sellerbunker_initial_sync_pending", "1");
+      window.dispatchEvent(new CustomEvent("sellerbunker-initial-sync-pending"));
+      // Show the bar again even if they dismissed it on a previous connect
+      localStorage.removeItem("sellerbunker_initial_sync_dismissed");
       if (localStorage.getItem("sellerbunker_amazon_connect_thanks_seen") !== "1") {
         setShowAmazonConnectThankYou(true);
       }

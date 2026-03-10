@@ -225,9 +225,21 @@ export class AmazonSyncProcessor extends WorkerHost {
     }
 
     if (job.name === 'fee-estimate-refresh') {
-      this.logger.log('[AmazonSync] Running fee estimate refresh for all orgs');
+      this.logger.log('[AmazonSync] Running fee estimate refresh for orgs with Amazon linked');
 
+      // Only orgs that have at least one member with a linked Amazon account (avoid touching orphan/test orgs).
       const orgs = await this.prisma.organization.findMany({
+        where: {
+          members: {
+            some: {
+              user: {
+                sellerAccounts: {
+                  some: { marketplace: 'amazon' },
+                },
+              },
+            },
+          },
+        },
         select: { id: true },
       });
 
@@ -237,10 +249,15 @@ export class AmazonSyncProcessor extends WorkerHost {
           await this.amazonService.refreshFeeEstimatesForOrg(org.id);
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e);
-          errors.push({ orgId: org.id, error: msg });
-          this.logger.error(
-            `[AmazonSync] Fee estimate refresh failed for org ${org.id}: ${msg}`,
-          );
+          const isNotLinked = /amazon account not linked|link your amazon account/i.test(msg);
+          if (isNotLinked) {
+            // Skip silently; no need to log every org without Amazon
+          } else {
+            errors.push({ orgId: org.id, error: msg });
+            this.logger.error(
+              `[AmazonSync] Fee estimate refresh failed for org ${org.id}: ${msg}`,
+            );
+          }
         }
       }
 

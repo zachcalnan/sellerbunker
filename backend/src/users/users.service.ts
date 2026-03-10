@@ -234,7 +234,7 @@ export class UsersService {
     });
     if (!org) throw new NotFoundException('Organization not found');
     return {
-      vatRegistrationType: org.vatRegistrationType ?? 'NON_VAT_REGISTERED',
+      vatRegistrationType: org.vatRegistrationType ?? null,
       vatEffectiveDate: org.vatEffectiveDate?.toISOString?.() ?? null,
       vatFlatRatePct: org.vatFlatRatePct != null ? Number(org.vatFlatRatePct) : null,
       vatRatePct: org.vatRatePct != null ? Number(org.vatRatePct) : null,

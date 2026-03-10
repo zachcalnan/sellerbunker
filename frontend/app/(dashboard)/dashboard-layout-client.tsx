@@ -7,6 +7,8 @@ import { Topbar } from "@/components/topbar";
 import { FullscreenProvider, useFullscreen } from "@/contexts/fullscreen-context";
 import { DisplaySettingsProvider } from "@/contexts/display-settings-context";
 import { SubscriptionGate } from "@/components/subscription-gate";
+import { VatOnboardingModal } from "@/components/vat-onboarding-modal";
+import { CogsPromptModal } from "@/components/cogs-prompt-modal";
 
 function DashboardLayoutInner({
   children,
@@ -40,6 +42,8 @@ function DashboardLayoutInner({
 
   return (
     <>
+      <VatOnboardingModal />
+      <CogsPromptModal />
       <MobileNav />
       <div className="hidden md:fixed md:inset-y-0 md:left-0 md:z-10 md:flex md:w-56">
         <Sidebar />
