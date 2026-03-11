@@ -1277,9 +1277,17 @@ export class AmazonService {
    * - map them into a single aggregate "AMAZON_GENERIC" product per user
    * - upsert one Order row per AmazonOrderId
    */
+  /** Default days of orders to sync (used when opts.days not provided). */
+  static readonly SYNC_ORDERS_DAYS_DEFAULT = 30;
+
   async syncRecentOrdersToDb(
     userId: string,
-    opts?: { ignoreCursor?: boolean; days?: number },
+    opts?: {
+      ignoreCursor?: boolean;
+      days?: number;
+      /** Progress 0–25 for initial-sync progress bar (orders phase). */
+      onProgress?: (progress: number) => void | Promise<void>;
+    },
   ): Promise<void> {
     const credentials = await this.getAmazonCredentialsForUser(userId);
 
@@ -1293,7 +1301,12 @@ export class AmazonService {
     });
 
     const nowSafe = new Date(Date.now() - 5 * 60 * 1000);
-    const days = Math.max(1, Math.min(365, Number(opts?.days ?? 30) || 30));
+    const days = Math.max(
+      1,
+      Math.min(365, Number(opts?.days ?? AmazonService.SYNC_ORDERS_DAYS_DEFAULT) || AmazonService.SYNC_ORDERS_DAYS_DEFAULT),
+    );
+    const onProgress = opts?.onProgress;
+    if (onProgress) await onProgress(1);
     const defaultStart = new Date(
       nowSafe.getTime() - days * 24 * 60 * 60 * 1000,
     );
@@ -1380,6 +1393,7 @@ export class AmazonService {
       NumberOfItemsUnshipped?: number;
     };
 
+    if (onProgress) await onProgress(2);
     const allOrders: SpApiOrder[] = [];
     let nextToken: string | undefined;
     try {
@@ -1410,6 +1424,7 @@ export class AmazonService {
     this.logger.log(
       `[syncRecentOrdersToDb] getOrders returned ${orders.length} orders (paginated; userId=${userId} lastUpdatedAfter=${createdAfterIso} marketplaces=${marketplaceIds.length})`,
     );
+    if (onProgress) await onProgress(5);
 
     if (orders.length === 0) {
       // Still advance the cursor so we don't keep re-querying the same window.
@@ -1515,8 +1530,18 @@ export class AmazonService {
 
     const vatSettings = await this.getVatSettingsForUser(userId);
     const seenAsinsInThisSync = new Set<string>();
+    const totalOrders = orders.length;
+    let lastReportedProgress = 5;
 
-    for (const order of orders) {
+    for (let orderIndex = 0; orderIndex < orders.length; orderIndex++) {
+      if (onProgress && totalOrders > 0) {
+        const p = 5 + Math.floor((20 * (orderIndex + 1)) / totalOrders);
+        if (p > lastReportedProgress) {
+          lastReportedProgress = p;
+          await onProgress(p);
+        }
+      }
+      const order = orders[orderIndex];
       const amazonOrderId = order.AmazonOrderId;
       if (!amazonOrderId) {
         // Skip orders without a stable ID.
@@ -2324,7 +2349,8 @@ export class AmazonService {
             Array.from(seenAsinsInThisSync),
             20,
           );
-          if (result.processed > 0 && this.logger.debug) {
+          // Only log when we actually updated something; processed=1 updated=0 is normal when ASIN returns 404 from Catalog API
+          if (result.updated > 0 && this.logger.debug) {
             this.logger.debug(
               `[AmazonService.syncRecentOrdersToDb] catalog category backfill: processed=${result.processed} updated=${result.updated}`,
             );
@@ -5824,10 +5850,10 @@ try {
       return a.localeCompare(b);
     });
 
-    // Catalog API: 2 req/sec per account. 500ms between calls keeps us under limit.
+    // Catalog API: strict quota (often 1–2 req/sec). Default 1s between calls to avoid 429.
     const catalogThrottleMs =
       Number(this.configService.get<string>('SPAPI_CATALOG_THROTTLE_MS')) ||
-      500;
+      1000;
 
     const userIds = await this.getOrgMemberUserIds(orgId);
     const needsBackfill = {
@@ -6053,23 +6079,39 @@ try {
         let sawAttributes = false;
         for (const marketplaceId of marketplaceIds) {
           let res: any;
-          try {
-            res = (await this.spApiClient.getCatalogItem(credentials, asin, [
-              marketplaceId,
-            ])) as any;
-          } catch (e) {
-            const msg = e instanceof Error ? e.message : String(e);
-            // Catalog Items frequently returns a per-marketplace NOT_FOUND even when the ASIN exists
-            // in another marketplace. Treat that as a normal miss and continue trying.
-            if (
-              msg.includes('/catalog/2022-04-01/items/') &&
-              msg.includes('(404)') &&
-              msg.toLowerCase().includes('not found in marketplace')
-            ) {
-              continue;
+          let skipToNextMarketplace = false;
+          for (let attempt = 0; attempt <= 2; attempt++) {
+            try {
+              res = (await this.spApiClient.getCatalogItem(credentials, asin, [
+                marketplaceId,
+              ])) as any;
+              break;
+            } catch (e) {
+              const msg = e instanceof Error ? e.message : String(e);
+              if (
+                msg.includes('/catalog/2022-04-01/items/') &&
+                msg.includes('(404)') &&
+                msg.toLowerCase().includes('not found in marketplace')
+              ) {
+                skipToNextMarketplace = true;
+                break;
+              }
+              const is429 =
+                msg.includes('429') ||
+                msg.includes('QuotaExceeded') ||
+                msg.toLowerCase().includes('quota exceeded');
+              if (is429 && attempt < 2) {
+                const waitMs = attempt === 0 ? 3000 : 6000;
+                this.logger.warn(
+                  `[backfillProductTitles] Catalog 429 for ASIN ${asin}; waiting ${waitMs / 1000}s before retry`,
+                );
+                await new Promise((r) => setTimeout(r, waitMs));
+                continue;
+              }
+              throw e;
             }
-            throw e;
           }
+          if (skipToNextMarketplace) continue;
           const payload = unwrapPayload(res);
 
           const summaries = payload?.summaries ?? payload?.Summaries ?? null;
@@ -6363,9 +6405,17 @@ try {
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
           const is404 = msg.includes('404') || msg.includes('NOT_FOUND');
-          const is429 = msg.includes('429') || msg.toLowerCase().includes('throttl');
+          const is429 =
+            msg.includes('429') ||
+            msg.includes('QuotaExceeded') ||
+            msg.toLowerCase().includes('quota exceeded') ||
+            msg.toLowerCase().includes('throttl');
           if (is429 && attempt < 2) {
-            await new Promise((r) => setTimeout(r, attempt === 0 ? 2000 : 5000));
+            const waitMs = attempt === 0 ? 3000 : 6000;
+            this.logger.warn(
+              `[fetchAndStoreCatalogCategoryForAsin] Catalog 429 for ASIN ${asin}; waiting ${waitMs / 1000}s before retry`,
+            );
+            await new Promise((r) => setTimeout(r, waitMs));
             continue;
           }
           if (is404) {
@@ -6377,7 +6427,7 @@ try {
         }
       }
       if (productType?.trim() || displayGroup?.trim()) break;
-      await new Promise((r) => setTimeout(r, 400));
+      await new Promise((r) => setTimeout(r, 1000));
     }
 
     const data: { productType?: string; displayGroup?: string } = {};
@@ -6480,7 +6530,7 @@ try {
           noDataCount += 1;
           if (noDataSample.length < 5) noDataSample.push(asin);
         }
-        await new Promise((r) => setTimeout(r, 500));
+        await new Promise((r) => setTimeout(r, 1000));
       }
     }
 
@@ -6510,7 +6560,7 @@ try {
           noDataCount += 1;
           if (noDataSample.length < 5) noDataSample.push(asin);
         }
-        await new Promise((r) => setTimeout(r, 500));
+        await new Promise((r) => setTimeout(r, 1000));
       }
     }
 

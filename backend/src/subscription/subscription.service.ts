@@ -1,9 +1,13 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { StripeService } from '../stripe/stripe.service';
 
 @Injectable()
 export class SubscriptionService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly stripeService: StripeService,
+  ) {}
 
   private isBillingBypassed(): boolean {
     const flag = (process.env.BYPASS_BILLING ?? '').toLowerCase();
@@ -33,7 +37,7 @@ export class SubscriptionService {
     return null;
   }
 
-  /** When the user will lose access (trial end or period end). Used to show "You will be locked out as of [date]". */
+  /** When the user will lose access (trial end or period end), or when the next billing date is (for trialing with card). */
   async getLockoutAt(userId: string): Promise<Date | null> {
     if (this.isBillingBypassed()) return null;
     const sub = await this.prisma.subscription.findUnique({
@@ -42,6 +46,16 @@ export class SubscriptionService {
     if (!sub || !sub.trialEndAt) return null;
     if (sub.status === 'trialing' || sub.status === 'canceled') return sub.trialEndAt;
     return null;
+  }
+
+  /** Subscription status for display: trialing (will convert to paid at trial end), active, canceled, or null. */
+  async getSubscriptionStatus(userId: string): Promise<string | null> {
+    if (this.isBillingBypassed()) return null;
+    const sub = await this.prisma.subscription.findUnique({
+      where: { userId },
+    });
+    if (!sub) return null;
+    return sub.status;
   }
 
   /** Sync our subscription record from Stripe subscription (e.g. when canceled or payment fails). */
@@ -74,6 +88,38 @@ export class SubscriptionService {
       where: { id: user.id },
       data: { clerkId: null },
     });
+  }
+
+  /**
+   * Cancel the user's subscription at period end (or trial end). Tells Stripe to cancel at period end,
+   * then sets our DB to status=canceled and trialEndAt=end date so access continues until then.
+   */
+  async cancelSubscription(userId: string): Promise<{ lockoutAt: Date }> {
+    if (this.isBillingBypassed()) {
+      throw new BadRequestException('Billing is bypassed');
+    }
+    const sub = await this.prisma.subscription.findUnique({
+      where: { userId },
+    });
+    if (!sub?.stripeSubscriptionId) {
+      throw new BadRequestException('No active subscription to cancel');
+    }
+    if (sub.status === 'canceled') {
+      const existing = sub.trialEndAt ?? new Date();
+      return { lockoutAt: existing };
+    }
+    const result = await this.stripeService.cancelSubscriptionAtPeriodEnd(sub.stripeSubscriptionId);
+    if (!result) {
+      throw new BadRequestException('Could not cancel subscription with Stripe');
+    }
+    await this.prisma.subscription.update({
+      where: { userId },
+      data: {
+        status: 'canceled',
+        trialEndAt: result.periodEnd,
+      },
+    });
+    return { lockoutAt: result.periodEnd };
   }
 
   async recordFromCheckout(params: {

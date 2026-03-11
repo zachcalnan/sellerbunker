@@ -20,7 +20,6 @@ import { LinkAmazonAccountDto } from './dto/link-amazon-account.dto';
 import { CreatePurchaseDto } from './dto/create-purchase.dto';
 import { UpdatePurchaseDto } from './dto/update-purchase.dto';
 import { ClerkAuthGuard } from '../auth/clerk-auth.guard';
-import { RedisService } from '../redis/redis.service';
 import { AmazonSyncService } from './amazon-sync.service';
 
 @Controller('amazon')
@@ -30,7 +29,6 @@ export class AmazonController {
     private readonly amazonService: AmazonService,
     private readonly amazonSyncService: AmazonSyncService,
     private readonly configService: ConfigService,
-    private readonly redis: RedisService,
   ) {}
 
   @Get('ping')
@@ -94,9 +92,11 @@ ping() {
       try {
         if (stateData.userId) {
           this.logger.log(
-            `[AmazonController] Enqueuing initial full-sync after OAuth (userId=${stateData.userId})`,
+            `[AmazonController] Enqueuing initial full-sync after OAuth (userId=${stateData.userId}, jobId=full-sync-${stateData.userId})`,
           );
           await this.amazonSyncService.enqueueFullSync(stateData.userId);
+        } else {
+          this.logger.warn('[AmazonController] OAuth state missing userId – cannot enqueue full-sync');
         }
       } catch (syncErr) {
         // Non-fatal: logging is enough, the link itself has already succeeded.
@@ -104,12 +104,49 @@ ping() {
         this.logger.warn(`Failed to enqueue initial Amazon sync: ${msg}. User can trigger sync from dashboard.`);
       }
 
+      const defaultFrontend =
+        this.configService.get<string>('FRONTEND_URL') || 'http://localhost:3000';
       const frontendBase = this.amazonService.getRedirectOriginAfterOAuth(
         stateData.returnOrigin,
-        this.configService.get<string>('FRONTEND_URL') || 'http://localhost:3000',
+        defaultFrontend,
       );
-      const dashboardUrl =
+      let dashboardUrl =
         frontendBase.replace(/\/$/, '') + '/dashboard?amazon_connected=1';
+      // When redirecting to a different origin (e.g. localhost), always pass this backend's API URL
+      // so the frontend can poll sync progress from the same backend that ran the callback.
+      // Workaround: without this, local frontend would poll local API and get 0% forever.
+      if (stateData.returnOrigin?.trim()) {
+        const publicApiUrl =
+          this.configService.get<string>('PUBLIC_API_URL') ||
+          (() => {
+            const u = this.configService.get<string>('AMAZON_REDIRECT_URI');
+            if (u) {
+              try {
+                const url = new URL(u);
+                url.pathname = '';
+                url.search = '';
+                return url.toString().replace(/\/$/, '');
+              } catch {
+                /* fall through to request-based fallback */
+              }
+            }
+            // Fallback: derive from the request that received the OAuth callback (this backend's public URL)
+            const req = res.req as { get?(name: string): string | undefined; protocol?: string };
+            const host = req.get?.('host');
+            if (host) {
+              const proto = req.get?.('x-forwarded-proto') || req.protocol || 'https';
+              return `${proto === 'https' ? 'https' : 'http'}://${host}`.replace(/\/$/, '');
+            }
+            return null;
+          })();
+        if (publicApiUrl) {
+          dashboardUrl += `&sync_progress_api=${encodeURIComponent(publicApiUrl)}`;
+        } else {
+          this.logger.warn(
+            '[AmazonController] Could not derive sync_progress_api for cross-origin redirect – sync bar may stay at 0% on the frontend. Set PUBLIC_API_URL or AMAZON_REDIRECT_URI.',
+          );
+        }
+      }
       return res.redirect(dashboardUrl);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -153,39 +190,14 @@ ping() {
 
   /**
    * Initial sync progress (0–100) for the post-connect full-sync. Used by topbar to show progress bar.
-   * Returns { progress: number, done: boolean }. Once 100 or key expired, done is true.
+   * Returns { progress: number, done: boolean }. When key is missing, checks for active full-sync job
+   * so the bar shows 0% "in progress" instead of appearing complete.
    */
   @UseGuards(ClerkAuthGuard)
   @Get('sync-progress')
   async getSyncProgress(@Req() req: { user: { userId: string } }) {
-    const parseProgress = (raw: string | null): number | null => {
-      if (!raw) return null;
-      try {
-        const { progress } = JSON.parse(raw) as { progress?: number };
-        const p = Number(progress);
-        return Number.isFinite(p) ? Math.min(100, Math.max(0, p)) : null;
-      } catch {
-        return null;
-      }
-    };
-
-    const [coreRaw, feeRaw] = await Promise.all([
-      this.redis.get(`amazon-initial-sync:${req.user.userId}`),
-      this.redis.get(`amazon-fee-sync:${req.user.userId}`),
-    ]);
-    const coreProgress = parseProgress(coreRaw) ?? 100;
-    const feeProgress = parseProgress(feeRaw);
-    const done = coreProgress >= 100;
-    const feeDone = feeProgress == null || feeProgress >= 100;
-    const stage = !done ? 'core' : !feeDone ? 'fees' : 'complete';
-
-    return {
-      progress: coreProgress,
-      done,
-      stage,
-      feeProgress: feeProgress ?? 100,
-      feeDone,
-    };
+    this.logger.log(`[sync-progress] GET received userId=${req.user.userId.slice(0, 8)}…`);
+    return this.amazonSyncService.getSyncProgress(req.user.userId);
   }
 
   @UseGuards(ClerkAuthGuard)

@@ -25,6 +25,14 @@ async function bootstrap() {
   app.use(bodyParser.json({ verify: rawBodyBuffer }));
   app.use(bodyParser.urlencoded({ verify: rawBodyBuffer, extended: true }));
 
+  // Log sync-progress requests so we can confirm the frontend is polling (even if auth fails later)
+  app.use((req: any, _res: any, next: () => void) => {
+    if (req.method === 'GET' && req.url?.startsWith('/api/amazon/sync-progress')) {
+      console.log(`[sync-progress] REQUEST ${req.method} ${req.url}`);
+    }
+    next();
+  });
+
   // Enable CORS (allow frontend URL + custom domain so payment redirect works on www.sellerbunker.com)
   const frontendUrl = configService.get('FRONTEND_URL') || 'http://localhost:3000';
   const corsOrigins = [

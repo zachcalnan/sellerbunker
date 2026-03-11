@@ -25,7 +25,8 @@ export class AmazonSyncProcessor extends WorkerHost {
     super();
   }
 
-  private async setInitialSyncProgress(userId: string, progress: number): Promise<void> {
+  /** Persist core sync progress to Redis so GET /sync-progress can return it after the job is removed. */
+  private async setCoreSyncProgress(userId: string, progress: number): Promise<void> {
     const key = `amazon-initial-sync:${userId}`;
     await this.redis.set(key, JSON.stringify({ progress }), SYNC_PROGRESS_TTL);
   }
@@ -80,10 +81,25 @@ export class AmazonSyncProcessor extends WorkerHost {
       }
       try {
         this.logger.log(`[full-sync] Starting for userId=${userId}`);
-        await this.setInitialSyncProgress(userId, 0);
-        // 1) Orders first – populates orders and order items for dashboard summary
-        await this.amazonService.syncRecentOrdersToDb(userId);
-        await this.setInitialSyncProgress(userId, 25);
+        // Job progress for live UI; Redis for durable record so 25/50/75/100 still show after job is removed
+        const setProgress = async (p: number) => {
+          await job.updateProgress(p);
+          await this.setCoreSyncProgress(userId, p);
+          try {
+            await this.amazonSyncService.setInitialSyncProgressInDb(userId, p);
+          } catch (e) {
+            this.logger.warn(`[full-sync] setInitialSyncProgressInDb failed (progress=${p}): ${e instanceof Error ? e.message : String(e)}`);
+          }
+        };
+        await setProgress(0);
+        await setProgress(1);
+        this.logger.log(`[full-sync] progress 1% (job id=${job.id})`);
+        // 1) Orders (0→25%) – populates orders and order items for dashboard
+        await this.amazonService.syncRecentOrdersToDb(userId, {
+          onProgress: setProgress,
+        });
+        await setProgress(25);
+        this.logger.log(`[full-sync] orders done → 25%`);
         // 2) FBA inventory, shipments, fee estimates – use activeOrgId or first org the user belongs to
         const user = await this.prisma.user.findUnique({
           where: { id: userId },
@@ -102,7 +118,8 @@ export class AmazonSyncProcessor extends WorkerHost {
         }
         if (orgIdForSync) {
           await this.amazonService.syncFbaInventory(orgIdForSync, userId);
-          await this.setInitialSyncProgress(userId, 50);
+          await setProgress(50);
+          this.logger.log(`[full-sync] inventory done → 50%`);
           const initialTitlesBackfillLimit = Math.min(
             300,
             Math.max(
@@ -139,16 +156,17 @@ export class AmazonSyncProcessor extends WorkerHost {
               );
               if (nextProgress <= lastShipmentProgress) return;
               lastShipmentProgress = nextProgress;
-              await this.setInitialSyncProgress(userId, nextProgress);
+              await setProgress(nextProgress);
             },
           });
-          await this.setInitialSyncProgress(userId, 75);
+          await setProgress(75);
+          this.logger.log(`[full-sync] shipments done → 75%`);
           await this.amazonSyncService.enqueueFeeSync(userId, orgIdForSync);
         } else {
           this.logger.warn(`[full-sync] userId=${userId} has no activeOrgId and no org membership; skipping inventory/shipments/fees`);
         }
-        await this.setInitialSyncProgress(userId, 100);
-        this.logger.log(`[full-sync] Completed for userId=${userId}`);
+        await setProgress(100);
+        this.logger.log(`[full-sync] Completed → 100%`);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         this.logger.error(`[full-sync] Failed for userId=${userId}: ${msg}`, err instanceof Error ? err.stack : undefined);

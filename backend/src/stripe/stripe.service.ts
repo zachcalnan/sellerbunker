@@ -56,4 +56,28 @@ export class StripeService {
       return null;
     }
   }
+
+  /**
+   * Cancel the subscription at the end of the current billing period (or trial end).
+   * Returns the date when access will end so we can store it in our DB.
+   */
+  async cancelSubscriptionAtPeriodEnd(subscriptionId: string): Promise<{ periodEnd: Date } | null> {
+    if (!this.stripe) return null;
+    try {
+      const sub = await this.stripe.subscriptions.update(subscriptionId, {
+        cancel_at_period_end: true,
+      }) as { current_period_end?: number; trial_end?: number };
+      const periodEndSec = sub.current_period_end;
+      const trialEndSec = sub.trial_end;
+      const end =
+        typeof periodEndSec === 'number'
+          ? new Date(periodEndSec * 1000)
+          : typeof trialEndSec === 'number'
+            ? new Date(trialEndSec * 1000)
+            : new Date();
+      return { periodEnd: end };
+    } catch {
+      return null;
+    }
+  }
 }

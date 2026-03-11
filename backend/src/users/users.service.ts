@@ -82,6 +82,7 @@ export class UsersService {
   /**
    * Ensure the user has an active org and membership. Creates a personal org
    * on first use. Returns the active org id.
+   * If the user's activeOrgId points to a deleted org, we clear it and create a new org.
    */
   async ensureActiveOrg(userId: string, email: string): Promise<string> {
     const user = (await this.prisma.user.findUnique({
@@ -90,22 +91,33 @@ export class UsersService {
     })) as any;
 
     if (user?.activeOrgId) {
-      // Ensure membership exists (defensive)
-      await (this.prisma as any).organizationMembership.upsert({
-        where: {
-          orgId_userId: {
+      const orgExists = await (this.prisma as any).organization.findUnique({
+        where: { id: user.activeOrgId },
+        select: { id: true },
+      });
+      if (orgExists) {
+        // Ensure membership exists (defensive)
+        await (this.prisma as any).organizationMembership.upsert({
+          where: {
+            orgId_userId: {
+              orgId: user.activeOrgId,
+              userId,
+            },
+          },
+          update: {},
+          create: {
             orgId: user.activeOrgId,
             userId,
+            role: 'owner',
           },
-        },
-        update: {},
-        create: {
-          orgId: user.activeOrgId,
-          userId,
-          role: 'owner',
-        },
+        });
+        return user.activeOrgId as string;
+      }
+      // Org was deleted (e.g. manual DB delete); clear stale reference so we create a new org below
+      await (this.prisma.user as any).update({
+        where: { id: userId },
+        data: { activeOrgId: null },
       });
-      return user.activeOrgId as string;
     }
 
     const baseName = email?.includes('@') ? email.split('@')[0] : 'Personal';

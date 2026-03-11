@@ -26,9 +26,21 @@ model User {
   sellerAccounts SellerAccount[]
   shipments      Shipment[]
   subscriptions  Subscription[]
+  initialSyncProgress InitialSyncProgress?
   activeOrg      Organization?            @relation("ActiveOrg", fields: [activeOrgId], references: [id])
 
   @@map("users")
+}
+
+// Single source of truth for "syncing" bar: survives Redis flush and job removal. Worker + enqueue write; API reads.
+model InitialSyncProgress {
+  id        String   @id @default(uuid())
+  userId    String   @unique @map("user_id")
+  progress  Int      // 0-100
+  updatedAt DateTime @updatedAt @map("updated_at")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("initial_sync_progress")
 }
 
 model Subscription {

@@ -591,7 +591,8 @@ export class AmazonSpApiClient {
       this.logger.log(`[SP-API] ${options.method} ${canonicalUri}`);
     }
 
-    const response = await this.httpRequest({
+    const max429Retries = 3;
+    let response = await this.httpRequest({
       hostname: host,
       path: pathWithQuery,
       method: options.method,
@@ -603,6 +604,31 @@ export class AmazonSpApiClient {
       },
       body: payload,
     });
+
+    for (let attempt = 0; attempt < max429Retries && response.statusCode === 429; attempt++) {
+      const retryAfterHeader = response.headers?.['retry-after'] ?? response.headers?.['Retry-After'];
+      let waitMs = 2000 * Math.pow(2, attempt);
+      if (retryAfterHeader) {
+        const parsed = parseInt(String(retryAfterHeader), 10);
+        if (Number.isFinite(parsed)) waitMs = parsed * 1000;
+      }
+      this.logger.warn(
+        `[SP-API] 429 QuotaExceeded for ${options.method} ${options.path}; waiting ${waitMs / 1000}s before retry (${attempt + 1}/${max429Retries})`,
+      );
+      await new Promise((r) => setTimeout(r, waitMs));
+      response = await this.httpRequest({
+        hostname: host,
+        path: pathWithQuery,
+        method: options.method,
+        headers: {
+          host,
+          'x-amz-access-token': accessToken,
+          'x-amz-date': amzDate,
+          Authorization: authorizationHeader,
+        },
+        body: payload,
+      });
+    }
 
     if (!response.body) {
       return null;
@@ -617,10 +643,11 @@ export class AmazonSpApiClient {
         response.statusCode === 404 &&
         (options.path?.includes('/listings/') ?? false) &&
         (response.body ?? '').includes('NOT_FOUND');
-      // Listings 404 NOT_FOUND = SKU not listed in that marketplace (expected). Do not log - not related to Orders API.
+      // Catalog 404 = ASIN not in catalog for that marketplace (discontinued, invalid, or not listed). Expected; skip log to reduce noise.
+      // Listings 404 NOT_FOUND = SKU not listed in that marketplace (expected). Do not log.
       const useDebugLog = isCatalog404;
       const log = useDebugLog ? this.logger.debug?.bind(this.logger) ?? this.logger.log : this.logger.warn.bind(this.logger);
-      if (!isListings404) {
+      if (!isListings404 && !isCatalog404) {
         log(`[SP-API] request failed: ${options.method} ${fullUrl} -> ${response.statusCode}`);
       }
       // Skip response body / error detail logs for Listings 404 NOT_FOUND (expected for unlisted SKUs).
@@ -749,7 +776,7 @@ export class AmazonSpApiClient {
     method: string;
     headers?: Record<string, string>;
     body?: string;
-  }): Promise<{ statusCode: number; body: string }> {
+  }): Promise<{ statusCode: number; body: string; headers?: Record<string, string> }> {
     const { hostname, path, method, headers, body } = options;
 
     return new Promise((resolve, reject) => {
@@ -770,9 +797,17 @@ export class AmazonSpApiClient {
           res.on('data', (chunk) => chunks.push(chunk as Buffer));
           res.on('end', () => {
             const responseBody = Buffer.concat(chunks).toString('utf8');
+            const headerRecord: Record<string, string> = {};
+            if (res.headers) {
+              for (const [k, v] of Object.entries(res.headers)) {
+                if (typeof v === 'string') headerRecord[k.toLowerCase()] = v;
+                else if (Array.isArray(v) && v[0]) headerRecord[k.toLowerCase()] = String(v[0]);
+              }
+            }
             resolve({
               statusCode: res.statusCode ?? 0,
               body: responseBody,
+              headers: headerRecord,
             });
           });
         },
