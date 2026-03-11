@@ -11,6 +11,7 @@ import {
 import { ClerkAuthGuard } from '../auth/clerk-auth.guard';
 import { UsersService } from '../users/users.service';
 import { UpdateVatSettingsDto } from './dto/update-vat-settings.dto';
+import { UpdateFixedCostsDto } from './dto/update-fixed-costs.dto';
 
 @Controller('orgs')
 export class OrgsController {
@@ -34,6 +35,25 @@ export class OrgsController {
       vatFlatRatePct: dto.vatFlatRatePct,
       vatRatePct: dto.vatRatePct,
       vatCostsIncludeVat: dto.vatCostsIncludeVat,
+    });
+  }
+
+  @UseGuards(ClerkAuthGuard)
+  @Get('fixed-costs')
+  async getFixedCosts(@Req() req: { user: { userId: string; orgId: string } }) {
+    return this.usersService.getOrgFixedCosts(req.user.orgId, req.user.userId);
+  }
+
+  @UseGuards(ClerkAuthGuard)
+  @Patch('fixed-costs')
+  async updateFixedCosts(
+    @Req() req: { user: { userId: string; orgId: string } },
+    @Body() dto: UpdateFixedCostsDto,
+  ) {
+    return this.usersService.updateOrgFixedCosts(req.user.orgId, req.user.userId, {
+      softwareCosts: dto.softwareCosts,
+      otherSubscriptions: dto.otherSubscriptions,
+      otherFixedCosts: dto.otherFixedCosts,
     });
   }
 

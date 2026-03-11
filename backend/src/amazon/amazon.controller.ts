@@ -261,6 +261,15 @@ ping() {
       ignoreCursor === '1' || ignoreCursor === 'true' || ignoreCursor === 'yes';
 
     if (direct) {
+      const { progress } = await this.amazonSyncService.getSyncProgress(req.user.userId);
+      if (progress < 100) {
+        this.logger.log(
+          `[sync] Rejecting direct full sync – initial sync in progress (${progress}%). User must wait for 100% or use queue.`,
+        );
+        throw new BadRequestException(
+          `Initial sync is still in progress (${Math.round(progress)}%). Wait for it to reach 100% before running a full order sync.`,
+        );
+      }
       await this.amazonService.syncRecentOrdersToDb(req.user.userId, {
         ignoreCursor: true,
         days: safeDays,
@@ -270,6 +279,23 @@ ping() {
 
     await this.amazonSyncService.enqueueFullSync(req.user.userId);
     return { status: 'queued' };
+  }
+
+  /**
+   * Wipe all synced Amazon data for the current user and restart initial sync.
+   * Keeps credentials so no re-auth. Use when testing and initial sync misbehaves.
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Post('wipe-sync-data')
+  async wipeSyncData(@Req() req: { user: { userId: string } }) {
+    try {
+      await this.amazonSyncService.wipeSyncDataAndRestartInitialSync(req.user.userId);
+      return { ok: true, message: 'Data wiped; initial sync restarted.' };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`[wipe-sync-data] failed: ${msg}`);
+      throw new BadRequestException(msg || 'Wipe failed');
+    }
   }
 
   /**

@@ -25,15 +25,50 @@ export class AmazonSyncProcessor extends WorkerHost {
     super();
   }
 
-  /** Persist core sync progress to Redis so GET /sync-progress can return it after the job is removed. */
-  private async setCoreSyncProgress(userId: string, progress: number): Promise<void> {
+  /** Persist core sync progress and phase to Redis so GET /sync-progress can return it. */
+  private async setCoreSyncProgress(userId: string, progress: number, phase?: string): Promise<void> {
     const key = `amazon-initial-sync:${userId}`;
-    await this.redis.set(key, JSON.stringify({ progress }), SYNC_PROGRESS_TTL);
+    const p = Math.min(100, Math.max(0, progress));
+    const data: { progress: number; phase?: string } = { progress: p };
+    if (phase != null) data.phase = phase;
+    await this.redis.set(key, JSON.stringify(data), SYNC_PROGRESS_TTL);
   }
 
   private async setFeeSyncProgress(userId: string, progress: number): Promise<void> {
     const key = `amazon-fee-sync:${userId}`;
     await this.redis.set(key, JSON.stringify({ progress }), SYNC_PROGRESS_TTL);
+  }
+
+  /** True when initial sync has reached 100%. */
+  private async isInitialSyncComplete(userId: string): Promise<boolean> {
+    const raw = await this.redis.get(`amazon-initial-sync:${userId}`);
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw) as { progress?: number };
+        const p = Number(parsed?.progress);
+        return Number.isFinite(p) && p >= 100;
+      } catch {
+        return false;
+      }
+    }
+    const row = await this.prisma.initialSyncProgress.findUnique({
+      where: { userId },
+      select: { progress: true },
+    });
+    const p = row?.progress ?? 0;
+    return Number.isFinite(p) && p >= 100;
+  }
+
+  /** Skip org if any member has initial sync still in progress (so batch jobs don't override limited initial sync). */
+  private async shouldSkipOrgForBatch(orgId: string): Promise<boolean> {
+    const members = await this.prisma.organizationMembership.findMany({
+      where: { orgId },
+      select: { userId: true },
+    });
+    for (const { userId } of members) {
+      if (!(await this.isInitialSyncComplete(userId))) return true;
+    }
+    return false;
   }
 
   /**
@@ -56,6 +91,10 @@ export class AmazonSyncProcessor extends WorkerHost {
 
       const errors: Array<{ orgId: string; error: string }> = [];
       for (const org of orgs) {
+        if (await this.shouldSkipOrgForBatch(org.id)) {
+          this.logger.log(`[AmazonSync] Skipping org ${org.id} – initial sync not yet complete`);
+          continue;
+        }
         try {
           await this.amazonService.syncFbaInventory(org.id);
         } catch (e: any) {
@@ -80,27 +119,24 @@ export class AmazonSyncProcessor extends WorkerHost {
         throw new Error('Missing userId for full-sync job');
       }
       try {
-        this.logger.log(`[full-sync] Starting for userId=${userId}`);
-        // Job progress for live UI; Redis for durable record so 25/50/75/100 still show after job is removed
-        const setProgress = async (p: number) => {
+        this.logger.log(`[full-sync] Starting for userId=${userId} (initial sync: all 30-day orders + finances, minimal inventory, last 30-day shipments, top 10 fee estimates)`);
+        const setProgress = async (p: number, phase?: string) => {
           await job.updateProgress(p);
-          await this.setCoreSyncProgress(userId, p);
+          await this.setCoreSyncProgress(userId, p, phase);
           try {
             await this.amazonSyncService.setInitialSyncProgressInDb(userId, p);
           } catch (e) {
             this.logger.warn(`[full-sync] setInitialSyncProgressInDb failed (progress=${p}): ${e instanceof Error ? e.message : String(e)}`);
           }
         };
-        await setProgress(0);
-        await setProgress(1);
-        this.logger.log(`[full-sync] progress 1% (job id=${job.id})`);
-        // 1) Orders (0→25%) – populates orders and order items for dashboard
+        await setProgress(0, 'Syncing orders');
+        // 1) All orders in last 30 days + finances per order (0→25%)
         await this.amazonService.syncRecentOrdersToDb(userId, {
-          onProgress: setProgress,
+          days: 30,
+          onProgress: (p) => setProgress(p, 'Syncing orders'),
         });
-        await setProgress(25);
-        this.logger.log(`[full-sync] orders done → 25%`);
-        // 2) FBA inventory, shipments, fee estimates – use activeOrgId or first org the user belongs to
+        await setProgress(25, 'Syncing orders');
+        this.logger.log(`[full-sync] 30-day orders + finances done → 25%`);
         const user = await this.prisma.user.findUnique({
           where: { id: userId },
           select: { activeOrgId: true },
@@ -113,63 +149,86 @@ export class AmazonSyncProcessor extends WorkerHost {
           });
           orgIdForSync = membership?.orgId ?? null;
           if (orgIdForSync) {
-            this.logger.log(`[full-sync] userId=${userId} has no activeOrgId; using first org ${orgIdForSync} for inventory/shipments/fees`);
+            this.logger.log(`[full-sync] userId=${userId} has no activeOrgId; using first org ${orgIdForSync}`);
           }
         }
         if (orgIdForSync) {
-          await this.amazonService.syncFbaInventory(orgIdForSync, userId);
-          await setProgress(50);
-          this.logger.log(`[full-sync] inventory done → 50%`);
-          const initialTitlesBackfillLimit = Math.min(
-            300,
-            Math.max(
-              0,
-              Number(process.env.AMAZON_INITIAL_TITLES_BACKFILL_LIMIT) || 100,
-            ),
-          );
-          if (initialTitlesBackfillLimit > 0) {
-            try {
-              const result = await this.amazonService.backfillProductTitles(
-                orgIdForSync,
-                initialTitlesBackfillLimit,
-                userId,
-              );
-              this.logger.log(
-                `[full-sync] Initial titles backfill for userId=${userId}: requested=${result?.requested ?? 0} updated=${result?.updated ?? 0} skipped=${result?.skipped ?? 0} errors=${result?.errorsCount ?? 0}`,
-              );
-            } catch (titleErr) {
-              const msg =
-                titleErr instanceof Error ? titleErr.message : String(titleErr);
-              this.logger.warn(
-                `[full-sync] Initial titles backfill failed for userId=${userId}: ${msg}`,
-              );
-            }
+          // 2) Minimal FBA inventory (first page, first marketplace) → 25→50%
+          await setProgress(25, 'Syncing inventory');
+          await this.amazonService.syncFbaInventory(orgIdForSync, userId, { maxPages: 1 });
+          await setProgress(50, 'Syncing inventory');
+          this.logger.log(`[full-sync] minimal inventory done → 50%`);
+          // 3) Last 30 days shipments → 50→75%
+          await setProgress(50, 'Syncing shipments');
+          try {
+            await this.amazonService.syncShipments(orgIdForSync, userId, {
+              days: 30,
+              onProgress: async ({ processed, total }) => {
+                if (total <= 0) return;
+                const nextProgress = Math.min(75, 50 + Math.floor((processed / total) * 25));
+                await setProgress(nextProgress, 'Syncing shipments');
+              },
+            });
+          } catch (shipErr) {
+            const msg = shipErr instanceof Error ? shipErr.message : String(shipErr);
+            this.logger.warn(`[full-sync] 30-day shipments failed: ${msg}`);
           }
-          // 3) Shipments – FBA shipment list and status
-          let lastShipmentProgress = 50;
-          await this.amazonService.syncShipments(orgIdForSync, userId, {
-            onProgress: async ({ processed, total }) => {
-              if (total <= 0) return;
-              const nextProgress = Math.min(
-                75,
-                50 + Math.floor((processed / total) * 25),
-              );
-              if (nextProgress <= lastShipmentProgress) return;
-              lastShipmentProgress = nextProgress;
-              await setProgress(nextProgress);
-            },
-          });
-          await setProgress(75);
-          this.logger.log(`[full-sync] shipments done → 75%`);
-          await this.amazonSyncService.enqueueFeeSync(userId, orgIdForSync);
+          await setProgress(75, 'Syncing shipments');
+          this.logger.log(`[full-sync] last 30-day shipments done → 75%`);
+          // 4) Fee estimates for top 10 in-stock → 75→100%
+          await setProgress(75, 'Syncing fee estimates');
+          try {
+            await this.amazonService.refreshFeeEstimatesForOrg(orgIdForSync, {
+              topByQuantityInStock: 10,
+              onProgress: async ({ processed, total }) => {
+                if (total <= 0) return;
+                const pct = processed / total;
+                const nextProgress = Math.min(100, 75 + Math.floor(pct * 25));
+                await setProgress(nextProgress, 'Syncing fee estimates');
+              },
+            });
+          } catch (feeErr) {
+            const msg = feeErr instanceof Error ? feeErr.message : String(feeErr);
+            this.logger.warn(`[full-sync] Top 10 fee estimate failed: ${msg}`);
+          }
+          await setProgress(100, 'Complete');
+          this.logger.log(`[full-sync] Initial sync completed → 100%. Enqueuing full inventory, shipments, titles in background.`);
+          await this.amazonSyncService.enqueuePostInitialSync(userId, orgIdForSync);
+          await this.amazonSyncService.enqueueTitlesBackfill(orgIdForSync, userId);
         } else {
-          this.logger.warn(`[full-sync] userId=${userId} has no activeOrgId and no org membership; skipping inventory/shipments/fees`);
+          this.logger.warn(`[full-sync] userId=${userId} has no activeOrgId and no org membership; skipping inventory/fees`);
         }
-        await setProgress(100);
+        await setProgress(100, 'Complete');
         this.logger.log(`[full-sync] Completed → 100%`);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         this.logger.error(`[full-sync] Failed for userId=${userId}: ${msg}`, err instanceof Error ? err.stack : undefined);
+        throw err;
+      }
+    }
+
+    if (job.name === 'post-initial-sync') {
+      const { userId, orgId } = job.data as AmazonSyncJobData;
+      if (!userId || !orgId) {
+        throw new Error('Missing userId or orgId for post-initial-sync job');
+      }
+      try {
+        this.logger.log(`[post-initial-sync] Starting for userId=${userId}, orgId=${orgId}`);
+        // Do NOT sync full orders here: that was causing "34 orders" to appear right after the bar hit 100%
+        // (initial sync correctly caps at 15; this job ran 2s later and pulled the rest). Full 30-day order
+        // backfill is done by the recurring orders-batch-sync job (every 10 min), so the user sees only 15
+        // until the next batch run.
+        await this.amazonService.syncFbaInventory(orgId, userId);
+        this.logger.log(`[post-initial-sync] full inventory done`);
+        await this.amazonService.syncShipments(orgId, userId);
+        this.logger.log(`[post-initial-sync] shipments done`);
+        this.logger.log(`[post-initial-sync] Completed for userId=${userId}, orgId=${orgId}`);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.logger.error(
+          `[post-initial-sync] Failed for userId=${userId}, orgId=${orgId}: ${msg}`,
+          err instanceof Error ? err.stack : undefined,
+        );
         throw err;
       }
     }
@@ -208,7 +267,23 @@ export class AmazonSyncProcessor extends WorkerHost {
     }
 
     if (job.name === 'orders-batch-sync') {
-      await this.amazonService.syncRecentOrdersForAllSellers();
+      const accounts = await this.prisma.sellerAccount.findMany({
+        where: { marketplace: 'amazon', isActive: true },
+        select: { userId: true },
+      });
+      this.logger.log(`[AmazonSync] orders-batch-sync: ${accounts.length} seller(s)`);
+      for (const { userId } of accounts) {
+        if (!(await this.isInitialSyncComplete(userId))) {
+          this.logger.log(`[AmazonSync] Skipping orders for userId=${userId.slice(0, 8)}… – initial sync not yet complete`);
+          continue;
+        }
+        try {
+          await this.amazonService.syncRecentOrdersToDb(userId, { days: 30 });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          this.logger.warn(`[AmazonSync] orders-batch-sync failed (userId=${userId}): ${msg}`);
+        }
+      }
     }
 
     if (job.name === 'shipments-batch-sync') {
@@ -220,6 +295,10 @@ export class AmazonSyncProcessor extends WorkerHost {
 
       const errors: Array<{ orgId: string; error: string }> = [];
       for (const org of orgs) {
+        if (await this.shouldSkipOrgForBatch(org.id)) {
+          this.logger.log(`[AmazonSync] Skipping shipments for org ${org.id} – initial sync not yet complete`);
+          continue;
+        }
         const member = await this.prisma.organizationMembership.findFirst({
           where: { orgId: org.id },
           select: { userId: true },
@@ -243,7 +322,7 @@ export class AmazonSyncProcessor extends WorkerHost {
     }
 
     if (job.name === 'fee-estimate-refresh') {
-      this.logger.log('[AmazonSync] Running fee estimate refresh for orgs with Amazon linked');
+      this.logger.log('[AmazonSync] Running fee estimate refresh (top 10 by stock only) for orgs with Amazon linked');
 
       // Only orgs that have at least one member with a linked Amazon account (avoid touching orphan/test orgs).
       const orgs = await this.prisma.organization.findMany({
@@ -263,8 +342,12 @@ export class AmazonSyncProcessor extends WorkerHost {
 
       const errors: Array<{ orgId: string; error: string }> = [];
       for (const org of orgs) {
+        if (await this.shouldSkipOrgForBatch(org.id)) {
+          this.logger.log(`[AmazonSync] Skipping fee-estimate-refresh for org ${org.id} – initial sync not yet complete`);
+          continue;
+        }
         try {
-          await this.amazonService.refreshFeeEstimatesForOrg(org.id);
+          await this.amazonService.refreshFeeEstimatesForOrg(org.id, { topByQuantityInStock: 10 });
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e);
           const isNotLinked = /amazon account not linked|link your amazon account/i.test(msg);
@@ -286,6 +369,19 @@ export class AmazonSyncProcessor extends WorkerHost {
       }
     }
 
+    if (job.name === 'titles-backfill') {
+      const { orgId, userId, limit } = job.data as { orgId?: string; userId?: string; limit?: number };
+      if (!orgId) {
+        throw new Error('Missing orgId for titles-backfill job');
+      }
+      const safeLimit = Math.min(300, Math.max(1, Number(limit) || 100));
+      this.logger.log(`[AmazonSync] Running titles backfill for org ${orgId} (limit=${safeLimit})`);
+      const result = await this.amazonService.backfillProductTitles(orgId, safeLimit, userId);
+      this.logger.log(
+        `[AmazonSync] Titles backfill org ${orgId}: requested=${result?.requested ?? 0} updated=${result?.updated ?? 0} skipped=${result?.skipped ?? 0} errors=${result?.errorsCount ?? 0}`,
+      );
+    }
+
     if (job.name === 'product-titles-backfill') {
       this.logger.log('[AmazonSync] Running product titles/images backfill for all orgs');
 
@@ -296,6 +392,10 @@ export class AmazonSyncProcessor extends WorkerHost {
       const limit = Math.min(200, Math.max(50, Number(process.env.AMAZON_TITLES_BACKFILL_LIMIT) || 100));
       const errors: Array<{ orgId: string; error: string }> = [];
       for (const org of orgs) {
+        if (await this.shouldSkipOrgForBatch(org.id)) {
+          this.logger.log(`[AmazonSync] Skipping product-titles-backfill for org ${org.id} – initial sync not yet complete`);
+          continue;
+        }
         try {
           const result = await this.amazonService.backfillProductTitles(org.id, limit);
           this.logger.log(

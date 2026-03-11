@@ -284,4 +284,51 @@ export class UsersService {
     });
     return this.getOrgVatSettings(orgId, userId);
   }
+
+  /**
+   * Get fixed costs for an org (caller must be a member).
+   */
+  async getOrgFixedCosts(orgId: string, userId: string) {
+    const isMember = await this.isOrgMember(userId, orgId);
+    if (!isMember) throw new NotFoundException('Not a member of this org');
+    const org = await (this.prisma as any).organization.findUnique({
+      where: { id: orgId },
+      select: {
+        fixedCostsSoftware: true,
+        fixedCostsOtherSubs: true,
+        fixedCostsOther: true,
+      },
+    });
+    if (!org) throw new NotFoundException('Organization not found');
+    return {
+      softwareCosts: org.fixedCostsSoftware != null ? Number(org.fixedCostsSoftware) : null,
+      otherSubscriptions: org.fixedCostsOtherSubs != null ? Number(org.fixedCostsOtherSubs) : null,
+      otherFixedCosts: org.fixedCostsOther != null ? Number(org.fixedCostsOther) : null,
+    };
+  }
+
+  /**
+   * Update fixed costs for an org (caller must be a member).
+   */
+  async updateOrgFixedCosts(
+    orgId: string,
+    userId: string,
+    data: {
+      softwareCosts?: number;
+      otherSubscriptions?: number;
+      otherFixedCosts?: number;
+    },
+  ) {
+    const isMember = await this.isOrgMember(userId, orgId);
+    if (!isMember) throw new NotFoundException('Not a member of this org');
+    const payload: Record<string, unknown> = {};
+    if (data.softwareCosts !== undefined) payload.fixedCostsSoftware = data.softwareCosts;
+    if (data.otherSubscriptions !== undefined) payload.fixedCostsOtherSubs = data.otherSubscriptions;
+    if (data.otherFixedCosts !== undefined) payload.fixedCostsOther = data.otherFixedCosts;
+    await (this.prisma as any).organization.update({
+      where: { id: orgId },
+      data: payload,
+    });
+    return this.getOrgFixedCosts(orgId, userId);
+  }
 }

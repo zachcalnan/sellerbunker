@@ -72,6 +72,9 @@ model Organization {
   vatFlatRatePct         Decimal?                 @map("vat_flat_rate_pct") @db.Decimal(7, 4) // flat rate %
   vatRatePct             Decimal?                @map("vat_rate_pct") @db.Decimal(7, 4) // standard rate % for costs/revenue
   vatCostsIncludeVat     Boolean?                 @map("vat_costs_include_vat") // true = user enters costs incl VAT
+  fixedCostsSoftware     Decimal?                 @map("fixed_costs_software") @db.Decimal(14, 2)
+  fixedCostsOtherSubs    Decimal?                 @map("fixed_costs_other_subs") @db.Decimal(14, 2)
+  fixedCostsOther        Decimal?                @map("fixed_costs_other") @db.Decimal(14, 2)
   members                OrganizationMembership[]
   usersWithActiveOrg     User[]                   @relation("ActiveOrg")
 

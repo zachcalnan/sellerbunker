@@ -1280,11 +1280,21 @@ export class AmazonService {
   /** Default days of orders to sync (used when opts.days not provided). */
   static readonly SYNC_ORDERS_DAYS_DEFAULT = 30;
 
+  /**
+   * Sync orders from SP-API into DB (including finances per order via listFinancialEventsByOrderId). Call paths:
+   * - full-sync (initial): days=30, no cap → all 30-day orders + finances.
+   * - orders-batch-sync (recurring): days=30; runs when initial sync is 100%.
+   * Optional maxOrders/maxOrderItems cap for testing or limited sync.
+   */
   async syncRecentOrdersToDb(
     userId: string,
     opts?: {
       ignoreCursor?: boolean;
       days?: number;
+      /** Optional cap on number of orders to process. */
+      maxOrders?: number;
+      /** Optional cap on total order line items to write. */
+      maxOrderItems?: number;
       /** Progress 0–25 for initial-sync progress bar (orders phase). */
       onProgress?: (progress: number) => void | Promise<void>;
     },
@@ -1303,7 +1313,7 @@ export class AmazonService {
     const nowSafe = new Date(Date.now() - 5 * 60 * 1000);
     const days = Math.max(
       1,
-      Math.min(365, Number(opts?.days ?? AmazonService.SYNC_ORDERS_DAYS_DEFAULT) || AmazonService.SYNC_ORDERS_DAYS_DEFAULT),
+      Math.min(30, Number(opts?.days ?? AmazonService.SYNC_ORDERS_DAYS_DEFAULT) || AmazonService.SYNC_ORDERS_DAYS_DEFAULT),
     );
     const onProgress = opts?.onProgress;
     if (onProgress) await onProgress(1);
@@ -1394,6 +1404,8 @@ export class AmazonService {
     };
 
     if (onProgress) await onProgress(2);
+    const maxOrders = opts?.maxOrders != null && opts.maxOrders > 0 ? Math.min(1000, Math.floor(opts.maxOrders)) : undefined;
+    const maxOrderItems = opts?.maxOrderItems != null && opts.maxOrderItems > 0 ? Math.min(1000, Math.floor(opts.maxOrderItems)) : undefined;
     const allOrders: SpApiOrder[] = [];
     let nextToken: string | undefined;
     try {
@@ -1409,6 +1421,11 @@ export class AmazonService {
         const page = data?.payload ?? data?.Payload;
         const pageOrders = page?.Orders ?? [];
         allOrders.push(...pageOrders);
+        if (maxOrders != null && allOrders.length >= maxOrders) {
+          allOrders.splice(maxOrders);
+          nextToken = undefined;
+          break;
+        }
         nextToken = page?.NextToken ?? undefined;
       } while (nextToken);
     } catch (err) {
@@ -1419,11 +1436,20 @@ export class AmazonService {
       throw err;
     }
 
-    const orders = allOrders;
-
-    this.logger.log(
-      `[syncRecentOrdersToDb] getOrders returned ${orders.length} orders (paginated; userId=${userId} lastUpdatedAfter=${createdAfterIso} marketplaces=${marketplaceIds.length})`,
-    );
+    // Enforce cap so we never process more than maxOrders when set (initial sync = 15 only)
+    const orders =
+      maxOrders != null && maxOrders > 0
+        ? allOrders.slice(0, maxOrders)
+        : allOrders;
+    if (maxOrders != null && orders.length > 0) {
+      this.logger.log(
+        `[syncRecentOrdersToDb] getOrders returned ${allOrders.length} order(s), processing ${orders.length} (capped at ${maxOrders} for initial sync; userId=${userId})`,
+      );
+    } else {
+      this.logger.log(
+        `[syncRecentOrdersToDb] getOrders returned ${orders.length} orders (paginated; userId=${userId} lastUpdatedAfter=${createdAfterIso} marketplaces=${marketplaceIds.length})`,
+      );
+    }
     if (onProgress) await onProgress(5);
 
     if (orders.length === 0) {
@@ -1530,10 +1556,28 @@ export class AmazonService {
 
     const vatSettings = await this.getVatSettingsForUser(userId);
     const seenAsinsInThisSync = new Set<string>();
-    const totalOrders = orders.length;
+    // When maxOrders is set (initial sync), never process more than that – second line of defense
+    const processLimit =
+      maxOrders != null && maxOrders > 0
+        ? Math.min(orders.length, maxOrders)
+        : orders.length;
+    const totalOrders = processLimit;
     let lastReportedProgress = 5;
 
-    for (let orderIndex = 0; orderIndex < orders.length; orderIndex++) {
+    if (maxOrders != null && maxOrders > 0) {
+      this.logger.log(
+        `[syncRecentOrdersToDb] initial sync: processing up to ${processLimit} orders, cap ${maxOrderItems ?? maxOrders} order items (userId=${userId})`,
+      );
+    }
+
+    let orderItemsWrittenThisSync = 0;
+    for (let orderIndex = 0; orderIndex < processLimit; orderIndex++) {
+      if (maxOrderItems != null && orderItemsWrittenThisSync >= maxOrderItems) {
+        this.logger.log(
+          `[syncRecentOrdersToDb] initial sync: reached cap of ${maxOrderItems} order items, stopping (userId=${userId})`,
+        );
+        break;
+      }
       if (onProgress && totalOrders > 0) {
         const p = 5 + Math.floor((20 * (orderIndex + 1)) / totalOrders);
         if (p > lastReportedProgress) {
@@ -1543,11 +1587,7 @@ export class AmazonService {
       }
       const order = orders[orderIndex];
       const amazonOrderId = order.AmazonOrderId;
-      if (!amazonOrderId) {
-        // Skip orders without a stable ID.
-
-        continue;
-      }
+      if (!amazonOrderId) continue;
 
       const rawTotal = parseFloat(order.OrderTotal?.Amount ?? '0');
       const totalAmount = Number.isNaN(rawTotal) ? 0 : rawTotal;
@@ -1567,71 +1607,103 @@ export class AmazonService {
         order.EarliestShipDate ??
         nowSafe.toISOString();
       const orderDate = new Date(orderDateStr);
-      if (Number.isNaN(orderDate.getTime())) {
-        continue;
-      }
+      if (Number.isNaN(orderDate.getTime())) continue;
 
       const shouldFetchLineItems =
         !orderItemsThrottled && !existingOrderItemOrderIds.has(amazonOrderId);
+      const shouldFetchFinances =
+        !financesUnauthorized &&
+        (shouldFetchLineItems || existingOrderItemOrderIds.has(amazonOrderId));
 
-      // Best-effort enrichment: order-items (tax/shipping charged) + finances (fees).
-      // If calls fail (missing role, sandbox limitations, etc.), we keep totals at zero.
       let taxChargedTotal = 0;
       let shippingChargedTotal = 0;
       let amazonFeesTotal = 0;
       let orderItems: any[] = [];
+      let finRes: any = null;
+      let itemsRes: any = null;
 
-      if (shouldFetchLineItems) {
+      if (shouldFetchLineItems && shouldFetchFinances) {
         try {
-          const itemsRes = (await this.spApiClient.getOrderItems(
-            credentials,
-            amazonOrderId,
-          )) as any;
+          [itemsRes, finRes] = await Promise.all([
+            this.spApiClient.getOrderItems(credentials, amazonOrderId),
+            this.spApiClient.listFinancialEventsByOrderId(credentials, amazonOrderId, { maxResultsPerPage: 100 }),
+          ]);
+          itemsRes = itemsRes as any;
+          finRes = finRes as any;
           orderItems = itemsRes?.payload?.OrderItems ?? [];
-          // Sum ItemTax and ShippingPrice where present
           for (const item of orderItems) {
             const itemTaxAmt = Number(item?.ItemTax?.Amount ?? 0);
             if (!Number.isNaN(itemTaxAmt)) taxChargedTotal += itemTaxAmt;
             const shipAmt = Number(item?.ShippingPrice?.Amount ?? 0);
             if (!Number.isNaN(shipAmt)) shippingChargedTotal += shipAmt;
           }
-
-          // Prefer item-level quantity when available.
           const qtyFromItems = orderItems.reduce(
-            (sum: number, item: any) =>
-              sum + Number(item?.QuantityOrdered ?? 0),
+            (sum: number, item: any) => sum + Number(item?.QuantityOrdered ?? 0),
             0,
           );
-          if (qtyFromItems > 0) {
-            quantity = qtyFromItems;
-          }
+          if (qtyFromItems > 0) quantity = qtyFromItems;
         } catch (err: any) {
-          // If we hit 429 once, stop calling orderItems for the remainder of this run.
           const status = err?.statusCode ?? err?.status ?? null;
           const body = typeof err?.message === 'string' ? err.message : '';
-          if (
-            status === 429 ||
-            body.includes('(429)') ||
-            body.includes('QuotaExceeded')
-          ) {
+          if (status === 429 || body.includes('(429)') || body.includes('QuotaExceeded')) {
             orderItemsThrottled = true;
           }
-
-          // Non-fatal; leave zeros.
-          console.warn(
-            '[AmazonService.syncRecentOrdersToDb] getOrderItems failed',
-            {
-              userId,
-              amazonOrderId,
-              err,
-              throttled: orderItemsThrottled,
-            },
+          console.warn('[AmazonService.syncRecentOrdersToDb] getOrderItems/listFinancialEvents failed', {
+            userId,
+            amazonOrderId,
+            err: err?.message ?? err,
+          });
+        }
+      } else if (shouldFetchLineItems) {
+        try {
+          itemsRes = (await this.spApiClient.getOrderItems(credentials, amazonOrderId)) as any;
+          orderItems = itemsRes?.payload?.OrderItems ?? [];
+          for (const item of orderItems) {
+            const itemTaxAmt = Number(item?.ItemTax?.Amount ?? 0);
+            if (!Number.isNaN(itemTaxAmt)) taxChargedTotal += itemTaxAmt;
+            const shipAmt = Number(item?.ShippingPrice?.Amount ?? 0);
+            if (!Number.isNaN(shipAmt)) shippingChargedTotal += shipAmt;
+          }
+          const qtyFromItems = orderItems.reduce(
+            (sum: number, item: any) => sum + Number(item?.QuantityOrdered ?? 0),
+            0,
           );
+          if (qtyFromItems > 0) quantity = qtyFromItems;
+        } catch (err: any) {
+          const status = err?.statusCode ?? err?.status ?? null;
+          const body = typeof err?.message === 'string' ? err.message : '';
+          if (status === 429 || body.includes('(429)') || body.includes('QuotaExceeded')) {
+            orderItemsThrottled = true;
+          }
+          console.warn('[AmazonService.syncRecentOrdersToDb] getOrderItems failed', {
+            userId,
+            amazonOrderId,
+            err: err?.message ?? err,
+          });
+        }
+      } else if (shouldFetchFinances) {
+        try {
+          finRes = (await this.spApiClient.listFinancialEventsByOrderId(credentials, amazonOrderId, { maxResultsPerPage: 100 })) as any;
+        } catch (err: any) {
+          const status = err?.statusCode ?? err?.status ?? null;
+          const msg = typeof err?.message === 'string' ? err.message : '';
+          if (
+            status === 403 ||
+            msg.includes('(403)') ||
+            msg.includes('"code": "Unauthorized"') ||
+            msg.includes('Access to requested resource is denied')
+          ) {
+            financesUnauthorized = true;
+          }
+          console.warn('[AmazonService.syncRecentOrdersToDb] listFinancialEventsByOrderId failed', {
+            userId,
+            amazonOrderId,
+            err: err?.message ?? err,
+          });
         }
       }
 
       // When Finances API returns settled fee data we save it per order item (feesSource='finances').
-      // Past sales then show exact concluded fees and profit; we never overwrite settled with estimates.
       const feeByOrderItemId = new Map<string, number>();
       const feeBySku = new Map<string, number>();
 
@@ -1707,159 +1779,128 @@ export class AmazonService {
         return out;
       };
 
-      if (!financesUnauthorized && shouldFetchLineItems) {
-        try {
-          const finRes = (await this.spApiClient.listFinancialEventsByOrderId(
-            credentials,
-            amazonOrderId,
-            { maxResultsPerPage: 100 },
-          )) as any;
-          // Sum all FeeAmount CurrencyAmount occurrences (usually negative for fees).
-          amazonFeesTotal = sumCurrencyAmountsByKey(finRes, 'FeeAmount');
-
-          const events = finRes?.payload?.FinancialEvents ?? {};
-          const shipmentLists = [
-            ...(events?.ShipmentEventList ?? []),
-            ...(events?.RefundEventList ?? []),
-            ...(events?.ChargebackEventList ?? []),
-            ...(events?.GuaranteeClaimEventList ?? []),
-          ];
-
-          for (const ev of shipmentLists) {
-            const items = ev?.ShipmentItemList ?? [];
-            for (const si of items) {
-              const fee =
-                sumFeeOrChargeList(si?.ItemFeeList) +
-                sumFeeOrChargeList(si?.ItemFeeAdjustmentList) +
-                sumFeeOrChargeList(si?.ItemChargeList);
-              const orderItemId = si?.OrderItemId as string | undefined;
-              const sku = si?.SellerSKU as string | undefined;
-              if (fee !== 0) {
-                if (orderItemId) addFee(feeByOrderItemId, orderItemId, fee);
-                if (sku) addFee(feeBySku, sku, fee);
-              }
-              // Parse fee breakdown from Finances API (ReferralFee, FBAFees, VariableClosingFee/DigitalServiceFee).
-              const b1 = parseFeeBreakdown(si?.ItemFeeList);
-              const b2 = parseFeeBreakdown(si?.ItemFeeAdjustmentList);
-              const r = b1.referral + b2.referral, f = b1.fba + b2.fba, d = b1.digital + b2.digital;
-              if (orderItemId) addFeeBreakdown(breakdownByOrderItemId, orderItemId, r, f, d);
-              if (sku) addFeeBreakdown(breakdownBySku, sku, r, f, d);
+      if (finRes) {
+        amazonFeesTotal = sumCurrencyAmountsByKey(finRes, 'FeeAmount');
+        const events = finRes?.payload?.FinancialEvents ?? {};
+        const shipmentLists = [
+          ...(events?.ShipmentEventList ?? []),
+          ...(events?.RefundEventList ?? []),
+          ...(events?.ChargebackEventList ?? []),
+          ...(events?.GuaranteeClaimEventList ?? []),
+        ];
+        for (const ev of shipmentLists) {
+          const items = ev?.ShipmentItemList ?? [];
+          for (const si of items) {
+            const fee =
+              sumFeeOrChargeList(si?.ItemFeeList) +
+              sumFeeOrChargeList(si?.ItemFeeAdjustmentList) +
+              sumFeeOrChargeList(si?.ItemChargeList);
+            const orderItemId = si?.OrderItemId as string | undefined;
+            const sku = si?.SellerSKU as string | undefined;
+            if (fee !== 0) {
+              if (orderItemId) addFee(feeByOrderItemId, orderItemId, fee);
+              if (sku) addFee(feeBySku, sku, fee);
             }
+            const b1 = parseFeeBreakdown(si?.ItemFeeList);
+            const b2 = parseFeeBreakdown(si?.ItemFeeAdjustmentList);
+            const r = b1.referral + b2.referral, f = b1.fba + b2.fba, d = b1.digital + b2.digital;
+            if (orderItemId) addFeeBreakdown(breakdownByOrderItemId, orderItemId, r, f, d);
+            if (sku) addFeeBreakdown(breakdownBySku, sku, r, f, d);
           }
-        } catch (err: any) {
-          const status = err?.statusCode ?? err?.status ?? null;
-          const msg = typeof err?.message === 'string' ? err.message : '';
-          if (
-            status === 403 ||
-            msg.includes('(403)') ||
-            msg.includes('"code": "Unauthorized"') ||
-            msg.includes('Access to requested resource is denied')
-          ) {
-            financesUnauthorized = true;
-          }
-
-          // Non-fatal; leave zeros.
-          console.warn(
-            '[AmazonService.syncRecentOrdersToDb] listFinancialEventsByOrderId failed',
-            { userId, amazonOrderId, err, financesUnauthorized },
-          );
         }
       }
 
-      // When we already have OrderItems for this order (skipped getOrderItems), still fetch Finances
-      // and backfill settled fee breakdown so Cost Breakdown and profit use actual fees.
-      if (
-        !financesUnauthorized &&
-        existingOrderItemOrderIds.has(amazonOrderId)
-      ) {
-        try {
-          const finRes = (await this.spApiClient.listFinancialEventsByOrderId(
-            credentials,
-            amazonOrderId,
-            { maxResultsPerPage: 100 },
-          )) as any;
-          const events = finRes?.payload?.FinancialEvents ?? {};
-          const shipmentLists = [
-            ...(events?.ShipmentEventList ?? []),
-            ...(events?.RefundEventList ?? []),
-            ...(events?.ChargebackEventList ?? []),
-            ...(events?.GuaranteeClaimEventList ?? []),
-          ];
-          for (const ev of shipmentLists) {
-            const items = ev?.ShipmentItemList ?? [];
-            for (const si of items) {
-              const fee =
-                sumFeeOrChargeList(si?.ItemFeeList) +
-                sumFeeOrChargeList(si?.ItemFeeAdjustmentList) +
-                sumFeeOrChargeList(si?.ItemChargeList);
-              const orderItemId = si?.OrderItemId as string | undefined;
-              const sku = si?.SellerSKU as string | undefined;
-              if (fee !== 0 && orderItemId) addFee(feeByOrderItemId, orderItemId, fee);
-              if (fee !== 0 && sku) addFee(feeBySku, sku, fee);
-              const b1 = parseFeeBreakdown(si?.ItemFeeList);
-              const b2 = parseFeeBreakdown(si?.ItemFeeAdjustmentList);
-              const r = b1.referral + b2.referral, f = b1.fba + b2.fba, d = b1.digital + b2.digital;
-              if (orderItemId) addFeeBreakdown(breakdownByOrderItemId, orderItemId, r, f, d);
-              if (sku) addFeeBreakdown(breakdownBySku, sku, r, f, d);
-            }
-          }
-          const orderRecord = await (this.prisma as any).order.findFirst({
-            where: { userId, orderId: amazonOrderId, marketplace: 'amazon' },
-            select: { id: true },
-          });
-          if (orderRecord && (breakdownByOrderItemId.size > 0 || feeByOrderItemId.size > 0)) {
-            const existingItems = await (this.prisma as any).orderItem.findMany({
-              where: { orderDbId: orderRecord.id },
-              select: {
-                id: true,
-                orderItemId: true,
-                revenueTotal: true,
-                cogsTotal: true,
-                quantity: true,
-                taxChargedTotal: true,
-                orderDate: true,
-              },
-            });
-            for (const oi of existingItems) {
-              const bid = breakdownByOrderItemId.get(oi.orderItemId);
-              const fee = feeByOrderItemId.get(oi.orderItemId) ?? 0;
-              if (!bid && fee === 0) continue;
-              const rev = Number(oi.revenueTotal ?? 0);
-              const cogs = oi.cogsTotal != null ? Number(oi.cogsTotal) : null;
-              const qty = Number(oi.quantity ?? 1) || 1;
-              const taxChargedNum = Number(oi.taxChargedTotal ?? 0) || 0;
-              const orderDateItem = oi.orderDate instanceof Date ? oi.orderDate : new Date(oi.orderDate);
-              const vatResult = this.computeOrderItemVatAndProfit(
-                rev,
-                cogs,
-                qty,
-                orderDateItem,
-                fee,
-                taxChargedNum,
-                vatSettings,
-              );
-              const updateData: any = {
-                feesSource: 'finances',
-                amazonFeesTotal: Number((fee ?? 0).toFixed(2)),
-                profit: vatResult.profit != null ? Number(vatResult.profit.toFixed(2)) : undefined,
-              };
-              if (bid) {
-                updateData.settledReferralFeeTotal = Number(bid.referral.toFixed(2));
-                updateData.settledFbaFeeTotal = Number(bid.fba.toFixed(2));
-                updateData.settledDigitalServiceFeeTotal = Number(bid.digital.toFixed(2));
+      // When we already have OrderItems for this order, fetch Finances if not yet done and backfill settled fee breakdown.
+      if (!financesUnauthorized && existingOrderItemOrderIds.has(amazonOrderId)) {
+        if (!finRes) {
+          try {
+            const finResBackfill = (await this.spApiClient.listFinancialEventsByOrderId(
+              credentials,
+              amazonOrderId,
+              { maxResultsPerPage: 100 },
+            )) as any;
+            const events = finResBackfill?.payload?.FinancialEvents ?? {};
+            const shipmentLists = [
+              ...(events?.ShipmentEventList ?? []),
+              ...(events?.RefundEventList ?? []),
+              ...(events?.ChargebackEventList ?? []),
+              ...(events?.GuaranteeClaimEventList ?? []),
+            ];
+            for (const ev of shipmentLists) {
+              const items = ev?.ShipmentItemList ?? [];
+              for (const si of items) {
+                const fee =
+                  sumFeeOrChargeList(si?.ItemFeeList) +
+                  sumFeeOrChargeList(si?.ItemFeeAdjustmentList) +
+                  sumFeeOrChargeList(si?.ItemChargeList);
+                const orderItemId = si?.OrderItemId as string | undefined;
+                const sku = si?.SellerSKU as string | undefined;
+                if (fee !== 0 && orderItemId) addFee(feeByOrderItemId, orderItemId, fee);
+                if (fee !== 0 && sku) addFee(feeBySku, sku, fee);
+                const b1 = parseFeeBreakdown(si?.ItemFeeList);
+                const b2 = parseFeeBreakdown(si?.ItemFeeAdjustmentList);
+                const r = b1.referral + b2.referral, f = b1.fba + b2.fba, d = b1.digital + b2.digital;
+                if (orderItemId) addFeeBreakdown(breakdownByOrderItemId, orderItemId, r, f, d);
+                if (sku) addFeeBreakdown(breakdownBySku, sku, r, f, d);
               }
-              await (this.prisma as any).orderItem.update({
-                where: { id: oi.id },
-                data: updateData,
-              });
             }
+          } catch (err: any) {
+            console.warn(
+              '[AmazonService.syncRecentOrdersToDb] backfill finances for existing order items failed',
+              { userId, amazonOrderId, err: err?.message ?? err },
+            );
           }
-        } catch (err: any) {
-          // Non-fatal; do not set financesUnauthorized so new orders can still try.
-          console.warn(
-            '[AmazonService.syncRecentOrdersToDb] backfill finances for existing order items failed',
-            { userId, amazonOrderId, err: err?.message ?? err },
-          );
+        }
+        const orderRecord = await (this.prisma as any).order.findFirst({
+          where: { userId, orderId: amazonOrderId, marketplace: 'amazon' },
+          select: { id: true },
+        });
+        if (orderRecord && (breakdownByOrderItemId.size > 0 || feeByOrderItemId.size > 0)) {
+          const existingItems = await (this.prisma as any).orderItem.findMany({
+            where: { orderDbId: orderRecord.id },
+            select: {
+              id: true,
+              orderItemId: true,
+              revenueTotal: true,
+              cogsTotal: true,
+              quantity: true,
+              taxChargedTotal: true,
+              orderDate: true,
+            },
+          });
+          for (const oi of existingItems) {
+            const bid = breakdownByOrderItemId.get(oi.orderItemId);
+            const fee = feeByOrderItemId.get(oi.orderItemId) ?? 0;
+            if (!bid && fee === 0) continue;
+            const rev = Number(oi.revenueTotal ?? 0);
+            const cogs = oi.cogsTotal != null ? Number(oi.cogsTotal) : null;
+            const qty = Number(oi.quantity ?? 1) || 1;
+            const taxChargedNum = Number(oi.taxChargedTotal ?? 0) || 0;
+            const orderDateItem = oi.orderDate instanceof Date ? oi.orderDate : new Date(oi.orderDate);
+            const vatResult = this.computeOrderItemVatAndProfit(
+              rev,
+              cogs,
+              qty,
+              orderDateItem,
+              fee,
+              taxChargedNum,
+              vatSettings,
+            );
+            const updateData: any = {
+              feesSource: 'finances',
+              amazonFeesTotal: Number((fee ?? 0).toFixed(2)),
+              profit: vatResult.profit != null ? Number(vatResult.profit.toFixed(2)) : undefined,
+            };
+            if (bid) {
+              updateData.settledReferralFeeTotal = Number(bid.referral.toFixed(2));
+              updateData.settledFbaFeeTotal = Number(bid.fba.toFixed(2));
+              updateData.settledDigitalServiceFeeTotal = Number(bid.digital.toFixed(2));
+            }
+            await (this.prisma as any).orderItem.update({
+              where: { id: oi.id },
+              data: updateData,
+            });
+          }
         }
       }
 
@@ -1983,6 +2024,12 @@ export class AmazonService {
       // Persist accurate line items for per-product profitability.
       // If we don't have orderItems (e.g. call failed), we skip creating OrderItem rows.
       if (orderItems.length > 0) {
+        // Initial sync cap: stop after we've written maxOrderItems line items so the UI shows that many rows.
+        const itemCap =
+          maxOrderItems != null
+            ? Math.max(0, maxOrderItems - orderItemsWrittenThisSync)
+            : orderItems.length;
+        const itemsToWrite = Math.min(orderItems.length, itemCap);
         // Compute total item revenue for proportional allocations when needed.
         const itemRevenues = orderItems.map((it: any) => {
           const revenue = Number(it?.ItemPrice?.Amount ?? 0);
@@ -1990,7 +2037,7 @@ export class AmazonService {
         });
         const totalItemRevenue = itemRevenues.reduce((a, b) => a + b, 0);
 
-        for (let idx = 0; idx < orderItems.length; idx++) {
+        for (let idx = 0; idx < itemsToWrite; idx++) {
           const it = orderItems[idx];
           const orderItemId = String(it?.OrderItemId ?? '');
           const sku = String(it?.SellerSKU ?? '');
@@ -2174,16 +2221,24 @@ export class AmazonService {
             },
           });
         }
+        orderItemsWrittenThisSync += itemsToWrite;
+        if (maxOrderItems != null && orderItemsWrittenThisSync >= maxOrderItems) {
+          this.logger.log(
+            `[syncRecentOrdersToDb] initial sync: wrote ${orderItemsWrittenThisSync} order items, stopping (userId=${userId})`,
+          );
+          break;
+        }
       }
     }
 
-    // Backfill any missing line items for orders in the window.
+    // Backfill any missing line items for orders in the window. Skip during initial sync so we don't add more than maxOrderItems.
     // This is important because:
     // - getOrders is incremental (cursor-based) and may not keep returning older orders
     // - getOrderItems can be rate-limited (429), so some orders won't get items on the first pass
     //
     // We retry a small number per run to stay under quotas.
     try {
+      if (maxOrders == null) {
       const missingOrders = await this.prisma.order.findMany({
         where: {
           userId,
@@ -2306,23 +2361,26 @@ export class AmazonService {
           // ignore other errors; we'll retry next run
         }
       }
+      }
     } catch {
       // non-fatal
     }
 
-    // Update sync cursor for this seller.
-    await this.prisma.sellerAccount.update({
-      where: {
-        userId_marketplace: {
-          userId,
-          marketplace: 'amazon',
+    // Update sync cursor only when doing a full sync. When maxOrders is set (initial sync), do NOT advance the cursor so post-initial-sync can run a full 30-day fetch.
+    if (maxOrders == null) {
+      await this.prisma.sellerAccount.update({
+        where: {
+          userId_marketplace: {
+            userId,
+            marketplace: 'amazon',
+          },
         },
-      },
-      // Cast to any until Prisma types are regenerated with ordersLastSyncedAt.
-      data: {
-        ordersLastSyncedAt: nowSafe,
-      } as any,
-    });
+        // Cast to any until Prisma types are regenerated with ordersLastSyncedAt.
+        data: {
+          ordersLastSyncedAt: nowSafe,
+        } as any,
+      });
+    }
 
     // Recompute daily KPI aggregates for this user based on the latest orders.
     try {
@@ -2335,51 +2393,8 @@ export class AmazonService {
       );
     }
 
-    // Backfill Product.productType/displayGroup for new ASINs seen in this sync.
-    if (seenAsinsInThisSync.size > 0) {
-      const membership = await this.prisma.organizationMembership.findFirst({
-        where: { userId },
-        select: { orgId: true },
-      });
-      if (membership?.orgId) {
-        try {
-          const result = await this.backfillCatalogCategoriesForNewAsins(
-            membership.orgId,
-            userId,
-            Array.from(seenAsinsInThisSync),
-            20,
-          );
-          // Only log when we actually updated something; processed=1 updated=0 is normal when ASIN returns 404 from Catalog API
-          if (result.updated > 0 && this.logger.debug) {
-            this.logger.debug(
-              `[AmazonService.syncRecentOrdersToDb] catalog category backfill: processed=${result.processed} updated=${result.updated}`,
-            );
-          }
-        } catch (e) {
-          // Non-fatal: don't fail order sync if catalog backfill fails
-          this.logger.warn(
-            `[AmazonService.syncRecentOrdersToDb] catalog category backfill failed: ${e instanceof Error ? e.message : String(e)}`,
-          );
-        }
-        // Backfill product title and imageUrl from Catalog API so orders page can show product images.
-        try {
-          const titleResult = await this.backfillProductTitles(
-            membership.orgId,
-            20,
-            userId,
-          );
-          if (titleResult?.updated != null && titleResult.updated > 0) {
-            this.logger.log(
-              `[AmazonService.syncRecentOrdersToDb] product title/image backfill: updated=${titleResult.updated} (orders page images)`,
-            );
-          }
-        } catch (e) {
-          this.logger.warn(
-            `[AmazonService.syncRecentOrdersToDb] product title/image backfill failed: ${e instanceof Error ? e.message : String(e)}`,
-          );
-        }
-      }
-    }
+    // Catalog category backfill for new ASINs is no longer run here (was blocking order sync).
+    // It runs during FBA inventory sync and can be added as a background job if needed.
   }
 
   /**
@@ -3944,6 +3959,10 @@ export class AmazonService {
     preferredUserId?: string,
     options?: {
       onProgress?: (progress: { processed: number; total: number }) => void | Promise<void>;
+      /** When set, only fetch shipments updated in the last N days (e.g. 30 for initial sync). Default 60. */
+      days?: number;
+      /** When set (e.g. 15), only fetch and process this many shipments. Used for limited sync. */
+      maxShipments?: number;
     },
   ): Promise<{
     synced: number;
@@ -4067,22 +4086,33 @@ export class AmazonService {
       return Array.isArray(list) ? list : [];
     };
 
-    // ——— Phase 1: First getShipments request must include all statuses so we get every shipment ID ———
+    // ——— Phase 1: Fetch shipments (last N days). First request uses DATE_RANGE; pagination uses NEXT_TOKEN. ———
+    const SHIPMENT_SYNC_DAYS = options?.days != null && options.days > 0 ? Math.min(90, Math.floor(options.days)) : 60;
+    const now = new Date();
+    const shipmentWindowStart = new Date(now.getTime() - SHIPMENT_SYNC_DAYS * 24 * 60 * 60 * 1000);
+    const lastUpdatedAfterIso = shipmentWindowStart.toISOString().split('.')[0] + 'Z';
+    const lastUpdatedBeforeIso = now.toISOString().split('.')[0] + 'Z';
+
     const listRows: any[] = [];
     let nextToken: string | undefined;
     await reportProgress(0, 100);
     this.logger.log(
-      `[syncShipments] Phase 1: getShipments with all ${ALL_SHIPMENT_STATUSES.length} statuses (required for full list): ${ALL_SHIPMENT_STATUSES.join(',')}`,
+      `[syncShipments] Phase 1: getShipments last ${SHIPMENT_SYNC_DAYS} days, all ${ALL_SHIPMENT_STATUSES.length} statuses`,
     );
     do {
       try {
         if (throttleMs > 0) await new Promise((r) => setTimeout(r, throttleMs));
-        const queryType: 'NEXT_TOKEN' | 'SHIPMENT' = nextToken ? 'NEXT_TOKEN' : 'SHIPMENT';
+        const queryType: 'NEXT_TOKEN' | 'DATE_RANGE' | 'SHIPMENT' = nextToken ? 'NEXT_TOKEN' : 'DATE_RANGE';
         const res = (await this.spApiClient.getFbaInboundShipments(credentials, {
           marketplaceId,
           queryType,
-          shipmentStatusList: nextToken ? undefined : [...ALL_SHIPMENT_STATUSES],
-          nextToken,
+          ...(nextToken
+            ? { nextToken }
+            : {
+                lastUpdatedAfter: lastUpdatedAfterIso,
+                lastUpdatedBefore: lastUpdatedBeforeIso,
+                shipmentStatusList: [...ALL_SHIPMENT_STATUSES],
+              }),
         })) as any;
         const payload = res?.payload ?? res;
         rawResponses.push(payload);
@@ -4091,8 +4121,15 @@ export class AmazonService {
           `[syncShipments] getShipments page: payload keys=${Object.keys(payload ?? {}).join(', ')} ShipmentData length=${parseShipmentList(payload).length}`,
         );
         const items = parseShipmentList(payload);
-        for (const row of items) listRows.push(row);
-        nextToken = payload?.NextToken ?? payload?.nextToken ?? undefined;
+        for (const row of items) {
+          listRows.push(row);
+          if (options?.maxShipments != null && listRows.length >= options.maxShipments) break;
+        }
+        if (options?.maxShipments != null && listRows.length >= options.maxShipments) {
+          nextToken = undefined;
+        } else {
+          nextToken = payload?.NextToken ?? payload?.nextToken ?? undefined;
+        }
       } catch (e) {
         const msg = (e as Error).message ?? 'Failed to fetch shipments';
         errors.push(msg);
@@ -4101,8 +4138,12 @@ export class AmazonService {
       }
     } while (nextToken);
 
-    this.logger.log(`[syncShipments] Phase 1 done: ${listRows.length} shipment(s) from API. Saving to DB.`);
-    if (listRows.length === 0) {
+    const rowsToProcess =
+      options?.maxShipments != null
+        ? listRows.slice(0, options.maxShipments)
+        : listRows;
+    this.logger.log(`[syncShipments] Phase 1 done: ${listRows.length} shipment(s) from API, processing ${rowsToProcess.length}. Saving to DB.`);
+    if (rowsToProcess.length === 0) {
       await reportProgress(100, 100);
     }
 
@@ -4111,8 +4152,8 @@ export class AmazonService {
 
     // Raw API data only: no DTO or mapper – we use the same objects from getFbaInboundShipments (JSON.parse(response.body)).
     // Log full first shipment object so no field is hidden by truncation (e.g. LastUpdatedDate, ClosedDate).
-    if (listRows.length > 0) {
-      const r0 = listRows[0] as Record<string, unknown>;
+    if (rowsToProcess.length > 0) {
+      const r0 = rowsToProcess[0] as Record<string, unknown>;
       this.logger.log(`[syncShipments] First row keys (raw API, no DTO): ${Object.keys(r0).join(', ')}`);
       const fullFirstRow = JSON.stringify(r0);
       if (fullFirstRow.length <= 4000) {
@@ -4122,7 +4163,7 @@ export class AmazonService {
         this.logger.log(`[syncShipments] First row tail: ...${fullFirstRow.slice(-1500)}`);
       }
     }
-    for (const row of listRows) {
+    for (const row of rowsToProcess) {
       const shipmentId = row.ShipmentId ?? row.shipmentId ?? row.ShipmentIdentifier ?? row.shipmentIdentifier;
       if (!shipmentId) continue;
       // Created: API may return CreatedDate; else parse from ShipmentName e.g. "FBA STA (11/03/2025 19:20)-BHX4"
@@ -4152,7 +4193,7 @@ export class AmazonService {
             row.Last_updated_date ??
             row.last_updated_date,
         );
-      if (listRows.indexOf(row) === 0) {
+      if (rowsToProcess.indexOf(row) === 0) {
         const dateLikeKeys = Object.keys(row).filter(
           (k) =>
             /date|updated|closed|modified|at$/i.test(k) &&
@@ -4221,31 +4262,28 @@ export class AmazonService {
           create: createPayload,
         });
         synced += 1;
-        if (listRows.length > 0) {
+        if (rowsToProcess.length > 0) {
           const stageProgress = Math.min(
             40,
-            Math.floor((synced / listRows.length) * 40),
+            Math.floor((synced / rowsToProcess.length) * 40),
           );
           await reportProgress(stageProgress, 100);
         }
-        this.logger.log(`[syncShipments] saved list data for ${shipmentId} (${synced}/${listRows.length})`);
+        this.logger.log(`[syncShipments] saved list data for ${shipmentId} (${synced}/${rowsToProcess.length})`);
       } catch (e) {
         const msg = (e as Error).message ?? String(e);
         errors.push(`Shipment ${shipmentId} save: ${msg}`);
       }
     }
 
-    // ——— Phase 2: For each shipment ID, fetch items + transport and update DB ———
-    this.logger.log(`[syncShipments] Phase 2: enriching ${listRows.length} shipment(s) with items and transport.`);
-    // Transport details are often 403 for historic/closed shipments; only request for statuses that typically have transport data.
+    // ——— Phase 2: For each shipment ID, fetch items + transport and update DB (batches of 4 in parallel) ———
+    this.logger.log(`[syncShipments] Phase 2: enriching ${rowsToProcess.length} shipment(s) with items and transport.`);
     const STATUSES_WITH_TRANSPORT = ['WORKING', 'READY_TO_SHIP', 'SHIPPED', 'IN_TRANSIT', 'DELIVERED'];
-    for (let i = 0; i < listRows.length; i++) {
-      const row = listRows[i];
+    const PHASE2_BATCH = 4;
+
+    const enrichOneShipment = async (row: any, index: number): Promise<void> => {
       const shipmentId = row.ShipmentId ?? row.shipmentId ?? row.ShipmentIdentifier ?? row.shipmentIdentifier;
-      if (!shipmentId) {
-        this.logger.warn(`[syncShipments] Phase 2 skip: no shipmentId in row`);
-        continue;
-      }
+      if (!shipmentId) return;
 
       let unitsSent = 0;
       let unitsReceived = 0;
@@ -4272,8 +4310,7 @@ export class AmazonService {
       let transportStatus: string | null = null;
       let deliveryDate: Date | null = null;
       const rowStatus = (row.ShipmentStatus ?? row.shipmentStatus ?? row.Status ?? row.status ?? '') as string;
-      const requestTransport = STATUSES_WITH_TRANSPORT.includes(rowStatus.toUpperCase());
-      if (requestTransport) {
+      if (STATUSES_WITH_TRANSPORT.includes(rowStatus.toUpperCase())) {
         try {
           if (throttleMs > 0) await new Promise((r) => setTimeout(r, Math.floor(throttleMs / 2)));
           const transportRes = (await this.spApiClient.getFbaInboundTransportDetails(credentials, String(shipmentId))) as any;
@@ -4284,13 +4321,7 @@ export class AmazonService {
           deliveryDate = parseDate(transport.DeliveryDate ?? transport.deliveryDate ?? transport.EstimatedDeliveryDate ?? transport.estimatedDeliveryDate) ?? null;
         } catch (e) {
           const msg = (e as Error).message ?? String(e);
-          const is403 = msg.includes('403') || msg.includes('Unauthorized');
-          if (is403) {
-            this.logger.debug(
-              `[syncShipments] transportDetails 403 for ${shipmentId} (often unavailable for historic/closed shipments)`,
-            );
-          } else {
-            this.logger.warn(`[syncShipments] transportDetails error for shipmentId=${shipmentId}: ${msg}`);
+          if (!msg.includes('403') && !msg.includes('Unauthorized')) {
             errors.push(`Shipment ${shipmentId} transportDetails: ${msg}`);
           }
         }
@@ -4316,11 +4347,16 @@ export class AmazonService {
         });
       } catch (e) {
         const msg = (e as Error).message ?? String(e);
-        this.logger.warn(`[syncShipments] Phase 2 DB update failed for ${shipmentId}: ${msg}`);
+        errors.push(`Shipment ${shipmentId} update: ${msg}`);
       }
-      if (listRows.length > 0) {
-        const stageProgress =
-          40 + Math.floor(((i + 1) / listRows.length) * 60);
+    };
+
+    for (let start = 0; start < rowsToProcess.length; start += PHASE2_BATCH) {
+      const chunk = rowsToProcess.slice(start, start + PHASE2_BATCH);
+      await Promise.all(chunk.map((row, j) => enrichOneShipment(row, start + j)));
+      if (rowsToProcess.length > 0) {
+        const done = Math.min(start + chunk.length, rowsToProcess.length);
+        const stageProgress = 40 + Math.floor((done / rowsToProcess.length) * 60);
         await reportProgress(Math.min(100, stageProgress), 100);
       }
     }
@@ -4333,8 +4369,9 @@ export class AmazonService {
   /**
    * Fetch FBA inventory summaries from SP-API and upsert Inventory rows
    * for products we already know about in this org (matched by SKU).
+   * @param opts.maxPages - If set (e.g. 1), only fetch this many pages per marketplace. Used for initial sync to get a minimal set quickly.
    */
-  async syncFbaInventory(orgId: string, preferredUserId?: string) {
+  async syncFbaInventory(orgId: string, preferredUserId?: string, opts?: { maxPages?: number }) {
     const debug = ['1', 'true', 'yes'].includes(
       (this.configService.get<string>('SPAPI_DEBUG_LOGS') ?? '').toLowerCase(),
     );
@@ -4531,11 +4568,13 @@ try {
 
 
       
+      const maxPages = opts?.maxPages;
       for (const marketplaceId of marketplaceIds) {
         marketplacesProcessed += 1;
         let nextToken: string | undefined = undefined;
+        let pagesFetched = 0;
 
-        // Paginate until exhausted
+        // Paginate until exhausted (or maxPages when set, e.g. initial sync)
         while (true) {
 
   if (throttleMs > 0) {
@@ -4663,6 +4702,16 @@ inventoryBySku.set(key, existing);
             upsertedInventoryRows += 1;
           }
 
+          pagesFetched += 1;
+          if (maxPages != null && maxPages > 0 && pagesFetched >= maxPages) {
+            if (debug) {
+              this.logger.debug(
+                `[FBA ${marketplaceId}] Stopping after ${pagesFetched} page(s) (maxPages=${maxPages})`,
+              );
+            }
+            break;
+          }
+
           // SP-API returns next page token in pagination (or payload); check all known locations
           const rawToken: string | undefined =
             res?.pagination?.nextToken ??
@@ -4693,6 +4742,8 @@ inventoryBySku.set(key, existing);
             );
           }
         }
+        // Initial sync: only first marketplace's first page(s) to get top 10 in-stock for fee estimates
+        if (maxPages != null && maxPages > 0) break;
       }
 
 
@@ -4885,40 +4936,17 @@ try {
       },
     });
   }
+  const writtenCount = aggregateBySku.size;
+  this.logger.log(`[syncFbaInventory] wrote ${writtenCount} inventory row(s) for org ${orgId}`);
+  if (writtenCount === 0) {
+    this.logger.warn(`[syncFbaInventory] FBA API returned no inventory for this org – check credentials and that the seller has FBA inventory. Existing DB rows are not deleted.`);
+  }
 } catch (e) {
   throw e;
 }
 
-    // Backfill: every ASIN from this inventory sync → call Catalog API, save productType/displayGroup when present; else move on. No errors.
-    const asinsFromInventory = [
-      ...new Set(
-        [...inventoryBySku.values()]
-          .map((r) => r.asin)
-          .filter((a): a is string => a != null && a.trim() !== ''),
-      ),
-    ];
-    try {
-      const result = await this.backfillCatalogCategoriesForNewAsins(
-        orgId,
-        ownerUserId,
-        asinsFromInventory.length > 0 ? asinsFromInventory : undefined,
-        250,
-      );
-      if (debug || result.requested > 0 || result.updated > 0 || result.noDataCount > 0) {
-        this.logger.log(
-          `[syncFbaInventory] catalog backfill: requested=${result.requested} processed=${result.processed} updated=${result.updated} noData=${result.noDataCount}`,
-        );
-        if (result.noDataCount > 0 && result.noDataSample?.length) {
-          this.logger.log(
-            `[syncFbaInventory] catalog noData sample ASINs: ${result.noDataSample.slice(0, 5).join(', ')}`,
-          );
-        }
-      }
-    } catch (e) {
-      this.logger.warn(
-        `[syncFbaInventory] catalog category backfill failed: ${e instanceof Error ? e.message : String(e)}`,
-      );
-    }
+    // Catalog category backfill no longer runs inline here (was adding 1s per ASIN + API time, e.g. 2.5+ min for 94 ASINs).
+    // Use the "Backfill catalog category" API or a dedicated job if needed.
 
 } // closes: syncFbaInventory
 
@@ -4933,6 +4961,8 @@ try {
     orgId: string,
     options?: {
       onProgress?: (progress: { processed: number; total: number }) => void | Promise<void>;
+      /** When set, only process this many products with highest total quantity in stock (for initial sync quick pass). */
+      topByQuantityInStock?: number;
     },
   ): Promise<{
     skipped?: boolean;
@@ -5012,6 +5042,144 @@ try {
     let errorCount = 0;
     let totalProcessed = 0;
 
+    const topN = options?.topByQuantityInStock;
+    const isTopNPass = topN != null && topN > 0;
+    if (isTopNPass) {
+      const invRows = await this.prisma.inventory.findMany({
+        where: { userId: { in: userIds } },
+        orderBy: { totalQty: 'desc' },
+        take: topN * 2,
+        select: { productId: true },
+      });
+      const productIds = [...new Set(invRows.map((r) => r.productId))].slice(0, topN);
+      if (productIds.length === 0) {
+        this.logger.log(`[refreshFeeEstimatesForOrg] Top-${topN} pass: no inventory rows, skipping`);
+        return { updatedCount: 0, errorCount: 0, skippedCount: 0, total: 0, processed: 0 };
+      }
+      const products = await this.prisma.product.findMany({
+        where: { id: { in: productIds }, sku: { not: '' } },
+        select: { id: true, sku: true, asin: true, currentListedPrice: true },
+      });
+      this.logger.log(`[refreshFeeEstimatesForOrg] Top-${topN} pass: processing ${products.length} products only (initial sync); full fee sync runs in background`);
+      await options?.onProgress?.({ processed: 0, total: products.length });
+      const currentListedPriceByProductId = new Map<string, number>();
+      for (const p of products) {
+        const raw = (p as any).currentListedPrice;
+        if (raw != null) {
+          const n = typeof raw === 'number' && Number.isFinite(raw) ? raw : Number(String(raw));
+          if (Number.isFinite(n) && n > 0) currentListedPriceByProductId.set(p.id, n);
+        }
+      }
+      const toProcess = products.slice(0, topN);
+      const delayMsTop = 200;
+      let updatedCountTop = 0;
+      let errorCountTop = 0;
+      let processedTop = 0;
+      for (const product of toProcess) {
+        const callOnce = async (useAsin: boolean): Promise<boolean> => {
+          let currentListedPriceToSave: number | null = null;
+          if (sellerId) {
+            try {
+              const listingRes = await this.spApiClient.getListingsItem(
+                credentials,
+                sellerId,
+                product.sku,
+                [marketplaceId],
+                ['summaries', 'offers', 'attributes'],
+              );
+              const parsed = this.parseListingsItemPrice(listingRes as any);
+              if (parsed != null && parsed > 0) currentListedPriceToSave = parsed;
+            } catch {
+              // keep existing
+            }
+          }
+          const soldPrice = getSoldPrice(product.id);
+          const storedListedPrice = currentListedPriceByProductId.get(product.id) ?? null;
+          const listingPriceAmount =
+            soldPrice ?? currentListedPriceToSave ?? storedListedPrice ?? defaultListingPrice;
+          const params = {
+            marketplaceId,
+            isAmazonFulfilled: true,
+            listingPriceAmount,
+            listingPriceCurrency: listingCurrency,
+          };
+          try {
+            const res = useAsin && product.asin
+              ? ((await this.spApiClient.getMyFeesEstimateForASIN(credentials, product.asin, params)) as any)
+              : ((await this.spApiClient.getMyFeesEstimateForSKU(credentials, product.sku, params)) as any);
+            const breakdown = this.parseFeesEstimateBreakdown(res);
+            const hasValidTotal = breakdown.total != null && Number.isFinite(breakdown.total);
+            const ref = breakdown.referralFee ?? 0;
+            const fba = breakdown.fbaFee ?? 0;
+            const digitalFromApi = breakdown.digitalServiceFee ?? 0;
+            const digitalToSave =
+              digitalFromApi > 0
+                ? digitalFromApi
+                : credentials.region === 'eu' && (ref !== 0 || fba !== 0)
+                  ? Math.round((ref + fba) * 0.02 * 100) / 100
+                  : undefined;
+            const feeResult = (res as any)?.payload?.FeesEstimateResult ?? (res as any)?.FeesEstimateResult;
+            const priceInFeeRes = feeResult?.FeesEstimateIdentifier?.PriceToEstimateFees?.ListingPrice
+              ?? feeResult?.feesEstimateIdentifier?.priceToEstimateFees?.listingPrice;
+            const amountFromFeeRaw = priceInFeeRes?.Amount ?? priceInFeeRes?.amount;
+            const amountFromFee = typeof amountFromFeeRaw === 'number' && Number.isFinite(amountFromFeeRaw)
+              ? amountFromFeeRaw
+              : typeof amountFromFeeRaw === 'string'
+                ? parseFloat(amountFromFeeRaw)
+                : null;
+            const listingPriceToPersist =
+              currentListedPriceToSave
+              ?? (amountFromFee != null && !Number.isNaN(amountFromFee) && amountFromFee > 0 ? amountFromFee : null)
+              ?? currentListedPriceByProductId.get(product.id)
+              ?? listingPriceAmount;
+            const persistPrice = listingPriceToPersist !== defaultListingPrice
+              || currentListedPriceToSave != null
+              || currentListedPriceByProductId.has(product.id);
+            await this.prisma.product.update({
+              where: { id: product.id },
+              data: {
+                feeEstimateRawJson: res ?? undefined,
+                ...(persistPrice ? { currentListedPrice: listingPriceToPersist } : {}),
+                ...(hasValidTotal
+                  ? {
+                      estimatedAmazonFeePerUnit: breakdown.total,
+                      estimatedReferralFeePerUnit: breakdown.referralFee ?? undefined,
+                      estimatedFbaFeePerUnit: breakdown.fbaFee ?? undefined,
+                      estimatedDigitalServiceFeePerUnit: digitalToSave ?? breakdown.digitalServiceFee ?? undefined,
+                      estimatedAmazonFeeUpdatedAt: new Date(),
+                    }
+                  : {}),
+              },
+            });
+            return hasValidTotal;
+          } catch {
+            return false;
+          }
+        };
+        try {
+          await new Promise((r) => setTimeout(r, delayMsTop));
+          let ok = product.asin ? await callOnce(true) : await callOnce(false);
+          if (!ok && product.asin) ok = await callOnce(false);
+          if (ok) updatedCountTop += 1;
+          else errorCountTop += 1;
+        } catch {
+          errorCountTop += 1;
+        }
+        processedTop += 1;
+        await options?.onProgress?.({ processed: processedTop, total: toProcess.length });
+      }
+      this.logger.log(`[refreshFeeEstimatesForOrg] Top-${topN} pass done: updated=${updatedCountTop} errors=${errorCountTop}`);
+      return {
+        updatedCount: updatedCountTop,
+        errorCount: errorCountTop,
+        skippedCount: Math.max(0, toProcess.length - updatedCountTop - errorCountTop),
+        total: toProcess.length,
+        processed: toProcess.length,
+      };
+    }
+
+    // Full pass: only when topByQuantityInStock was NOT set (e.g. fee-sync job or manual Refresh fees).
+    // Initial sync only runs the top-10 block above and returns; this loop must never run for initial sync.
     await options?.onProgress?.({ processed: 0, total: totalProductCount });
 
     // Paginate until all products are processed (same pattern as FBA inventory: loop until no more pages).
@@ -6530,7 +6698,7 @@ try {
           noDataCount += 1;
           if (noDataSample.length < 5) noDataSample.push(asin);
         }
-        await new Promise((r) => setTimeout(r, 1000));
+        await new Promise((r) => setTimeout(r, 200));
       }
     }
 
@@ -6560,7 +6728,7 @@ try {
           noDataCount += 1;
           if (noDataSample.length < 5) noDataSample.push(asin);
         }
-        await new Promise((r) => setTimeout(r, 1000));
+        await new Promise((r) => setTimeout(r, 200));
       }
     }
 

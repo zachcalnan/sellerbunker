@@ -161,10 +161,16 @@ export class AmazonSyncService implements OnModuleInit {
 
   async enqueueFullSync(userId: string): Promise<void> {
     this.logger.log(`Enqueuing full-sync job (userId=${userId})`);
-    // Set Redis to 0 immediately so the frontend sees "0%" as soon as it polls after redirect
+    // Set DB first so batch jobs (orders-batch-sync etc.) see progress 0 and skip this user until initial sync hits 100%
+    try {
+      await this.setInitialSyncProgressInDb(userId, 0);
+    } catch (e) {
+      this.logger.warn(`setInitialSyncProgressInDb(0) failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    // Set Redis to 0 and phase so the frontend sees "0% – Fetching orders" as soon as it polls after redirect
     await this.redis.set(
       `amazon-initial-sync:${userId}`,
-      JSON.stringify({ progress: 0 }),
+      JSON.stringify({ progress: 0, phase: 'Fetching orders' }),
       SYNC_PROGRESS_TTL,
     );
     await this.redis.del(`amazon-fee-sync:${userId}`);
@@ -176,11 +182,6 @@ export class AmazonSyncService implements OnModuleInit {
       `Full-sync for userId=${userId}`,
       { delay: 2500 },
     );
-    try {
-      await this.setInitialSyncProgressInDb(userId, 0);
-    } catch (e) {
-      this.logger.warn(`setInitialSyncProgressInDb(0) failed: ${e instanceof Error ? e.message : String(e)}`);
-    }
   }
 
   /**
@@ -194,16 +195,19 @@ export class AmazonSyncService implements OnModuleInit {
     stage: 'core' | 'fees' | 'complete';
     feeProgress: number;
     feeDone: boolean;
+    corePhaseEndPct: number;
+    phase?: string;
   }> {
     this.logger.log(`[sync-progress] getSyncProgress called userId=${userId.slice(0, 8)}…`);
-    const parseProgress = (raw: string | null): number | null => {
-      if (!raw) return null;
+    const parseRedisSync = (raw: string | null): { progress: number | null; phase?: string } => {
+      if (!raw) return { progress: null };
       try {
-        const { progress } = JSON.parse(raw) as { progress?: number };
-        const p = Number(progress);
-        return Number.isFinite(p) ? Math.min(100, Math.max(0, p)) : null;
+        const parsed = JSON.parse(raw) as { progress?: number; phase?: string };
+        const p = Number(parsed.progress);
+        const progress = Number.isFinite(p) ? Math.min(100, Math.max(0, p)) : null;
+        return { progress, phase: typeof parsed.phase === 'string' ? parsed.phase : undefined };
       } catch {
-        return null;
+        return { progress: null };
       }
     };
 
@@ -217,7 +221,8 @@ export class AmazonSyncService implements OnModuleInit {
     const fullSyncJob = await this.queue.getJob(`full-sync-${userId}`);
     let coreProgress: number;
     let jobState: string | null = null;
-    const fromRedis = parseProgress(await this.redis.get(coreKey));
+    const redisSync = parseRedisSync(await this.redis.get(coreKey));
+    const fromRedis = redisSync.progress;
     let progressSource: 'db' | 'job' | 'redis' | 'default';
     if (fullSyncJob) {
       jobState = await fullSyncJob.getState();
@@ -250,12 +255,38 @@ export class AmazonSyncService implements OnModuleInit {
       progressSource = dbRow != null ? 'db' : fromRedis != null ? 'redis' : 'default';
     }
 
-    // Fee progress: still in Redis (fee-sync is a separate job)
+    // Fee progress: fee-sync is a background job; we do NOT block "initial sync complete" on it.
+    // Core = minimal inventory (first page) + top 10 fee estimates. When that hits 100%, initial sync is done.
     const feeRaw = await this.redis.get(`amazon-fee-sync:${userId}`);
-    const feeProgress = parseProgress(feeRaw);
+    let feeProgress = parseRedisSync(feeRaw).progress;
     const done = coreProgress >= 100;
     const feeDone = feeProgress == null || feeProgress >= 100;
-    const stage = !done ? 'core' : !feeDone ? 'fees' : 'complete';
+    const phase = redisSync.phase;
+    const isFeePhase = typeof phase === 'string' && /fee|Fee/.test(phase);
+
+    // During initial sync, fee phase runs 75→100%. Always use corePhaseEndPct 75 when stage is "fees" so the bar never drops to 50%.
+    const feePhaseStartPct = 75;
+    const stage: 'core' | 'fees' | 'complete' = done ? 'complete' : isFeePhase ? 'fees' : 'core';
+    const corePhaseEndPct = stage === 'fees' ? feePhaseStartPct : 50;
+
+    // When in fee phase (initial sync), derive feeProgress from coreProgress so the bar shows 75→100.
+    if (stage === 'fees' && feeProgress == null && coreProgress >= feePhaseStartPct) {
+      feeProgress = Math.min(100, Math.round(((coreProgress - feePhaseStartPct) / (100 - feePhaseStartPct)) * 100));
+    }
+
+    // When phase is missing during sync, infer label so the first phase always shows "Syncing orders" etc.
+    const resolvedPhase =
+      phase != null && phase.trim() !== ''
+        ? phase
+        : !done && coreProgress < 100
+          ? coreProgress < 25
+            ? 'Syncing orders'
+            : coreProgress < 50
+              ? 'Syncing inventory'
+              : coreProgress < 75
+                ? 'Syncing shipments'
+                : 'Syncing fee estimates'
+          : undefined;
 
     this.logger.log(
       `[sync-progress] userId=${userId.slice(0, 8)}… jobState=${jobState ?? 'none'} progress=${coreProgress} from=${progressSource}`,
@@ -266,9 +297,6 @@ export class AmazonSyncService implements OnModuleInit {
       );
     }
 
-    // Percentage at which core phase (orders → inventory → shipments) ends; fees run from this to 100.
-    const corePhaseEndPct = 75;
-
     return {
       progress: coreProgress,
       done,
@@ -276,6 +304,7 @@ export class AmazonSyncService implements OnModuleInit {
       feeProgress: feeProgress ?? 100,
       feeDone,
       corePhaseEndPct,
+      phase: resolvedPhase,
     };
   }
 
@@ -292,5 +321,67 @@ export class AmazonSyncService implements OnModuleInit {
       { userId, orgId },
       `Fee-sync for userId=${userId}`,
     );
+  }
+
+  /** Enqueue titles backfill to run in background after initial sync (Catalog API, 1 req per product). */
+  async enqueueTitlesBackfill(orgId: string, userId: string): Promise<void> {
+    const limit = Math.min(
+      300,
+      Math.max(0, Number(process.env.AMAZON_INITIAL_TITLES_BACKFILL_LIMIT) || 100),
+    );
+    if (limit <= 0) return;
+    this.logger.log(`Enqueuing titles-backfill job (orgId=${orgId}, limit=${limit})`);
+    await this.enqueueUniqueJob(
+      'titles-backfill',
+      `titles-backfill-${orgId}`,
+      { orgId, userId, limit },
+      `Titles backfill for org ${orgId}`,
+    );
+  }
+
+  /**
+   * Enqueue post-initial-sync: orders, full inventory, shipments.
+   * Runs after initial sync (minimal inventory + top 10 fees) hits 100%.
+   */
+  async enqueuePostInitialSync(userId: string, orgId: string): Promise<void> {
+    this.logger.log(`Enqueuing post-initial-sync job (userId=${userId}, orgId=${orgId})`);
+    await this.enqueueUniqueJob(
+      'post-initial-sync',
+      `post-initial-sync-${userId}`,
+      { userId, orgId },
+      `Post-initial sync for userId=${userId}`,
+      { delay: 2000 },
+    );
+  }
+
+  /**
+   * Wipe all Amazon-synced data for a user and re-enqueue initial sync.
+   * Keeps SellerAccount (credentials) so they don't have to re-auth.
+   * Use for testing when initial sync misbehaves.
+   */
+  async wipeSyncDataAndRestartInitialSync(userId: string): Promise<void> {
+    this.logger.log(`[wipe-sync-data] Starting for userId=${userId}`);
+    await this.prisma.orderItem.deleteMany({ where: { userId } });
+    await this.prisma.order.deleteMany({ where: { userId } });
+    await this.prisma.inventory.deleteMany({ where: { userId } });
+    await this.prisma.inventoryByMarketplace.deleteMany({ where: { userId } });
+    await this.prisma.shipment.deleteMany({ where: { userId } });
+    await this.prisma.initialSyncProgress.deleteMany({ where: { userId } });
+    await this.redis.del(`amazon-initial-sync:${userId}`);
+    await this.redis.del(`amazon-fee-sync:${userId}`);
+    await this.prisma.sellerAccount.updateMany({
+      where: { userId, marketplace: 'amazon' },
+      data: { ordersLastSyncedAt: null } as any,
+    });
+    for (const jobId of [`full-sync-${userId}`, `post-initial-sync-${userId}`]) {
+      try {
+        const job = await this.queue.getJob(jobId);
+        if (job) await job.remove();
+      } catch {
+        // Job may not exist
+      }
+    }
+    this.logger.log(`[wipe-sync-data] Data wiped for userId=${userId}; enqueuing full-sync`);
+    await this.enqueueFullSync(userId);
   }
 }
