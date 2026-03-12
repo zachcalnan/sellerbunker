@@ -48,7 +48,7 @@ export function CogsPromptModal() {
         <div className="mt-6 flex flex-wrap items-center justify-end gap-3">
           <Link
             href="/cost-of-goods"
-            className="rounded-lg bg-[rgb(2,242,170)] px-4 py-2 text-sm font-medium text-black hover:opacity-90"
+            className="rounded-lg bg-sb-accent px-4 py-2 text-sm font-medium text-black hover:opacity-90"
             onClick={handleGotIt}
           >
             Go to Cost of Goods

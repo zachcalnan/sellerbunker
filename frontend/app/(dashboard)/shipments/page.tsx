@@ -144,7 +144,7 @@ export default function ShipmentsPage() {
         <div className="flex flex-col items-center justify-center gap-4 py-12">
           <p className="text-[var(--muted-foreground)]">Sign in to view FBA shipments.</p>
           <SignInButton>
-            <button className="rounded-lg bg-[rgb(2,242,170)] px-4 py-2 text-sm font-medium text-black">
+            <button className="rounded-lg bg-sb-accent px-4 py-2 text-sm font-medium text-black">
               Sign in
             </button>
           </SignInButton>
@@ -162,7 +162,7 @@ export default function ShipmentsPage() {
                   placeholder="Search by Shipment ID, name, status, FC…"
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
-                  className="max-w-md rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[rgb(2,242,170)]"
+                  className="min-w-[260px] max-w-md flex-1 rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--foreground)] placeholder:text-[var(--foreground)]/60 placeholder:opacity-100 focus:outline-none focus:ring-2 focus:ring-sb-accent"
                   aria-label="Search shipments"
                 />
               </div>
@@ -192,7 +192,7 @@ export default function ShipmentsPage() {
               <div className="flex items-center gap-1">
                 Checked in
                 <span
-                  className="inline-flex h-5 w-5 shrink-0 cursor-help items-center justify-center rounded-full border-2 border-[rgb(2,242,170)] bg-[rgb(2,242,170)] text-[11px] font-semibold lowercase text-black hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-[rgb(2,242,170)] focus:ring-offset-1"
+                  className="inline-flex h-5 w-5 shrink-0 cursor-help items-center justify-center rounded-full border-2 border-sb-accent bg-sb-accent text-[11px] font-semibold lowercase text-black hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-sb-accent focus:ring-offset-1"
                   title="Cannot retrieve historic check-in dates - you can enter manually"
                   aria-label="Info: Cannot retrieve historic check-in dates - you can enter manually"
                 >
@@ -211,7 +211,7 @@ export default function ShipmentsPage() {
               </div>
             ) : filtered.length === 0 ? (
               <div className="px-4 py-6 text-sm text-[var(--muted-foreground)]">
-                No shipments found. Data syncs automatically every 2 hours.
+                No shipments found.
               </div>
             ) : (
               <>
@@ -254,12 +254,12 @@ export default function ShipmentsPage() {
                               <button
                                 type="button"
                                 onClick={() => openManualCheckIn(r)}
-                                className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded border border-[var(--surface-border)] bg-[var(--surface-hover)] text-[var(--muted-foreground)] hover:border-[rgb(2,242,170)]/50 hover:bg-[rgb(2,242,170)]/10 hover:text-[var(--foreground)] focus:outline-none focus:ring-2 focus:ring-[rgb(2,242,170)]"
-                                title="Enter check-in date manually"
-                                aria-label="Enter check-in date manually"
+                                className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded border border-[var(--surface-border)] bg-[var(--surface-hover)] text-[var(--muted-foreground)] hover:border-sb-accent/50 hover:bg-sb-accent/10 hover:text-[var(--foreground)] focus:outline-none focus:ring-2 focus:ring-sb-accent"
+                                title="Enter check-in date"
+                                aria-label="Enter check-in date"
                               >
-                                <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                                <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
                                 </svg>
                               </button>
                             </>
@@ -340,7 +340,7 @@ export default function ShipmentsPage() {
                     type="date"
                     value={manualCheckInDate}
                     onChange={(e) => setManualCheckInDate(e.target.value)}
-                    className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--foreground)] focus:outline-none focus:ring-2 focus:ring-[rgb(2,242,170)]"
+                    className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--foreground)] focus:outline-none focus:ring-2 focus:ring-sb-accent"
                   />
                 </div>
                 {manualCheckInError && (
@@ -358,7 +358,7 @@ export default function ShipmentsPage() {
                     type="button"
                     onClick={saveManualCheckIn}
                     disabled={manualCheckInSaving || !manualCheckInDate.trim()}
-                    className="rounded-lg bg-[rgb(2,242,170)] px-3 py-2 text-sm font-medium text-black hover:opacity-90 disabled:opacity-60"
+                    className="rounded-lg bg-sb-accent px-3 py-2 text-sm font-medium text-black hover:opacity-90 disabled:opacity-60"
                   >
                     {manualCheckInSaving ? "Saving…" : "Save"}
                   </button>

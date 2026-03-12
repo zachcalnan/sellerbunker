@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Suspense, type ReactNode, useCallback, useEffect, useState } from "react";
+import { Suspense, type ReactNode, useCallback, useEffect, useLayoutEffect, useState } from "react";
 import { useAuth } from "@clerk/nextjs";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useDisplaySettings } from "@/contexts/display-settings-context";
@@ -14,7 +14,6 @@ type AccountSummary = {
   revenue: number;
   profitMargin: number;
   unitsSold: number;
-  adSpend: number;
   totalOrders: number;
   orderItemsOrdersCount?: number;
   orderItemsCoveragePct?: number;
@@ -22,6 +21,9 @@ type AccountSummary = {
   unitsInFba: number;
   openShipments: number;
   hasCostData?: boolean;
+  totalProfit?: number;
+  totalCostOfGoods?: number;
+  roiPct?: number | null;
   generatedAt: string;
 };
 
@@ -80,31 +82,63 @@ function HomeInner() {
   const [summary, setSummary] = useState<AccountSummary | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  /** When we have 0 orders: true = sync is 100% (no contradiction with topbar), false/null = still syncing */
-  const [syncCompleteWhenZero, setSyncCompleteWhenZero] = useState<boolean | null>(null);
 
   const amazonConnectedParam = searchParams.get("amazon_connected") === "1";
   const [showAmazonConnectThankYou, setShowAmazonConnectThankYou] = useState(false);
+
+  // Run as soon as possible (before paint): read URL directly so modal always shows regardless of useSearchParams/Suspense
+  useLayoutEffect(() => {
+    if (typeof window === "undefined") return;
+    const search = window.location.search;
+    const hasParam = search.includes("amazon_connected=1");
+
+    if (hasParam) {
+      try {
+        sessionStorage.setItem(POST_CONNECT_REFRESH_PENDING_KEY, "1");
+        sessionStorage.setItem("sellerbunker_initial_sync_pending", "1");
+        try {
+          localStorage.setItem("sellerbunker_sync_started_at", String(Date.now()));
+        } catch {}
+        const params = new URLSearchParams(search);
+        const syncProgressApi = params.get("sync_progress_api");
+        if (syncProgressApi) {
+          sessionStorage.setItem("sellerbunker_sync_progress_api", syncProgressApi);
+        }
+        window.dispatchEvent(new CustomEvent("sellerbunker-initial-sync-pending"));
+        localStorage.removeItem("sellerbunker_initial_sync_dismissed");
+      } catch {
+        /* ignore */
+      }
+      // Always show the modal when URL has amazon_connected=1 — no localStorage gate
+      setShowAmazonConnectThankYou(true);
+      return;
+    }
+
+    // Fallback: param was stripped (e.g. after auth redirect) but we have sync-pending and user hasn't dismissed
+    const fromSession =
+      sessionStorage.getItem(POST_CONNECT_REFRESH_PENDING_KEY) === "1" ||
+      sessionStorage.getItem("sellerbunker_initial_sync_pending") === "1";
+    const thanksSeen = localStorage.getItem("sellerbunker_amazon_connect_thanks_seen") === "1";
+    if (fromSession && !thanksSeen) {
+      setShowAmazonConnectThankYou(true);
+    }
+  }, []);
+
+  // Keep sessionStorage in sync when searchParams resolve (e.g. after Suspense)
   useEffect(() => {
     if (!amazonConnectedParam) return;
     try {
       sessionStorage.setItem(POST_CONNECT_REFRESH_PENDING_KEY, "1");
-      // Tell the topbar to show the sync progress bar and start polling
       sessionStorage.setItem("sellerbunker_initial_sync_pending", "1");
-      window.dispatchEvent(new CustomEvent("sellerbunker-initial-sync-pending"));
-      // Show the bar again even if they dismissed it on a previous connect
-      localStorage.removeItem("sellerbunker_initial_sync_dismissed");
-      if (localStorage.getItem("sellerbunker_amazon_connect_thanks_seen") !== "1") {
-        setShowAmazonConnectThankYou(true);
+      const syncProgressApi = searchParams.get("sync_progress_api");
+      if (syncProgressApi) {
+        sessionStorage.setItem("sellerbunker_sync_progress_api", syncProgressApi);
       }
+      window.dispatchEvent(new CustomEvent("sellerbunker-initial-sync-pending"));
     } catch {
-      setShowAmazonConnectThankYou(true);
+      /* ignore */
     }
-    const next = new URLSearchParams(searchParams.toString());
-    next.delete("amazon_connected");
-    const q = next.toString();
-    router.replace(q ? `/dashboard?${q}` : "/dashboard");
-  }, [amazonConnectedParam]);
+  }, [amazonConnectedParam, searchParams]);
   const dismissAmazonConnectThankYou = () => {
     try {
       localStorage.setItem("sellerbunker_amazon_connect_thanks_seen", "1");
@@ -114,6 +148,7 @@ function HomeInner() {
     setShowAmazonConnectThankYou(false);
     const next = new URLSearchParams(searchParams.toString());
     next.delete("amazon_connected");
+    next.delete("sync_progress_api");
     const q = next.toString();
     router.replace(q ? `/dashboard?${q}` : "/dashboard");
   };
@@ -343,56 +378,19 @@ function HomeInner() {
     return () => clearInterval(interval);
   }, [isPostConnect, fetchSummary, summary?.totalOrders]);
 
-  // When we have 0 orders, check if sync is already 100% so we don't show "Syncing..." when topbar says "Sync complete"
-  useEffect(() => {
-    if (!isSignedIn || !summary || summary.totalOrders > 0) {
-      setSyncCompleteWhenZero(null);
-      return;
-    }
-    let cancelled = false;
-    const check = async () => {
-      try {
-        const token = await getToken({ template: "backend" });
-        const res = await fetch(`${baseUrl}/api/amazon/sync-progress`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (!res.ok || cancelled) return;
-        const data = (await res.json()) as { progress?: number; done?: boolean };
-        if (cancelled) return;
-        const p = Number(data?.progress);
-        const done = data?.done === true || (Number.isFinite(p) && p >= 100);
-        setSyncCompleteWhenZero(done);
-      } catch {
-        if (!cancelled) setSyncCompleteWhenZero(null);
-      }
-    };
-    void check();
-    return () => {
-      cancelled = true;
-    };
-  }, [isSignedIn, getToken, baseUrl, summary?.totalOrders]);
-
   const effectiveCurrency = summary?.currency ?? "USD";
 
+  const hasCostData = summary?.hasCostData ?? false;
+  // Profit = sale price - selling fees - COGS (from backend totalProfit when present)
   const profit =
     summary != null
-      ? summary.revenue * summary.profitMargin
+      ? (summary.totalProfit != null ? summary.totalProfit : summary.revenue * summary.profitMargin)
       : 0;
+  // ROI = profit / cost of goods (from backend)
   const roiPct =
-    summary != null && summary.adSpend > 0
-      ? (profit / summary.adSpend) * 100
+    summary != null && hasCostData && summary.roiPct != null && Number.isFinite(summary.roiPct)
+      ? summary.roiPct
       : 0;
-
-  const hasCostData = summary?.hasCostData ?? false;
-  const showCogsNotice = summary != null && summary.totalOrders > 0 && !hasCostData;
-  const orderItemsCoveragePct = summary?.orderItemsCoveragePct ?? 1;
-  const orderItemsOrdersCount = summary?.orderItemsOrdersCount ?? null;
-  const showLineItemBackfillNotice =
-    summary != null &&
-    summary.totalOrders > 0 &&
-    Number.isFinite(orderItemsCoveragePct) &&
-    orderItemsCoveragePct < 0.95;
-
   const cards = summary
     ? [
         {
@@ -404,35 +402,10 @@ function HomeInner() {
           centerLine1: hasCostData ? formatCurrency(profit, effectiveCurrency, 2) : "—",
           centerLine2: "",
           centerLine3: hasCostData ? `${(summary.profitMargin * 100).toFixed(1)}%` : "—",
-          note: showLineItemBackfillNotice ? (
-            <span>
-              Still backfilling SKU line items{" "}
-              {orderItemsOrdersCount != null ? (
-                <span className="font-medium text-[var(--foreground)]">
-                  ({orderItemsOrdersCount}/{summary.totalOrders})
-                </span>
-              ) : null}
-              . Profit / missing-COGS may be incomplete.
-            </span>
-          ) : showCogsNotice ? (
-            <span>
-              Set{" "}
-              <Link
-                href={`/cost-of-goods?${new URLSearchParams({
-                  start: effectiveStart,
-                  end: effectiveEnd,
-                }).toString()}`}
-                className="underline underline-offset-2"
-              >
-                COGS
-              </Link>{" "}
-              to calculate profit.
-            </span>
-          ) : null,
         },
         {
           label: "Sales",
-          value: formatCurrency(summary.revenue, effectiveCurrency),
+          value: formatCurrency(summary.revenue, effectiveCurrency, 2),
           percentage: 0,
           color: ringColor,
           fullRing: true,
@@ -453,6 +426,9 @@ function HomeInner() {
           color: ringColor,
           fullRing: true,
           hidePercentage: !hasCostData,
+          centerLine1: hasCostData ? `${Math.round(roiPct)}%` : "—",
+          centerLine2: "",
+          centerLine3: "ROI",
         },
       ]
     : [];
@@ -460,24 +436,41 @@ function HomeInner() {
   return (
     <div className={`min-h-screen ${backgroundClass} text-[var(--foreground)]`}>
       {showAmazonConnectThankYou && (
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/50 p-4">
-          <div className="relative w-full max-w-md rounded-2xl border border-[var(--surface-border)] bg-[var(--surface)] p-6 shadow-xl">
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 p-6">
+          <div className="relative flex h-[85vh] w-full max-w-2xl flex-col rounded-2xl border border-[var(--surface-border)] bg-[var(--surface)] p-8 shadow-2xl">
             <button
               type="button"
               onClick={dismissAmazonConnectThankYou}
-              className="absolute right-3 top-3 rounded p-1 text-[var(--muted-foreground)] transition hover:bg-[var(--foreground)]/10 hover:text-[var(--foreground)]"
+              className="absolute right-4 top-4 rounded p-1.5 text-[var(--muted-foreground)] transition hover:bg-[var(--foreground)]/10 hover:text-[var(--foreground)]"
               aria-label="Close"
             >
-              <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg className="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
               </svg>
             </button>
-            <h2 className="pr-8 text-lg font-semibold text-[var(--foreground)]">
-              Thank you for connecting
-            </h2>
-            <p className="mt-2 text-sm text-[var(--muted-foreground)]">
-              Please allow up to an hour for SellerBunker to sync your data.
-            </p>
+            <div className="flex flex-1 flex-col items-center justify-center gap-6 text-center">
+              <h2 className="text-xl font-semibold text-[var(--foreground)] sm:text-2xl">
+                Please be patient — your data is syncing
+              </h2>
+              <div className="flex flex-col gap-4 text-sm text-[var(--muted-foreground)] sm:text-base">
+                <p>
+                  This only has to happen once. When you return, your data will be available for immediate loading.
+                </p>
+                <p>
+                  Initial sync can take up to 30 minutes if things are slow. You can close this and use the app — some data will continue syncing in the background while you navigate. That’s normal.
+                </p>
+                <p className="mt-2 font-medium text-[var(--foreground)]">
+                  Thank you for joining SellerBunker.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={dismissAmazonConnectThankYou}
+                className="rounded-lg bg-sb-accent px-6 py-3 text-sm font-medium text-black hover:opacity-90"
+              >
+                Got it
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -486,25 +479,6 @@ function HomeInner() {
         {loading && (
           <div className="rounded-xl border border-[var(--surface-border)] bg-transparent px-4 py-3 text-xs text-[var(--muted-foreground)]">
             Loading account summary...
-          </div>
-        )}
-        {summary && summary.totalOrders === 0 && !error && (
-          <div className="flex flex-col gap-3 rounded-xl border border-amber-500/50 bg-amber-500/10 px-4 py-3 text-sm text-[var(--foreground)]">
-            {syncCompleteWhenZero === true ? (
-              <>
-                <p className="font-medium">Sync complete. No orders in the selected period.</p>
-                <p className="text-[var(--muted-foreground)]">
-                  Try a different date range above.
-                </p>
-              </>
-            ) : (
-              <>
-                <p className="font-medium">Syncing your data…</p>
-                <p className="text-[var(--muted-foreground)]">
-                  Numbers will update here when ready. This can take up to an hour.
-                </p>
-              </>
-            )}
           </div>
         )}
         {error ? (
@@ -540,7 +514,7 @@ function HomeInner() {
                     alert(`Could not start Amazon connection: ${e instanceof Error ? e.message : "Please try again."}`);
                   }
                 }}
-                className="inline-flex w-fit items-center justify-center rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white shadow-sm transition hover:bg-emerald-700"
+                className="inline-flex w-fit items-center justify-center rounded-md bg-sb-accent px-3 py-1.5 text-xs font-medium text-black shadow-sm transition hover:opacity-90"
               >
                 Connect Amazon
               </button>
@@ -594,7 +568,7 @@ function HomeInner() {
                                   : allTimeStart;
                         setRangeInUrl(start, end);
                       }}
-                      className="h-8 cursor-pointer rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-2.5 text-xs text-[var(--foreground)] outline-none focus:ring-2 focus:ring-[rgb(2,242,170)]/40"
+                      className="h-8 cursor-pointer rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-2.5 text-xs text-[var(--foreground)] outline-none focus:ring-2 focus:ring-sb-accent/40"
                     >
                       <option value="today">Today</option>
                       <option value="yesterday">Yesterday</option>
@@ -622,7 +596,7 @@ function HomeInner() {
                         />
                         <button
                           type="button"
-                          className="h-8 cursor-pointer rounded-lg bg-[rgb(2,242,170)] px-3 text-xs font-medium text-black transition hover:opacity-90"
+                          className="h-8 cursor-pointer rounded-lg bg-sb-accent px-3 text-xs font-medium text-black transition hover:opacity-90"
                           onClick={() => {
                             if (!customStart || !customEnd) return;
                             setRangeInUrl(customStart, customEnd);
@@ -1855,6 +1829,7 @@ function SalesTrend({
   label,
   noWrapper = false,
 }: SalesTrendProps) {
+  const { ringColor } = useDisplaySettings();
   const [sales, setSales] = useState<SalesSeries | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -1926,7 +1901,7 @@ function SalesTrend({
   const numPoints = Math.max(1, points.length);
   const bucketWidth = barAreaWidth / numPoints;
   const barWidth = bucketWidth * 0.88; // one overlapping stacked bar per day
-  const revenueColor = "rgb(2, 242, 170)"; // teal
+  const revenueColor = ringColor; // matches display settings theme
   const profitColor = "rgb(251, 191, 36)"; // amber
 
   const content = (
@@ -2060,14 +2035,15 @@ function SalesTrend({
                   rx={2}
                   className="cursor-pointer"
                 />
-                {/* Revenue extends above profit (green) – overlapping, revenue = profit + (revenue - profit) */}
+                {/* Revenue extends above profit – colour matches display settings theme */}
                 {revenueHeight > profitHeight && (
                   <rect
                     x={barX}
                     y={barTopY}
                     width={barWidth}
                     height={revenueHeight - profitHeight}
-                    fill={isHovered ? revenueColor : "rgba(2, 242, 170, 0.6)"}
+                    fill={revenueColor}
+                    fillOpacity={isHovered ? 1 : 0.6}
                     rx={2}
                     className="cursor-pointer"
                   />

@@ -9,14 +9,62 @@ import { SettingsModal } from "./settings-modal";
 import { useFullscreen } from "@/contexts/fullscreen-context";
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
+/** When redirect URI is production, use this for sync-progress so the bar polls the backend that ran the callback. Set in .env.local for local dev. */
+const SYNC_PROGRESS_API_OVERRIDE = process.env.NEXT_PUBLIC_SYNC_PROGRESS_API ?? "";
 const FLASH_DISMISSED_KEY = "topbar-notification-flash-dismissed";
+const COGS_ROI_DISMISSED_KEY = "topbar_cogs_roi_dismissed";
+const COGS_PROFIT_DISMISSED_KEY = "topbar_cogs_profit_dismissed";
+const MISSING_UNITS_DISMISSED_IDS_KEY = "topbar_missing_units_dismissed_ids";
 const INITIAL_SYNC_DISMISSED_KEY = "sellerbunker_initial_sync_dismissed";
 const INITIAL_SYNC_PENDING_KEY = "sellerbunker_initial_sync_pending";
+const SYNC_PROGRESS_API_KEY = "sellerbunker_sync_progress_api";
+/** Persisted so after disconnect/reload we still show the bar and poll for current % (backend keeps progress in DB/Redis). */
+const SYNC_STARTED_AT_KEY = "sellerbunker_sync_started_at";
+const SYNC_STARTED_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24h
+
+function isSyncRecentlyStarted(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    const raw = localStorage.getItem(SYNC_STARTED_AT_KEY);
+    if (!raw) return false;
+    const t = parseInt(raw, 10);
+    return Number.isFinite(t) && Date.now() - t < SYNC_STARTED_MAX_AGE_MS;
+  } catch {
+    return false;
+  }
+}
 
 type SyncStage = "core" | "fees" | "complete";
 
 function toDateOnly(d: Date) {
   return d.toISOString().slice(0, 10);
+}
+
+/** Format date as "4th Dec 26" (ordinal day, short month, 2-digit year). */
+function formatSentDate(dateStr: string): string {
+  const d = new Date(dateStr);
+  if (Number.isNaN(d.getTime())) return dateStr;
+  const day = d.getDate();
+  const ord =
+    day === 11 || day === 12 || day === 13
+      ? "th"
+      : day % 10 === 1
+        ? "st"
+        : day % 10 === 2
+          ? "nd"
+          : day % 10 === 3
+            ? "rd"
+            : "th";
+  const month = d.toLocaleDateString(undefined, { month: "short" });
+  const year = d.getFullYear().toString().slice(-2);
+  return `${day}${ord} ${month} ${year}`;
+}
+
+/** True when backend says sync is in progress (core or fees). No localStorage/session/events - API is source of truth. */
+function isSyncInProgress(stage: SyncStage, progress: number | null): boolean {
+  if (stage !== "complete") return true;
+  if (progress !== null && progress < 100) return true;
+  return false;
 }
 
 export function Topbar() {
@@ -28,17 +76,84 @@ export function Topbar() {
     if (typeof window === "undefined") return false;
     return sessionStorage.getItem(FLASH_DISMISSED_KEY) === "1";
   });
+  const [cogsRoiDismissed, setCogsRoiDismissed] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return sessionStorage.getItem(COGS_ROI_DISMISSED_KEY) === "1";
+  });
+  const [cogsProfitDismissed, setCogsProfitDismissed] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return sessionStorage.getItem(COGS_PROFIT_DISMISSED_KEY) === "1";
+  });
+  const [missingUnitsShipments, setMissingUnitsShipments] = useState<
+    Array<{ shipmentId: string; missingUnits: number; sentDate: string | null; shipmentName: string | null }>
+  >([]);
+  const [dismissedMissingShipmentIds, setDismissedMissingShipmentIds] = useState<Set<string>>(() => {
+    if (typeof window === "undefined") return new Set();
+    try {
+      const raw = sessionStorage.getItem(MISSING_UNITS_DISMISSED_IDS_KEY);
+      if (!raw) return new Set();
+      const arr = JSON.parse(raw) as unknown;
+      return new Set(Array.isArray(arr) ? arr.filter((id): id is string => typeof id === "string") : []);
+    } catch {
+      return new Set();
+    }
+  });
   const [syncProgress, setSyncProgress] = useState<number | null>(null);
   const [feeSyncProgress, setFeeSyncProgress] = useState<number | null>(null);
   const [syncStage, setSyncStage] = useState<SyncStage>("complete");
+  const [syncPhase, setSyncPhase] = useState<string | null>(null);
+  const [corePhaseEndPct, setCorePhaseEndPct] = useState(50);
   const [syncDismissed, setSyncDismissed] = useState(() => {
-    if (typeof window === "undefined") return true;
+    if (typeof window === "undefined") return false;
     return localStorage.getItem(INITIAL_SYNC_DISMISSED_KEY) === "1";
   });
   const [hasSeenSyncInProgress, setHasSeenSyncInProgress] = useState(false);
-  const [syncPendingFromSession, setSyncPendingFromSession] = useState(false);
+  const [syncPendingFromSession, setSyncPendingFromSession] = useState(() => {
+    if (typeof window === "undefined") return false;
+    if (sessionStorage.getItem(INITIAL_SYNC_PENDING_KEY) === "1") return true;
+    return isSyncRecentlyStarted();
+  });
   const [settingsOpen, setSettingsOpen] = useState(false);
   const syncCompleteFiredRef = useRef(false);
+  const hasSeenSyncInProgressRef = useRef(false);
+
+  // When user just connected Amazon: show bar and clear dismissed state
+  useEffect(() => {
+    const onJustConnected = () => {
+      setSyncPendingFromSession(true);
+      setSyncDismissed(false);
+    };
+    window.addEventListener("sellerbunker-initial-sync-pending", onJustConnected);
+    return () => window.removeEventListener("sellerbunker-initial-sync-pending", onJustConnected);
+  }, []);
+
+  // Show bar only when user has started Amazon connect this session (INITIAL_SYNC_PENDING_KEY from ?amazon_connected=1)
+  // or recently (isSyncRecentlyStarted) so after refresh we still show bar. Do not show before they've ever connected.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const check = () => {
+      const sessionPending = sessionStorage.getItem(INITIAL_SYNC_PENDING_KEY) === "1";
+      const recentStart = isSyncRecentlyStarted();
+      // Only treat as "sync pending" if they have the session key (just came back from Amazon) or URL param, or a recent sync start from a previous page load after connect
+      if (sessionPending || recentStart) {
+        setSyncPendingFromSession(true);
+        if (sessionPending) setSyncDismissed(false);
+      }
+      const hasJustConnectedParam = window.location.search.includes("amazon_connected=1");
+      if (hasJustConnectedParam) {
+        const params = new URLSearchParams(window.location.search);
+        const syncApi = params.get("sync_progress_api");
+        if (syncApi) {
+          try {
+            sessionStorage.setItem(SYNC_PROGRESS_API_KEY, syncApi);
+          } catch {}
+        }
+      }
+    };
+    check();
+    const t = setInterval(check, 500);
+    return () => clearInterval(t);
+  }, []);
 
   const fetchMissing = useCallback(async () => {
     if (!isSignedIn) return;
@@ -68,120 +183,214 @@ export function Topbar() {
     void fetchMissing();
   }, [isSignedIn, fetchMissing]);
 
-  const fetchSyncProgress = useCallback(async () => {
-    if (!isSignedIn || syncDismissed) return;
+  const fetchMissingUnitsSummary = useCallback(async () => {
+    if (!isSignedIn) return;
     try {
       const token = await getToken({ template: "backend" });
       if (!token) return;
-      const res = await fetch(`${BASE_URL}/api/amazon/sync-progress`, {
+      const res = await fetch(`${BASE_URL}/api/amazon/shipments/missing-summary`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) return;
+      const data = (await res.json()) as {
+        shipments?: Array<{
+          shipmentId: string;
+          missingUnits: number;
+          sentDate: string | null;
+          shipmentName: string | null;
+        }>;
+      };
+      setMissingUnitsShipments(Array.isArray(data.shipments) ? data.shipments : []);
+    } catch {
+      setMissingUnitsShipments([]);
+    }
+  }, [isSignedIn, getToken]);
+
+  useEffect(() => {
+    if (!isSignedIn) {
+      setMissingUnitsShipments([]);
+      return;
+    }
+    void fetchMissingUnitsSummary();
+  }, [isSignedIn, fetchMissingUnitsSummary]);
+
+  const fetchSyncProgress = useCallback(async () => {
+    if (!isSignedIn) return;
+    try {
+      const token = await getToken({ template: "backend" });
+      if (!token) {
+        if (typeof window !== "undefined" && process.env.NODE_ENV === "development") {
+          console.warn("[sync-progress] No token, skipping poll");
+        }
+        return;
+      }
+      // 1) Redirect may have set this (production sends sync_progress_api when redirecting to localhost)
+      // 2) Local dev: if redirect URI is production, set NEXT_PUBLIC_SYNC_PROGRESS_API so we poll the right backend
+      const syncProgressBase =
+        (typeof window !== "undefined" && sessionStorage.getItem(SYNC_PROGRESS_API_KEY)) ||
+        (SYNC_PROGRESS_API_OVERRIDE && SYNC_PROGRESS_API_OVERRIDE.trim()) ||
+        BASE_URL;
+      const url = `${syncProgressBase}/api/amazon/sync-progress`;
+      const res = await fetch(url, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        if (typeof window !== "undefined" && process.env.NODE_ENV === "development") {
+          console.warn("[sync-progress] res.notOk", res.status, res.statusText, url);
+        }
+        return;
+      }
       const data = (await res.json()) as {
         progress?: number;
         done?: boolean;
         stage?: SyncStage;
         feeProgress?: number;
         feeDone?: boolean;
+        corePhaseEndPct?: number;
+        phase?: string;
       };
       const p = Number(data.progress);
-      if (Number.isFinite(p)) {
-        const progressNum = Math.min(100, Math.max(0, p));
+      const progressNum = Number.isFinite(p) ? Math.min(100, Math.max(0, p)) : null;
+      const stage = data.stage === "core" || data.stage === "fees" || data.stage === "complete"
+        ? data.stage
+        : progressNum !== null && progressNum < 100
+          ? "core"
+          : "complete";
+
+      // Always apply whatever progress the API returns (0, 25, 50, 75, 100) so the bar reflects reality.
+      if (progressNum !== null) {
+        if (progressNum < 100) {
+          hasSeenSyncInProgressRef.current = true;
+          setHasSeenSyncInProgress(true);
+        } else {
+          // So the "Sync complete" state can show (bar needs hasSeenSyncInProgress to show complete state)
+          hasSeenSyncInProgressRef.current = true;
+          setHasSeenSyncInProgress(true);
+        }
         setSyncProgress(progressNum);
+        setSyncStage(stage);
       }
       const feeP = Number(data.feeProgress);
       if (Number.isFinite(feeP)) {
         setFeeSyncProgress(Math.min(100, Math.max(0, feeP)));
       }
-      const stage = data.stage === "core" || data.stage === "fees" || data.stage === "complete"
-        ? data.stage
-        : Number.isFinite(p) && p < 100
-          ? "core"
-          : "complete";
-      setSyncStage(stage);
-      if (stage !== "complete") setHasSeenSyncInProgress(true);
+      const coreEnd = Number(data.corePhaseEndPct);
+      if (Number.isFinite(coreEnd) && coreEnd >= 0 && coreEnd <= 100) {
+        setCorePhaseEndPct(coreEnd);
+      }
+      if (typeof data.phase === "string" && data.phase.trim()) {
+        setSyncPhase(data.phase.trim());
+      }
       if (stage === "complete" && data.feeDone !== false) {
         try {
           sessionStorage.removeItem(INITIAL_SYNC_PENDING_KEY);
+          sessionStorage.removeItem(SYNC_PROGRESS_API_KEY);
+          localStorage.removeItem(SYNC_STARTED_AT_KEY);
         } catch {}
         setSyncPendingFromSession(false);
       }
-    } catch {
-      setSyncProgress(100);
-      setFeeSyncProgress(100);
-      setSyncStage("complete");
+    } catch (err) {
+      // Don't overwrite state on error – keep showing the bar (e.g. 0%) until we get a successful response.
+      // In dev, log so you can see CORS/network failures (often why bar stays 0% when polling production from localhost).
+      if (typeof window !== "undefined" && process.env.NODE_ENV === "development") {
+        console.warn("[sync-progress] fetch failed (CORS or network?)", err);
+      }
     }
-  }, [isSignedIn, syncDismissed, getToken]);
+  }, [isSignedIn, getToken]);
 
+  // Only probe sync-progress when we know a sync was started (returned from Amazon connect). Avoids showing the sync bar after payment / before connecting Amazon.
   useEffect(() => {
-    const checkPending = () => {
-      try {
-        if (sessionStorage.getItem(INITIAL_SYNC_PENDING_KEY) === "1") {
-          setSyncPendingFromSession(true);
-        }
-      } catch {}
-    };
-    const onSyncPending = () => {
-      setSyncPendingFromSession(true);
-      setSyncDismissed(false); // show the bar again when we've just connected Amazon
-    };
-    window.addEventListener("sellerbunker-initial-sync-pending", onSyncPending);
-    if (!isSignedIn || syncDismissed) {
+    if (!isSignedIn || !syncPendingFromSession) return;
+    const probeTimer = setTimeout(() => void fetchSyncProgress(), 200);
+    return () => clearTimeout(probeTimer);
+  }, [isSignedIn, syncPendingFromSession, fetchSyncProgress]);
+
+  // Only poll when we know a sync was started (just came back from Amazon connect). Stops us hitting the API for every signed-in user before they've connected.
+  // Poll every 350ms so we catch 1%, 2%, 5%, 10%… during orders (job often finishes in 2–5s; DB/Redis can lag so we take max and poll often).
+  useEffect(() => {
+    if (!isSignedIn) {
       setSyncProgress(null);
       setFeeSyncProgress(null);
       setSyncStage("complete");
-      setSyncPendingFromSession(false);
-      return () => window.removeEventListener("sellerbunker-initial-sync-pending", onSyncPending);
+      return;
     }
-    checkPending();
-    const pendingInterval = setInterval(checkPending, 500);
+    if (!syncPendingFromSession && !hasSeenSyncInProgress) return;
     void fetchSyncProgress();
-    const progressInterval = setInterval(fetchSyncProgress, 3000);
+    const early = setTimeout(() => void fetchSyncProgress(), 150);
+    const progressInterval = setInterval(fetchSyncProgress, 350);
     return () => {
-      window.removeEventListener("sellerbunker-initial-sync-pending", onSyncPending);
-      clearInterval(pendingInterval);
+      clearTimeout(early);
       clearInterval(progressInterval);
     };
-  }, [isSignedIn, syncDismissed, fetchSyncProgress]);
+  }, [isSignedIn, syncPendingFromSession, hasSeenSyncInProgress, fetchSyncProgress]);
 
   const dismissSyncProgress = () => {
     try {
       localStorage.setItem(INITIAL_SYNC_DISMISSED_KEY, "1");
-      sessionStorage.removeItem(INITIAL_SYNC_PENDING_KEY);
     } catch {}
     setSyncDismissed(true);
-    setSyncPendingFromSession(false);
-    setSyncProgress(null);
-    setFeeSyncProgress(null);
-    setSyncStage("complete");
   };
 
   const hasMissing = (missingCount ?? 0) > 0;
-  const awaitingFirstSyncPoll =
-    syncPendingFromSession &&
-    syncProgress === null &&
-    feeSyncProgress === null &&
-    syncStage === "complete";
+  const visibleMissingShipments = missingUnitsShipments.filter(
+    (s) => !dismissedMissingShipmentIds.has(s.shipmentId),
+  );
+  const hasMissingUnits = visibleMissingShipments.length > 0;
+  const hasNotifications =
+    hasMissing || !cogsRoiDismissed || !cogsProfitDismissed || hasMissingUnits;
+  const syncInProgress = isSyncInProgress(syncStage, syncProgress);
   const feeSyncActive = syncStage === "fees";
+  // Fees phase runs 75→100%. Use 75 when in fees so we never show 50% (backend sends 75; guard against stale corePhaseEndPct).
+  const feeSegmentStart = 75;
   const visibleSyncProgress = feeSyncActive
-    ? (feeSyncProgress ?? 0)
+    ? feeSegmentStart + ((feeSyncProgress ?? 0) / 100) * (100 - feeSegmentStart)
     : (syncProgress ?? 0);
-  const syncTitle = awaitingFirstSyncPoll
-    ? "Syncing your data…"
-    : syncStage === "complete"
-    ? "Sync complete"
-    : feeSyncActive
-      ? "Improving profit calculations…"
-      : "Syncing your data…";
-  const syncDetail = feeSyncActive
-    ? "Orders, inventory, and shipments are ready."
-    : null;
-  const hasSyncActivity =
-    syncPendingFromSession ||
-    syncStage !== "complete" ||
-    ((syncProgress !== null || feeSyncProgress !== null) && hasSeenSyncInProgress);
-  const showSyncBox = hasSyncActivity && (!syncDismissed || syncPendingFromSession);
-  const syncComplete = showSyncBox && syncStage === "complete" && !awaitingFirstSyncPoll;
+  const noSyncDataYet = isSignedIn && syncProgress === null;
+  const awaitingFirstPoll = syncPendingFromSession && syncProgress === null && syncStage === "complete";
+  const syncTitle =
+    noSyncDataYet || awaitingFirstPoll
+      ? "Initial sync"
+      : syncInProgress
+        ? feeSyncActive
+          ? "Initial sync (fees)"
+          : "Initial sync"
+        : "Sync complete";
+  const progressPct = visibleSyncProgress;
+  // When we have no API response yet, show indeterminate loading (bar animates)
+  const barIsIndeterminate = syncProgress === null && (noSyncDataYet || awaitingFirstPoll);
+  // Phase label: use backend phase when present; otherwise infer from progress so "Syncing orders" shows from the start
+  const displayPhase =
+    syncPhase != null && syncPhase.trim() !== ""
+      ? syncPhase
+      : syncProgress != null && syncProgress < 100
+        ? syncProgress < 25
+          ? "Syncing orders"
+          : syncProgress < 50
+            ? "Syncing inventory"
+            : syncProgress < 75
+              ? "Syncing shipments"
+              : "Syncing fee estimates"
+        : null;
+  const syncDetail =
+    displayPhase != null
+      ? `${displayPhase} • ${Math.round(barIsIndeterminate ? 0 : visibleSyncProgress)}%`
+      : feeSyncActive
+        ? `Fees • ${Math.round(visibleSyncProgress)}%`
+        : awaitingFirstPoll || noSyncDataYet
+          ? "Starting • …"
+          : null;
+  // Show bar only when a sync was started (came back from Amazon) or we're already in progress / just completed
+  const showSyncBox =
+    (syncPendingFromSession || hasSeenSyncInProgress) &&
+    (noSyncDataYet ||
+      syncInProgress ||
+      awaitingFirstPoll ||
+      (syncStage === "complete" && (syncProgress ?? 100) >= 100 && hasSeenSyncInProgress && !syncDismissed));
+  const syncComplete = showSyncBox && syncStage === "complete" && (syncProgress ?? 100) >= 100 && !awaitingFirstPoll && !noSyncDataYet;
+  const showBackgroundSyncNote = !syncComplete && showSyncBox;
+  const backgroundSyncTooltip = "Complete syncing will take place after initial sync in the background.";
+  // Keep for backward compatibility if a cached bundle still references it (renders as info icon now, not this)
+  const backgroundSyncNote: string | null = null;
 
   useEffect(() => {
     if (syncComplete && !syncCompleteFiredRef.current && typeof window !== "undefined") {
@@ -211,7 +420,7 @@ export function Topbar() {
             animation: notification-gentle-flash 2s ease-in-out infinite;
           }
         `}</style>
-        {hasMissing && !flashingDismissed && (
+        {hasNotifications && !flashingDismissed && (
           <span
             className="notification-flash inline-flex h-2.5 w-2.5 shrink-0 rounded-full bg-amber-500 ring-2 ring-amber-500/30"
             aria-hidden
@@ -222,17 +431,17 @@ export function Topbar() {
           className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:bg-[var(--foreground)]/5"
           aria-label="Notifications"
         >
-          {(hasMissing && flashingDismissed) || !hasMissing ? (
+          {(hasNotifications && flashingDismissed) || !hasNotifications ? (
             <span
-              className={`inline-flex h-2 w-2 shrink-0 rounded-full ${hasMissing ? "bg-amber-500" : "bg-[var(--muted-foreground)]"}`}
+              className={`inline-flex h-2 w-2 shrink-0 rounded-full ${hasNotifications ? "bg-amber-500" : "bg-[var(--muted-foreground)]"}`}
               aria-hidden
             />
           ) : null}
           <span className="text-sm font-medium">
-            Notifications{hasMissing ? " — Hover for details" : ""}
+            Notifications{hasNotifications ? " — Hover for details" : ""}
           </span>
         </button>
-        {hasMissing && (
+        {hasNotifications && (
           <button
             type="button"
             onClick={(e) => {
@@ -274,46 +483,126 @@ export function Topbar() {
                     </button>
                   )}
                 </div>
-                <div
-                  className={`mt-1.5 h-2 w-full overflow-hidden rounded-full ${
-                    syncComplete
-                      ? "bg-emerald-500/30"
-                      : feeSyncActive
-                        ? "bg-sky-500/20"
-                        : "bg-[var(--foreground)]/10"
-                  }`}
-                >
+                <div className="mt-1.5 flex items-center gap-1.5">
                   <div
-                    className={`h-full rounded-full transition-all duration-300 ${
-                      syncComplete
-                        ? "bg-emerald-500"
-                        : feeSyncActive
-                          ? "bg-sky-500/80"
-                          : "bg-[var(--foreground)]/40"
+                    className={`h-2 min-w-0 flex-1 overflow-hidden rounded-full ${
+                      syncComplete ? "bg-sb-accent/30" : "bg-sb-accent/20"
                     }`}
-                    style={{ width: `${visibleSyncProgress}%` }}
-                  />
+                  >
+                    <div
+                      className={`h-full rounded-full transition-all duration-300 ${
+                        barIsIndeterminate
+                          ? "bg-sb-accent/80 animate-pulse"
+                          : syncComplete
+                            ? "bg-sb-accent"
+                            : "bg-sb-accent/80"
+                      }`}
+                      style={{ width: barIsIndeterminate ? "40%" : `${visibleSyncProgress}%` }}
+                    />
+                  </div>
+                  {showBackgroundSyncNote && (
+                    <span
+                      className="shrink-0 inline-flex items-center text-[var(--muted-foreground)]"
+                      title={backgroundSyncTooltip}
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden><circle cx="12" cy="12" r="10" /><path d="M12 16v-4" /><path d="M12 8h.01" /></svg>
+                    </span>
+                  )}
                 </div>
                 {syncDetail && (
                   <p className="mt-1 text-[11px] text-[var(--muted-foreground)]">{syncDetail}</p>
                 )}
-                {!syncComplete && (
-                  <p className="mt-1 text-[11px] text-[var(--muted-foreground)]">{visibleSyncProgress}%</p>
-                )}
               </div>
             )}
             {missingCount != null ? (
-              hasMissing ? (
+              (hasMissing || !cogsRoiDismissed || !cogsProfitDismissed || hasMissingUnits) ? (
                 <div className="flex flex-col gap-2">
-                  <p className="text-[var(--foreground)]">
-                    You are missing {missingCount} COGs SKU input{missingCount === 1 ? "" : "s"}.
-                  </p>
-                  <Link
-                    href={`/cost-of-goods?${new URLSearchParams({ missing: "1" }).toString()}`}
-                    className="text-sm font-medium text-[var(--foreground)] underline underline-offset-2 hover:no-underline"
-                  >
-                    Fix now
-                  </Link>
+                  {visibleMissingShipments.map((s) => (
+                    <div
+                      key={s.shipmentId}
+                      className="flex items-start justify-between gap-2"
+                    >
+                      <p className="text-[var(--foreground)] text-sm">
+                        You have {s.missingUnits} unit{s.missingUnits === 1 ? "" : "s"} missing
+                        {s.sentDate
+                          ? `, sent on ${formatSentDate(s.sentDate)}`
+                          : ""}
+                        .
+                      </p>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          const next = new Set(dismissedMissingShipmentIds);
+                          next.add(s.shipmentId);
+                          setDismissedMissingShipmentIds(next);
+                          try {
+                            sessionStorage.setItem(
+                              MISSING_UNITS_DISMISSED_IDS_KEY,
+                              JSON.stringify([...next]),
+                            );
+                          } catch {}
+                        }}
+                        className="shrink-0 rounded p-0.5 text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/10 hover:text-[var(--foreground)]"
+                        aria-label="Dismiss"
+                      >
+                        <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </button>
+                    </div>
+                  ))}
+                  {hasMissing && (
+                    <div className="flex flex-col gap-1">
+                      <p className="text-[var(--foreground)]">
+                        You are missing {missingCount} COGs SKU input{missingCount === 1 ? "" : "s"}.
+                      </p>
+                      <Link
+                        href={`/cost-of-goods?${new URLSearchParams({ missing: "1" }).toString()}`}
+                        className="text-sm font-medium text-[var(--foreground)] underline underline-offset-2 hover:no-underline"
+                      >
+                        Fix now
+                      </Link>
+                    </div>
+                  )}
+                  {!cogsRoiDismissed && (
+                    <div className="flex items-start justify-between gap-2">
+                      <p className="text-[var(--foreground)] text-sm">ROI not accurate until COGS filled.</p>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setCogsRoiDismissed(true);
+                          try { sessionStorage.setItem(COGS_ROI_DISMISSED_KEY, "1"); } catch {}
+                        }}
+                        className="shrink-0 rounded p-0.5 text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/10 hover:text-[var(--foreground)]"
+                        aria-label="Dismiss"
+                      >
+                        <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </button>
+                    </div>
+                  )}
+                  {!cogsProfitDismissed && (
+                    <div className="flex items-start justify-between gap-2">
+                      <p className="text-[var(--foreground)] text-sm">Profit not accurate until COGs filled out.</p>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setCogsProfitDismissed(true);
+                          try { sessionStorage.setItem(COGS_PROFIT_DISMISSED_KEY, "1"); } catch {}
+                        }}
+                        className="shrink-0 rounded p-0.5 text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/10 hover:text-[var(--foreground)]"
+                        aria-label="Dismiss"
+                      >
+                        <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </button>
+                    </div>
+                  )}
                 </div>
               ) : (
                 <p className="text-[var(--muted-foreground)]">No notifications.</p>
@@ -377,19 +666,13 @@ export function Topbar() {
     </header>
     {showSyncBox && (
       <div
-        className={`flex items-center gap-3 bg-[var(--surface)] px-4 py-2.5 text-sm shadow-sm ${
-          feeSyncActive
-            ? "border-b border-sky-500/35"
-            : "border-b-2 border-emerald-500/60"
-        }`}
+        className={`flex items-center gap-3 bg-[var(--surface)] px-4 py-2.5 text-sm shadow-sm border-b-2 border-sb-accent/40`}
         role="status"
         aria-live="polite"
         aria-label={
           syncComplete
             ? "Sync complete"
-            : feeSyncActive
-              ? `Improving profit calculations, ${visibleSyncProgress}%`
-              : `Syncing your data, ${visibleSyncProgress}%`
+            : `Initial sync, ${visibleSyncProgress}%`
         }
       >
         <div className="min-w-0 shrink-0">
@@ -400,21 +683,29 @@ export function Topbar() {
             <p className="text-xs text-[var(--muted-foreground)]">{syncDetail}</p>
           )}
         </div>
-        <div className={`min-w-[140px] flex-1 max-w-[240px] h-2.5 overflow-hidden rounded-full ${
-          feeSyncActive ? "bg-sky-500/20" : "bg-[var(--foreground)]/15"
-        }`}>
+        <div className="min-w-[140px] flex-1 max-w-[240px] h-2.5 overflow-hidden rounded-full bg-sb-accent/20">
           <div
             className={`h-full rounded-full transition-all duration-300 ${
-              syncComplete
-                ? "bg-emerald-500"
-                : feeSyncActive
-                  ? "bg-sky-500/80"
-                  : "bg-emerald-500/80"
+              barIsIndeterminate
+                ? "bg-sb-accent/80 animate-pulse"
+                : syncComplete
+                  ? "bg-sb-accent"
+                  : "bg-sb-accent/80"
             }`}
-            style={{ width: `${visibleSyncProgress}%` }}
+            style={{ width: barIsIndeterminate ? "40%" : `${visibleSyncProgress}%` }}
           />
         </div>
-        <span className="shrink-0 tabular-nums text-sm font-medium text-[var(--foreground)]">{visibleSyncProgress}%</span>
+        <span className="shrink-0 tabular-nums text-sm font-medium text-[var(--foreground)]">
+          {Math.round(barIsIndeterminate ? 0 : visibleSyncProgress)}%
+        </span>
+        {showBackgroundSyncNote && (
+          <span
+            className="shrink-0 inline-flex items-center text-[var(--muted-foreground)]"
+            title={backgroundSyncTooltip}
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden><circle cx="12" cy="12" r="10" /><path d="M12 16v-4" /><path d="M12 8h.01" /></svg>
+          </span>
+        )}
         <button
           type="button"
           onClick={dismissSyncProgress}

@@ -397,7 +397,7 @@ export function MobileNav() {
                   href="/dashboard"
                   className={`flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium no-underline transition-colors ${
                     pathname === "/dashboard"
-                      ? "bg-[rgb(2,242,170)] text-black"
+                      ? "bg-sb-accent text-black"
                       : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
                   }`}
                   onClick={() => setOpen(false)}
@@ -410,7 +410,7 @@ export function MobileNav() {
                   href="/cost-of-goods"
                   className={`flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium no-underline transition-colors ${
                     pathname === "/cost-of-goods"
-                      ? "bg-[rgb(2,242,170)] text-black"
+                      ? "bg-sb-accent text-black"
                       : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
                   }`}
                   onClick={() => setOpen(false)}
@@ -423,7 +423,7 @@ export function MobileNav() {
                   href="/inventory"
                   className={`flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium no-underline transition-colors ${
                     pathname === "/inventory"
-                      ? "bg-[rgb(2,242,170)] text-black"
+                      ? "bg-sb-accent text-black"
                       : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
                   }`}
                   onClick={() => setOpen(false)}
@@ -436,7 +436,7 @@ export function MobileNav() {
                   href="/orders"
                   className={`flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium no-underline transition-colors ${
                     pathname === "/orders"
-                      ? "bg-[rgb(2,242,170)] text-black"
+                      ? "bg-sb-accent text-black"
                       : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
                   }`}
                   onClick={() => setOpen(false)}
@@ -449,7 +449,7 @@ export function MobileNav() {
                   href="/shipments"
                   className={`flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium no-underline transition-colors ${
                     pathname === "/shipments"
-                      ? "bg-[rgb(2,242,170)] text-black"
+                      ? "bg-sb-accent text-black"
                       : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
                   }`}
                   onClick={() => setOpen(false)}
@@ -462,7 +462,7 @@ export function MobileNav() {
                   href="/replenish"
                   className={`flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium no-underline transition-colors ${
                     pathname === "/replenish"
-                      ? "bg-[rgb(2,242,170)] text-black"
+                      ? "bg-sb-accent text-black"
                       : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
                   }`}
                   onClick={() => setOpen(false)}
@@ -500,31 +500,33 @@ export function MobileNav() {
               <div className="min-h-0 flex-1" aria-hidden="true" />
 
               <div className="flex flex-col gap-2 border-t border-[var(--surface-border)] pt-4">
-                <div className="flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--surface-border)]">
-                  <span
-                    className={`inline-flex h-2 w-2 shrink-0 rounded-full ${
-                      isSignedIn ? "bg-emerald-400" : "bg-amber-400"
-                    }`}
-                  />
-                  {isSignedIn && amazonConnected === false ? (
-                    <button
-                      type="button"
-                      onClick={connectAmazon}
-                      disabled={connectingAmazon}
-                      className="cursor-pointer truncate text-left hover:underline disabled:cursor-not-allowed disabled:opacity-60"
-                      title="Connect Amazon for data"
-                    >
-                      {connectingAmazon
-                        ? "Opening Amazon…"
-                        : "Connect Amazon for data"}
-                    </button>
-                  ) : isSignedIn && amazonConnected === true ? (
-                    <span className="truncate">Amazon connected</span>
-                  ) : (
-                    <span className="truncate">
-                      {isSignedIn ? "Authenticated" : "Sign in for data"}
-                    </span>
-                  )}
+                <div className="flex flex-col gap-1.5">
+                  <div className="flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--surface-border)]">
+                    <span
+                      className={`inline-flex h-2 w-2 shrink-0 rounded-full ${
+                        isSignedIn ? "bg-emerald-400" : "bg-amber-400"
+                      }`}
+                    />
+                    {isSignedIn && amazonConnected === false ? (
+                      <button
+                        type="button"
+                        onClick={connectAmazon}
+                        disabled={connectingAmazon}
+                        className="cursor-pointer truncate text-left hover:underline disabled:cursor-not-allowed disabled:opacity-60"
+                        title="Connect Amazon for data"
+                      >
+                        {connectingAmazon
+                          ? "Opening Amazon…"
+                          : "Connect Amazon for data"}
+                      </button>
+                    ) : isSignedIn && amazonConnected === true ? (
+                      <span className="truncate">Amazon connected</span>
+                    ) : (
+                      <span className="truncate">
+                        {isSignedIn ? "Authenticated" : "Sign in for data"}
+                      </span>
+                    )}
+                  </div>
                 </div>
 
                 <SignedOut>
@@ -576,17 +578,6 @@ export function MobileNav() {
                         className="absolute left-0 right-0 top-full z-10 mt-1 flex flex-col overflow-hidden rounded-lg border border-[var(--surface-border)] bg-[var(--surface)] shadow-lg"
                         role="menu"
                       >
-                        <Link
-                          href="/settings"
-                          role="menuitem"
-                          onClick={() => {
-                            setOptionsOpen(false);
-                            setOpen(false);
-                          }}
-                          className="block px-3 py-2.5 text-left text-sm text-[var(--foreground)] no-underline hover:bg-[var(--foreground)]/10"
-                        >
-                          Settings
-                        </Link>
                         <button
                           type="button"
                           role="menuitem"

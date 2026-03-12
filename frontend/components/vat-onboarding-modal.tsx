@@ -120,7 +120,7 @@ export function VatOnboardingModal() {
               onClick={() => setSelected(opt.value)}
               className={`w-full rounded-lg border px-4 py-3 text-left transition ${
                 selected === opt.value
-                  ? "border-[rgb(2,242,170)] bg-[rgb(2,242,170)]/10 text-[var(--foreground)]"
+                  ? "border-sb-accent bg-sb-accent/10 text-[var(--foreground)]"
                   : "border-[var(--surface-border)] bg-[var(--background)] text-[var(--foreground)] hover:border-[var(--surface-border)]/80"
               }`}
             >
@@ -139,7 +139,7 @@ export function VatOnboardingModal() {
             type="button"
             onClick={handleContinue}
             disabled={selected == null || saving}
-            className="rounded-lg bg-[rgb(2,242,170)] px-4 py-2 text-sm font-medium text-black hover:opacity-90 disabled:opacity-50 disabled:pointer-events-none"
+            className="rounded-lg bg-sb-accent px-4 py-2 text-sm font-medium text-black hover:opacity-90 disabled:opacity-50 disabled:pointer-events-none"
           >
             {saving ? "Saving…" : "Continue"}
           </button>

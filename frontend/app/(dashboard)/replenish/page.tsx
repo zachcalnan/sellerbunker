@@ -104,7 +104,7 @@ export default function ReplenishPage() {
             Sign in to view replenishment suggestions.
           </p>
           <SignInButton>
-            <button className="rounded-lg bg-[rgb(2,242,170)] px-4 py-2 text-sm font-medium text-black">
+            <button className="rounded-lg bg-sb-accent px-4 py-2 text-sm font-medium text-black">
               Sign in
             </button>
           </SignInButton>
@@ -125,7 +125,7 @@ export default function ReplenishPage() {
               placeholder="Search by SKU, ASIN or title…"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              className="max-w-md rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[rgb(2,242,170)]"
+              className="max-w-md rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-sb-accent"
               aria-label="Search replenish list"
             />
           </div>

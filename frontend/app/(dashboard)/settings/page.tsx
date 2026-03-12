@@ -5,6 +5,8 @@ import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { useDisplaySettings } from "@/contexts/display-settings-context";
 
+const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
+
 const VAT_TYPES = [
   { value: "NON_VAT_REGISTERED", label: "Non VAT registered" },
   { value: "VAT_STANDARD", label: "VAT registered (standard)" },
@@ -38,7 +40,7 @@ export default function SettingsPage() {
     setError(null);
     try {
       const token = await getToken({ template: "backend" });
-      const res = await fetch("/api/orgs/vat-settings", {
+      const res = await fetch(`${BASE_URL}/api/orgs/vat-settings`, {
         headers: { Authorization: `Bearer ${token}` },
         credentials: "include",
       });
@@ -77,7 +79,7 @@ export default function SettingsPage() {
         const pct = Number(form.vatFlatRatePct);
         body.vatFlatRatePct = Number.isFinite(pct) ? pct : null;
       }
-      const res = await fetch("/api/orgs/vat-settings", {
+      const res = await fetch(`${BASE_URL}/api/orgs/vat-settings`, {
         method: "PATCH",
         headers: {
           Authorization: `Bearer ${token}`,
@@ -109,7 +111,7 @@ export default function SettingsPage() {
         <div className="flex flex-col items-center justify-center gap-4 py-12">
           <p className="text-[var(--muted-foreground)]">Sign in to change settings.</p>
           <SignInButton>
-            <button className="rounded-lg bg-[rgb(2,242,170)] px-4 py-2 text-sm font-medium text-black">
+            <button className="rounded-lg bg-sb-accent px-4 py-2 text-sm font-medium text-black">
               Sign in
             </button>
           </SignInButton>
@@ -157,7 +159,7 @@ export default function SettingsPage() {
                     vatRegistrationType: e.target.value as VatSettings["vatRegistrationType"],
                   }))
                 }
-                className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--foreground)] focus:outline-none focus:ring-2 focus:ring-[rgb(2,242,170)]"
+                className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--foreground)] focus:outline-none focus:ring-2 focus:ring-sb-accent"
               >
                 {VAT_TYPES.map((t) => (
                   <option key={t.value} value={t.value}>
@@ -178,7 +180,7 @@ export default function SettingsPage() {
                 type="date"
                 value={form.vatEffectiveDate}
                 onChange={(e) => setForm((prev) => ({ ...prev, vatEffectiveDate: e.target.value }))}
-                className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--foreground)] focus:outline-none focus:ring-2 focus:ring-[rgb(2,242,170)]"
+                className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--foreground)] focus:outline-none focus:ring-2 focus:ring-sb-accent"
               />
             </div>
 
@@ -197,7 +199,7 @@ export default function SettingsPage() {
                   step={0.01}
                   value={form.vatFlatRatePct}
                   onChange={(e) => setForm((prev) => ({ ...prev, vatFlatRatePct: e.target.value }))}
-                  className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--foreground)] focus:outline-none focus:ring-2 focus:ring-[rgb(2,242,170)]"
+                  className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--foreground)] focus:outline-none focus:ring-2 focus:ring-sb-accent"
                 />
               </div>
             )}
@@ -206,7 +208,7 @@ export default function SettingsPage() {
               type="button"
               onClick={save}
               disabled={saving}
-              className="rounded-lg bg-[rgb(2,242,170)] px-4 py-2 text-sm font-medium text-black hover:opacity-90 disabled:opacity-60"
+              className="rounded-lg bg-sb-accent px-4 py-2 text-sm font-medium text-black hover:opacity-90 disabled:opacity-60"
             >
               {saving ? "Saving…" : "Save settings"}
             </button>

@@ -45,10 +45,6 @@ export default function OrdersPage() {
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
   const [period, setPeriod] = useState<PeriodKey>("today");
-  const [debug, setDebug] = useState<Record<string, unknown> | null>(null);
-  const [debugLoading, setDebugLoading] = useState(false);
-  const [testFetch, setTestFetch] = useState<Record<string, unknown> | null>(null);
-  const [testFetchLoading, setTestFetchLoading] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -130,45 +126,6 @@ export default function OrdersPage() {
     new Intl.NumberFormat(undefined, { style: "currency", currency: "GBP", minimumFractionDigits: 2 }).format(n);
   const nil = (v: string | number | null | undefined) => (v == null || v === "" ? "—" : String(v));
 
-  const fetchDebug = useCallback(async () => {
-    setDebugLoading(true);
-    setDebug(null);
-    try {
-      const token = await getToken({ template: "backend" });
-      const res = await fetch(`${baseUrl}/api/amazon/dev/orders-debug`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      const data = await res.json();
-      setDebug(data);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "Failed to fetch";
-      setDebug({
-        error: msg,
-        hint: "Check the backend is running and NEXT_PUBLIC_API_URL is correct (e.g. http://localhost:3001).",
-      });
-    } finally {
-      setDebugLoading(false);
-    }
-  }, [getToken, baseUrl]);
-
-  const fetchTestFetch = useCallback(async () => {
-    setTestFetchLoading(true);
-    setTestFetch(null);
-    try {
-      const token = await getToken({ template: "backend" });
-      const res = await fetch(`${baseUrl}/api/amazon/dev/orders-test-fetch`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      const data = await res.json();
-      setTestFetch(data);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "Failed to fetch";
-      setTestFetch({ error: msg });
-    } finally {
-      setTestFetchLoading(false);
-    }
-  }, [getToken, baseUrl]);
-
   const { backgroundClass } = useDisplaySettings();
 
   return (
@@ -184,26 +141,6 @@ export default function OrdersPage() {
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            {isSignedIn && (
-              <>
-                <button
-                  type="button"
-                  onClick={() => void fetchDebug()}
-                  disabled={debugLoading}
-                  className="rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--foreground)] outline-none hover:bg-[var(--surface-border)]/50 disabled:opacity-50"
-                >
-                  {debugLoading ? "Loading…" : "Debug orders"}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void fetchTestFetch()}
-                  disabled={testFetchLoading}
-                  className="rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--foreground)] outline-none hover:bg-[var(--surface-border)]/50 disabled:opacity-50"
-                >
-                  {testFetchLoading ? "…" : "Test orders API"}
-                </button>
-              </>
-            )}
             <input
               value={query}
               onChange={(e) => setQuery(e.target.value)}
@@ -218,7 +155,7 @@ export default function OrdersPage() {
         <div className="rounded-xl border border-[var(--surface-border)] bg-[var(--surface)] p-4 text-sm text-[var(--muted-foreground)]">
           <div className="mb-3">Sign in to view Orders.</div>
           <SignInButton>
-            <button className="cursor-pointer rounded-lg bg-[rgb(2,242,170)] px-3 py-2 text-sm font-medium text-black">
+            <button className="cursor-pointer rounded-lg bg-sb-accent px-3 py-2 text-sm font-medium text-black">
               Sign in
             </button>
           </SignInButton>
@@ -226,50 +163,6 @@ export default function OrdersPage() {
       </SignedOut>
 
       <SignedIn>
-        {debug != null ? (
-          <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 dark:border-amber-800 dark:bg-amber-950/30 px-4 py-3">
-            <div className="mb-2 flex items-center justify-between">
-              <span className="text-sm font-medium text-black dark:text-red-200">Orders debug (this org)</span>
-              <button
-                type="button"
-                onClick={() => setDebug(null)}
-                className="text-xs text-red-700 hover:underline dark:text-red-300"
-              >
-                Dismiss
-              </button>
-            </div>
-            <pre className="overflow-x-auto whitespace-pre-wrap break-all rounded bg-white/80 p-3 text-xs text-black dark:bg-black/40 dark:text-red-100">
-              {JSON.stringify(debug, null, 2)}
-            </pre>
-            {debug && !("error" in debug) && (
-              <p className="mt-2 text-xs text-black dark:text-red-200">
-                memberHasSellerAccount: no Amazon connected in this org if false. memberUserIds: users in this org (sync runs for users with a seller account).
-              </p>
-            )}
-          </div>
-        ) : null}
-        {testFetch != null ? (
-          <div className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 dark:border-emerald-800 dark:bg-emerald-950/30 px-4 py-3">
-            <div className="mb-2 flex items-center justify-between">
-              <span className="text-sm font-medium text-black dark:text-red-200">Orders API test (live getOrders, no persist)</span>
-              <button
-                type="button"
-                onClick={() => setTestFetch(null)}
-                className="text-xs text-red-700 hover:underline dark:text-red-300"
-              >
-                Dismiss
-              </button>
-            </div>
-            <pre className="overflow-x-auto whitespace-pre-wrap break-all rounded bg-white/80 p-3 text-xs text-black dark:bg-black/40 dark:text-red-100">
-              {JSON.stringify(testFetch, null, 2)}
-            </pre>
-            {testFetch && !("error" in testFetch) && (
-              <p className="mt-2 text-xs text-black dark:text-red-200">
-                orderCount = orders returned by SP-API for last 30 days. If this is 0, the API format was wrong or the account has no orders in the window.
-              </p>
-            )}
-          </div>
-        ) : null}
         {error ? (
           <div className="mb-4 rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-700">
             {error}

@@ -86,6 +86,26 @@ function CostOfGoodsInner() {
   };
   const [vatSettings, setVatSettings] = useState<VatSettings | null>(null);
 
+  type FixedCosts = {
+    softwareCosts: number | null;
+    otherSubscriptions: number | null;
+    otherFixedCosts: number | null;
+  };
+  const [fixedCosts, setFixedCosts] = useState<FixedCosts | null>(null);
+  const [fixedCostsFormOpen, setFixedCostsFormOpen] = useState(false);
+  const [fixedCostsSaving, setFixedCostsSaving] = useState(false);
+  type FixedCostsPeriod = "monthly" | "annual";
+  const [fixedCostsPeriod, setFixedCostsPeriod] = useState<{
+    softwareCosts: FixedCostsPeriod;
+    otherSubscriptions: FixedCostsPeriod;
+    otherFixedCosts: FixedCostsPeriod;
+  }>({ softwareCosts: "monthly", otherSubscriptions: "monthly", otherFixedCosts: "monthly" });
+  const [fixedCostsForm, setFixedCostsForm] = useState({
+    softwareCosts: "",
+    otherSubscriptions: "",
+    otherFixedCosts: "",
+  });
+
   const [loading, setLoading] = useState(false);
   const [creating, setCreating] = useState(false);
   const [seeding, setSeeding] = useState(false);
@@ -416,6 +436,29 @@ function CostOfGoodsInner() {
   }, [isSignedIn, getToken, baseUrl, startParam, endParam, query, take, skip, cogsFilter, skuSkip]);
 
   useEffect(() => {
+    if (!isSignedIn) {
+      setFixedCosts(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const token = await getToken({ template: "backend" });
+        if (!token || cancelled) return;
+        const res = await fetch(`${baseUrl}/api/orgs/fixed-costs`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok || cancelled) return;
+        const data = (await res.json()) as FixedCosts;
+        if (!cancelled) setFixedCosts(data);
+      } catch {
+        if (!cancelled) setFixedCosts(null);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [isSignedIn, getToken, baseUrl]);
+
+  useEffect(() => {
     if (missingParamOn) {
       setCogsFilter("missing");
     }
@@ -649,12 +692,56 @@ function CostOfGoodsInner() {
     }
   };
 
+  const saveFixedCosts = async () => {
+    setFixedCostsSaving(true);
+    setError(null);
+    const toMonthly = (v: number, period: FixedCostsPeriod) => (period === "annual" ? v / 12 : v);
+    const num = (s: string, period: FixedCostsPeriod) => {
+      if (s.trim() === "") return undefined;
+      const v = toMonthly(Number(s), period);
+      return Number.isFinite(v) ? v : undefined;
+    };
+    try {
+      const token = await getToken({ template: "backend" });
+      if (!token) throw new Error("Not authenticated.");
+      const res = await fetch(`${baseUrl}/api/orgs/fixed-costs`, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          softwareCosts: num(fixedCostsForm.softwareCosts, fixedCostsPeriod.softwareCosts),
+          otherSubscriptions: num(fixedCostsForm.otherSubscriptions, fixedCostsPeriod.otherSubscriptions),
+          otherFixedCosts: num(fixedCostsForm.otherFixedCosts, fixedCostsPeriod.otherFixedCosts),
+        }),
+      });
+      if (!res.ok) throw new Error("Failed to save fixed costs.");
+      const data = (await res.json()) as FixedCosts;
+      setFixedCosts(data);
+      setFixedCostsFormOpen(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to save fixed costs.");
+    } finally {
+      setFixedCostsSaving(false);
+    }
+  };
+
+  const openFixedCostsForm = () => {
+    setFixedCostsForm({
+      softwareCosts: fixedCosts?.softwareCosts != null ? String(fixedCosts.softwareCosts) : "",
+      otherSubscriptions: fixedCosts?.otherSubscriptions != null ? String(fixedCosts.otherSubscriptions) : "",
+      otherFixedCosts: fixedCosts?.otherFixedCosts != null ? String(fixedCosts.otherFixedCosts) : "",
+    });
+    setFixedCostsFormOpen(true);
+  };
+
   const { backgroundClass } = useDisplaySettings();
 
   return (
     <div className={`min-h-screen w-full ${backgroundClass} px-4 py-6`}>
       <div className="mb-4 rounded-xl border border-[var(--surface-border)] bg-[var(--surface)] px-4 py-3">
-        <div className="flex flex-wrap items-end justify-between gap-4">
+        <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <h1 className="text-2xl font-semibold text-[var(--foreground)]">
               Cost of Goods
@@ -663,95 +750,222 @@ function CostOfGoodsInner() {
               Log inbound cost entries per SKU (unit, delivery, prep, VAT). Profit uses the latest entry per SKU.
             </p>
           </div>
-          <div className="flex w-full flex-col gap-3 sm:w-auto">
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-              <input
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search SKU / ASIN / title / shipment / supplier…"
-                className="w-full rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--foreground)] outline-none sm:w-80"
-              />
+          <div className="flex shrink-0 flex-col items-end sm:ml-auto">
+            {!fixedCostsFormOpen ? (
+              <>
+                <button
+                  type="button"
+                  onClick={openFixedCostsForm}
+                  className="cursor-pointer rounded-lg bg-sb-accent px-3 py-2 text-sm font-medium text-black hover:opacity-90"
+                >
+                  Fixed monthly cost
+                </button>
+                <p className="mt-1 text-[10px] text-[var(--muted-foreground)]">
+                  Add ongoing fixed costs here
+                </p>
+              </>
+            ) : null}
+          </div>
+        </div>
+        {fixedCostsFormOpen && (
+          <div className="mt-4 flex flex-col gap-2 rounded-lg border border-[var(--surface-border)] bg-[var(--background)]/50 p-3">
+            <span className="text-sm font-medium text-[var(--foreground)]">Fixed monthly cost</span>
+            <p className="text-[10px] text-[var(--muted-foreground)]">
+              Choose monthly or annual per line. Stored as monthly for reporting.
+            </p>
+            <div className="grid gap-3 sm:grid-cols-1">
+              <div className="flex flex-col gap-1">
+                <label className="text-xs text-[var(--muted-foreground)]">Software costs</label>
+                <div className="flex flex-wrap items-center gap-2">
+                  <input
+                    type="number"
+                    min={0}
+                    step="0.01"
+                    value={fixedCostsForm.softwareCosts}
+                    onChange={(e) => setFixedCostsForm((f) => ({ ...f, softwareCosts: e.target.value }))}
+                    className="w-24 rounded border border-[var(--surface-border)] bg-[var(--background)] px-2 py-1.5 text-sm text-[var(--foreground)]"
+                    placeholder="0"
+                  />
+                  <div className="inline-flex h-7 items-stretch overflow-hidden rounded-md border border-[var(--surface-border)]">
+                    <button
+                      type="button"
+                      onClick={() => setFixedCostsPeriod((p) => ({ ...p, softwareCosts: "monthly" }))}
+                      className={`cursor-pointer px-2 text-xs focus:outline-none focus:ring-1 focus:ring-inset focus:ring-[var(--nav-active-border)] ${fixedCostsPeriod.softwareCosts === "monthly" ? "bg-sb-accent text-black" : "bg-transparent text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5"}`}
+                    >
+                      Monthly
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setFixedCostsPeriod((p) => ({ ...p, softwareCosts: "annual" }))}
+                      className={`cursor-pointer border-l border-[var(--surface-border)] px-2 text-xs focus:outline-none focus:ring-1 focus:ring-inset focus:ring-[var(--nav-active-border)] ${fixedCostsPeriod.softwareCosts === "annual" ? "bg-sb-accent text-black" : "bg-transparent text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5"}`}
+                    >
+                      Annual
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <div className="flex flex-col gap-1">
+                <label className="text-xs text-[var(--muted-foreground)]">Other subscriptions</label>
+                <div className="flex flex-wrap items-center gap-2">
+                  <input
+                    type="number"
+                    min={0}
+                    step="0.01"
+                    value={fixedCostsForm.otherSubscriptions}
+                    onChange={(e) => setFixedCostsForm((f) => ({ ...f, otherSubscriptions: e.target.value }))}
+                    className="w-24 rounded border border-[var(--surface-border)] bg-[var(--background)] px-2 py-1.5 text-sm text-[var(--foreground)]"
+                    placeholder="0"
+                  />
+                  <div className="inline-flex h-7 items-stretch overflow-hidden rounded-md border border-[var(--surface-border)]">
+                    <button
+                      type="button"
+                      onClick={() => setFixedCostsPeriod((p) => ({ ...p, otherSubscriptions: "monthly" }))}
+                      className={`cursor-pointer px-2 text-xs focus:outline-none focus:ring-1 focus:ring-inset focus:ring-[var(--nav-active-border)] ${fixedCostsPeriod.otherSubscriptions === "monthly" ? "bg-sb-accent text-black" : "bg-transparent text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5"}`}
+                    >
+                      Monthly
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setFixedCostsPeriod((p) => ({ ...p, otherSubscriptions: "annual" }))}
+                      className={`cursor-pointer border-l border-[var(--surface-border)] px-2 text-xs focus:outline-none focus:ring-1 focus:ring-inset focus:ring-[var(--nav-active-border)] ${fixedCostsPeriod.otherSubscriptions === "annual" ? "bg-sb-accent text-black" : "bg-transparent text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5"}`}
+                    >
+                      Annual
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <div className="flex flex-col gap-1">
+                <label className="text-xs text-[var(--muted-foreground)]">Other fixed costs</label>
+                <div className="flex flex-wrap items-center gap-2">
+                  <input
+                    type="number"
+                    min={0}
+                    step="0.01"
+                    value={fixedCostsForm.otherFixedCosts}
+                    onChange={(e) => setFixedCostsForm((f) => ({ ...f, otherFixedCosts: e.target.value }))}
+                    className="w-24 rounded border border-[var(--surface-border)] bg-[var(--background)] px-2 py-1.5 text-sm text-[var(--foreground)]"
+                    placeholder="0"
+                  />
+                  <div className="inline-flex h-7 items-stretch overflow-hidden rounded-md border border-[var(--surface-border)]">
+                    <button
+                      type="button"
+                      onClick={() => setFixedCostsPeriod((p) => ({ ...p, otherFixedCosts: "monthly" }))}
+                      className={`cursor-pointer px-2 text-xs focus:outline-none focus:ring-1 focus:ring-inset focus:ring-[var(--nav-active-border)] ${fixedCostsPeriod.otherFixedCosts === "monthly" ? "bg-sb-accent text-black" : "bg-transparent text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5"}`}
+                    >
+                      Monthly
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setFixedCostsPeriod((p) => ({ ...p, otherFixedCosts: "annual" }))}
+                      className={`cursor-pointer border-l border-[var(--surface-border)] px-2 text-xs focus:outline-none focus:ring-1 focus:ring-inset focus:ring-[var(--nav-active-border)] ${fixedCostsPeriod.otherFixedCosts === "annual" ? "bg-sb-accent text-black" : "bg-transparent text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5"}`}
+                    >
+                      Annual
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={saveFixedCosts}
+                disabled={fixedCostsSaving}
+                className="cursor-pointer rounded-lg bg-sb-accent px-3 py-2 text-sm font-medium text-black disabled:opacity-60"
+              >
+                {fixedCostsSaving ? "Saving…" : "Save"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setFixedCostsFormOpen(false)}
+                className="cursor-pointer rounded-lg border border-[var(--surface-border)] px-3 py-2 text-sm font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/5"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+        <div className="mt-4 flex w-full flex-col gap-3 sm:flex-row sm:items-center">
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search SKU / ASIN / title / shipment / supplier…"
+            className="w-full rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--foreground)] outline-none sm:w-80"
+          />
+          <button
+            type="button"
+            onClick={() => {
+              if (showForm) {
+                setShowForm(false);
+                setEditingEntry(null);
+                return;
+              }
+              setEditingEntry(null);
+              resetNewEntryForm();
+              setShowForm(true);
+            }}
+            className="cursor-pointer rounded-lg bg-sb-accent px-3 py-2 text-sm font-medium text-black"
+          >
+            {showForm ? "Close" : "Add entry"}
+          </button>
+        </div>
+        <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-center gap-2 text-xs text-[var(--muted-foreground)]">
+            <span className="sr-only">COGS filter</span>
+            <div className="inline-flex h-8 items-stretch overflow-hidden rounded-lg border border-[var(--surface-border)]">
               <button
                 type="button"
                 onClick={() => {
-                  if (showForm) {
-                    setShowForm(false);
-                    setEditingEntry(null);
-                    return;
-                  }
-                  setEditingEntry(null);
-                  resetNewEntryForm();
-                  setShowForm(true);
+                  setCogsFilter("missing");
+                  setSkuSkip(0);
                 }}
-                className="cursor-pointer rounded-lg bg-[rgb(2,242,170)] px-3 py-2 text-sm font-medium text-black"
+                className={[
+                  "cursor-pointer h-8 px-3 text-xs",
+                  cogsFilter === "missing"
+                    ? "bg-sb-accent text-black"
+                    : "bg-transparent text-[var(--foreground)]",
+                ].join(" ")}
               >
-                {showForm ? "Close" : "Add entry"}
+                Missing
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setCogsFilter("complete");
+                  setSkuSkip(0);
+                }}
+                className={[
+                  "cursor-pointer h-8 px-3 text-xs border-l border-[var(--surface-border)]",
+                  cogsFilter === "complete"
+                    ? "bg-sb-accent text-black"
+                    : "bg-transparent text-[var(--foreground)]",
+                ].join(" ")}
+              >
+                Complete
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setCogsFilter("all");
+                  setSkuSkip(0);
+                }}
+                className={[
+                  "cursor-pointer h-8 px-3 text-xs border-l border-[var(--surface-border)]",
+                  cogsFilter === "all"
+                    ? "bg-sb-accent text-black"
+                    : "bg-transparent text-[var(--foreground)]",
+                ].join(" ")}
+              >
+                All
               </button>
             </div>
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-              <div className="flex items-center gap-2 text-xs text-[var(--muted-foreground)]">
-                <span className="sr-only">COGS filter</span>
-
-                <div className="inline-flex h-8 items-stretch overflow-hidden rounded-lg border border-[var(--surface-border)]">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setCogsFilter("missing");
-                      setSkuSkip(0);
-                    }}
-                    className={[
-                      "cursor-pointer h-8 px-3 text-xs",
-                      cogsFilter === "missing"
-                        ? "bg-[rgb(2,242,170)] text-black"
-                        : "bg-transparent text-[var(--foreground)]",
-                    ].join(" ")}
-                  >
-                    Missing
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setCogsFilter("complete");
-                      setSkuSkip(0);
-                    }}
-                    className={[
-                      "cursor-pointer h-8 px-3 text-xs border-l border-[var(--surface-border)]",
-                      cogsFilter === "complete"
-                        ? "bg-[rgb(2,242,170)] text-black"
-                        : "bg-transparent text-[var(--foreground)]",
-                    ].join(" ")}
-                  >
-                    Complete
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setCogsFilter("all");
-                      setSkuSkip(0);
-                    }}
-                    className={[
-                      "cursor-pointer h-8 px-3 text-xs border-l border-[var(--surface-border)]",
-                      cogsFilter === "all"
-                        ? "bg-[rgb(2,242,170)] text-black"
-                        : "bg-transparent text-[var(--foreground)]",
-                    ].join(" ")}
-                  >
-                    All
-                  </button>
-                </div>
-              </div>
-
-              <div className="flex flex-wrap items-center gap-3 text-xs text-[var(--muted-foreground)]">
-                <span>
-                  {pagingTotal > 0
-                    ? `${pagingStart} - ${pagingEnd} of ${pagingTotal}`
-                    : "0 - 0 of 0"}
-                </span>
-                <span className="text-[var(--muted-foreground)]">10 per page</span>
-              </div>
-            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-3 text-xs text-[var(--muted-foreground)]">
+            <span>
+              {pagingTotal > 0
+                ? `${pagingStart} - ${pagingEnd} of ${pagingTotal}`
+                : "0 - 0 of 0"}
+            </span>
+            <span className="text-[var(--muted-foreground)]">10 per page</span>
           </div>
         </div>
       </div>
@@ -1216,7 +1430,7 @@ function CostOfGoodsInner() {
                     type="button"
                     onClick={editingEntry ? updateEntry : createEntry}
                     disabled={creating}
-                    className="cursor-pointer rounded-lg bg-[rgb(2,242,170)] px-4 py-2 text-sm font-medium text-black disabled:cursor-not-allowed disabled:opacity-60"
+                    className="cursor-pointer rounded-lg bg-sb-accent px-4 py-2 text-sm font-medium text-black disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     {creating ? "Saving…" : editingEntry ? "Save changes" : "Save"}
                   </button>
@@ -1279,7 +1493,7 @@ function CostOfGoodsInner() {
                           resetNewEntryForm();
                           setShowForm(true);
                         }}
-                        className="cursor-pointer rounded-lg bg-[rgb(2,242,170)] px-3 py-2 text-sm font-medium text-black"
+                        className="cursor-pointer rounded-lg bg-sb-accent px-3 py-2 text-sm font-medium text-black"
                       >
                         Add entry
                       </button>
@@ -1330,7 +1544,7 @@ function CostOfGoodsInner() {
                           ) : null}
                           <button
                             type="button"
-                            className="mt-2 cursor-pointer rounded-lg bg-[rgb(2,242,170)] px-3 py-1.5 text-xs font-medium text-black"
+                            className="mt-2 cursor-pointer rounded-lg bg-sb-accent px-3 py-1.5 text-xs font-medium text-black"
                             onClick={() => {
                               setEditingEntry(null);
                               setShowForm(true);

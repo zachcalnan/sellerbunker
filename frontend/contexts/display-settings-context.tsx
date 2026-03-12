@@ -63,6 +63,12 @@ export function DisplaySettingsProvider({ children }: { children: ReactNode }) {
     [backgroundTheme],
   );
 
+  // Apply accent (theme) colour to the document so buttons, rings, sync bar, etc. use it
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    document.documentElement.style.setProperty("--sb-accent", ringColor);
+  }, [ringColor]);
+
   const setBackgroundTheme = useCallback((t: BackgroundTheme) => {
     setBackgroundThemeState(t);
     try {
