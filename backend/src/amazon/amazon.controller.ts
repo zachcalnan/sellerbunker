@@ -676,6 +676,16 @@ ping() {
   }
 
   /**
+   * Summary of missing units from FBA shipments (for topbar notification).
+   * Example: GET /api/amazon/shipments/missing-summary
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Get('shipments/missing-summary')
+  async getShipmentsMissingSummary(@Req() req: { user: { orgId: string } }) {
+    return this.amazonService.getShipmentsMissingSummary(req.user.orgId);
+  }
+
+  /**
    * FBA Shipments: sync from SP-API (getShipments + items + transport).
    * Example: POST /api/amazon/shipments/sync
    */

@@ -574,12 +574,14 @@ export class AmazonService {
         revenue: 0,
         profitMargin: 0,
         unitsSold: 0,
-        adSpend: 0,
         totalOrders: 0,
         activeSkus: 0,
         unitsInFba: 0,
         openShipments: 0,
         hasCostData: false,
+        totalProfit: 0,
+        totalCostOfGoods: 0,
+        roiPct: null as number | null,
         orderItemsOrdersCount: 0,
         orderItemsCoveragePct: 1,
         generatedAt: new Date().toISOString(),
@@ -619,8 +621,6 @@ export class AmazonService {
       return sum + qty;
     }, 0);
 
-    const adSpend = 0;
-
     const toNumber = (value: unknown): number => {
       if (value == null) return 0;
       if (typeof value === 'number') return value;
@@ -651,12 +651,21 @@ export class AmazonService {
         revenueTotal: true,
         taxChargedTotal: true,
         amazonFeesTotal: true,
+        feesSource: true,
+        settledReferralFeeTotal: true,
+        settledFbaFeeTotal: true,
+        settledDigitalServiceFeeTotal: true,
+        cogsTotal: true,
         quantity: true,
         orderId: true,
         orderDbId: true,
         product: {
           select: {
             costOfGoods: true,
+            estimatedAmazonFeePerUnit: true,
+            estimatedReferralFeePerUnit: true,
+            estimatedFbaFeePerUnit: true,
+            estimatedDigitalServiceFeePerUnit: true,
           },
         },
       },
@@ -669,45 +678,128 @@ export class AmazonService {
     const orderItemsCoveragePct =
       totalOrders > 0 ? orderItemsOrdersCount / totalOrders : 1;
 
+    // Profit = sale price (revenueTotal) - selling fees (amazonFeesTotal, stored negative) - tax - COGS. ROI = profit / cost of goods.
     let totalProfit = 0;
+    let totalCostOfGoods = 0;
     let hasProfitData = false;
     for (const it of orderItems) {
-      const existingProfit = it.profit == null ? null : toNumber(it.profit);
-      if (existingProfit != null && !Number.isNaN(existingProfit)) {
-        totalProfit += existingProfit;
-        hasProfitData = true;
-        continue;
-      }
-
-      const cogsPerUnit =
-        it.product?.costOfGoods == null
-          ? null
-          : toNumber(it.product.costOfGoods);
-      if (cogsPerUnit == null || Number.isNaN(cogsPerUnit)) {
-        continue;
-      }
-
       const revenueTotal = toNumber(it.revenueTotal ?? 0);
       const taxChargedTotal = toNumber(it.taxChargedTotal ?? 0);
       const amazonFeesTotal = toNumber(it.amazonFeesTotal ?? 0);
       const qty = toNumber(it.quantity ?? 0);
+      const storedCogsTotal = it.cogsTotal != null ? toNumber(it.cogsTotal) : null;
+      const cogsPerUnit =
+        it.product?.costOfGoods == null
+          ? null
+          : toNumber(it.product.costOfGoods);
       const cogsTotal =
-        cogsPerUnit * (Number.isFinite(qty) && qty > 0 ? qty : 1);
+        storedCogsTotal != null && !Number.isNaN(storedCogsTotal)
+          ? storedCogsTotal
+          : cogsPerUnit != null && !Number.isNaN(cogsPerUnit) && Number.isFinite(qty) && qty > 0
+            ? cogsPerUnit * qty
+            : 0;
 
-      // amazonFeesTotal is stored as negative from SP-API; adding it subtracts the fee from profit.
-      const computed =
-        revenueTotal - taxChargedTotal - cogsTotal + amazonFeesTotal;
-      if (!Number.isNaN(computed)) {
-        totalProfit += computed;
+      // Only include items that have COGS (so profit = sale price - fees - COGS is well-defined).
+      if (cogsTotal <= 0 && (it.profit == null || it.profit === undefined)) continue;
+
+      // Replicate listOrders fee logic exactly so summary circles match Recent Orders / orders sheet.
+      const toNumOpt = (v: unknown): number | null => {
+        if (v == null) return null;
+        const n = toNumber(v);
+        return Number.isFinite(n) ? n : null;
+      };
+      const settledFees = amazonFeesTotal;
+      const estPerUnit =
+        it.product?.estimatedAmazonFeePerUnit != null
+          ? toNumOpt(it.product.estimatedAmazonFeePerUnit)
+          : null;
+      const estReferral =
+        it.product?.estimatedReferralFeePerUnit != null
+          ? toNumOpt(it.product.estimatedReferralFeePerUnit)
+          : null;
+      const estFba =
+        it.product?.estimatedFbaFeePerUnit != null
+          ? toNumOpt(it.product.estimatedFbaFeePerUnit)
+          : null;
+      const estDigital =
+        it.product?.estimatedDigitalServiceFeePerUnit != null
+          ? toNumOpt(it.product.estimatedDigitalServiceFeePerUnit)
+          : null;
+      const feesForDisplay =
+        settledFees !== 0
+          ? settledFees
+          : estPerUnit != null && qty > 0
+            ? -Math.abs(estPerUnit * qty)
+            : 0;
+      const feesSource = (it as any).feesSource ?? null;
+      let referralFeeTotal: number | null = null;
+      let fbaFeeTotal: number | null = null;
+      let digitalServiceFeeTotal: number | null = null;
+      const settledReferral = toNumOpt((it as any).settledReferralFeeTotal);
+      const settledFba = toNumOpt((it as any).settledFbaFeeTotal);
+      const settledDigital = toNumOpt((it as any).settledDigitalServiceFeeTotal);
+      const hasSettledBreakdown =
+        feesSource === 'finances' &&
+        (settledReferral != null || settledFba != null || settledDigital != null);
+      if (hasSettledBreakdown) {
+        referralFeeTotal = settledReferral;
+        fbaFeeTotal = settledFba;
+        digitalServiceFeeTotal = settledDigital;
+      }
+      if (!hasSettledBreakdown && feesSource !== 'finances') {
+        if (estReferral != null) {
+          referralFeeTotal = Math.round(-Math.abs(estReferral * qty) * 100) / 100;
+        }
+        if (estFba != null) {
+          fbaFeeTotal = Math.round(-Math.abs(estFba * qty) * 100) / 100;
+        }
+        if (estDigital != null) {
+          digitalServiceFeeTotal = Math.round(-Math.abs(estDigital * qty) * 100) / 100;
+        }
+        if (
+          Number.isFinite(feesForDisplay) &&
+          feesForDisplay !== 0 &&
+          referralFeeTotal == null &&
+          fbaFeeTotal == null &&
+          digitalServiceFeeTotal == null
+        ) {
+          referralFeeTotal = Math.round((feesForDisplay / 2) * 100) / 100;
+          fbaFeeTotal = Math.round((feesForDisplay - referralFeeTotal) * 100) / 100;
+        }
+        if (
+          digitalServiceFeeTotal == null &&
+          (referralFeeTotal != null || fbaFeeTotal != null)
+        ) {
+          const sum = Math.abs(referralFeeTotal ?? 0) + Math.abs(fbaFeeTotal ?? 0);
+          if (sum > 0) {
+            digitalServiceFeeTotal = Math.round(-sum * 0.02 * 100) / 100;
+          }
+        }
+      }
+      const totalFromBreakdown =
+        (referralFeeTotal ?? 0) + (fbaFeeTotal ?? 0) + (digitalServiceFeeTotal ?? 0);
+      const finalFeesForDisplay =
+        (referralFeeTotal != null || fbaFeeTotal != null || digitalServiceFeeTotal != null) &&
+        totalFromBreakdown !== 0
+          ? Math.round(totalFromBreakdown * 100) / 100
+          : feesForDisplay;
+
+      // Same formula as listOrders: revenue - tax - COGS + fees (fees negative) so circles match orders sheet.
+      const itemProfit =
+        revenueTotal - taxChargedTotal - cogsTotal + finalFeesForDisplay;
+
+      if (!Number.isNaN(itemProfit)) {
+        totalProfit += itemProfit;
+        totalCostOfGoods += cogsTotal;
         hasProfitData = true;
       }
     }
 
     const currency = credentials.region === 'eu' ? 'GBP' : 'USD';
-    // "hasCostData" means we can calculate profit (we found at least one line item with COGS).
-    // Note: profit can legitimately sum to 0, so we must not use "totalProfit !== 0" here.
-    const hasCostData = hasProfitData || adSpend !== 0;
+    const hasCostData = hasProfitData;
     const profitMargin = hasCostData && revenue > 0 ? totalProfit / revenue : 0;
+    const roiPct =
+      totalCostOfGoods > 0 ? (totalProfit / totalCostOfGoods) * 100 : null;
 
     return {
       marketplace: 'amazon',
@@ -717,7 +809,6 @@ export class AmazonService {
       revenue,
       profitMargin,
       unitsSold,
-      adSpend,
       totalOrders,
       orderItemsOrdersCount,
       orderItemsCoveragePct,
@@ -725,6 +816,9 @@ export class AmazonService {
       unitsInFba: 0,
       openShipments: 0,
       hasCostData,
+      totalProfit,
+      totalCostOfGoods,
+      roiPct,
       generatedAt: new Date().toISOString(),
     };
   }
@@ -3948,6 +4042,46 @@ export class AmazonService {
         checkedInDateIsClosedDate: checkedInDateReal != null ? s.checkedInDateIsClosedDate ?? null : null,
       };
     });
+  }
+
+  /**
+   * Per-shipment summary of missing units from FBA shipments (for topbar notification).
+   * Returns one entry per shipment that has unitsMissing > 0, ordered by sent date (most recent first).
+   */
+  async getShipmentsMissingSummary(orgId: string): Promise<{
+    shipments: Array<{
+      shipmentId: string;
+      missingUnits: number;
+      sentDate: string | null;
+      shipmentName: string | null;
+    }>;
+  }> {
+    const userIds = await this.getOrgMemberUserIds(orgId);
+    const rows = await this.prisma.shipment.findMany({
+      where: {
+        userId: { in: userIds },
+        unitsMissing: { gt: 0 },
+      },
+      select: {
+        shipmentId: true,
+        shipmentName: true,
+        unitsMissing: true,
+        pickupDate: true,
+        createdDate: true,
+      },
+      orderBy: [{ createdDate: 'desc' }, { pickupDate: 'desc' }],
+    });
+    const shipments = rows.map((r) => {
+      const sentDate =
+        (r.pickupDate ?? r.createdDate)?.toISOString().slice(0, 10) ?? null;
+      return {
+        shipmentId: r.shipmentId,
+        missingUnits: r.unitsMissing ?? 0,
+        sentDate,
+        shipmentName: r.shipmentName ?? null,
+      };
+    });
+    return { shipments };
   }
 
   /**
