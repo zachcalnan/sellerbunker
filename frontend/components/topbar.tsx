@@ -402,7 +402,7 @@ export function Topbar() {
   return (
     <>
     <header
-      className="hidden md:flex h-14 shrink-0 items-center justify-between gap-4 border-b border-[var(--surface-border)] bg-[var(--surface)] px-4"
+      className="flex h-14 shrink-0 items-center justify-between gap-2 border-b border-[var(--surface-border)] bg-[var(--surface)] px-3 md:gap-4 md:px-4"
       role="banner"
     >
       <div

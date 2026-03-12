@@ -339,6 +339,21 @@ export class AmazonSyncService implements OnModuleInit {
     );
   }
 
+  /** Enqueue category backfill (productType/displayGroup) to run in background. Runs after initial sync and after order sync so new ASINs get categories. */
+  async enqueueCategoryBackfill(orgId: string, userId: string, options?: { limit?: number }): Promise<void> {
+    const limit = Math.min(
+      250,
+      Math.max(1, options?.limit ?? (Number(process.env.AMAZON_CATEGORY_BACKFILL_LIMIT) || 100)),
+    );
+    this.logger.log(`Enqueuing category-backfill job (orgId=${orgId}, limit=${limit})`);
+    await this.enqueueUniqueJob(
+      'category-backfill',
+      `category-backfill-${orgId}`,
+      { orgId, userId, limit },
+      `Category backfill for org ${orgId}`,
+    );
+  }
+
   /**
    * Enqueue post-initial-sync: orders, full inventory, shipments.
    * Runs after initial sync (minimal inventory + top 10 fees) hits 100%.

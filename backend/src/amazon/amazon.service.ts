@@ -864,9 +864,6 @@ export class AmazonService {
         userId: { in: userIds },
         marketplace: 'amazon',
         orderDate: { gte: safeStart, lte: safeEnd },
-        product: {
-          displayGroup: { not: null, notIn: [''] },
-        },
       },
       select: {
         revenueTotal: true,

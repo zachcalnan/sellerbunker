@@ -195,6 +195,7 @@ export class AmazonSyncProcessor extends WorkerHost {
           this.logger.log(`[full-sync] Initial sync completed → 100%. Enqueuing full inventory, shipments, titles in background.`);
           await this.amazonSyncService.enqueuePostInitialSync(userId, orgIdForSync);
           await this.amazonSyncService.enqueueTitlesBackfill(orgIdForSync, userId);
+          await this.amazonSyncService.enqueueCategoryBackfill(orgIdForSync, userId);
         } else {
           this.logger.warn(`[full-sync] userId=${userId} has no activeOrgId and no org membership; skipping inventory/fees`);
         }
@@ -279,6 +280,21 @@ export class AmazonSyncProcessor extends WorkerHost {
         }
         try {
           await this.amazonService.syncRecentOrdersToDb(userId, { days: 30 });
+          const user = await this.prisma.user.findUnique({
+            where: { id: userId },
+            select: { activeOrgId: true },
+          });
+          let orgId = user?.activeOrgId ?? null;
+          if (!orgId) {
+            const membership = await this.prisma.organizationMembership.findFirst({
+              where: { userId },
+              select: { orgId: true },
+            });
+            orgId = membership?.orgId ?? null;
+          }
+          if (orgId) {
+            await this.amazonSyncService.enqueueCategoryBackfill(orgId, userId, { limit: 50 });
+          }
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           this.logger.warn(`[AmazonSync] orders-batch-sync failed (userId=${userId}): ${msg}`);
@@ -379,6 +395,31 @@ export class AmazonSyncProcessor extends WorkerHost {
       const result = await this.amazonService.backfillProductTitles(orgId, safeLimit, userId);
       this.logger.log(
         `[AmazonSync] Titles backfill org ${orgId}: requested=${result?.requested ?? 0} updated=${result?.updated ?? 0} skipped=${result?.skipped ?? 0} errors=${result?.errorsCount ?? 0}`,
+      );
+    }
+
+    if (job.name === 'category-backfill') {
+      const { orgId, userId, limit } = job.data as { orgId?: string; userId?: string; limit?: number };
+      if (!orgId) {
+        throw new Error('Missing orgId for category-backfill job');
+      }
+      let preferredUserId = userId;
+      if (!preferredUserId) {
+        const member = await this.prisma.organizationMembership.findFirst({
+          where: { orgId },
+          select: { userId: true },
+        });
+        preferredUserId = member?.userId ?? '';
+      }
+      if (!preferredUserId) {
+        this.logger.warn(`[AmazonSync] Category backfill skipped for org ${orgId}: no userId and no org members`);
+        return;
+      }
+      const safeLimit = Math.min(250, Math.max(1, Number(limit) || 100));
+      this.logger.log(`[AmazonSync] Running category backfill for org ${orgId} (limit=${safeLimit})`);
+      const result = await this.amazonService.backfillCatalogCategoriesForNewAsins(orgId, preferredUserId, undefined, safeLimit);
+      this.logger.log(
+        `[AmazonSync] Category backfill org ${orgId}: requested=${result?.requested ?? 0} processed=${result?.processed ?? 0} updated=${result?.updated ?? 0} noData=${result?.noDataCount ?? 0}`,
       );
     }
 

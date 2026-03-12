@@ -326,11 +326,11 @@ export default function LandingPage() {
             <div className="grid gap-10 lg:grid-cols-2 lg:gap-16 lg:items-center">
               <div>
                 <h1 className="text-4xl font-bold tracking-tight text-[var(--foreground)] sm:text-5xl lg:text-6xl">
-                  Your Amazon profit.{" "}
-                  <span style={{ color: accentColor }}>Finally under control.</span>
+                  Stop guessing your Amazon profits.{" "}
+                  <span style={{ color: accentColor }}>SellerBunker tracks every cost Amazon hides.</span>
                 </h1>
                 <p className="mt-4 max-w-xl text-lg text-[var(--muted-foreground)]">
-                  SellerBunker tracks sales, profit, inventory, and ROI in one powerful dashboard designed for serious Amazon sellers—whether you sell FBA (Fulfilled by Amazon), FBM (Fulfilled by Merchant), or both.
+                  SellerBunker tracks sales, profit, inventory, shipments, and ROI in one powerful dashboard designed for serious Amazon sellers—whether you sell FBA (Fulfilled by Amazon), FBM (Fulfilled by Merchant), or both. We identify missing stock and indicate which products you should replenish to keep making profit.
                 </p>
                 <div className="mt-6 flex flex-wrap gap-4">
                   <SignedOut>
@@ -425,30 +425,98 @@ export default function LandingPage() {
         <section className="border-b border-[var(--surface-border)] bg-[var(--surface)]/30 py-20 sm:py-24">
           <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
             <h2 className="text-center text-3xl font-bold text-[var(--foreground)] sm:text-4xl">
-              Stop guessing your Amazon profits
+              Amazon profit numbers are wrong.
             </h2>
-            <p className="mx-auto mt-4 max-w-2xl text-center text-lg text-[var(--muted-foreground)]">
-              SellerBunker replaces messy spreadsheets and confusing Amazon reports with one clear dashboard—for FBA and FBM sellers alike.
+            <p className="mx-auto mt-6 max-w-2xl text-center text-lg text-[var(--muted-foreground)]">
+              Seller Central ignores:
             </p>
-            <ul className="mx-auto mt-12 grid max-w-4xl gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            <ul className="mx-auto mt-8 grid max-w-2xl gap-3 sm:grid-cols-2 lg:grid-cols-3 lg:max-w-4xl">
               {[
-                "Amazon reports are confusing",
-                "You don't know your true profit",
-                "Inventory is hard to track",
-                "Reordering decisions are guesswork",
-                "You manage everything in spreadsheets",
-              ].map((problem) => (
+                "Inbound shipping",
+                "Prep costs",
+                "Refunds",
+                "Damaged inventory",
+                "Cross-border VAT",
+              ].map((item) => (
                 <li
-                  key={problem}
+                  key={item}
                   className="flex items-center gap-3 rounded-xl border border-[var(--surface-border)] bg-[var(--background)] px-4 py-3"
                 >
                   <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[var(--foreground)]" style={{ backgroundColor: accentMuted }}>
                     <span className="text-sm" style={{ color: accentColor }}>✕</span>
                   </span>
-                  <span className="text-[var(--foreground)]">{problem}</span>
+                  <span className="text-[var(--foreground)]">{item}</span>
                 </li>
               ))}
             </ul>
+            <p className="mx-auto mt-10 text-center text-xl font-semibold" style={{ color: accentColor }}>
+              SellerBunker fixes this.
+            </p>
+          </div>
+        </section>
+
+        {/* Track your REAL profit */}
+        <section className="border-b border-[var(--surface-border)] bg-[var(--background)] py-20 sm:py-24">
+          <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+            <h2 className="text-center text-3xl font-bold text-[var(--foreground)] sm:text-4xl">
+              Track your REAL profit
+            </h2>
+            <p className="mx-auto mt-4 max-w-2xl text-center text-lg text-[var(--muted-foreground)]">
+              We include every cost so you see true profit—not just revenue. Supports both VAT-registered and non-VAT-registered sellers.
+            </p>
+            <ul className="mx-auto mt-12 flex max-w-2xl flex-col gap-3 sm:mx-0 sm:max-w-none sm:grid sm:grid-cols-2 lg:grid-cols-3">
+              {[
+                "Amazon fees",
+                "VAT",
+                "Prep costs",
+                "Shipping",
+                "Refunds",
+                "Lost inventory",
+                "Inbound shipment costs",
+              ].map((item) => (
+                <li
+                  key={item}
+                  className="flex items-center gap-3 rounded-xl border border-[var(--surface-border)] bg-[var(--surface)] px-4 py-3"
+                >
+                  <span
+                    className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-sm font-medium text-black"
+                    style={{ backgroundColor: accentColor }}
+                  >
+                    ✓
+                  </span>
+                  <span className="text-[var(--foreground)]">{item}</span>
+                </li>
+              ))}
+            </ul>
+            <div className="mx-auto mt-14 max-w-sm rounded-2xl border border-[var(--surface-border)] bg-[var(--surface)] p-5 shadow-lg">
+              <p className="text-center text-xs font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">Example: one sale</p>
+              <div className="mt-4 space-y-2 text-sm">
+                <div className="flex justify-between text-[var(--foreground)]">
+                  <span>Sale price</span>
+                  <span className="tabular-nums">£24.99</span>
+                </div>
+                <div className="flex justify-between text-[var(--muted-foreground)]">
+                  <span>Amazon fees (FBA &amp; Referral)</span>
+                  <span className="tabular-nums">−£8.40</span>
+                </div>
+                <div className="flex justify-between text-[var(--muted-foreground)]">
+                  <span>Prep cost</span>
+                  <span className="tabular-nums">−£0.60</span>
+                </div>
+                <div className="flex justify-between text-[var(--muted-foreground)]">
+                  <span>Inbound shipping</span>
+                  <span className="tabular-nums">−£0.50</span>
+                </div>
+                <div className="flex justify-between text-[var(--muted-foreground)]">
+                  <span>VAT</span>
+                  <span className="tabular-nums">−£3.40</span>
+                </div>
+              </div>
+              <div className="mt-4 flex justify-between border-t border-[var(--surface-border)] pt-4 text-base font-semibold" style={{ color: accentColor }}>
+                <span>True profit</span>
+                <span className="tabular-nums">£12.09</span>
+              </div>
+            </div>
           </div>
         </section>
 
@@ -565,7 +633,7 @@ export default function LandingPage() {
               For every type of Amazon seller (FBA &amp; FBM)
             </h2>
             <p className="mx-auto mt-4 max-w-2xl text-center text-[var(--muted-foreground)]">
-              Whether you fulfill through Amazon (FBA) or ship yourself (FBM), SellerBunker gives you one view of profit, inventory, and orders.
+              Whether you fulfill through Amazon (FBA) or ship yourself (FBM), and whether you&apos;re VAT registered or not, SellerBunker gives you one view of profit, inventory, and orders.
             </p>
             <div className="mt-16 grid gap-8 md:grid-cols-3">
               {[
@@ -619,6 +687,21 @@ export default function LandingPage() {
           </div>
         </section>
 
+        {/* Repricer in development */}
+        <section className="border-b border-[var(--surface-border)] bg-[var(--surface)]/30 py-20 sm:py-24">
+          <div className="mx-auto max-w-3xl px-4 text-center sm:px-6 lg:px-8">
+            <h2 className="text-3xl font-bold text-[var(--foreground)] sm:text-4xl">
+              Repricer module in development
+            </h2>
+            <p className="mt-4 text-lg text-[var(--muted-foreground)]">
+              We&apos;re building a repricer to help you stay competitive on Amazon. It will integrate with your existing SellerBunker dashboard—more updates as we get closer to launch.
+            </p>
+            <p className="mx-auto mt-4 max-w-2xl text-center text-sm text-[var(--muted-foreground)]">
+              We currently support UK marketplaces within the EU region while in early beta, and will be covering all EU markets very soon.
+            </p>
+          </div>
+        </section>
+
         {/* 8. Pricing */}
         <section id="pricing" className="border-b border-[var(--surface-border)] bg-[var(--surface)]/30 py-20 sm:py-24">
           <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
@@ -626,13 +709,13 @@ export default function LandingPage() {
               Simple pricing
             </h2>
             <p className="mx-auto mt-4 max-w-xl text-center text-[var(--muted-foreground)]">
-              Start with a free trial. No credit card required.
+              Start with a free trial.
             </p>
             <div className="mt-16 grid gap-8 md:grid-cols-3">
               {[
                 { name: "Starter", price: "£14.99", period: "month", orders: "Up to 5,000 orders per month", note: "Testing price for initial users", priceSubline: "Two weeks free, then", cta: "Start free trial", featured: true, badge: "For initial testing" },
-                { name: "Growth", price: "TBC", period: "", orders: "5,000 – 50,000 orders per month", cta: "Start free trial", featured: false },
-                { name: "Pro", price: "TBC", period: "", orders: "Unlimited orders per month", cta: "Start free trial", featured: false },
+                { name: "Growth", price: "£26.99", period: "month", orders: "5,000 – 50,000 orders per month", cta: "Start free trial", featured: false },
+                { name: "Pro", price: "£44.99", period: "month", orders: "50,000+ orders per month", cta: "Start free trial", featured: false },
               ].map((plan) => (
                 <div
                   key={plan.name}
@@ -706,7 +789,13 @@ export default function LandingPage() {
               Trusted by Amazon sellers
             </h2>
             <p className="mx-auto mt-6 max-w-2xl text-center text-[var(--muted-foreground)]">
-              Built by real Amazon FBA and FBM sellers—ex developers and market professionals—who know what you need to run your business.
+              After years selling across UK &amp; EU, we were frustrated by the lack of accurate profit analytics and the cost of the tools out there.
+            </p>
+            <p className="mx-auto mt-4 max-w-2xl text-center text-[var(--foreground)] font-medium">
+              SellerBunker was built to solve this.
+            </p>
+            <p className="mx-auto mt-4 max-w-2xl text-center text-[var(--muted-foreground)]">
+              Already used by Amazon sellers running 7-figure businesses. We want to deliver better functionality than the competition at a more cost-effective price.
             </p>
           </div>
         </section>
@@ -715,10 +804,10 @@ export default function LandingPage() {
         <section className="py-20 sm:py-28">
           <div className="mx-auto max-w-4xl px-4 text-center sm:px-6 lg:px-8">
             <h2 className="text-3xl font-bold text-[var(--foreground)] sm:text-4xl">
-              Take control of your Amazon profits today
+              Join the private beta
             </h2>
             <p className="mt-4 text-lg text-[var(--muted-foreground)]">
-              Start your free trial. Connect Amazon (FBA or FBM). See your true profit in minutes.
+              Get free access while we build SellerBunker
             </p>
             <div className="mt-10">
 <SignedOut>
@@ -726,7 +815,7 @@ export default function LandingPage() {
                 <button
                   className="rounded-xl bg-white px-8 py-4 text-lg font-semibold text-black transition hover:bg-gray-100"
                 >
-                  Start free trial
+                  Join the private beta
                 </button>
               </SignUpButton>
             </SignedOut>
