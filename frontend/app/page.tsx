@@ -357,7 +357,7 @@ export default function LandingPage() {
 
       {/* Navigation: on mobile stacked + centered smaller buttons; on lg single row */}
       <header className="fixed top-0 left-0 right-0 z-50 w-full max-w-[100vw] overflow-x-hidden bg-[var(--background)]/95 backdrop-blur">
-        <nav className="mx-auto flex min-h-14 max-w-7xl flex-col items-center gap-2 px-3 py-2 sm:flex-row sm:flex-nowrap sm:items-center sm:justify-between sm:gap-0 sm:px-4 sm:py-0 sm:pl-2 sm:pr-6 sm:h-16 lg:pl-4 lg:pr-8">
+        <nav className="mx-auto flex min-h-14 max-w-7xl flex-col items-center gap-4 px-4 py-3 sm:flex-row sm:flex-nowrap sm:items-center sm:justify-between sm:gap-0 sm:px-4 sm:py-0 sm:pl-2 sm:pr-6 sm:h-16 lg:pl-4 lg:pr-8">
           <Link href="/" className="flex shrink-0 items-center font-semibold no-underline hover:opacity-80 md:-ml-2 lg:-ml-4" aria-label="SellerBunker home">
             <img
               src="/sellerbunker-logo.png"
@@ -365,7 +365,7 @@ export default function LandingPage() {
               className="sellerbunker-logo h-16 w-auto max-w-[min(100vw-2rem,220px)] object-contain object-left sm:h-20 sm:max-w-[280px] md:-my-1 md:mt-2 md:h-32 md:max-w-[420px] lg:min-w-[420px] lg:max-w-[580px] xl:-my-2 xl:mt-3 xl:h-44 xl:min-w-[520px] xl:max-w-[720px]"
             />
           </Link>
-          <div className="flex flex-wrap items-center justify-center gap-1 sm:gap-2 lg:flex-nowrap lg:justify-end">
+          <div className="flex flex-wrap items-center justify-center gap-2 sm:gap-2 lg:flex-nowrap lg:justify-end">
             <NavDropdown label="Product">
               <Link href="#features" className="block px-4 py-2 text-sm text-[var(--foreground)] hover:bg-[var(--foreground)]/5 no-underline">
                 Features
@@ -425,17 +425,17 @@ export default function LandingPage() {
         </nav>
       </header>
 
-      <main className="landing-page w-full max-w-[100vw] overflow-x-hidden pt-28 sm:pt-24">
+      <main className="landing-page w-full max-w-[100vw] overflow-x-hidden pt-48 sm:pt-24">
         {/* 1. Hero - no blurred background, dashboard mockup on the right */}
         <section className="border-b border-[var(--surface-border)] bg-[var(--background)]">
-          <div className="mx-auto max-w-7xl px-4 pt-2 pb-8 sm:px-6 sm:pt-3 sm:pb-12 lg:px-8 lg:pt-4 lg:pb-16">
-            <div className="grid gap-10 lg:grid-cols-2 lg:gap-16 lg:items-center">
-              <div>
-                <h1 className="text-3xl font-bold tracking-tight text-[var(--foreground)] sm:text-4xl lg:text-5xl">
+          <div className="mx-auto max-w-7xl px-5 pt-5 pb-10 sm:px-6 sm:pt-3 sm:pb-12 lg:px-8 lg:pt-4 lg:pb-16">
+            <div className="grid gap-12 lg:grid-cols-2 lg:gap-16 lg:items-center">
+              <div className="min-w-0">
+                <h1 className="text-3xl font-bold leading-tight tracking-tight text-[var(--foreground)] sm:text-4xl lg:text-5xl">
                   Stop guessing your Amazon profits.{" "}
                   <span style={{ color: accentColor }}>SellerBunker tracks every cost Amazon hides.</span>
                 </h1>
-                <p className="mt-3 max-w-xl text-base text-[var(--muted-foreground)] sm:mt-4 sm:text-lg">
+                <p className="mt-4 max-w-xl text-base leading-relaxed text-[var(--muted-foreground)] sm:mt-4 sm:text-lg">
                   SellerBunker tracks your sales, profit, ROI, orders, inventory, shipments and more in one powerful dashboard designed for serious Amazon sellers—whether you sell FBA (Fulfilled by Amazon), FBM (Fulfilled by Merchant), or both.
                 </p>
                 <div className="mt-4 flex flex-wrap gap-3 sm:mt-6 sm:gap-4">
@@ -465,14 +465,14 @@ export default function LandingPage() {
                   </span>
                 </div>
               </div>
-              <div className="relative -mt-12 sm:-mt-16 lg:-mt-24">
+              <div className="relative -mt-4 sm:-mt-16 lg:-mt-24">
                 <div className="overflow-hidden rounded-2xl border-2 border-white/20 bg-[var(--surface)] shadow-2xl ring-1 ring-white/10" style={{ boxShadow: "0 0 40px -8px rgba(96,165,250,0.25), 0 25px 50px -12px rgba(0,0,0,0.5)" }}>
-                  <div className="aspect-[16/10] flex flex-col p-4 sm:p-5">
-                    <div className="mb-3 flex items-center justify-between">
+                  <div className="aspect-[16/10] flex flex-col p-5 sm:p-5">
+                    <div className="mb-4 flex items-center justify-between gap-2 sm:mb-3">
                       <span className="text-xs font-medium uppercase tracking-widest text-[var(--foreground)]">Performance snapshot</span>
-                      <span className="rounded-md border border-white/20 bg-white/5 px-2 py-1 text-[10px] text-[var(--muted-foreground)]">Last 30 days</span>
+                      <span className="shrink-0 rounded-md border border-white/20 bg-white/5 px-2 py-1 text-[10px] text-[var(--muted-foreground)]">Last 30 days</span>
                     </div>
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 flex-1 items-center justify-items-center">
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-5 sm:gap-4 flex-1 items-center justify-items-center">
                       {[
                         { label: "Profit", value: "£2,847", color: accentColor },
                         { label: "Sales", value: "£12,430", color: "#818CF8" },
@@ -481,15 +481,15 @@ export default function LandingPage() {
                       ].map((card) => (
                         <div
                           key={card.label}
-                          className="aspect-square w-full max-w-[130px] sm:max-w-[140px] rounded-full border-[3px] p-3 flex flex-col items-center justify-center text-center"
+                          className="aspect-square w-full max-w-[100px] sm:max-w-[130px] lg:max-w-[140px] rounded-full border-[3px] p-2.5 sm:p-3 flex flex-col items-center justify-center text-center"
                           style={{
                             borderColor: card.color,
                             backgroundColor: "rgba(0,0,0,0.35)",
                             boxShadow: `inset 0 1px 0 rgba(255,255,255,0.12), 0 0 0 1px rgba(255,255,255,0.08), 0 0 24px -4px ${card.color}40, 0 0 0 1px ${card.color}30`,
                           }}
                         >
-                          <span className="text-[10px] uppercase tracking-wider text-[var(--muted-foreground)]">{card.label}</span>
-                          <span className="text-base font-semibold mt-0.5" style={{ color: card.color }}>{card.value}</span>
+                          <span className="text-[9px] sm:text-[10px] uppercase tracking-wider text-[var(--muted-foreground)]">{card.label}</span>
+                          <span className="text-sm sm:text-base font-semibold mt-0.5" style={{ color: card.color }}>{card.value}</span>
                         </div>
                       ))}
                     </div>
@@ -503,7 +503,7 @@ export default function LandingPage() {
                       ))}
                     </div>
                     <p className="mt-2 text-[10px] text-[var(--muted-foreground)]">Sales v Profit · Revenue vs profit</p>
-                    <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:gap-2">
+                    <div className="mt-4 flex flex-col gap-3 sm:mt-3 sm:flex-row sm:flex-wrap sm:gap-2">
                       <div className="flex items-center gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5">
                         <span className="text-amber-400" aria-hidden>
                           <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
