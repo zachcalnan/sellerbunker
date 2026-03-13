@@ -51,15 +51,15 @@ function NavAuthButtons() {
   // Signed out: Sign in → sign-in page; Dashboard → sign-up page
   if (!isLoaded || !isSignedIn) {
     return (
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-1 lg:gap-2">
         <SignInButton mode="redirect" forceRedirectUrl="/start-trial">
-          <button className="text-sm font-medium text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition px-2 py-1.5 rounded-lg hover:bg-[var(--foreground)]/5">
+          <button className="rounded-lg px-2 py-1.5 text-xs font-medium text-[var(--muted-foreground)] transition hover:bg-[var(--foreground)]/5 hover:text-[var(--foreground)] lg:py-2 lg:text-sm">
             Sign in
           </button>
         </SignInButton>
         <a
           href="/sign-up"
-          className="rounded-lg bg-white px-4 py-2 text-sm font-medium text-black no-underline transition hover:bg-gray-100"
+          className="rounded-lg bg-white px-2 py-1.5 text-xs font-medium text-black no-underline transition hover:bg-gray-100 lg:px-4 lg:py-2 lg:text-sm"
         >
           Dashboard
         </a>
@@ -72,7 +72,7 @@ function NavAuthButtons() {
     return (
       <Link
         href="/dashboard"
-        className="rounded-lg bg-white px-4 py-2 text-sm font-medium text-black no-underline transition hover:bg-gray-100"
+        className="rounded-lg bg-white px-2 py-1.5 text-xs font-medium text-black no-underline transition hover:bg-gray-100 lg:px-4 lg:py-2 lg:text-sm"
       >
         Dashboard
       </Link>
@@ -81,15 +81,15 @@ function NavAuthButtons() {
 
   // Signed in but no subscription (or still loading): Sign in → sign-in; Dashboard → sign-up
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex items-center gap-1 lg:gap-2">
       <SignInButton mode="redirect" forceRedirectUrl="/start-trial">
-        <button className="text-sm font-medium text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition px-2 py-1.5 rounded-lg hover:bg-[var(--foreground)]/5">
+        <button className="rounded-lg px-2 py-1.5 text-xs font-medium text-[var(--muted-foreground)] transition hover:bg-[var(--foreground)]/5 hover:text-[var(--foreground)] lg:py-2 lg:text-sm">
           Sign in
         </button>
       </SignInButton>
       <a
         href="/sign-up"
-        className="rounded-lg bg-white px-4 py-2 text-sm font-medium text-black no-underline transition hover:bg-gray-100"
+        className="rounded-lg bg-white px-2 py-1.5 text-xs font-medium text-black no-underline transition hover:bg-gray-100 lg:px-4 lg:py-2 lg:text-sm"
       >
         Dashboard
       </a>
@@ -112,18 +112,115 @@ function NavDropdown({ label, children }: { label: string; children: React.React
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="flex items-center gap-1 rounded-lg px-3 py-2 text-sm font-medium text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:bg-[var(--foreground)]/5 transition"
+        className="flex items-center gap-0.5 rounded-lg px-2 py-1.5 text-xs font-medium text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:bg-[var(--foreground)]/5 transition lg:gap-1 lg:px-3 lg:py-2 lg:text-sm"
       >
         {label}
-        <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+        <svg className="h-3 w-3 lg:h-4 lg:w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
         </svg>
       </button>
       {open && (
-        <div className="absolute right-0 top-full z-50 mt-1 min-w-[180px] rounded-lg border border-[var(--surface-border)] bg-[var(--surface)] py-1 shadow-lg" onClick={() => setOpen(false)}>
+        <div className="absolute left-1/2 right-auto -translate-x-1/2 top-full z-50 mt-1 min-w-[160px] rounded-lg border border-[var(--surface-border)] bg-[var(--surface)] py-1 shadow-lg lg:left-auto lg:right-0 lg:translate-x-0" onClick={() => setOpen(false)}>
           {children}
         </div>
       )}
+    </div>
+  );
+}
+
+/** Hue rotation per slot so fallback image still shows 5 different accent colours (0, 72, 144, 216, 288 deg). */
+const FALLBACK_HUE_ROTATIONS = [0, 72, 144, 216, 288];
+
+/** Five dashboard theme screenshots: 3 on top, 2 below; hover brings one to the front. */
+function CustomizableDashboardStack() {
+  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
+  const [failedUrls, setFailedUrls] = useState<Set<string>>(new Set());
+  const fallbackSrc = "/dashboard-preview.png";
+  const cards = [
+    { src: "/dashboard-display-1.png", alt: "Dashboard theme 1" },
+    { src: "/dashboard-display-2.png", alt: "Dashboard theme 2" },
+    { src: "/dashboard-display-3.png", alt: "Dashboard theme 3" },
+    { src: "/dashboard-display-4.png", alt: "Dashboard theme 4" },
+    { src: "/dashboard-display-5.png", alt: "Dashboard theme 5" },
+  ];
+  const getSrc = (i: number) => (failedUrls.has(cards[i].src) ? fallbackSrc : cards[i].src);
+  const useFallbackTint = (i: number) => failedUrls.has(cards[i].src);
+
+  return (
+    <div className="relative mx-auto w-full max-w-5xl grid grid-cols-3 gap-4 py-4">
+      {/* Top row: 3 images */}
+      {cards.slice(0, 3).map((item, i) => {
+        const isHovered = hoveredIndex === i;
+        return (
+          <div
+            key={i}
+            className="relative transition-all duration-300 ease-out cursor-pointer"
+            style={{
+              zIndex: isHovered ? 50 : i + 1,
+              transform: isHovered ? "scale(1.05)" : "scale(1)",
+            }}
+            onMouseEnter={() => setHoveredIndex(i)}
+            onMouseLeave={() => setHoveredIndex(null)}
+          >
+            <div
+              className="relative w-full aspect-video rounded-lg border border-white/15 bg-[var(--surface)] shadow-xl overflow-hidden ring-1 ring-black/10"
+              style={
+                useFallbackTint(i)
+                  ? { filter: `hue-rotate(${FALLBACK_HUE_ROTATIONS[i]}deg)` }
+                  : undefined
+              }
+            >
+              <Image
+                src={getSrc(i)}
+                alt={item.alt}
+                fill
+                className="object-contain"
+                sizes="(max-width: 1024px) 33vw, 380px"
+                unoptimized
+                onError={() => setFailedUrls((prev) => new Set(prev).add(item.src))}
+              />
+            </div>
+          </div>
+        );
+      })}
+      {/* Bottom row: 2 images, centered under the 3 */}
+      <div className="col-span-3 flex justify-center gap-4">
+        {cards.slice(3, 5).map((item, i) => {
+          const idx = i + 3;
+          const isHovered = hoveredIndex === idx;
+          return (
+            <div
+              key={idx}
+              className="relative w-[calc(33.333%-0.5rem)] max-w-[380px] transition-all duration-300 ease-out cursor-pointer"
+              style={{
+                zIndex: isHovered ? 50 : idx + 1,
+                transform: isHovered ? "scale(1.05)" : "scale(1)",
+              }}
+              onMouseEnter={() => setHoveredIndex(idx)}
+              onMouseLeave={() => setHoveredIndex(null)}
+            >
+              <div
+                className="relative w-full aspect-video rounded-lg border border-white/15 bg-[var(--surface)] shadow-xl overflow-hidden ring-1 ring-black/10"
+                style={
+                  useFallbackTint(idx)
+                    ? { filter: `hue-rotate(${FALLBACK_HUE_ROTATIONS[idx]}deg)` }
+                    : undefined
+                }
+              >
+                <Image
+                  src={getSrc(idx)}
+                  alt={item.alt}
+                  fill
+                  className="object-contain"
+                  sizes="(max-width: 1024px) 40vw, 380px"
+                  unoptimized
+                  onError={() => setFailedUrls((prev) => new Set(prev).add(item.src))}
+                />
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -182,7 +279,7 @@ function ContactForm() {
               type="text"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              className="w-full rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-4 py-2.5 text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] outline-none focus:ring-2 focus:ring-[var(--surface-border)]"
+              className="w-full rounded-lg border border-white/20 bg-white text-gray-900 placeholder:text-gray-500 outline-none focus:ring-2 focus:ring-white/40 focus:border-white/40"
               placeholder="Your name"
             />
           </div>
@@ -196,7 +293,7 @@ function ContactForm() {
               required
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              className="w-full rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-4 py-2.5 text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] outline-none focus:ring-2 focus:ring-[var(--surface-border)]"
+              className="w-full rounded-lg border border-white/20 bg-white text-gray-900 placeholder:text-gray-500 outline-none focus:ring-2 focus:ring-white/40 focus:border-white/40"
               placeholder="you@example.com"
             />
           </div>
@@ -209,7 +306,7 @@ function ContactForm() {
               type="text"
               value={subject}
               onChange={(e) => setSubject(e.target.value)}
-              className="w-full rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-4 py-2.5 text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] outline-none focus:ring-2 focus:ring-[var(--surface-border)]"
+              className="w-full rounded-lg border border-white/20 bg-white text-gray-900 placeholder:text-gray-500 outline-none focus:ring-2 focus:ring-white/40 focus:border-white/40"
               placeholder="What's this about?"
             />
           </div>
@@ -223,7 +320,7 @@ function ContactForm() {
               rows={5}
               value={message}
               onChange={(e) => setMessage(e.target.value)}
-              className="w-full rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-4 py-2.5 text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] outline-none focus:ring-2 focus:ring-[var(--surface-border)] resize-y min-h-[120px]"
+              className="w-full rounded-lg border border-white/20 bg-white text-gray-900 placeholder:text-gray-500 outline-none focus:ring-2 focus:ring-white/40 focus:border-white/40 resize-y min-h-[120px]"
               placeholder="Your message..."
             />
           </div>
@@ -250,7 +347,7 @@ function ContactForm() {
 export default function LandingPage() {
   return (
     <div
-      className="min-h-screen bg-[var(--background)] text-[var(--foreground)]"
+      className="min-h-screen min-h-[100dvh] w-full max-w-[100vw] overflow-x-hidden bg-[var(--background)] text-[var(--foreground)]"
       data-theme="dark"
     >
       {/* Force dark theme for landing */}
@@ -258,17 +355,17 @@ export default function LandingPage() {
         .landing-page { --background: #000; --foreground: #e5e7eb; --surface: #0a0a0a; --surface-border: #262626; --muted-foreground: #94a3b8; }
       `}</style>
 
-      {/* Navigation */}
-      <header className="fixed top-0 left-0 right-0 z-50 border-b border-[var(--surface-border)] bg-[var(--background)]/95 backdrop-blur">
-        <nav className="mx-auto flex h-14 max-w-7xl items-center justify-between pl-2 pr-4 sm:h-16 sm:pl-2 sm:pr-6 lg:pl-4 lg:pr-8">
-          <Link href="/" className="-ml-2 flex shrink-0 items-center overflow-visible font-semibold no-underline hover:opacity-80 sm:-ml-2 lg:-ml-4" aria-label="SellerBunker home">
+      {/* Navigation: on mobile stacked + centered smaller buttons; on lg single row */}
+      <header className="fixed top-0 left-0 right-0 z-50 w-full max-w-[100vw] overflow-x-hidden bg-[var(--background)]/95 backdrop-blur">
+        <nav className="mx-auto flex min-h-14 max-w-7xl flex-col items-center gap-2 px-3 py-2 sm:flex-row sm:flex-nowrap sm:items-center sm:justify-between sm:gap-0 sm:px-4 sm:py-0 sm:pl-2 sm:pr-6 sm:h-16 lg:pl-4 lg:pr-8">
+          <Link href="/" className="flex shrink-0 items-center font-semibold no-underline hover:opacity-80 md:-ml-2 lg:-ml-4" aria-label="SellerBunker home">
             <img
               src="/sellerbunker-logo.png"
               alt="SellerBunker"
-              className="sellerbunker-logo mt-0.5 -mb-1 h-24 w-auto min-w-[360px] max-w-[520px] object-contain object-left sm:mt-1 sm:-mb-2 sm:h-36 sm:min-w-[432px] sm:max-w-[648px]"
+              className="sellerbunker-logo h-16 w-auto max-w-[min(100vw-2rem,220px)] object-contain object-left sm:h-20 sm:max-w-[280px] md:-my-1 md:mt-2 md:h-32 md:max-w-[420px] lg:min-w-[420px] lg:max-w-[580px] xl:-my-2 xl:mt-3 xl:h-44 xl:min-w-[520px] xl:max-w-[720px]"
             />
           </Link>
-          <div className="flex items-center gap-1 sm:gap-2">
+          <div className="flex flex-wrap items-center justify-center gap-1 sm:gap-2 lg:flex-nowrap lg:justify-end">
             <NavDropdown label="Product">
               <Link href="#features" className="block px-4 py-2 text-sm text-[var(--foreground)] hover:bg-[var(--foreground)]/5 no-underline">
                 Features
@@ -279,8 +376,11 @@ export default function LandingPage() {
               <Link href="#how-it-works" className="block px-4 py-2 text-sm text-[var(--foreground)] hover:bg-[var(--foreground)]/5 no-underline">
                 How it works
               </Link>
-              <span className="block px-4 py-2 text-sm text-[var(--muted-foreground)]/70 select-none pointer-events-none italic" aria-hidden>
-                Repricer — coming soon
+              <span className="flex items-center gap-2 px-4 py-2.5 text-sm text-[var(--muted-foreground)]" aria-hidden>
+                <span className="inline-flex items-center rounded-md border border-white/20 bg-white/5 px-2 py-0.5 text-xs font-medium uppercase tracking-wider text-white/80">
+                  Coming soon
+                </span>
+                <span>Repricer module in development</span>
               </span>
             </NavDropdown>
             <NavDropdown label="Pricing">
@@ -291,7 +391,7 @@ export default function LandingPage() {
             <SignedIn>
               <Link
                 href="/start-trial"
-                className="rounded-lg bg-transparent px-4 py-2 text-sm font-medium text-white no-underline transition border-t-2 border-b-2 border-white hover:bg-white/10"
+                className="rounded-lg bg-transparent px-2 py-1.5 text-xs font-medium text-white no-underline transition border-t-2 border-b-2 border-white hover:bg-white/10 lg:px-4 lg:py-2 lg:text-sm"
               >
                 Start 14 day free trial
               </Link>
@@ -299,7 +399,7 @@ export default function LandingPage() {
             <SignedOut>
               <SignUpButton mode="redirect" forceRedirectUrl="/start-trial" signInForceRedirectUrl="/start-trial">
                 <button
-                  className="rounded-lg bg-transparent px-4 py-2 text-sm font-medium text-white transition border-t-2 border-b-2 border-white hover:bg-white/10"
+                  className="rounded-lg bg-transparent px-2 py-1.5 text-xs font-medium text-white transition border-t-2 border-b-2 border-white hover:bg-white/10 lg:px-4 lg:py-2 lg:text-sm"
                 >
                   Start 14 day free trial
                 </button>
@@ -312,31 +412,37 @@ export default function LandingPage() {
               <a href="mailto:support@sellerbunker.com" className="block px-4 py-2 text-sm text-[var(--foreground)] hover:bg-[var(--foreground)]/5 no-underline">
                 Email us
               </a>
+              <a href="https://discord.gg/sbDwPbV9" target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 px-4 py-2 text-sm text-[var(--foreground)] hover:bg-[var(--foreground)]/5 no-underline">
+                <svg className="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+                  <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028 14.09 14.09 0 0 0 1.226-1.994.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03z"/>
+                </svg>
+                Discord
+              </a>
             </NavDropdown>
-            <div className="ml-2 h-6 w-px bg-[var(--surface-border)]" />
+            <div className="ml-1 h-5 w-px bg-[var(--surface-border)] lg:ml-2 lg:h-6" />
             <NavAuthButtons />
           </div>
         </nav>
       </header>
 
-      <main className="landing-page pt-20 sm:pt-24">
+      <main className="landing-page w-full max-w-[100vw] overflow-x-hidden pt-28 sm:pt-24">
         {/* 1. Hero - no blurred background, dashboard mockup on the right */}
         <section className="border-b border-[var(--surface-border)] bg-[var(--background)]">
           <div className="mx-auto max-w-7xl px-4 pt-2 pb-8 sm:px-6 sm:pt-3 sm:pb-12 lg:px-8 lg:pt-4 lg:pb-16">
             <div className="grid gap-10 lg:grid-cols-2 lg:gap-16 lg:items-center">
               <div>
-                <h1 className="text-4xl font-bold tracking-tight text-[var(--foreground)] sm:text-5xl lg:text-6xl">
+                <h1 className="text-3xl font-bold tracking-tight text-[var(--foreground)] sm:text-4xl lg:text-5xl">
                   Stop guessing your Amazon profits.{" "}
                   <span style={{ color: accentColor }}>SellerBunker tracks every cost Amazon hides.</span>
                 </h1>
-                <p className="mt-4 max-w-xl text-lg text-[var(--muted-foreground)]">
-                  SellerBunker tracks sales, profit, inventory, shipments, and ROI in one powerful dashboard designed for serious Amazon sellers—whether you sell FBA (Fulfilled by Amazon), FBM (Fulfilled by Merchant), or both. We identify missing stock and indicate which products you should replenish to keep making profit.
+                <p className="mt-3 max-w-xl text-base text-[var(--muted-foreground)] sm:mt-4 sm:text-lg">
+                  SellerBunker tracks your sales, profit, ROI, orders, inventory, shipments and more in one powerful dashboard designed for serious Amazon sellers—whether you sell FBA (Fulfilled by Amazon), FBM (Fulfilled by Merchant), or both. We identify missing stock and indicate which products you should replenish to keep making profit.
                 </p>
-                <div className="mt-6 flex flex-wrap gap-4">
+                <div className="mt-4 flex flex-wrap gap-3 sm:mt-6 sm:gap-4">
                   <SignedOut>
                     <SignUpButton mode="redirect" forceRedirectUrl="/start-trial" signInForceRedirectUrl="/start-trial">
                       <button
-                        className="rounded-xl bg-white px-6 py-3.5 text-base font-semibold text-black shadow-lg transition hover:bg-gray-100"
+                        className="rounded-xl bg-white px-5 py-2.5 text-sm font-semibold text-black shadow-lg transition hover:bg-gray-100 sm:px-6 sm:py-3 sm:text-base"
                       >
                         Start free trial
                       </button>
@@ -345,43 +451,45 @@ export default function LandingPage() {
                   <SignedIn>
                     <Link
                       href="/dashboard"
-                      className="rounded-xl px-6 py-3.5 text-base font-semibold text-black shadow-lg transition hover:opacity-90"
+                      className="rounded-xl px-5 py-2.5 text-sm font-semibold text-black shadow-lg transition hover:opacity-90 sm:px-6 sm:py-3 sm:text-base"
                       style={{ backgroundColor: accentColor }}
                     >
                       Go to dashboard
                     </Link>
                   </SignedIn>
                 </div>
-                <div className="mt-6 flex flex-wrap items-center gap-6 text-sm text-[var(--muted-foreground)]">
+                <div className="mt-4 flex flex-wrap items-center gap-4 text-xs text-[var(--muted-foreground)] sm:mt-6 sm:gap-6 sm:text-sm">
                   <span className="flex items-center gap-2">
                     <span className="inline-block h-2 w-2 rounded-full" style={{ backgroundColor: accentColor }} />
                     Built with ease of use in mind
                   </span>
                 </div>
               </div>
-              <div className="relative">
-                <div className="overflow-hidden rounded-2xl border border-[var(--surface-border)] bg-[var(--surface)] shadow-2xl ring-1 ring-black/10">
+              <div className="relative -mt-12 sm:-mt-16 lg:-mt-24">
+                <div className="overflow-hidden rounded-2xl border-2 border-white/20 bg-[var(--surface)] shadow-2xl ring-1 ring-white/10" style={{ boxShadow: "0 0 40px -8px rgba(96,165,250,0.25), 0 25px 50px -12px rgba(0,0,0,0.5)" }}>
                   <div className="aspect-[16/10] flex flex-col p-4 sm:p-5">
-                    <div className="mb-4 flex items-center justify-between">
-                      <span className="text-xs font-medium uppercase tracking-widest text-[var(--muted-foreground)]">Performance snapshot</span>
-                      <span className="rounded bg-[var(--surface-border)]/50 px-2 py-1 text-[10px] text-[var(--muted-foreground)]">Last 30 days</span>
+                    <div className="mb-3 flex items-center justify-between">
+                      <span className="text-xs font-medium uppercase tracking-widest text-[var(--foreground)]">Performance snapshot</span>
+                      <span className="rounded-md border border-white/20 bg-white/5 px-2 py-1 text-[10px] text-[var(--muted-foreground)]">Last 30 days</span>
                     </div>
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 flex-1">
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 flex-1 items-center justify-items-center">
                       {[
                         { label: "Profit", value: "£2,847", color: accentColor },
-                        { label: "Sales", value: "£12,430", color: "#4F46E5" },
-                        { label: "Units", value: "1,240", color: "#F97316" },
-                        { label: "ROI", value: "34%", color: "#EC4899" },
+                        { label: "Sales", value: "£12,430", color: "#818CF8" },
+                        { label: "Units", value: "1,240", color: "#FB923C" },
+                        { label: "ROI", value: "34%", color: "#F472B6" },
                       ].map((card) => (
                         <div
                           key={card.label}
-                          className="rounded-xl border border-[var(--surface-border)] bg-[var(--background)]/50 p-3 flex flex-col justify-center"
+                          className="aspect-square w-full max-w-[130px] sm:max-w-[140px] rounded-full border-[3px] p-3 flex flex-col items-center justify-center text-center"
                           style={{
-                            boxShadow: "inset 0 1px 0 rgba(255,255,255,0.12), 0 0 0 1px rgba(255,255,255,0.08), 0 0 20px -4px rgba(255,255,255,0.15), 0 0 0 2px rgba(255,255,255,0.2)",
+                            borderColor: card.color,
+                            backgroundColor: "rgba(0,0,0,0.35)",
+                            boxShadow: `inset 0 1px 0 rgba(255,255,255,0.12), 0 0 0 1px rgba(255,255,255,0.08), 0 0 24px -4px ${card.color}40, 0 0 0 1px ${card.color}30`,
                           }}
                         >
                           <span className="text-[10px] uppercase tracking-wider text-[var(--muted-foreground)]">{card.label}</span>
-                          <span className="text-lg font-semibold" style={{ color: card.color }}>{card.value}</span>
+                          <span className="text-base font-semibold mt-0.5" style={{ color: card.color }}>{card.value}</span>
                         </div>
                       ))}
                     </div>
@@ -395,6 +503,25 @@ export default function LandingPage() {
                       ))}
                     </div>
                     <p className="mt-2 text-[10px] text-[var(--muted-foreground)]">Sales v Profit · Revenue vs profit</p>
+                    <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:gap-2">
+                      <div className="flex items-center gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5">
+                        <span className="text-amber-400" aria-hidden>
+                          <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
+                        </span>
+                        <span className="text-[10px] font-medium text-amber-200/95 sm:text-xs">Missing 12 units from shipments</span>
+                      </div>
+                      <div className="flex items-center gap-2 rounded-lg border border-[rgba(96,165,250,0.5)] bg-[rgba(96,165,250,0.1)] px-2.5 py-1.5">
+                        <div className="h-8 w-8 shrink-0 overflow-hidden rounded bg-[var(--surface)] ring-1 ring-white/10">
+                          <div className="flex h-full w-full items-center justify-center text-[var(--muted-foreground)]">
+                            <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" /></svg>
+                          </div>
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-[10px] font-medium text-[var(--foreground)] sm:text-xs">Wireless Earbuds Pro</p>
+                          <p className="text-[9px] sm:text-[10px]" style={{ color: accentColor }}>Most profitable — replenish now</p>
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -406,7 +533,7 @@ export default function LandingPage() {
         <section id="dashboard-preview" className="border-b border-[var(--surface-border)] bg-[var(--surface)]/50 py-16 sm:py-20">
           <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
             <h2 className="text-center text-2xl font-bold text-[var(--foreground)] sm:text-3xl mb-10">
-              See your Amazon business (FBA &amp; FBM) at a glance
+              See your Amazon business at a glance
             </h2>
             <div className="overflow-hidden rounded-2xl border border-[var(--surface-border)] bg-[var(--surface)] shadow-xl w-full max-w-7xl mx-auto">
               <Image
@@ -418,6 +545,11 @@ export default function LandingPage() {
                 priority={false}
               />
             </div>
+
+            <h3 className="text-center text-xl font-bold text-[var(--foreground)] sm:text-2xl mt-16 mb-8">
+              Customizable dashboard display
+            </h3>
+            <CustomizableDashboardStack />
           </div>
         </section>
 
@@ -437,10 +569,11 @@ export default function LandingPage() {
                 "Refunds",
                 "Damaged inventory",
                 "Cross-border VAT",
+                "True profit / ROI",
               ].map((item) => (
                 <li
                   key={item}
-                  className="flex items-center gap-3 rounded-xl border border-[var(--surface-border)] bg-[var(--background)] px-4 py-3"
+                  className="flex items-center gap-3 rounded-xl border-2 border-white/25 bg-[var(--background)] px-4 py-3 shadow-[0_0_0_1px_rgba(255,255,255,0.15)]"
                 >
                   <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[var(--foreground)]" style={{ backgroundColor: accentMuted }}>
                     <span className="text-sm" style={{ color: accentColor }}>✕</span>
@@ -690,6 +823,10 @@ export default function LandingPage() {
         {/* Repricer in development */}
         <section className="border-b border-[var(--surface-border)] bg-[var(--surface)]/30 py-20 sm:py-24">
           <div className="mx-auto max-w-3xl px-4 text-center sm:px-6 lg:px-8">
+            <div className="inline-flex items-center gap-2 rounded-full border border-white/20 bg-white/5 px-4 py-1.5 text-sm font-medium uppercase tracking-wider text-white/90 mb-6">
+              <span className="h-2 w-2 rounded-full bg-amber-400 animate-pulse" aria-hidden />
+              Coming soon
+            </div>
             <h2 className="text-3xl font-bold text-[var(--foreground)] sm:text-4xl">
               Repricer module in development
             </h2>
@@ -699,6 +836,11 @@ export default function LandingPage() {
             <p className="mx-auto mt-4 max-w-2xl text-center text-sm text-[var(--muted-foreground)]">
               We currently support UK marketplaces within the EU region while in early beta, and will be covering all EU markets very soon.
             </p>
+            <div className="mt-8 flex flex-wrap items-center justify-center gap-3 text-sm text-[var(--muted-foreground)]">
+              <span className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5">Automated repricing</span>
+              <span className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5">Dashboard integration</span>
+              <span className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5">Stay competitive</span>
+            </div>
           </div>
         </section>
 
@@ -708,14 +850,26 @@ export default function LandingPage() {
             <h2 className="text-center text-3xl font-bold text-[var(--foreground)] sm:text-4xl">
               Simple pricing
             </h2>
-            <p className="mx-auto mt-4 max-w-xl text-center text-[var(--muted-foreground)]">
-              Start with a free trial.
+            <p className="mx-auto mt-4 max-w-2xl text-center text-sm text-[var(--muted-foreground)]">
+              We are currently in beta testing meaning it is completely free for users until development is over — please join the{" "}
+              <a
+                href="https://discord.gg/sbDwPbV9"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 font-medium text-[var(--foreground)] underline hover:no-underline"
+              >
+                <svg className="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+                  <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028 14.09 14.09 0 0 0 1.226-1.994.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03z"/>
+                </svg>
+                Discord
+              </a>{" "}
+              to request the free sign up code.
             </p>
             <div className="mt-16 grid gap-8 md:grid-cols-3">
               {[
                 { name: "Starter", price: "£14.99", period: "month", orders: "Up to 5,000 orders per month", note: "Testing price for initial users", priceSubline: "Two weeks free, then", cta: "Start free trial", featured: true, badge: "For initial testing" },
-                { name: "Growth", price: "£26.99", period: "month", orders: "5,000 – 50,000 orders per month", cta: "Start free trial", featured: false },
-                { name: "Pro", price: "£44.99", period: "month", orders: "50,000+ orders per month", cta: "Start free trial", featured: false },
+                { name: "Growth", price: "£26.99", period: "month", orders: "5,000 – 50,000 orders per month", priceSubline: "Two weeks free, then", cta: "Start free trial", featured: false },
+                { name: "Pro", price: "£44.99", period: "month", orders: "50,000+ orders per month", priceSubline: "Two weeks free, then", cta: "Start free trial", featured: false },
               ].map((plan) => (
                 <div
                   key={plan.name}
@@ -807,7 +961,7 @@ export default function LandingPage() {
               Join the private beta
             </h2>
             <p className="mt-4 text-lg text-[var(--muted-foreground)]">
-              Get free access while we build SellerBunker
+              Get free access while we build SellerBunker — we will send you a code once accepted into the group that you can use at checkout.
             </p>
             <div className="mt-10">
 <SignedOut>
@@ -829,6 +983,17 @@ export default function LandingPage() {
                 </Link>
               </SignedIn>
             </div>
+            <a
+              href="https://discord.gg/sbDwPbV9"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-8 inline-flex items-center justify-center gap-3 rounded-xl border-2 border-white/25 bg-white/5 px-8 py-4 text-lg font-semibold text-[var(--foreground)] transition hover:bg-white/10 hover:border-white/35 no-underline"
+            >
+              <svg className="h-8 w-8 shrink-0" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+                <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028 14.09 14.09 0 0 0 1.226-1.994.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03z"/>
+              </svg>
+              Join our Discord
+            </a>
           </div>
         </section>
       </main>
@@ -851,7 +1016,7 @@ export default function LandingPage() {
             </div>
             <div className="flex items-center gap-4">
               <a
-                href="https://discord.gg/sellerbunker"
+                href="https://discord.gg/sbDwPbV9"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition"

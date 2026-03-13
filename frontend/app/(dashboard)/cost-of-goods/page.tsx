@@ -62,7 +62,8 @@ function CostOfGoodsInner() {
   >([]);
   const [missingCount, setMissingCount] = useState<number | null>(null);
 
-  const SKU_LIST_PAGE_SIZE = 10;
+  const SKU_FETCH_SIZE = 500;
+  const DISPLAY_PAGE_SIZE = 20;
   const [skuItems, setSkuItems] = useState<
     Array<{
       id: string;
@@ -75,7 +76,7 @@ function CostOfGoodsInner() {
     }>
   >([]);
   const [skuTotal, setSkuTotal] = useState(0);
-  const [skuSkip, setSkuSkip] = useState(0);
+  const [skuPage, setSkuPage] = useState(1);
 
   type VatSettings = {
     vatRegistrationType: string;
@@ -171,12 +172,12 @@ function CostOfGoodsInner() {
       const missingQs = new URLSearchParams();
       if (startParam) missingQs.set("start", startParam);
       if (endParam) missingQs.set("end", endParam);
-      missingQs.set("take", String(SKU_LIST_PAGE_SIZE));
-      missingQs.set("skip", String(skuSkip));
+      missingQs.set("take", String(SKU_FETCH_SIZE));
+      missingQs.set("skip", "0");
 
       const allFetches: Promise<Response>[] = [
         fetch(`${baseUrl}/api/amazon/cost-of-goods/entries?` +
-          new URLSearchParams({ query, take: String(take), skip: String(skip) }).toString(),
+          new URLSearchParams({ take: "50", skip: "0" }).toString(),
           { headers: { Authorization: `Bearer ${token}` } },
         ),
         fetch(`${baseUrl}/api/amazon/products`, { headers: { Authorization: `Bearer ${token}` } }),
@@ -194,7 +195,7 @@ function CostOfGoodsInner() {
         allFetches.push(
           fetch(
             `${baseUrl}/api/amazon/cost-of-goods/complete?` +
-            new URLSearchParams({ take: String(SKU_LIST_PAGE_SIZE), skip: String(skuSkip) }).toString(),
+            new URLSearchParams({ take: String(SKU_FETCH_SIZE), skip: "0" }).toString(),
             { headers: { Authorization: `Bearer ${token}` } },
           ),
         );
@@ -202,7 +203,7 @@ function CostOfGoodsInner() {
         allFetches.push(
           fetch(
             `${baseUrl}/api/amazon/cost-of-goods/products?` +
-            new URLSearchParams({ take: String(SKU_LIST_PAGE_SIZE), skip: String(skuSkip) }).toString(),
+            new URLSearchParams({ take: String(SKU_FETCH_SIZE), skip: "0" }).toString(),
             { headers: { Authorization: `Bearer ${token}` } },
           ),
         );
@@ -332,6 +333,29 @@ function CostOfGoodsInner() {
       .slice(0, 30);
   }, [products, productPickerQuery]);
 
+  // Client-side filter by SKU, ASIN, title (like inventory page) – instant search
+  const filteredSkuItems = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return skuItems;
+    return skuItems.filter((p) => {
+      const sku = (p.sku ?? "").toLowerCase();
+      const asin = (p.asin ?? "").toLowerCase();
+      const title = (p.title ?? "").toLowerCase();
+      return sku.includes(q) || asin.includes(q) || title.includes(q);
+    });
+  }, [skuItems, query]);
+
+  const totalSkuPages = Math.max(1, Math.ceil(filteredSkuItems.length / DISPLAY_PAGE_SIZE));
+  const safeSkuPage = Math.min(skuPage, totalSkuPages);
+  const paginatedSkuItems = useMemo(
+    () =>
+      filteredSkuItems.slice(
+        (safeSkuPage - 1) * DISPLAY_PAGE_SIZE,
+        safeSkuPage * DISPLAY_PAGE_SIZE,
+      ),
+    [filteredSkuItems, safeSkuPage],
+  );
+
   useEffect(() => {
     if (!showForm) return;
 
@@ -433,7 +457,12 @@ function CostOfGoodsInner() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isSignedIn, getToken, baseUrl, startParam, endParam, query, take, skip, cogsFilter, skuSkip]);
+  }, [isSignedIn, getToken, baseUrl, startParam, endParam, cogsFilter]);
+
+  // Reset to first page when search query or tab changes (client-side filter)
+  useEffect(() => {
+    setSkuPage(1);
+  }, [query, cogsFilter]);
 
   useEffect(() => {
     if (!isSignedIn) {
@@ -476,13 +505,17 @@ function CostOfGoodsInner() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [showForm]);
 
-  const pagingTotal = skuTotal;
-  const pagingStart = skuTotal > 0 ? skuSkip + 1 : 0;
-  const pagingEnd = skuTotal > 0 ? Math.min(skuSkip + skuItems.length, skuTotal) : 0;
-  const canPrevSku = skuSkip > 0;
-  const canNextSku = skuSkip + skuItems.length < skuTotal;
-  const prevSkuPage = () => setSkuSkip((s) => Math.max(0, s - SKU_LIST_PAGE_SIZE));
-  const nextSkuPage = () => setSkuSkip((s) => s + SKU_LIST_PAGE_SIZE);
+  const pagingTotal = filteredSkuItems.length;
+  const pagingStart =
+    filteredSkuItems.length > 0 ? (safeSkuPage - 1) * DISPLAY_PAGE_SIZE + 1 : 0;
+  const pagingEnd =
+    filteredSkuItems.length > 0
+      ? Math.min(safeSkuPage * DISPLAY_PAGE_SIZE, filteredSkuItems.length)
+      : 0;
+  const canPrevSku = safeSkuPage > 1;
+  const canNextSku = safeSkuPage < totalSkuPages;
+  const prevSkuPage = () => setSkuPage((p) => Math.max(1, p - 1));
+  const nextSkuPage = () => setSkuPage((p) => Math.min(totalSkuPages, p + 1));
 
 
   const createEntry = async () => {
@@ -916,7 +949,7 @@ function CostOfGoodsInner() {
                 type="button"
                 onClick={() => {
                   setCogsFilter("missing");
-                  setSkuSkip(0);
+                  setSkuPage(1);
                 }}
                 className={[
                   "cursor-pointer h-8 px-3 text-xs",
@@ -931,7 +964,7 @@ function CostOfGoodsInner() {
                 type="button"
                 onClick={() => {
                   setCogsFilter("complete");
-                  setSkuSkip(0);
+                  setSkuPage(1);
                 }}
                 className={[
                   "cursor-pointer h-8 px-3 text-xs border-l border-[var(--surface-border)]",
@@ -946,7 +979,7 @@ function CostOfGoodsInner() {
                 type="button"
                 onClick={() => {
                   setCogsFilter("all");
-                  setSkuSkip(0);
+                  setSkuPage(1);
                 }}
                 className={[
                   "cursor-pointer h-8 px-3 text-xs border-l border-[var(--surface-border)]",
@@ -965,7 +998,7 @@ function CostOfGoodsInner() {
                 ? `${pagingStart} - ${pagingEnd} of ${pagingTotal}`
                 : "0 - 0 of 0"}
             </span>
-            <span className="text-[var(--muted-foreground)]">10 per page</span>
+            <span className="text-[var(--muted-foreground)]">{DISPLAY_PAGE_SIZE} per page</span>
           </div>
         </div>
       </div>
@@ -1473,9 +1506,11 @@ function CostOfGoodsInner() {
                   </div>
                 </div>
 
-                {skuItems.length === 0 ? (
+                {paginatedSkuItems.length === 0 ? (
                   <div className="px-4 py-6 text-sm text-[var(--muted-foreground)]">
-                    {cogsFilter === "missing" ? (
+                    {query.trim() ? (
+                      <div>No SKUs match &quot;{query.trim()}&quot;. Try a different search or clear the search.</div>
+                    ) : cogsFilter === "missing" ? (
                       <>
                         <div>No SKUs missing COGS in this period.</div>
                         <p className="mt-2 text-xs">
@@ -1512,7 +1547,7 @@ function CostOfGoodsInner() {
                   </div>
                 ) : (
                   <div className="grid gap-3 p-4 sm:grid-cols-2">
-                    {skuItems.map((p) => (
+                    {paginatedSkuItems.map((p) => (
                       <div
                         key={p.id}
                         className="flex items-start gap-3 rounded-lg border border-[var(--surface-border)] bg-[var(--surface)] p-3"

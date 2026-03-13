@@ -99,6 +99,10 @@ export class AmazonSyncProcessor extends WorkerHost {
           await this.amazonService.syncFbaInventory(org.id);
         } catch (e: any) {
           const msg = e instanceof Error ? e.message : String(e);
+          if (msg.includes('Amazon account not linked') || msg.includes('link your Amazon account first')) {
+            this.logger.log(`[AmazonSync] Skipping org ${org.id} – no Amazon account linked`);
+            continue;
+          }
           errors.push({ orgId: org.id, error: msg });
           this.logger.error(
             `[AmazonSync] Inventory sync failed for org ${org.id}: ${msg}`,

@@ -747,7 +747,7 @@ ping() {
   ) {
     const takeN = Number(take ?? 10);
     const skipN = Number(skip ?? 0);
-    const safeTake = Number.isFinite(takeN) ? Math.max(1, Math.min(100, takeN)) : 10;
+    const safeTake = Number.isFinite(takeN) ? Math.max(1, Math.min(500, takeN)) : 10;
     const safeSkip = Number.isFinite(skipN) ? Math.max(0, skipN) : 0;
     return this.amazonService.listProductsFromInventory(req.user.orgId, {
       take: safeTake,
@@ -768,7 +768,7 @@ ping() {
   ) {
     const takeN = Number(take ?? 10);
     const skipN = Number(skip ?? 0);
-    const safeTake = Number.isFinite(takeN) ? Math.max(1, Math.min(100, takeN)) : 10;
+    const safeTake = Number.isFinite(takeN) ? Math.max(1, Math.min(500, takeN)) : 10;
     const safeSkip = Number.isFinite(skipN) ? Math.max(0, skipN) : 0;
     return this.amazonService.listProductsWithCostFromInventory(req.user.orgId, {
       take: safeTake,
@@ -868,7 +868,7 @@ ping() {
   ) {
     const takeN = Number(take ?? 10);
     const skipN = Number(skip ?? 0);
-    const safeTake = Number.isFinite(takeN) ? Math.max(1, Math.min(100, takeN)) : 10;
+    const safeTake = Number.isFinite(takeN) ? Math.max(1, Math.min(500, takeN)) : 10;
     const safeSkip = Number.isFinite(skipN) ? Math.max(0, skipN) : 0;
     return this.amazonService.listMissingCostOfGoods(req.user.orgId, {
       start,

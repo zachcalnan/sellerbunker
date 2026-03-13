@@ -21,6 +21,9 @@ import {
   vatAmountFromEx,
 } from '../common/vat.util';
 
+/** When we have no settled fees and no product fee estimate, use this share of revenue as fee so profit/ROI are not overstated. */
+const DEFAULT_AMAZON_FEE_RATE_WHEN_UNKNOWN = 0.35;
+
 @Injectable()
 export class AmazonService {
   private readonly logger = new Logger(AmazonService.name);
@@ -708,6 +711,7 @@ export class AmazonService {
         const n = toNumber(v);
         return Number.isFinite(n) ? n : null;
       };
+      // Use order item's stored fees when present (settled or previously saved estimate); otherwise use product's saved estimate so we always pick up fee data from DB.
       const settledFees = amazonFeesTotal;
       const estPerUnit =
         it.product?.estimatedAmazonFeePerUnit != null
@@ -730,7 +734,9 @@ export class AmazonService {
           ? settledFees
           : estPerUnit != null && qty > 0
             ? -Math.abs(estPerUnit * qty)
-            : 0;
+            : revenueTotal > 0
+              ? -Math.abs(revenueTotal * DEFAULT_AMAZON_FEE_RATE_WHEN_UNKNOWN)
+              : 0;
       const feesSource = (it as any).feesSource ?? null;
       let referralFeeTotal: number | null = null;
       let fbaFeeTotal: number | null = null;
@@ -1614,9 +1620,11 @@ export class AmazonService {
       if (typeof input !== 'object') return 0;
 
       let total = 0;
+      const keyLower = keyName.toLowerCase();
       for (const [k, v] of Object.entries(input as Record<string, unknown>)) {
-        if (k === keyName && v && typeof v === 'object') {
-          const amt = (v as any).CurrencyAmount;
+        if ((k === keyName || k.toLowerCase() === keyLower) && v && typeof v === 'object') {
+          const obj = v as Record<string, unknown>;
+          const amt = obj.CurrencyAmount ?? obj.currencyAmount ?? obj.Amount ?? obj.amount;
           const n = Number(amt ?? 0);
           if (!Number.isNaN(n)) total += n;
         } else {
@@ -1795,6 +1803,7 @@ export class AmazonService {
       }
 
       // When Finances API returns settled fee data we save it per order item (feesSource='finances').
+      // ShipmentSettleEventList (deferred) is parsed first; if same item appears in both lists, first wins to avoid double-counting.
       const feeByOrderItemId = new Map<string, number>();
       const feeBySku = new Map<string, number>();
 
@@ -1805,7 +1814,8 @@ export class AmazonService {
       ) => {
         if (!key) return;
         const prev = map.get(key) ?? 0;
-        map.set(key, prev + amount);
+        if (prev !== 0) return;
+        map.set(key, amount);
       };
 
       const sumFeeOrChargeList = (list: any[] | undefined): number => {
@@ -1830,6 +1840,8 @@ export class AmazonService {
       ) => {
         if (!key) return;
         const cur = map.get(key) ?? { referral: 0, fba: 0, digital: 0 };
+        const hasExisting = cur.referral !== 0 || cur.fba !== 0 || cur.digital !== 0;
+        if (hasExisting) return;
         map.set(key, {
           referral: cur.referral + r,
           fba: cur.fba + f,
@@ -1872,28 +1884,35 @@ export class AmazonService {
 
       if (finRes) {
         amazonFeesTotal = sumCurrencyAmountsByKey(finRes, 'FeeAmount');
-        const events = finRes?.payload?.FinancialEvents ?? {};
+        // Support both PascalCase and camelCase (SP-API can return either). Include ShipmentSettleEventList (deferred transactions).
+        const events =
+          finRes?.payload?.FinancialEvents ??
+          finRes?.payload?.financialEvents ??
+          finRes?.FinancialEvents ??
+          {};
         const shipmentLists = [
-          ...(events?.ShipmentEventList ?? []),
-          ...(events?.RefundEventList ?? []),
-          ...(events?.ChargebackEventList ?? []),
-          ...(events?.GuaranteeClaimEventList ?? []),
+          ...(events?.ShipmentSettleEventList ?? events?.shipmentSettleEventList ?? []),
+          ...(events?.ShipmentEventList ?? events?.shipmentEventList ?? []),
+          ...(events?.RefundEventList ?? events?.refundEventList ?? []),
+          ...(events?.ChargebackEventList ?? events?.chargebackEventList ?? []),
+          ...(events?.GuaranteeClaimEventList ?? events?.guaranteeClaimEventList ?? []),
         ];
         for (const ev of shipmentLists) {
-          const items = ev?.ShipmentItemList ?? [];
+          const items = ev?.ShipmentItemList ?? ev?.shipmentItemList ?? [];
           for (const si of items) {
             const fee =
-              sumFeeOrChargeList(si?.ItemFeeList) +
-              sumFeeOrChargeList(si?.ItemFeeAdjustmentList) +
-              sumFeeOrChargeList(si?.ItemChargeList);
-            const orderItemId = si?.OrderItemId as string | undefined;
-            const sku = si?.SellerSKU as string | undefined;
+              sumFeeOrChargeList(si?.ItemFeeList ?? si?.itemFeeList) +
+              sumFeeOrChargeList(si?.ItemFeeAdjustmentList ?? si?.itemFeeAdjustmentList) +
+              sumFeeOrChargeList(si?.ItemChargeList ?? si?.itemChargeList);
+            const orderItemIdRaw = si?.OrderItemId ?? si?.orderItemId;
+            const orderItemId = orderItemIdRaw != null ? String(orderItemIdRaw) : '';
+            const sku = (si?.SellerSKU ?? si?.sellerSKU) as string | undefined;
             if (fee !== 0) {
               if (orderItemId) addFee(feeByOrderItemId, orderItemId, fee);
               if (sku) addFee(feeBySku, sku, fee);
             }
-            const b1 = parseFeeBreakdown(si?.ItemFeeList);
-            const b2 = parseFeeBreakdown(si?.ItemFeeAdjustmentList);
+            const b1 = parseFeeBreakdown(si?.ItemFeeList ?? si?.itemFeeList);
+            const b2 = parseFeeBreakdown(si?.ItemFeeAdjustmentList ?? si?.itemFeeAdjustmentList);
             const r = b1.referral + b2.referral, f = b1.fba + b2.fba, d = b1.digital + b2.digital;
             if (orderItemId) addFeeBreakdown(breakdownByOrderItemId, orderItemId, r, f, d);
             if (sku) addFeeBreakdown(breakdownBySku, sku, r, f, d);
@@ -1910,26 +1929,31 @@ export class AmazonService {
               amazonOrderId,
               { maxResultsPerPage: 100 },
             )) as any;
-            const events = finResBackfill?.payload?.FinancialEvents ?? {};
+            const events =
+              finResBackfill?.payload?.FinancialEvents ??
+              finResBackfill?.payload?.financialEvents ??
+              {};
             const shipmentLists = [
-              ...(events?.ShipmentEventList ?? []),
-              ...(events?.RefundEventList ?? []),
-              ...(events?.ChargebackEventList ?? []),
-              ...(events?.GuaranteeClaimEventList ?? []),
+              ...(events?.ShipmentSettleEventList ?? events?.shipmentSettleEventList ?? []),
+              ...(events?.ShipmentEventList ?? events?.shipmentEventList ?? []),
+              ...(events?.RefundEventList ?? events?.refundEventList ?? []),
+              ...(events?.ChargebackEventList ?? events?.chargebackEventList ?? []),
+              ...(events?.GuaranteeClaimEventList ?? events?.guaranteeClaimEventList ?? []),
             ];
             for (const ev of shipmentLists) {
-              const items = ev?.ShipmentItemList ?? [];
+              const items = ev?.ShipmentItemList ?? ev?.shipmentItemList ?? [];
               for (const si of items) {
                 const fee =
-                  sumFeeOrChargeList(si?.ItemFeeList) +
-                  sumFeeOrChargeList(si?.ItemFeeAdjustmentList) +
-                  sumFeeOrChargeList(si?.ItemChargeList);
-                const orderItemId = si?.OrderItemId as string | undefined;
-                const sku = si?.SellerSKU as string | undefined;
+                  sumFeeOrChargeList(si?.ItemFeeList ?? si?.itemFeeList) +
+                  sumFeeOrChargeList(si?.ItemFeeAdjustmentList ?? si?.itemFeeAdjustmentList) +
+                  sumFeeOrChargeList(si?.ItemChargeList ?? si?.itemChargeList);
+                const orderItemIdRaw = si?.OrderItemId ?? si?.orderItemId;
+                const orderItemId = orderItemIdRaw != null ? String(orderItemIdRaw) : '';
+                const sku = (si?.SellerSKU ?? si?.sellerSKU) as string | undefined;
                 if (fee !== 0 && orderItemId) addFee(feeByOrderItemId, orderItemId, fee);
                 if (fee !== 0 && sku) addFee(feeBySku, sku, fee);
-                const b1 = parseFeeBreakdown(si?.ItemFeeList);
-                const b2 = parseFeeBreakdown(si?.ItemFeeAdjustmentList);
+                const b1 = parseFeeBreakdown(si?.ItemFeeList ?? si?.itemFeeList);
+                const b2 = parseFeeBreakdown(si?.ItemFeeAdjustmentList ?? si?.itemFeeAdjustmentList);
                 const r = b1.referral + b2.referral, f = b1.fba + b2.fba, d = b1.digital + b2.digital;
                 if (orderItemId) addFeeBreakdown(breakdownByOrderItemId, orderItemId, r, f, d);
                 if (sku) addFeeBreakdown(breakdownBySku, sku, r, f, d);
@@ -1946,12 +1970,14 @@ export class AmazonService {
           where: { userId, orderId: amazonOrderId, marketplace: 'amazon' },
           select: { id: true },
         });
-        if (orderRecord && (breakdownByOrderItemId.size > 0 || feeByOrderItemId.size > 0)) {
+        if (orderRecord) {
           const existingItems = await (this.prisma as any).orderItem.findMany({
             where: { orderDbId: orderRecord.id },
             select: {
               id: true,
               orderItemId: true,
+              sku: true,
+              asin: true,
               revenueTotal: true,
               cogsTotal: true,
               quantity: true,
@@ -1960,8 +1986,69 @@ export class AmazonService {
             },
           });
           for (const oi of existingItems) {
-            const bid = breakdownByOrderItemId.get(oi.orderItemId);
-            const fee = feeByOrderItemId.get(oi.orderItemId) ?? 0;
+            const orderItemIdStr = oi.orderItemId != null ? String(oi.orderItemId) : '';
+            let bid = breakdownByOrderItemId.get(orderItemIdStr) ?? (oi.sku ? breakdownBySku.get(oi.sku) : undefined);
+            let fee = feeByOrderItemId.get(orderItemIdStr) ?? (oi.sku ? feeBySku.get(oi.sku) ?? 0 : 0);
+            // When this order's API returned no fee data, use same-ASIN or same-SKU settled so we overwrite estimate with settled.
+            if (fee === 0 && (oi.asin || oi.sku)) {
+              const asinTrim = oi.asin && String(oi.asin).trim() ? String(oi.asin).trim() : null;
+              const skuTrim = oi.sku && String(oi.sku).trim() ? String(oi.sku).trim() : null;
+              const orConditions: Array<{ asin?: string; sku?: string }> = [];
+              if (asinTrim) orConditions.push({ asin: asinTrim });
+              if (skuTrim) orConditions.push({ sku: skuTrim });
+              const sameSettled =
+                orConditions.length > 0
+                  ? await (this.prisma as any).orderItem.findFirst({
+                      where: {
+                        AND: [
+                          {
+                            userId,
+                            marketplace: 'amazon',
+                            orderDbId: { not: orderRecord.id },
+                            feesSource: 'finances',
+                            quantity: { gt: 0 },
+                          },
+                          {
+                            OR: [
+                              { amazonFeesTotal: { gt: 0 } },
+                              { amazonFeesTotal: { lt: 0 } },
+                            ],
+                          },
+                          { OR: orConditions },
+                        ],
+                      },
+                      orderBy: { orderDate: 'desc' },
+                      select: {
+                        amazonFeesTotal: true,
+                        quantity: true,
+                        settledReferralFeeTotal: true,
+                        settledFbaFeeTotal: true,
+                        settledDigitalServiceFeeTotal: true,
+                      },
+                    })
+                  : null;
+              if (
+                sameSettled &&
+                sameSettled.amazonFeesTotal != null &&
+                Number(sameSettled.amazonFeesTotal) !== 0 &&
+                Number(sameSettled.quantity) > 0
+              ) {
+                const qtyHere = Number(oi.quantity ?? 1) || 1;
+                const feePerUnit = Number(sameSettled.amazonFeesTotal) / Number(sameSettled.quantity);
+                fee = Number((feePerUnit * qtyHere).toFixed(2));
+                const ref = sameSettled.settledReferralFeeTotal != null ? Number(sameSettled.settledReferralFeeTotal) : 0;
+                const fba = sameSettled.settledFbaFeeTotal != null ? Number(sameSettled.settledFbaFeeTotal) : 0;
+                const dig = sameSettled.settledDigitalServiceFeeTotal != null ? Number(sameSettled.settledDigitalServiceFeeTotal) : 0;
+                if (qtyHere > 0 && (ref !== 0 || fba !== 0 || dig !== 0)) {
+                  const scale = (qtyHere / Number(sameSettled.quantity));
+                  bid = {
+                    referral: Number((ref * scale).toFixed(2)),
+                    fba: Number((fba * scale).toFixed(2)),
+                    digital: Number((dig * scale).toFixed(2)),
+                  };
+                }
+              }
+            }
             if (!bid && fee === 0) continue;
             const rev = Number(oi.revenueTotal ?? 0);
             const cogs = oi.cogsTotal != null ? Number(oi.cogsTotal) : null;
@@ -2149,16 +2236,49 @@ export class AmazonService {
           // Per-item fee allocation:
           // - Prefer Finances item-level fees by OrderItemId.
           // - Fall back to SKU mapping.
-          // - Otherwise allocate proportionally by revenue.
+          // - Otherwise allocate proportionally by revenue (order-level total from Finances API).
           let itemFees = 0;
+          let usedOrderLevelFinances = false;
           if (orderItemId && feeByOrderItemId.has(orderItemId)) {
             itemFees = feeByOrderItemId.get(orderItemId) ?? 0;
           } else if (sku && feeBySku.has(sku)) {
             itemFees = feeBySku.get(sku) ?? 0;
           } else if (totalItemRevenue > 0 && amazonFeesTotal !== 0) {
             itemFees = (revenueTotal / totalItemRevenue) * amazonFeesTotal;
+            usedOrderLevelFinances = true;
           }
-          // If no actual fees from Finances API yet, use product's estimated fee (per unit × qty).
+          // If we don't have this order's settled fees, prefer settled fees from another order item with the same ASIN (overwrites estimates).
+          let usedSameAsinSettled = false;
+          if (itemFees === 0 && asin && String(asin).trim()) {
+            const asinTrim = String(asin).trim();
+            const sameAsinSettled = await (this.prisma as any).orderItem.findFirst({
+              where: {
+                userId,
+                marketplace: 'amazon',
+                asin: asinTrim,
+                feesSource: 'finances',
+                quantity: { gt: 0 },
+                OR: [
+                    { amazonFeesTotal: { gt: 0 } },
+                    { amazonFeesTotal: { lt: 0 } },
+                  ],
+              },
+              orderBy: { orderDate: 'desc' },
+              select: { amazonFeesTotal: true, quantity: true },
+            });
+            if (
+              sameAsinSettled &&
+              sameAsinSettled.amazonFeesTotal != null &&
+              Number(sameAsinSettled.amazonFeesTotal) !== 0 &&
+              Number(sameAsinSettled.quantity) > 0
+            ) {
+              const feePerUnit =
+                Number(sameAsinSettled.amazonFeesTotal) / Number(sameAsinSettled.quantity);
+              itemFees = Number((feePerUnit * quantityOrdered).toFixed(2));
+              usedSameAsinSettled = true;
+            }
+          }
+          // If no settled fees yet (this order or same ASIN), use product's saved estimate (per unit × qty).
           if (itemFees === 0 && sku) {
             const productWithEst = await this.prisma.product.findUnique({
               where: { userId_sku: { userId, sku } },
@@ -2184,13 +2304,84 @@ export class AmazonService {
               })
             : genericProduct;
 
+          // When we have no fees (Finances API not settled yet) and product has no estimate, fetch fee estimate so we don't persist 0 and overstate profit/ROI.
+          if (
+            itemFees === 0 &&
+            (asin || sku) &&
+            (itemProduct as any).estimatedAmazonFeePerUnit == null
+          ) {
+            try {
+              const marketplaceId = (
+                regionMarketplaceIds[credentials.region ?? 'eu'] ??
+                regionMarketplaceIds.eu
+              )[0];
+              const listingPriceAmount =
+                quantityOrdered > 0 ? revenueTotal / quantityOrdered : 15;
+              const listingCurrency =
+                credentials.region === 'eu' ? 'GBP' : 'USD';
+              const params = {
+                marketplaceId,
+                isAmazonFulfilled: true,
+                listingPriceAmount,
+                listingPriceCurrency: listingCurrency,
+              };
+              const res =
+                asin && String(asin).trim()
+                  ? await this.spApiClient.getMyFeesEstimateForASIN(
+                      credentials,
+                      String(asin).trim(),
+                      params,
+                    )
+                  : await this.spApiClient.getMyFeesEstimateForSKU(
+                      credentials,
+                      sku,
+                      params,
+                    );
+              const breakdown = this.parseFeesEstimateBreakdown(res as any);
+              if (
+                breakdown.total != null &&
+                Number.isFinite(breakdown.total)
+              ) {
+                const ref = breakdown.referralFee ?? 0;
+                const fba = breakdown.fbaFee ?? 0;
+                const digitalToSave =
+                  breakdown.digitalServiceFee ??
+                  (credentials.region === 'eu' && (ref !== 0 || fba !== 0)
+                    ? Math.round((ref + fba) * 0.02 * 100) / 100
+                    : 0);
+                await this.prisma.product.update({
+                  where: { id: itemProduct.id },
+                  data: {
+                    estimatedAmazonFeePerUnit: breakdown.total,
+                    estimatedReferralFeePerUnit: breakdown.referralFee ?? undefined,
+                    estimatedFbaFeePerUnit: breakdown.fbaFee ?? undefined,
+                    estimatedDigitalServiceFeePerUnit:
+                      digitalToSave || undefined,
+                    estimatedAmazonFeeUpdatedAt: new Date(),
+                  },
+                });
+                itemFees = breakdown.total * quantityOrdered;
+              }
+            } catch (err) {
+              this.logger.warn(
+                '[syncRecentOrdersToDb] fee estimate fetch failed for order item',
+                {
+                  orderItemId,
+                  sku,
+                  asin,
+                  err: (err as Error)?.message,
+                },
+              );
+            }
+          }
+
           const cogsPerUnit = itemProduct.costOfGoods
             ? Number(itemProduct.costOfGoods)
             : null;
           const cogsTotal =
             cogsPerUnit != null ? cogsPerUnit * quantityOrdered : null;
           const taxChargedNum = Number.isNaN(taxCharged) ? 0 : taxCharged;
-          const vatResult = this.computeOrderItemVatAndProfit(
+          let vatResult = this.computeOrderItemVatAndProfit(
             revenueTotal,
             cogsTotal,
             quantityOrdered,
@@ -2200,7 +2391,10 @@ export class AmazonService {
             vatSettings,
           );
           const feesFromFinances =
-            (orderItemId && feeByOrderItemId.has(orderItemId)) || (sku && feeBySku.has(sku));
+            (orderItemId && feeByOrderItemId.has(orderItemId)) ||
+            (sku && feeBySku.has(sku)) ||
+            usedSameAsinSettled ||
+            usedOrderLevelFinances;
           const settledBreakdown =
             (orderItemId && breakdownByOrderItemId.get(orderItemId)) ??
             (sku && breakdownBySku.get(sku)) ??
@@ -2214,7 +2408,26 @@ export class AmazonService {
             },
             select: { amazonFeesTotal: true, profit: true, feesSource: true },
           });
-          const finalFees = Number.isNaN(itemFees) ? 0 : Number(itemFees.toFixed(2));
+          let finalFees = Number.isNaN(itemFees) ? 0 : Number(itemFees.toFixed(2));
+          // Never overwrite a saved estimate with 0: keep existing order-item estimate until settled fees arrive.
+          if (
+            finalFees === 0 &&
+            existingItem &&
+            existingItem.amazonFeesTotal != null &&
+            Number(existingItem.amazonFeesTotal) !== 0 &&
+            (existingItem.feesSource as string) === 'estimate'
+          ) {
+            finalFees = Number(existingItem.amazonFeesTotal);
+            vatResult = this.computeOrderItemVatAndProfit(
+              revenueTotal,
+              cogsTotal,
+              quantityOrdered,
+              orderDate,
+              finalFees,
+              taxChargedNum,
+              vatSettings,
+            );
+          }
           const finalProfit = vatResult.profit != null ? Number(vatResult.profit.toFixed(2)) : null;
           const vatData: Record<string, number | null> = {};
           if (vatResult.salePriceIncVat != null) vatData.salePriceIncVat = vatResult.salePriceIncVat;
@@ -3666,18 +3879,20 @@ export class AmazonService {
       const taxChargedTotal = safeNum(it.taxChargedTotal);
       const settledFees = safeNum(it.amazonFeesTotal);
       const qty = safeNum(it.quantity) || 1;
-      // Prefer raw-query product fees; fallback to nested product (estimated breakdown) when raw query failed or missed the product
+      // Use order item stored fees when present; else product's saved estimate (so we always pick up estimates from DB).
       const estPerUnit = fees?.amazonFeePerUnit ?? toNum(product?.estimatedAmazonFeePerUnit) ?? null;
       const estReferral = fees?.referralPerUnit ?? toNum(product?.estimatedReferralFeePerUnit) ?? null;
       const estFba = fees?.fbaPerUnit ?? toNum(product?.estimatedFbaFeePerUnit) ?? null;
       const estDigital = fees?.digitalServicePerUnit ?? toNum(product?.estimatedDigitalServiceFeePerUnit) ?? null;
-      // Use settled total when we have it (finances); otherwise use estimated total (estimated per unit × qty)
+      // Use settled total when we have it (finances); otherwise use estimated total (estimated per unit × qty); else conservative fallback so ROI isn't overstated.
       const feesForDisplay =
         settledFees !== 0
           ? settledFees
           : estPerUnit != null && Number.isFinite(estPerUnit)
             ? -Math.abs(estPerUnit * qty)
-            : 0;
+            : revenueTotal > 0
+              ? -Math.abs(revenueTotal * DEFAULT_AMAZON_FEE_RATE_WHEN_UNKNOWN)
+              : 0;
       const feesSource = (it as any).feesSource ?? null;
       let referralFeeTotal: number | null = null;
       let fbaFeeTotal: number | null = null;
@@ -5853,11 +6068,13 @@ try {
           }
           if (typeof input !== 'object') return 0;
           let total = 0;
+          const keyLower = keyName.toLowerCase();
           for (const [k, v] of Object.entries(
             input as Record<string, unknown>,
           )) {
-            if (k === keyName && v && typeof v === 'object') {
-              const amt = (v as any).CurrencyAmount;
+            if ((k === keyName || k.toLowerCase() === keyLower) && v && typeof v === 'object') {
+              const obj = v as Record<string, unknown>;
+              const amt = obj.CurrencyAmount ?? obj.currencyAmount ?? obj.Amount ?? obj.amount;
               const n = Number(amt ?? 0);
               if (!Number.isNaN(n)) total += n;
             } else {
@@ -5869,28 +6086,33 @@ try {
 
         amazonFeesTotal = sumCurrencyAmountsByKey(finRes, 'FeeAmount');
 
-        const events = finRes?.payload?.FinancialEvents ?? {};
+        const events =
+          finRes?.payload?.FinancialEvents ??
+          finRes?.payload?.financialEvents ??
+          {};
         const shipmentLists = [
-          ...(events?.ShipmentEventList ?? []),
-          ...(events?.RefundEventList ?? []),
-          ...(events?.ChargebackEventList ?? []),
-          ...(events?.GuaranteeClaimEventList ?? []),
+          ...(events?.ShipmentSettleEventList ?? events?.shipmentSettleEventList ?? []),
+          ...(events?.ShipmentEventList ?? events?.shipmentEventList ?? []),
+          ...(events?.RefundEventList ?? events?.refundEventList ?? []),
+          ...(events?.ChargebackEventList ?? events?.chargebackEventList ?? []),
+          ...(events?.GuaranteeClaimEventList ?? events?.guaranteeClaimEventList ?? []),
         ];
         for (const ev of shipmentLists) {
-          const items = ev?.ShipmentItemList ?? [];
+          const items = ev?.ShipmentItemList ?? ev?.shipmentItemList ?? [];
           for (const si of items) {
             const fee =
-              sumFeeOrChargeList(si?.ItemFeeList) +
-              sumFeeOrChargeList(si?.ItemFeeAdjustmentList) +
-              sumFeeOrChargeList(si?.ItemChargeList);
-            const orderItemId = si?.OrderItemId as string | undefined;
-            const sku = si?.SellerSKU as string | undefined;
+              sumFeeOrChargeList(si?.ItemFeeList ?? si?.itemFeeList) +
+              sumFeeOrChargeList(si?.ItemFeeAdjustmentList ?? si?.itemFeeAdjustmentList) +
+              sumFeeOrChargeList(si?.ItemChargeList ?? si?.itemChargeList);
+            const orderItemIdRaw = si?.OrderItemId ?? si?.orderItemId;
+            const orderItemId = orderItemIdRaw != null ? String(orderItemIdRaw) : '';
+            const sku = (si?.SellerSKU ?? si?.sellerSKU) as string | undefined;
             if (fee !== 0) {
               if (orderItemId) addFee(feeByOrderItemId, orderItemId, fee);
               if (sku) addFee(feeBySku, sku, fee);
             }
-            const b1 = parseFeeBreakdownBackfill(si?.ItemFeeList);
-            const b2 = parseFeeBreakdownBackfill(si?.ItemFeeAdjustmentList);
+            const b1 = parseFeeBreakdownBackfill(si?.ItemFeeList ?? si?.itemFeeList);
+            const b2 = parseFeeBreakdownBackfill(si?.ItemFeeAdjustmentList ?? si?.itemFeeAdjustmentList);
             const r = b1.referral + b2.referral, f = b1.fba + b2.fba, d = b1.digital + b2.digital;
             if (orderItemId) addFeeBreakdownBackfill(breakdownByOrderItemId, orderItemId, r, f, d);
             if (sku) addFeeBreakdownBackfill(breakdownBySku, sku, r, f, d);
@@ -5935,7 +6157,38 @@ try {
         } else if (totalItemRevenue > 0 && amazonFeesTotal !== 0) {
           itemFees = (revenueTotal / totalItemRevenue) * amazonFeesTotal;
         }
-        // If no actual fees from Finances API yet, use product's estimated fee (per unit × qty).
+        // If we don't have this order's settled fees, prefer settled from another order with the same ASIN (overwrites estimates).
+        let usedSameAsinSettled = false;
+        if (itemFees === 0 && asin && String(asin).trim()) {
+          const asinTrim = String(asin).trim();
+          const sameAsinSettled = await (this.prisma as any).orderItem.findFirst({
+            where: {
+              userId,
+              marketplace: 'amazon',
+              asin: asinTrim,
+              feesSource: 'finances',
+              quantity: { gt: 0 },
+              OR: [
+                    { amazonFeesTotal: { gt: 0 } },
+                    { amazonFeesTotal: { lt: 0 } },
+                  ],
+            },
+            orderBy: { orderDate: 'desc' },
+            select: { amazonFeesTotal: true, quantity: true },
+          });
+          if (
+            sameAsinSettled &&
+            sameAsinSettled.amazonFeesTotal != null &&
+            Number(sameAsinSettled.amazonFeesTotal) !== 0 &&
+            Number(sameAsinSettled.quantity) > 0
+          ) {
+            const feePerUnit =
+              Number(sameAsinSettled.amazonFeesTotal) / Number(sameAsinSettled.quantity);
+            itemFees = Number((feePerUnit * quantityOrdered).toFixed(2));
+            usedSameAsinSettled = true;
+          }
+        }
+        // If no settled (this order or same ASIN), use product's estimated fee (per unit × qty).
         if (itemFees === 0 && sku) {
           const productWithEst = await this.prisma.product.findUnique({
             where: { userId_sku: { userId, sku } },
@@ -5978,7 +6231,9 @@ try {
             ? revenueTotal - taxCharged - cogsTotal + itemFees
             : null;
         const feesFromFinances =
-          (orderItemId && feeByOrderItemId.has(orderItemId)) || (sku && feeBySku.has(sku));
+          (orderItemId && feeByOrderItemId.has(orderItemId)) ||
+          (sku && feeBySku.has(sku)) ||
+          usedSameAsinSettled;
         const settledBreakdown =
           (orderItemId && breakdownByOrderItemId.get(orderItemId)) ??
           (sku && breakdownBySku.get(sku)) ??
@@ -5989,8 +6244,22 @@ try {
           },
           select: { amazonFeesTotal: true, profit: true, feesSource: true },
         });
-        const finalFees = Number.isNaN(itemFees) ? 0 : Number(itemFees.toFixed(2));
-        const finalProfit = profit != null ? Number(profit.toFixed(2)) : null;
+        let finalFees = Number.isNaN(itemFees) ? 0 : Number(itemFees.toFixed(2));
+        let finalProfit = profit != null ? Number(profit.toFixed(2)) : null;
+        // Never overwrite a saved estimate with 0: keep existing until settled fees arrive.
+        if (
+          finalFees === 0 &&
+          existingItem &&
+          existingItem.amazonFeesTotal != null &&
+          Number(existingItem.amazonFeesTotal) !== 0 &&
+          (existingItem.feesSource as string) === 'estimate'
+        ) {
+          finalFees = Number(existingItem.amazonFeesTotal);
+          finalProfit =
+            cogsTotal != null
+              ? Number((revenueTotal - taxCharged - cogsTotal + finalFees).toFixed(2))
+              : null;
+        }
         const updateFeesAndProfit =
           feesFromFinances || (existingItem?.feesSource as string) !== 'finances';
         const settledFeeFields =
@@ -6899,7 +7168,7 @@ try {
     opts?: { query?: string; take?: number; skip?: number },
   ) {
     const userIds = await this.getOrgMemberUserIds(orgId);
-    const q = (opts?.query ?? '').trim().toLowerCase();
+    const q = (opts?.query ?? '').trim();
     const take = opts?.take ?? 50;
     const skip = opts?.skip ?? 0;
 
@@ -6908,20 +7177,26 @@ try {
     };
 
     if (q) {
+      // Two-step: find product IDs matching search, then filter purchases (avoids Prisma relation filter quirks)
+      const matchingProducts = await (this.prisma as any).product.findMany({
+        where: {
+          userId: { in: userIds },
+          OR: [
+            { sku: { contains: q, mode: 'insensitive' } },
+            { asin: { contains: q, mode: 'insensitive' } },
+            { title: { contains: q, mode: 'insensitive' } },
+          ],
+        },
+        select: { id: true },
+      });
+      const matchingProductIds = (matchingProducts as Array<{ id: string }>).map((p) => p.id);
+
       where.OR = [
+        { productId: { in: matchingProductIds } },
         { shipmentId: { contains: q, mode: 'insensitive' } },
         { supplier: { contains: q, mode: 'insensitive' } },
         { supplierLink: { contains: q, mode: 'insensitive' } },
         { orderNumber: { contains: q, mode: 'insensitive' } },
-        {
-          product: {
-            OR: [
-              { sku: { contains: q, mode: 'insensitive' } },
-              { asin: { contains: q, mode: 'insensitive' } },
-              { title: { contains: q, mode: 'insensitive' } },
-            ],
-          },
-        },
       ];
     }
 
