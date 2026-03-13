@@ -436,7 +436,7 @@ export default function LandingPage() {
                   <span style={{ color: accentColor }}>SellerBunker tracks every cost Amazon hides.</span>
                 </h1>
                 <p className="mt-3 max-w-xl text-base text-[var(--muted-foreground)] sm:mt-4 sm:text-lg">
-                  SellerBunker tracks your sales, profit, ROI, orders, inventory, shipments and more in one powerful dashboard designed for serious Amazon sellers—whether you sell FBA (Fulfilled by Amazon), FBM (Fulfilled by Merchant), or both. We identify missing stock and indicate which products you should replenish to keep making profit.
+                  SellerBunker tracks your sales, profit, ROI, orders, inventory, shipments and more in one powerful dashboard designed for serious Amazon sellers—whether you sell FBA (Fulfilled by Amazon), FBM (Fulfilled by Merchant), or both.
                 </p>
                 <div className="mt-4 flex flex-wrap gap-3 sm:mt-6 sm:gap-4">
                   <SignedOut>
