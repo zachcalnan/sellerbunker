@@ -294,21 +294,19 @@ export function Sidebar() {
   }, [optionsOpen]);
 
   return (
-    <aside className="flex h-screen w-full flex-col border-r border-[var(--surface-border)] bg-[var(--surface)]">
-      <div className="flex shrink-0 items-start justify-start overflow-hidden pl-0 pr-1 -pt-0.5 pb-0">
-        <Link
-          href="/dashboard"
-          className="-ml-1 flex shrink-0 items-start overflow-hidden font-semibold tracking-tight text-[var(--foreground)] no-underline hover:opacity-80"
-          aria-label="Seller Bunker dashboard"
-        >
-          <img
-            src="/sellerbunker-logo.png"
-            alt="Seller Bunker"
-            className="sellerbunker-logo -mt-2 h-28 w-auto min-w-[140px] max-w-[180px] scale-105 origin-top-left object-contain object-left"
-          />
-        </Link>
-      </div>
-      <nav className="-mt-1 flex shrink-0 flex-col gap-0.5 px-2" aria-label="Main">
+    <aside className="flex gap-4 h-screen w-full flex-col border-r border-[var(--surface-border)] bg-[var(--surface)]">
+      <Link
+        href="/dashboard"
+        className="no-underline w-fit"
+        aria-label="Seller Bunker dashboard"
+      >
+        <img
+          src="/sellerbunker-logo2.png"
+          alt="Seller Bunker"
+          className="sellerbunker-logo h-full max-h-20 w-auto p-4 object-contain object-left"
+        />
+      </Link>
+      <nav className="flex-col gap-0.5 px-2" aria-label="Main">
         <SignedIn>
           {NAV_ITEMS.map(({ label, href, icon: Icon, disabled, tooltip }) => {
             if (disabled) {

@@ -4,8 +4,10 @@ import { useEffect, useRef } from "react";
 import { Sidebar } from "@/components/sidebar";
 import { MobileNav } from "@/components/mobile-nav";
 import { Topbar } from "@/components/topbar";
+import { SyncProgressBar } from "@/components/sync-progress-bar";
 import { FullscreenProvider, useFullscreen } from "@/contexts/fullscreen-context";
 import { DisplaySettingsProvider } from "@/contexts/display-settings-context";
+import { NotificationsProvider } from "@/contexts/notifications-context";
 import { SubscriptionGate } from "@/components/subscription-gate";
 import { VatOnboardingModal } from "@/components/vat-onboarding-modal";
 import { CogsPromptModal } from "@/components/cogs-prompt-modal";
@@ -44,14 +46,19 @@ function DashboardLayoutInner({
     <>
       <VatOnboardingModal />
       <CogsPromptModal />
-      <MobileNav />
-      <div className="hidden md:fixed md:inset-y-0 md:left-0 md:z-10 md:flex md:w-56">
-        <Sidebar />
-      </div>
-      <main className="flex min-h-screen flex-col md:pl-56">
-        <Topbar />
-        <div className="min-h-0 flex-1">{children}</div>
-      </main>
+      <NotificationsProvider>
+        <MobileNav />
+        <div className="hidden md:fixed md:inset-y-0 md:left-0 md:z-10 md:flex md:w-56">
+          <Sidebar />
+        </div>
+        <main className="flex min-h-screen flex-col md:pl-56">
+          <div className="hidden md:block">
+            <Topbar />
+          </div>
+          <SyncProgressBar />
+          <div className="min-h-0 flex-1">{children}</div>
+        </main>
+      </NotificationsProvider>
     </>
   );
 }

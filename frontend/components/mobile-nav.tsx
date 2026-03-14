@@ -13,6 +13,9 @@ import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { LanguageSelector } from "./language-selector";
 import { ThemeToggle } from "./theme-toggle";
+import { SettingsModal } from "./settings-modal";
+import { NotificationsDropdown } from "./notifications-dropdown";
+import { useFullscreen } from "@/contexts/fullscreen-context";
 
 const BASE_URL =
   process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
@@ -213,10 +216,52 @@ function CloseIcon({ className }: { className?: string }) {
   );
 }
 
+function FullscreenIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <path d="M4 4h6M14 4h6M20 4v6M20 14v6M20 20h-6M10 20H4M4 20V14M4 10V4" />
+    </svg>
+  );
+}
+
+function SettingsIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" />
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1Z" />
+    </svg>
+  );
+}
+
 export function MobileNav() {
   const pathname = usePathname();
   const router = useRouter();
   const [open, setOpen] = useState(false);
+  const [drawerSlideIn, setDrawerSlideIn] = useState(false);
+  const drawerHasOpenedRef = useRef(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [notificationsMaskOpen, setNotificationsMaskOpen] = useState(false);
+  const { setFullscreen } = useFullscreen();
   const { isSignedIn, getToken } = useAuth();
   const { signOut } = useClerk();
   const [amazonConnected, setAmazonConnected] = useState<boolean | null>(null);
@@ -224,6 +269,8 @@ export function MobileNav() {
   const [disconnectingAmazon, setDisconnectingAmazon] = useState(false);
   const [optionsOpen, setOptionsOpen] = useState(false);
   const optionsRef = useRef<HTMLDivElement>(null);
+
+  const closeDrawer = useCallback(() => setDrawerSlideIn(false), []);
 
   const fetchAmazonStatus = useCallback(async () => {
     if (!isSignedIn) return;
@@ -320,51 +367,96 @@ export function MobileNav() {
   }, [optionsOpen]);
 
   useEffect(() => {
-    setOpen(false);
-  }, [pathname]);
+    closeDrawer();
+  }, [pathname, closeDrawer]);
+
+  useEffect(() => {
+    if (open) {
+      drawerHasOpenedRef.current = false;
+      const frame = requestAnimationFrame(() => setDrawerSlideIn(true));
+      return () => cancelAnimationFrame(frame);
+    } else {
+      setDrawerSlideIn(false);
+    }
+  }, [open]);
+
+  useEffect(() => {
+    if (drawerSlideIn) drawerHasOpenedRef.current = true;
+  }, [drawerSlideIn]);
+
+  useEffect(() => {
+    if (open && !drawerSlideIn && drawerHasOpenedRef.current) {
+      const t = setTimeout(() => setOpen(false), 300);
+      drawerHasOpenedRef.current = false;
+      return () => clearTimeout(t);
+    }
+  }, [open, drawerSlideIn]);
 
   useEffect(() => {
     if (!open) return;
     const onEscape = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
+      if (e.key === "Escape") closeDrawer();
     };
     document.addEventListener("keydown", onEscape);
     return () => document.removeEventListener("keydown", onEscape);
-  }, [open]);
+  }, [open, closeDrawer]);
+
+  // When notifications dropdown shows its full-screen overlay, disable header clicks (e.g. burger)
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const handleOpen = () => setNotificationsMaskOpen(true);
+    const handleClose = () => setNotificationsMaskOpen(false);
+    window.addEventListener("sellerbunker-notifications-open", handleOpen);
+    window.addEventListener("sellerbunker-notifications-close", handleClose);
+    return () => {
+      window.removeEventListener("sellerbunker-notifications-open", handleOpen);
+      window.removeEventListener("sellerbunker-notifications-close", handleClose);
+    };
+  }, []);
 
   return (
     <>
       <header className="flex h-14 shrink-0 items-center justify-between gap-4 border-b border-[var(--surface-border)] bg-[var(--surface)] px-4 md:hidden">
         <Link
           href="/dashboard"
-          className="flex shrink-0 items-center font-semibold tracking-tight text-[var(--foreground)] no-underline hover:opacity-80"
+          className="flex shrink-0 items-center h-full font-semibold tracking-tight text-[var(--foreground)] no-underline hover:opacity-80"
           aria-label="Seller Bunker dashboard"
         >
           <img
-            src="/sellerbunker-logo.png"
+            src="/sellerbunker-logo2.png"
             alt="Seller Bunker"
-            className="sellerbunker-logo h-16 w-auto min-w-[130px] object-contain object-left"
+            className="sellerbunker-logo h-full w-auto p-2 object-contain object-left"
           />
         </Link>
-        <button
-          type="button"
-          onClick={() => setOpen(true)}
-          aria-label="Open menu"
-          className="flex h-10 w-10 cursor-pointer items-center justify-center rounded-lg text-[var(--foreground)] hover:bg-[var(--foreground)]/5"
-        >
-          <BurgerIcon className="h-6 w-6" />
-        </button>
+        <div className="flex items-center gap-2">
+          <NotificationsDropdown variant="iconOnly" />
+          <button
+            type="button"
+            onClick={(e) => {
+              if (notificationsMaskOpen) {
+                e.preventDefault();
+                e.stopPropagation();
+                return;
+              }
+              setOpen(true);
+            }}
+            aria-label="Open menu"
+            className="flex h-10 w-10 cursor-pointer items-center justify-center rounded-lg text-[var(--foreground)] hover:bg-[var(--foreground)]/5"
+          >
+            <BurgerIcon className="h-6 w-6" />
+          </button>
+        </div>
       </header>
 
       {open && (
         <>
           <div
-            className="fixed inset-0 z-40 bg-black/40 md:hidden"
+            className={`fixed inset-0 z-40 bg-[#0006] backdrop-blur-[20px] transition-opacity duration-300 ease-out md:hidden ${drawerSlideIn ? "opacity-100" : "opacity-0"}`}
             aria-hidden
-            onClick={() => setOpen(false)}
+            onClick={closeDrawer}
           />
           <div
-            className="fixed inset-y-0 right-0 z-50 flex w-72 max-w-[85vw] flex-col border-l border-[var(--surface-border)] bg-[var(--surface)] shadow-xl md:hidden"
+            className={`fixed inset-y-0 right-0 z-50 flex w-72 max-w-[85vw] flex-col border-l border-[var(--surface-border)] bg-[var(--surface)] shadow-xl transition-transform duration-300 ease-out md:hidden ${drawerSlideIn ? "translate-x-0" : "translate-x-full"}`}
             role="dialog"
             aria-label="Menu"
           >
@@ -374,7 +466,7 @@ export function MobileNav() {
               </span>
               <button
                 type="button"
-                onClick={() => setOpen(false)}
+                onClick={closeDrawer}
                 aria-label="Close menu"
                 className="flex h-10 w-10 cursor-pointer items-center justify-center rounded-lg text-[var(--foreground)] hover:bg-[var(--foreground)]/5"
               >
@@ -386,7 +478,7 @@ export function MobileNav() {
                 <Link
                   href="/"
                   className="flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium no-underline transition-colors text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
-                  onClick={() => setOpen(false)}
+                  onClick={closeDrawer}
                 >
                   Home
                 </Link>
@@ -400,7 +492,7 @@ export function MobileNav() {
                       ? "bg-sb-accent text-black"
                       : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
                   }`}
-                  onClick={() => setOpen(false)}
+                  onClick={closeDrawer}
                 >
                   <DashboardIcon className="h-4 w-4 shrink-0" />
                   Dashboard
@@ -413,7 +505,7 @@ export function MobileNav() {
                       ? "bg-sb-accent text-black"
                       : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
                   }`}
-                  onClick={() => setOpen(false)}
+                  onClick={closeDrawer}
                 >
                   <CostOfGoodsIcon className="h-4 w-4 shrink-0" />
                   Cost of Goods
@@ -426,7 +518,7 @@ export function MobileNav() {
                       ? "bg-sb-accent text-black"
                       : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
                   }`}
-                  onClick={() => setOpen(false)}
+                  onClick={closeDrawer}
                 >
                   <InventoryIcon className="h-4 w-4 shrink-0" />
                   Inventory
@@ -439,7 +531,7 @@ export function MobileNav() {
                       ? "bg-sb-accent text-black"
                       : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
                   }`}
-                  onClick={() => setOpen(false)}
+                  onClick={closeDrawer}
                 >
                   <OrdersIcon className="h-4 w-4 shrink-0" />
                   Orders
@@ -452,7 +544,7 @@ export function MobileNav() {
                       ? "bg-sb-accent text-black"
                       : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
                   }`}
-                  onClick={() => setOpen(false)}
+                  onClick={closeDrawer}
                 >
                   <ShipmentsIcon className="h-4 w-4 shrink-0" />
                   FBA Shipments
@@ -465,7 +557,7 @@ export function MobileNav() {
                       ? "bg-sb-accent text-black"
                       : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
                   }`}
-                  onClick={() => setOpen(false)}
+                  onClick={closeDrawer}
                 >
                   <ReplenishIcon className="h-4 w-4 shrink-0" />
                   Replenish
@@ -491,6 +583,31 @@ export function MobileNav() {
               </SignedIn>
 
               <div className="my-2 h-px bg-[var(--surface-border)]" />
+
+              <div className="flex flex-col gap-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    closeDrawer();
+                    setFullscreen(true);
+                  }}
+                  className="flex items-center gap-2 rounded-lg px-3 py-2.5 text-left text-sm font-medium text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5 hover:text-[var(--foreground)]"
+                >
+                  <FullscreenIcon className="h-4 w-4 shrink-0" />
+                  Full screen dashboard
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    closeDrawer();
+                    setSettingsOpen(true);
+                  }}
+                  className="flex items-center gap-2 rounded-lg px-3 py-2.5 text-left text-sm font-medium text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5 hover:text-[var(--foreground)]"
+                >
+                  <SettingsIcon className="h-4 w-4 shrink-0" />
+                  Settings
+                </button>
+              </div>
 
               <div className="flex flex-wrap items-center gap-2">
                 <LanguageSelector />
@@ -533,7 +650,7 @@ export function MobileNav() {
                   <div className="flex flex-col gap-2">
                     <SignInButton>
                       <button
-                        onClick={() => setOpen(false)}
+                        onClick={closeDrawer}
                         className="w-full cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2.5 text-left text-sm font-medium text-[var(--foreground)]"
                       >
                         Sign in
@@ -541,7 +658,7 @@ export function MobileNav() {
                     </SignInButton>
                     <SignUpButton>
                       <button
-                        onClick={() => setOpen(false)}
+                        onClick={closeDrawer}
                         className="w-full cursor-pointer rounded-lg bg-indigo-600 px-3 py-2.5 text-center text-sm font-medium text-white hover:bg-indigo-500"
                       >
                         Sign up
@@ -583,7 +700,7 @@ export function MobileNav() {
                           role="menuitem"
                           onClick={() => {
                             setOptionsOpen(false);
-                            setOpen(false);
+                            closeDrawer();
                             void signOut({ redirectUrl: "/" });
                           }}
                           className="cursor-pointer px-3 py-2.5 text-left text-sm text-[var(--foreground)] hover:bg-[var(--foreground)]/10"
@@ -610,6 +727,7 @@ export function MobileNav() {
           </div>
         </>
       )}
+      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </>
   );
 }

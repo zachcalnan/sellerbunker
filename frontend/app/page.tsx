@@ -16,10 +16,41 @@ const accentMuted = "rgba(96, 165, 250, 0.15)";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
 
+const navAuthFadeClass = "transition-opacity duration-400";
+
+let navTrialFadeDone = false;
+let navAuthFadeDone = false;
+
 /** Shows Sign in + Dashboard (→ sign-in page) when signed out OR signed in with no subscription; else Dashboard → /dashboard */
-function NavAuthButtons() {
+function NavAuthButtons({ skipFade }: { skipFade?: boolean } = {}) {
   const { isSignedIn, isLoaded, getToken } = useAuth();
   const [hasSubscription, setHasSubscription] = useState<boolean | null>(null);
+  const [isVisible, setIsVisible] = useState(skipFade || navAuthFadeDone);
+
+  useEffect(() => {
+    if (skipFade) return;
+    if (isLoaded && isSignedIn && hasSubscription === null) {
+      setIsVisible(false);
+    }
+  }, [skipFade, isLoaded, isSignedIn, hasSubscription]);
+
+  useEffect(() => {
+    if (skipFade) return;
+    const showingContent = !isLoaded || !isSignedIn || hasSubscription !== null;
+    if (showingContent) {
+      if (navAuthFadeDone) {
+        setIsVisible(true);
+        return;
+      }
+      const frame = requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          setIsVisible(true);
+          navAuthFadeDone = true;
+        });
+      });
+      return () => cancelAnimationFrame(frame);
+    }
+  }, [skipFade, isLoaded, isSignedIn, hasSubscription]);
 
   useEffect(() => {
     if (!isLoaded || !isSignedIn) {
@@ -48,18 +79,20 @@ function NavAuthButtons() {
     return () => { cancelled = true; };
   }, [isLoaded, isSignedIn, getToken]);
 
+  const wrapperClass = `${skipFade ? "" : navAuthFadeClass} flex w-[9.25rem] items-center justify-end gap-1 lg:w-[10.75rem] lg:gap-2 ${skipFade || isVisible ? "opacity-100" : "opacity-0"}`;
+
   // Signed out: Sign in → sign-in page; Dashboard → sign-up page
   if (!isLoaded || !isSignedIn) {
     return (
-      <div className="flex items-center gap-1 lg:gap-2">
+      <div className={wrapperClass}>
         <SignInButton mode="redirect" forceRedirectUrl="/start-trial">
-          <button className="rounded-lg px-2 py-1.5 text-xs font-medium text-[var(--muted-foreground)] transition hover:bg-[var(--foreground)]/5 hover:text-[var(--foreground)] lg:py-2 lg:text-sm">
+          <button className="cursor-pointer rounded-lg px-2 py-1.5 text-xs font-medium text-[var(--muted-foreground)] transition hover:bg-[var(--foreground)]/5 hover:text-[var(--foreground)] lg:py-2 lg:text-sm">
             Sign in
           </button>
         </SignInButton>
         <a
           href="/sign-up"
-          className="rounded-lg bg-white px-2 py-1.5 text-xs font-medium text-black no-underline transition hover:bg-gray-100 lg:px-4 lg:py-2 lg:text-sm"
+          className="cursor-pointer rounded-lg bg-white px-2 py-1.5 text-xs font-medium text-black no-underline transition hover:bg-gray-100 lg:px-4 lg:py-2 lg:text-sm"
         >
           Dashboard
         </a>
@@ -67,33 +100,267 @@ function NavAuthButtons() {
     );
   }
 
-  // Signed in with subscription: Dashboard → /dashboard
-  if (hasSubscription === true) {
+  if (hasSubscription === null && !skipFade) {
     return (
-      <Link
-        href="/dashboard"
-        className="rounded-lg bg-white px-2 py-1.5 text-xs font-medium text-black no-underline transition hover:bg-gray-100 lg:px-4 lg:py-2 lg:text-sm"
-      >
-        Dashboard
-      </Link>
+      <div className="flex w-[9.25rem] items-center justify-end gap-1 lg:w-[10.75rem] lg:gap-2" aria-hidden>
+        <span className="rounded-lg px-2 py-1.5 text-xs lg:py-2 lg:text-sm invisible">Sign in</span>
+        <span className="rounded-lg px-2 py-1.5 text-xs lg:px-4 lg:py-2 lg:text-sm invisible">Dashboard</span>
+      </div>
     );
   }
 
-  // Signed in but no subscription (or still loading): Sign in → sign-in; Dashboard → sign-up
+  // Signed in with subscription (or skipFade: show Dashboard immediately while subscription loads)
+  if (hasSubscription === true || (skipFade && isSignedIn && hasSubscription === null)) {
+    return (
+      <div className={wrapperClass}>
+        <span className="rounded-lg px-2 py-1.5 text-xs lg:py-2 lg:text-sm invisible" aria-hidden>
+          Sign in
+        </span>
+        <Link
+          href="/dashboard"
+          className="cursor-pointer rounded-lg bg-white px-2 py-1.5 text-xs font-medium text-black no-underline transition hover:bg-gray-100 lg:px-4 lg:py-2 lg:text-sm"
+        >
+          Dashboard
+        </Link>
+      </div>
+    );
+  }
+
+  // Signed in but no subscription: Sign in → sign-in; Dashboard → sign-up
   return (
-    <div className="flex items-center gap-1 lg:gap-2">
+    <div className={wrapperClass}>
       <SignInButton mode="redirect" forceRedirectUrl="/start-trial">
-        <button className="rounded-lg px-2 py-1.5 text-xs font-medium text-[var(--muted-foreground)] transition hover:bg-[var(--foreground)]/5 hover:text-[var(--foreground)] lg:py-2 lg:text-sm">
+        <button className="cursor-pointer rounded-lg px-2 py-1.5 text-xs font-medium text-[var(--muted-foreground)] transition hover:bg-[var(--foreground)]/5 hover:text-[var(--foreground)] lg:py-2 lg:text-sm">
           Sign in
         </button>
       </SignInButton>
       <a
         href="/sign-up"
-        className="rounded-lg bg-white px-2 py-1.5 text-xs font-medium text-black no-underline transition hover:bg-gray-100 lg:px-4 lg:py-2 lg:text-sm"
+        className="cursor-pointer rounded-lg bg-white px-2 py-1.5 text-xs font-medium text-black no-underline transition hover:bg-gray-100 lg:px-4 lg:py-2 lg:text-sm"
       >
         Dashboard
       </a>
     </div>
+  );
+}
+
+/** Trial CTA: reserve space while Clerk loads; show button only when signed out, fade in on first show only. */
+function NavTrialSlot() {
+  const { isLoaded, isSignedIn } = useAuth();
+  const [isVisible, setIsVisible] = useState(navTrialFadeDone);
+  const navTrialSize =
+    "inline-flex w-[11.75rem] items-center justify-center rounded-lg border-t-2 border-b-2 border-transparent px-2 py-1.5 text-xs font-medium lg:w-[13.5rem] lg:px-4 lg:py-2 lg:text-sm";
+
+  useEffect(() => {
+    if (!isLoaded || isSignedIn) {
+      setIsVisible(false);
+      return;
+    }
+    if (navTrialFadeDone) {
+      setIsVisible(true);
+      return;
+    }
+    const frame = requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        setIsVisible(true);
+        navTrialFadeDone = true;
+      });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [isLoaded, isSignedIn]);
+
+  // While Clerk is loading, reserve the space but keep it invisible so there's no flash.
+  if (!isLoaded) {
+    return (
+      <span className={`${navTrialSize} invisible`} aria-hidden>
+        Start 14 day free trial
+      </span>
+    );
+  }
+
+  // When signed in, reserve the same space so siblings don't shift.
+  if (isSignedIn) {
+    return (
+      <span className={`${navTrialSize} invisible`} aria-hidden>
+        Start 14 day free trial
+      </span>
+    );
+  }
+
+  // Signed out + Clerk loaded: show the trial button with fade-in.
+  return (
+    <SignUpButton mode="redirect" forceRedirectUrl="/start-trial" signInForceRedirectUrl="/start-trial">
+      <button
+        className={`${navTrialSize} cursor-pointer text-black no-underline transition-opacity duration-400 hover:opacity-90 ${isVisible ? "opacity-100" : "opacity-0"}`}
+        style={{ backgroundColor: accentColor }}
+      >
+        Start 14 day free trial
+      </button>
+    </SignUpButton>
+  );
+}
+
+/** Divider + Sign in/Dashboard: placeholder until Clerk is loaded to avoid layout shift. */
+function NavAuthSlot() {
+  const { isLoaded } = useAuth();
+  if (!isLoaded) {
+    return (
+      <>
+        <div className="ml-1 h-5 w-px bg-[var(--surface-border)] lg:ml-2 lg:h-6" aria-hidden />
+        <div className="flex w-[9.25rem] items-center justify-end gap-1 lg:w-[10.75rem] lg:gap-2" aria-hidden>
+          <span className="rounded-lg px-2 py-1.5 text-xs lg:py-2 lg:text-sm invisible">Sign in</span>
+          <span className="rounded-lg px-2 py-1.5 text-xs lg:px-4 lg:py-2 lg:text-sm invisible">Dashboard</span>
+        </div>
+      </>
+    );
+  }
+  return (
+    <>
+      <div className="ml-1 h-5 w-px bg-[var(--surface-border)] lg:ml-2 lg:h-6" />
+      <NavAuthButtons />
+    </>
+  );
+}
+
+const heroCtaClass = "inline-flex rounded-xl border border-transparent px-5 py-2.5 text-sm font-semibold shadow-lg transition sm:px-6 sm:py-3 sm:text-base";
+
+/** Hero CTAs: one placeholder until Clerk is loaded to avoid layout shift. */
+function HeroCtaSlot() {
+  const { isLoaded } = useAuth();
+  const [isVisible, setIsVisible] = useState(false);
+
+  useEffect(() => {
+    if (!isLoaded) {
+      setIsVisible(false);
+      return;
+    }
+    const frame = requestAnimationFrame(() => setIsVisible(true));
+    return () => cancelAnimationFrame(frame);
+  }, [isLoaded]);
+
+  if (!isLoaded) {
+    return (
+      <span className="inline-grid" aria-hidden>
+        <span className={`${heroCtaClass} invisible col-start-1 row-start-1`}>
+          Start free trial
+        </span>
+      </span>
+    );
+  }
+  return (
+    <>
+      <SignedOut>
+        <span className="inline-grid">
+          <span className={`${heroCtaClass} invisible col-start-1 row-start-1`} aria-hidden>
+            Start free trial
+          </span>
+          <SignUpButton mode="redirect" forceRedirectUrl="/start-trial" signInForceRedirectUrl="/start-trial">
+            <button
+              className={`${heroCtaClass} col-start-1 row-start-1 w-full justify-center text-black hover:opacity-90 transition-opacity duration-400 ${isVisible ? "opacity-100" : "opacity-0"
+                }`}
+              style={{ backgroundColor: accentColor }}
+            >
+              Start free trial
+            </button>
+          </SignUpButton>
+        </span>
+      </SignedOut>
+      <SignedIn>
+        <span className="inline-grid">
+          <span className={`${heroCtaClass} invisible col-start-1 row-start-1`} aria-hidden>
+            Start free trial
+          </span>
+          <Link
+            href="/dashboard"
+            className={`${heroCtaClass} col-start-1 row-start-1 w-full justify-center text-black hover:opacity-90 transition-opacity duration-400 ${isVisible ? "opacity-100" : "opacity-0"
+              }`}
+            style={{ backgroundColor: accentColor }}
+          >
+            Go to dashboard
+          </Link>
+        </span>
+      </SignedIn>
+    </>
+  );
+}
+
+const bottomCtaClass = "inline-flex rounded-xl border border-transparent px-8 py-4 text-lg font-semibold transition";
+
+/** Bottom CTA block: placeholder until Clerk is loaded to avoid layout shift. */
+function BottomCtaSlot() {
+  const { isLoaded } = useAuth();
+  const [isVisible, setIsVisible] = useState(false);
+
+  useEffect(() => {
+    if (!isLoaded) {
+      setIsVisible(false);
+      return;
+    }
+    const frame = requestAnimationFrame(() => setIsVisible(true));
+    return () => cancelAnimationFrame(frame);
+  }, [isLoaded]);
+
+  if (!isLoaded) {
+    return (
+      <span className="inline-grid" aria-hidden>
+        <span className={`${bottomCtaClass} invisible col-start-1 row-start-1`}>
+          Join the private beta
+        </span>
+      </span>
+    );
+  }
+  return (
+    <>
+      <SignedOut>
+        <span className="inline-grid">
+          <span className={`${bottomCtaClass} invisible col-start-1 row-start-1`} aria-hidden>
+            Join the private beta
+          </span>
+          <SignUpButton mode="redirect" forceRedirectUrl="/start-trial" signInForceRedirectUrl="/start-trial">
+            <button
+              className={`${bottomCtaClass} col-start-1 row-start-1 w-full justify-center text-black hover:opacity-90 transition-opacity duration-400 ${isVisible ? "opacity-100" : "opacity-0"
+                }`}
+              style={{ backgroundColor: accentColor }}
+            >
+              Join the private beta
+            </button>
+          </SignUpButton>
+        </span>
+      </SignedOut>
+      <SignedIn>
+        <span className="inline-grid">
+          <span className={`${bottomCtaClass} invisible col-start-1 row-start-1`} aria-hidden>
+            Join the private beta
+          </span>
+          <Link
+            href="/dashboard"
+            className={`${bottomCtaClass} col-start-1 row-start-1 w-full justify-center text-black hover:opacity-90 transition-opacity duration-400 ${isVisible ? "opacity-100" : "opacity-0"
+              }`}
+            style={{ backgroundColor: accentColor }}
+          >
+            Go to dashboard
+          </Link>
+        </span>
+      </SignedIn>
+    </>
+  );
+}
+
+function BurgerIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <path d="M4 6h16M4 12h16M4 18h16" />
+    </svg>
   );
 }
 
@@ -112,7 +379,7 @@ function NavDropdown({ label, children }: { label: string; children: React.React
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="flex items-center gap-0.5 rounded-lg px-2 py-1.5 text-xs font-medium text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:bg-[var(--foreground)]/5 transition lg:gap-1 lg:px-3 lg:py-2 lg:text-sm"
+        className="flex cursor-pointer items-center gap-0.5 rounded-lg px-2 py-1.5 text-xs font-medium text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:bg-[var(--foreground)]/5 transition lg:gap-1 lg:px-3 lg:py-2 lg:text-sm"
       >
         {label}
         <svg className="h-3 w-3 lg:h-4 lg:w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
@@ -345,6 +612,34 @@ function ContactForm() {
 }
 
 export default function LandingPage() {
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [drawerSlideIn, setDrawerSlideIn] = useState(false);
+  const drawerHasOpenedRef = useRef(false);
+
+  useEffect(() => {
+    if (mobileNavOpen) {
+      drawerHasOpenedRef.current = false;
+      const frame = requestAnimationFrame(() => setDrawerSlideIn(true));
+      return () => cancelAnimationFrame(frame);
+    } else {
+      setDrawerSlideIn(false);
+    }
+  }, [mobileNavOpen]);
+
+  useEffect(() => {
+    if (drawerSlideIn) drawerHasOpenedRef.current = true;
+  }, [drawerSlideIn]);
+
+  useEffect(() => {
+    if (mobileNavOpen && !drawerSlideIn && drawerHasOpenedRef.current) {
+      const t = setTimeout(() => setMobileNavOpen(false), 300);
+      drawerHasOpenedRef.current = false;
+      return () => clearTimeout(t);
+    }
+  }, [mobileNavOpen, drawerSlideIn]);
+
+  const closeDrawer = () => setDrawerSlideIn(false);
+
   return (
     <div
       className="min-h-screen min-h-[100dvh] w-full max-w-[100vw] overflow-x-hidden bg-[var(--background)] text-[var(--foreground)]"
@@ -354,75 +649,143 @@ export default function LandingPage() {
       <style>{`
         .landing-page { --background: #000; --foreground: #e5e7eb; --surface: #0a0a0a; --surface-border: #262626; --muted-foreground: #94a3b8; }
       `}</style>
-
       {/* Navigation: on mobile stacked + centered smaller buttons; on lg single row */}
-      <header className="fixed top-0 left-0 right-0 z-50 w-full max-w-[100vw] overflow-visible bg-[var(--background)]/95 backdrop-blur">
-        <nav className="mx-auto flex min-h-14 max-w-7xl flex-col items-center gap-4 px-4 py-3 sm:flex-row sm:flex-nowrap sm:items-center sm:justify-between sm:gap-0 sm:px-4 sm:py-0 sm:pl-2 sm:pr-6 sm:h-16 lg:pl-4 lg:pr-8">
-          <Link href="/" className="flex shrink-0 items-center font-semibold no-underline hover:opacity-80 md:-ml-2 lg:-ml-4" aria-label="SellerBunker home">
-            <img
-              src="/sellerbunker-logo.png"
-              alt="SellerBunker"
-              className="sellerbunker-logo h-16 w-auto max-w-[min(100vw-2rem,220px)] object-contain object-left sm:h-20 sm:max-w-[280px] md:-my-1 md:mt-2 md:h-32 md:max-w-[420px] lg:min-w-[420px] lg:max-w-[580px] xl:-my-2 xl:mt-3 xl:h-44 xl:min-w-[520px] xl:max-w-[720px]"
-            />
-          </Link>
-          <div className="flex flex-wrap items-center justify-center gap-2 sm:gap-2 lg:flex-nowrap lg:justify-end">
-            <NavDropdown label="Product">
-              <Link href="#features" className="block px-4 py-2 text-sm text-[var(--foreground)] hover:bg-[var(--foreground)]/5 no-underline">
-                Features
-              </Link>
-              <Link href="#dashboard-preview" className="block px-4 py-2 text-sm text-[var(--foreground)] hover:bg-[var(--foreground)]/5 no-underline">
-                See the dashboard
-              </Link>
-              <Link href="#how-it-works" className="block px-4 py-2 text-sm text-[var(--foreground)] hover:bg-[var(--foreground)]/5 no-underline">
-                How it works
-              </Link>
-              <span className="block px-4 py-2.5 text-sm text-[var(--muted-foreground)]" aria-hidden>
-                Repricer module coming soon
-              </span>
-            </NavDropdown>
-            <NavDropdown label="Pricing">
-              <Link href="#pricing" className="block px-4 py-2 text-sm text-[var(--foreground)] hover:bg-[var(--foreground)]/5 no-underline">
-                View plans
-              </Link>
-            </NavDropdown>
-            <SignedIn>
-              <Link
-                href="/start-trial"
-                className="rounded-lg bg-transparent px-2 py-1.5 text-xs font-medium text-white no-underline transition border-t-2 border-b-2 border-white hover:bg-white/10 lg:px-4 lg:py-2 lg:text-sm"
-              >
-                Start 14 day free trial
-              </Link>
-            </SignedIn>
-            <SignedOut>
-              <SignUpButton mode="redirect" forceRedirectUrl="/start-trial" signInForceRedirectUrl="/start-trial">
-                <button
-                  className="rounded-lg bg-transparent px-2 py-1.5 text-xs font-medium text-white transition border-t-2 border-b-2 border-white hover:bg-white/10 lg:px-4 lg:py-2 lg:text-sm"
-                >
-                  Start 14 day free trial
-                </button>
-              </SignUpButton>
-            </SignedOut>
-            <NavDropdown label="Get in contact">
-              <Link href="#contact" className="block px-4 py-2 text-sm text-[var(--foreground)] hover:bg-[var(--foreground)]/5 no-underline">
-                Contact form
-              </Link>
-              <a href="mailto:support@sellerbunker.com" className="block px-4 py-2 text-sm text-[var(--foreground)] hover:bg-[var(--foreground)]/5 no-underline">
-                Email us
-              </a>
-              <a href="https://discord.gg/sbDwPbV9" target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 px-4 py-2 text-sm text-[var(--foreground)] hover:bg-[var(--foreground)]/5 no-underline">
-                <svg className="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-                  <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028 14.09 14.09 0 0 0 1.226-1.994.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03z"/>
-                </svg>
-                Discord
-              </a>
-            </NavDropdown>
-            <div className="ml-1 h-5 w-px bg-[var(--surface-border)] lg:ml-2 lg:h-6" />
-            <NavAuthButtons />
-          </div>
-        </nav>
+      <header className="flex max-w-7xl mx-auto h-14 lg:h-20 shrink-0 items-center justify-between gap-4 border-b lg:border-none border-[var(--surface-border)] bg-[var(--surface)] px-4 lg:px-8">
+        <Link href="/" className="flex shrink-0 items-center h-full font-semibold no-underline md:-ml-2 lg:-ml-4 lg:p-2" aria-label="SellerBunker home">
+          <img
+            src="/sellerbunker-logo2.png"
+            alt="SellerBunker"
+            className="sellerbunker-logo h-full w-auto p-2 object-contain object-left"
+          />
+        </Link>
+        {/* Mobile burger */}
+        <button
+          type="button"
+          onClick={() => setMobileNavOpen((open) => !open)}
+          aria-label="Open menu"
+          className="flex h-10 w-10 cursor-pointer items-center justify-center rounded-lg text-[var(--foreground)] hover:bg-[var(--foreground)]/5 sm:hidden"
+        >
+          <BurgerIcon className="h-6 w-6" />
+        </button>
+
+        {/* Desktop nav */}
+        <div className="hidden sm:flex flex-wrap items-center justify-center gap-2 sm:gap-2 lg:flex-nowrap lg:justify-end">
+          <NavTrialSlot />
+          <NavDropdown label="Product">
+            <Link href="#features" className="block px-4 py-2 text-sm text-[var(--foreground)] hover:bg-[var(--foreground)]/5 no-underline">
+              Features
+            </Link>
+            <Link href="#dashboard-preview" className="block px-4 py-2 text-sm text-[var(--foreground)] hover:bg-[var(--foreground)]/5 no-underline">
+              See the dashboard
+            </Link>
+            <Link href="#how-it-works" className="block px-4 py-2 text-sm text-[var(--foreground)] hover:bg-[var(--foreground)]/5 no-underline">
+              How it works
+            </Link>
+            <span className="block px-4 py-2.5 text-sm text-[var(--muted-foreground)]" aria-hidden>
+              Repricer module coming soon
+            </span>
+          </NavDropdown>
+          <NavDropdown label="Pricing">
+            <Link href="#pricing" className="block px-4 py-2 text-sm text-[var(--foreground)] hover:bg-[var(--foreground)]/5 no-underline">
+              View plans
+            </Link>
+          </NavDropdown>
+          <NavDropdown label="Get in contact">
+            <Link href="#contact" className="block px-4 py-2 text-sm text-[var(--foreground)] hover:bg-[var(--foreground)]/5 no-underline">
+              Contact form
+            </Link>
+            <a href="mailto:support@sellerbunker.com" className="block px-4 py-2 text-sm text-[var(--foreground)] hover:bg-[var(--foreground)]/5 no-underline">
+              Email us
+            </a>
+            <a href="https://discord.gg/sbDwPbV9" target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 px-4 py-2 text-sm text-[var(--foreground)] hover:bg-[var(--foreground)]/5 no-underline">
+              <svg className="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+                <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028 14.09 14.09 0 0 0 1.226-1.994.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03z" />
+              </svg>
+              Discord
+            </a>
+          </NavDropdown>
+          <NavAuthSlot />
+        </div>
       </header>
 
-      <main className="landing-page w-full max-w-[100vw] overflow-x-hidden pt-48 sm:pt-24">
+      {/* Mobile nav drawer (matches dashboard style) */}
+      {mobileNavOpen && (
+        <>
+          <div
+            className={`fixed inset-0 z-40 bg-[#0006] backdrop-blur-[20px] transition-opacity duration-300 ease-out sm:hidden ${drawerSlideIn ? "opacity-100" : "opacity-0"}`}
+            aria-hidden
+            onClick={closeDrawer}
+          />
+          <div
+            className={`fixed inset-y-0 right-0 z-50 flex w-72 max-w-[85vw] flex-col border-l border-[var(--surface-border)] bg-[var(--surface)] shadow-xl transition-transform duration-300 ease-out sm:hidden ${drawerSlideIn ? "translate-x-0" : "translate-x-full"}`}
+            role="dialog"
+            aria-label="Menu"
+          >
+            <div className="flex h-14 shrink-0 items-center justify-between border-b border-[var(--surface-border)] px-4">
+              <span className="text-sm font-medium text-[var(--muted-foreground)]">Menu</span>
+              <button
+                type="button"
+                onClick={closeDrawer}
+                aria-label="Close menu"
+                className="flex h-10 w-10 cursor-pointer items-center justify-center rounded-lg text-[var(--foreground)] hover:bg-[var(--foreground)]/5"
+              >
+                <svg
+                  className="h-5 w-5"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth={1.8}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden
+                >
+                  <path d="M6 6l12 12M18 6L6 18" />
+                </svg>
+              </button>
+            </div>
+            <nav className="flex min-h-0 flex-1 flex-col gap-1 overflow-auto p-4">
+              <NavTrialSlot />
+              <button
+                type="button"
+                className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:bg-[var(--foreground)]/5"
+                onClick={() => {
+                  document.getElementById("features")?.scrollIntoView({ behavior: "smooth" });
+                  closeDrawer();
+                }}
+              >
+                <span>Product</span>
+              </button>
+              <button
+                type="button"
+                className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:bg-[var(--foreground)]/5"
+                onClick={() => {
+                  document.getElementById("pricing")?.scrollIntoView({ behavior: "smooth" });
+                  closeDrawer();
+                }}
+              >
+                <span>Pricing</span>
+              </button>
+              <button
+                type="button"
+                className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:bg-[var(--foreground)]/5"
+                onClick={() => {
+                  document.getElementById("contact")?.scrollIntoView({ behavior: "smooth" });
+                  closeDrawer();
+                }}
+              >
+                <span>Get in contact</span>
+              </button>
+            </nav>
+            <div className="border-t border-[var(--surface-border)] px-3 py-3">
+              <div className="flex justify-end">
+                <NavAuthButtons skipFade />
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+
+      <main className="landing-page w-full max-w-[100vw] overflow-x-hidden lg:pt-12">
         {/* 1. Hero - no blurred background, dashboard mockup on the right */}
         <section className="border-b border-[var(--surface-border)] bg-[var(--background)]">
           <div className="mx-auto max-w-7xl px-5 pt-5 pb-10 sm:px-6 sm:pt-3 sm:pb-12 lg:px-8 lg:pt-4 lg:pb-16">
@@ -436,24 +799,7 @@ export default function LandingPage() {
                   SellerBunker tracks your sales, profit, ROI, orders, inventory, shipments and displays it in one powerful dashboard. Designed for serious Amazon sellers in FBA (Fulfilled by Amazon), FBM (Fulfilled by Merchant), with focus on online arbitrage or wholesale.
                 </p>
                 <div className="mt-4 flex flex-wrap gap-3 sm:mt-6 sm:gap-4">
-                  <SignedOut>
-                    <SignUpButton mode="redirect" forceRedirectUrl="/start-trial" signInForceRedirectUrl="/start-trial">
-                      <button
-                        className="rounded-xl bg-white px-5 py-2.5 text-sm font-semibold text-black shadow-lg transition hover:bg-gray-100 sm:px-6 sm:py-3 sm:text-base"
-                      >
-                        Start free trial
-                      </button>
-                    </SignUpButton>
-                  </SignedOut>
-                  <SignedIn>
-                    <Link
-                      href="/dashboard"
-                      className="rounded-xl px-5 py-2.5 text-sm font-semibold text-black shadow-lg transition hover:opacity-90 sm:px-6 sm:py-3 sm:text-base"
-                      style={{ backgroundColor: accentColor }}
-                    >
-                      Go to dashboard
-                    </Link>
-                  </SignedIn>
+                  <HeroCtaSlot />
                 </div>
                 <div className="mt-4 flex flex-wrap items-center gap-4 text-xs text-[var(--muted-foreground)] sm:mt-6 sm:gap-6 sm:text-sm">
                   <span className="flex items-center gap-2">
@@ -866,7 +1212,7 @@ export default function LandingPage() {
                 className="inline-flex items-center gap-1 font-medium text-[var(--foreground)] underline hover:no-underline"
               >
                 <svg className="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-                  <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028 14.09 14.09 0 0 0 1.226-1.994.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03z"/>
+                  <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028 14.09 14.09 0 0 0 1.226-1.994.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03z" />
                 </svg>
                 Discord
               </a>{" "}
@@ -880,11 +1226,10 @@ export default function LandingPage() {
               ].map((plan) => (
                 <div
                   key={plan.name}
-                  className={`rounded-2xl border p-6 ${
-                    plan.featured
+                  className={`rounded-2xl border p-6 ${plan.featured
                       ? "border-[var(--surface-border)] ring-2"
                       : "border-[var(--surface-border)] bg-[var(--background)]"
-                  }`}
+                    }`}
                   style={plan.featured ? { borderColor: accentColor, boxShadow: `0 0 0 1px ${accentColor}` } : undefined}
                 >
                   {plan.featured && (
@@ -927,9 +1272,8 @@ export default function LandingPage() {
                   ) : (
                     <SignUpButton mode="redirect" forceRedirectUrl="/start-trial" signInForceRedirectUrl="/start-trial">
                       <button
-                        className={`mt-6 w-full rounded-xl py-3 text-sm font-semibold transition ${
-                          plan.featured ? "bg-white text-black hover:bg-gray-100" : "border border-[var(--surface-border)] text-[var(--foreground)] hover:bg-[var(--surface)]"
-                        }`}
+                        className={`mt-6 w-full rounded-xl py-3 text-sm font-semibold transition ${plan.featured ? "bg-white text-black hover:bg-gray-100" : "border border-[var(--surface-border)] text-[var(--foreground)] hover:bg-[var(--surface)]"
+                          }`}
                       >
                         {plan.cta}
                       </button>
@@ -971,24 +1315,7 @@ export default function LandingPage() {
               Get free access while we build SellerBunker — we will send you a code once accepted into the group that you can use at checkout.
             </p>
             <div className="mt-10">
-<SignedOut>
-              <SignUpButton mode="redirect" forceRedirectUrl="/start-trial" signInForceRedirectUrl="/start-trial">
-                <button
-                  className="rounded-xl bg-white px-8 py-4 text-lg font-semibold text-black transition hover:bg-gray-100"
-                >
-                  Join the private beta
-                </button>
-              </SignUpButton>
-            </SignedOut>
-              <SignedIn>
-                <Link
-                  href="/dashboard"
-                  className="inline-block rounded-xl px-8 py-4 text-lg font-semibold text-black transition hover:opacity-90"
-                  style={{ backgroundColor: accentColor }}
-                >
-                  Go to dashboard
-                </Link>
-              </SignedIn>
+              <BottomCtaSlot />
             </div>
             <a
               href="https://discord.gg/sbDwPbV9"
@@ -997,7 +1324,7 @@ export default function LandingPage() {
               className="mt-8 inline-flex items-center justify-center gap-3 rounded-xl border-2 border-white/25 bg-white/5 px-8 py-4 text-lg font-semibold text-[var(--foreground)] transition hover:bg-white/10 hover:border-white/35 no-underline"
             >
               <svg className="h-8 w-8 shrink-0" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-                <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028 14.09 14.09 0 0 0 1.226-1.994.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03z"/>
+                <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028 14.09 14.09 0 0 0 1.226-1.994.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03z" />
               </svg>
               Join our Discord
             </a>
@@ -1009,7 +1336,7 @@ export default function LandingPage() {
         <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
           <div className="flex flex-col items-center justify-between gap-3 sm:flex-row sm:gap-4">
             <img
-              src="/sellerbunker-logo.png"
+              src="/sellerbunker-logo2.png"
               alt="SellerBunker"
               className="sellerbunker-logo h-12 w-auto max-w-[140px] object-contain object-left opacity-90 sm:h-14 sm:max-w-[160px]"
             />
@@ -1030,7 +1357,7 @@ export default function LandingPage() {
                 aria-label="Join Discord"
               >
                 <svg className="h-5 w-5 sm:h-6 sm:w-6" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-                  <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028 14.09 14.09 0 0 0 1.226-1.994.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/>
+                  <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028 14.09 14.09 0 0 0 1.226-1.994.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z" />
                 </svg>
               </a>
               <a
@@ -1041,7 +1368,7 @@ export default function LandingPage() {
                 aria-label="Join TikTok"
               >
                 <svg className="h-5 w-5 sm:h-6 sm:w-6" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-                  <path d="M19.59 6.69a4.83 4.83 0 0 1-3.77-4.25V2h-3.45v13.67a2.89 2.89 0 0 1-5.2 1.74 2.89 2.89 0 0 1 2.31-4.64 2.93 2.93 0 0 1 .88.13V9.4a6.84 6.84 0 0 0-1-.05A6.33 6.33 0 0 0 5 20.1a6.34 6.34 0 0 0 10.86-4.43v-7a8.16 8.16 0 0 0 4.77 1.52v-3.4a4.85 4.85 0 0 1-1-.1z"/>
+                  <path d="M19.59 6.69a4.83 4.83 0 0 1-3.77-4.25V2h-3.45v13.67a2.89 2.89 0 0 1-5.2 1.74 2.89 2.89 0 0 1 2.31-4.64 2.93 2.93 0 0 1 .88.13V9.4a6.84 6.84 0 0 0-1-.05A6.33 6.33 0 0 0 5 20.1a6.34 6.34 0 0 0 10.86-4.43v-7a8.16 8.16 0 0 0 4.77 1.52v-3.4a4.85 4.85 0 0 1-1-.1z" />
                 </svg>
               </a>
               <a
@@ -1052,7 +1379,7 @@ export default function LandingPage() {
                 aria-label="Join Instagram"
               >
                 <svg className="h-5 w-5 sm:h-6 sm:w-6" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-                  <path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zM12 0C8.741 0 8.333.014 7.053.072 2.695.272.273 2.69.073 7.052.014 8.333 0 8.741 0 12c0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98C8.333 23.986 8.741 24 12 24c3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98C15.668.014 15.259 0 12 0zm0 5.838a6.162 6.162 0 1 0 0 12.324 6.162 6.162 0 0 0 0-12.324zM12 16a4 4 0 1 1 0-8 4 4 0 0 1 0 8zm6.406-11.845a1.44 1.44 0 1 0 0 2.881 1.44 1.44 0 0 0 0-2.881z"/>
+                  <path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zM12 0C8.741 0 8.333.014 7.053.072 2.695.272.273 2.69.073 7.052.014 8.333 0 8.741 0 12c0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98C8.333 23.986 8.741 24 12 24c3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98C15.668.014 15.259 0 12 0zm0 5.838a6.162 6.162 0 1 0 0 12.324 6.162 6.162 0 0 0 0-12.324zM12 16a4 4 0 1 1 0-8 4 4 0 0 1 0 8zm6.406-11.845a1.44 1.44 0 1 0 0 2.881 1.44 1.44 0 0 0 0-2.881z" />
                 </svg>
               </a>
             </div>
