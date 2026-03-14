@@ -356,7 +356,7 @@ export default function LandingPage() {
       `}</style>
 
       {/* Navigation: on mobile stacked + centered smaller buttons; on lg single row */}
-      <header className="fixed top-0 left-0 right-0 z-50 w-full max-w-[100vw] overflow-x-hidden bg-[var(--background)]/95 backdrop-blur">
+      <header className="fixed top-0 left-0 right-0 z-50 w-full max-w-[100vw] overflow-visible bg-[var(--background)]/95 backdrop-blur">
         <nav className="mx-auto flex min-h-14 max-w-7xl flex-col items-center gap-4 px-4 py-3 sm:flex-row sm:flex-nowrap sm:items-center sm:justify-between sm:gap-0 sm:px-4 sm:py-0 sm:pl-2 sm:pr-6 sm:h-16 lg:pl-4 lg:pr-8">
           <Link href="/" className="flex shrink-0 items-center font-semibold no-underline hover:opacity-80 md:-ml-2 lg:-ml-4" aria-label="SellerBunker home">
             <img
@@ -376,11 +376,8 @@ export default function LandingPage() {
               <Link href="#how-it-works" className="block px-4 py-2 text-sm text-[var(--foreground)] hover:bg-[var(--foreground)]/5 no-underline">
                 How it works
               </Link>
-              <span className="flex items-center gap-2 px-4 py-2.5 text-sm text-[var(--muted-foreground)]" aria-hidden>
-                <span className="inline-flex items-center rounded-md border border-white/20 bg-white/5 px-2 py-0.5 text-xs font-medium uppercase tracking-wider text-white/80">
-                  Coming soon
-                </span>
-                <span>Repricer module in development</span>
+              <span className="block px-4 py-2.5 text-sm text-[var(--muted-foreground)]" aria-hidden>
+                Repricer module coming soon
               </span>
             </NavDropdown>
             <NavDropdown label="Pricing">
@@ -436,7 +433,7 @@ export default function LandingPage() {
                   <span style={{ color: accentColor }}>SellerBunker tracks every cost Amazon hides.</span>
                 </h1>
                 <p className="mt-4 max-w-xl text-base leading-relaxed text-[var(--muted-foreground)] sm:mt-4 sm:text-lg">
-                  SellerBunker tracks your sales, profit, ROI, orders, inventory, shipments and more in one powerful dashboard designed for serious Amazon sellers—whether you sell FBA (Fulfilled by Amazon), FBM (Fulfilled by Merchant), or both.
+                  SellerBunker tracks your sales, profit, ROI, orders, inventory, shipments and displays it in one powerful dashboard. Designed for serious Amazon sellers in FBA (Fulfilled by Amazon), FBM (Fulfilled by Merchant), with focus on online arbitrage or wholesale.
                 </p>
                 <div className="mt-4 flex flex-wrap gap-3 sm:mt-6 sm:gap-4">
                   <SignedOut>
@@ -474,7 +471,7 @@ export default function LandingPage() {
                     </div>
                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-5 sm:gap-4 flex-1 items-center justify-items-center">
                       {[
-                        { label: "Profit", value: "£2,847", color: accentColor },
+                        { label: "Profit", value: "£2,847", color: "#60A5FA" },
                         { label: "Sales", value: "£12,430", color: "#818CF8" },
                         { label: "Units", value: "1,240", color: "#FB923C" },
                         { label: "ROI", value: "34%", color: "#F472B6" },
@@ -485,7 +482,7 @@ export default function LandingPage() {
                           style={{
                             borderColor: card.color,
                             backgroundColor: "rgba(0,0,0,0.35)",
-                            boxShadow: `inset 0 1px 0 rgba(255,255,255,0.12), 0 0 0 1px rgba(255,255,255,0.08), 0 0 24px -4px ${card.color}40, 0 0 0 1px ${card.color}30`,
+                            boxShadow: `inset 0 1px 0 rgba(255,255,255,0.12), 0 0 0 1px rgba(255,255,255,0.08), 0 0 32px -2px ${card.color}, 0 0 48px -8px ${card.color}`,
                           }}
                         >
                           <span className="text-[9px] sm:text-[10px] uppercase tracking-wider text-[var(--muted-foreground)]">{card.label}</span>
@@ -494,13 +491,17 @@ export default function LandingPage() {
                       ))}
                     </div>
                     <div className="mt-3 h-24 rounded-lg border border-[var(--surface-border)] bg-[var(--background)]/30 flex items-end gap-0.5 px-1 pb-1">
-                      {[40, 65, 45, 80, 55, 70, 90, 60, 75, 85, 70, 95].map((h, i) => (
-                        <div
-                          key={i}
-                          className="flex-1 rounded-t min-h-[4px] transition"
-                          style={{ height: `${h}%`, backgroundColor: accentColor, opacity: 0.8 }}
-                        />
-                      ))}
+                      {[40, 65, 45, 80, 55, 70, 90, 60, 75, 85, 70, 95].map((h, i) => {
+                        const blueShades = ["#93C5FD", "#60A5FA", "#3B82F6", "#2563EB", "#1D4ED8", "#6366F1", "#818CF8", "#A5B4FC", "#38BDF8", "#0EA5E9", "#0284C7", "#0369A1"];
+                        const shade = blueShades[i % blueShades.length];
+                        return (
+                          <div
+                            key={i}
+                            className="flex-1 rounded-t min-h-[4px] transition"
+                            style={{ height: `${h}%`, backgroundColor: shade, opacity: 0.9 }}
+                          />
+                        );
+                      })}
                     </div>
                     <p className="mt-2 text-[10px] text-[var(--muted-foreground)]">Sales v Profit · Revenue vs profit</p>
                     <div className="mt-4 flex flex-col gap-3 sm:mt-3 sm:flex-row sm:flex-wrap sm:gap-2">
@@ -520,6 +521,12 @@ export default function LandingPage() {
                           <p className="truncate text-[10px] font-medium text-[var(--foreground)] sm:text-xs">Wireless Earbuds Pro</p>
                           <p className="text-[9px] sm:text-[10px]" style={{ color: accentColor }}>Most profitable — replenish now</p>
                         </div>
+                      </div>
+                      <div className="flex items-center gap-2 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1.5">
+                        <span className="text-emerald-400" aria-hidden>
+                          <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                        </span>
+                        <span className="text-[10px] font-medium text-emerald-200/95 sm:text-xs">This product was ordered 6 times today, it made you £92.50 profit</span>
                       </div>
                     </div>
                   </div>
