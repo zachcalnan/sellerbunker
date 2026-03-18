@@ -28,6 +28,14 @@ export default function RootLayout({
     <ClerkProvider
       appearance={{
         theme: shadcn,
+        layout: {
+          logoImageUrl: "/sellerbunker-logo.png",
+          logoLinkUrl: "/",
+        },
+        elements: {
+          socialButtonsBlockButton__oauth_google: "!hidden",
+          socialButtonsIconButton__oauth_google: "!hidden",
+        },
       }}
       signInUrl="/sign-in"
       signUpUrl="/sign-up"

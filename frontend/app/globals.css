@@ -98,4 +98,32 @@ body {
   background: rgba(255, 255, 255, 0.1) !important;
 }
 
+/* Clerk: hide Google OAuth on sign-in / sign-up.
+   Also disable Google in Clerk Dashboard → Configure → User & Authentication → Social connections. */
+.cl-rootBox button.cl-socialButtonsBlockButton[data-provider="oauth_google"],
+.cl-rootBox .cl-socialButtonsBlockButton__oauth_google,
+.cl-rootBox button.cl-socialButtonsIconButton[data-provider="oauth_google"],
+.cl-rootBox .cl-socialButtonsIconButton__oauth_google,
+.cl-rootBox [data-provider="oauth_google"].cl-button,
+.cl-rootBox a[data-provider="oauth_google"] {
+  display: none !important;
+}
 
+/* SellerBunker logo on Clerk sign-in / sign-up — much larger */
+.cl-rootBox img[src*="sellerbunker-logo"] {
+  width: min(90vw, 20rem) !important;
+  max-width: 22rem !important;
+  height: auto !important;
+  max-height: 7rem !important;
+  object-fit: contain !important;
+  object-position: center !important;
+}
+.cl-rootBox .cl-header,
+.cl-rootBox [class*="logoBox"] {
+  min-height: 5.5rem !important;
+  align-items: center !important;
+}
+/* Dark theme: asset is dark; invert for visibility */
+[data-theme="dark"] .cl-rootBox img[src*="sellerbunker-logo"] {
+  filter: brightness(0) invert(1);
+}

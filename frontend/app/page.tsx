@@ -1,12 +1,6 @@
 "use client";
 
-import {
-  SignedIn,
-  SignedOut,
-  SignInButton,
-  SignUpButton,
-  useAuth,
-} from "@clerk/nextjs";
+import { SignedIn, SignedOut, useAuth } from "@clerk/nextjs";
 import Link from "next/link";
 import Image from "next/image";
 import { useState, useRef, useEffect } from "react";
@@ -18,7 +12,6 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
 
 const navAuthFadeClass = "transition-opacity duration-400";
 
-let navTrialFadeDone = false;
 let navAuthFadeDone = false;
 
 /** Shows Sign in + Dashboard (→ sign-in page) when signed out OR signed in with no subscription; else Dashboard → /dashboard */
@@ -81,21 +74,21 @@ function NavAuthButtons({ skipFade }: { skipFade?: boolean } = {}) {
 
   const wrapperClass = `${skipFade ? "" : navAuthFadeClass} flex w-[9.25rem] items-center justify-end gap-1 lg:w-[10.75rem] lg:gap-2 ${skipFade || isVisible ? "opacity-100" : "opacity-0"}`;
 
-  // Signed out: Sign in → sign-in page; Dashboard → sign-up page
+  const signInClass =
+    "cursor-pointer rounded-lg px-2 py-1.5 text-xs font-medium text-[var(--muted-foreground)] no-underline transition hover:bg-[var(--foreground)]/5 hover:text-[var(--foreground)] lg:py-2 lg:text-sm";
+  const dashClass =
+    "cursor-pointer rounded-lg bg-white px-2 py-1.5 text-xs font-medium text-black no-underline transition hover:bg-gray-100 lg:px-4 lg:py-2 lg:text-sm";
+
+  // Signed out: plain links — Clerk SignInButton can hang on click; /sign-in page still uses Clerk.
   if (!isLoaded || !isSignedIn) {
     return (
       <div className={wrapperClass}>
-        <SignInButton mode="redirect" forceRedirectUrl="/start-trial">
-          <button className="cursor-pointer rounded-lg px-2 py-1.5 text-xs font-medium text-[var(--muted-foreground)] transition hover:bg-[var(--foreground)]/5 hover:text-[var(--foreground)] lg:py-2 lg:text-sm">
-            Sign in
-          </button>
-        </SignInButton>
-        <a
-          href="/sign-up"
-          className="cursor-pointer rounded-lg bg-white px-2 py-1.5 text-xs font-medium text-black no-underline transition hover:bg-gray-100 lg:px-4 lg:py-2 lg:text-sm"
-        >
+        <Link href="/sign-in" className={signInClass}>
+          Sign in
+        </Link>
+        <Link href="/sign-up" className={dashClass}>
           Dashboard
-        </a>
+        </Link>
       </div>
     );
   }
@@ -126,90 +119,64 @@ function NavAuthButtons({ skipFade }: { skipFade?: boolean } = {}) {
     );
   }
 
-  // Signed in but no subscription: Sign in → sign-in; Dashboard → sign-up
+  // Signed in but no subscription
   return (
     <div className={wrapperClass}>
-      <SignInButton mode="redirect" forceRedirectUrl="/start-trial">
-        <button className="cursor-pointer rounded-lg px-2 py-1.5 text-xs font-medium text-[var(--muted-foreground)] transition hover:bg-[var(--foreground)]/5 hover:text-[var(--foreground)] lg:py-2 lg:text-sm">
-          Sign in
-        </button>
-      </SignInButton>
-      <a
-        href="/sign-up"
-        className="cursor-pointer rounded-lg bg-white px-2 py-1.5 text-xs font-medium text-black no-underline transition hover:bg-gray-100 lg:px-4 lg:py-2 lg:text-sm"
-      >
+      <Link href="/sign-in" className={signInClass}>
+        Sign in
+      </Link>
+      <Link href="/sign-up" className={dashClass}>
         Dashboard
-      </a>
+      </Link>
     </div>
   );
 }
 
-/** Trial CTA: reserve space while Clerk loads; show button only when signed out, fade in on first show only. */
+/** Trial CTA — always visible when signed out (no opacity fade; rAF + Strict Mode could leave buttons invisible forever). */
 function NavTrialSlot() {
   const { isLoaded, isSignedIn } = useAuth();
-  const [isVisible, setIsVisible] = useState(navTrialFadeDone);
   const navTrialSize =
     "inline-flex w-[11.75rem] items-center justify-center rounded-lg border-t-2 border-b-2 border-transparent px-2 py-1.5 text-xs font-medium lg:w-[13.5rem] lg:px-4 lg:py-2 lg:text-sm";
 
-  useEffect(() => {
-    if (!isLoaded || isSignedIn) {
-      setIsVisible(false);
-      return;
-    }
-    if (navTrialFadeDone) {
-      setIsVisible(true);
-      return;
-    }
-    const frame = requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        setIsVisible(true);
-        navTrialFadeDone = true;
-      });
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [isLoaded, isSignedIn]);
-
-  // While Clerk is loading, reserve the space but keep it invisible so there's no flash.
-  if (!isLoaded) {
+  if (!isLoaded || !isSignedIn) {
     return (
-      <span className={`${navTrialSize} invisible`} aria-hidden>
-        Start 14 day free trial
-      </span>
-    );
-  }
-
-  // When signed in, reserve the same space so siblings don't shift.
-  if (isSignedIn) {
-    return (
-      <span className={`${navTrialSize} invisible`} aria-hidden>
-        Start 14 day free trial
-      </span>
-    );
-  }
-
-  // Signed out + Clerk loaded: show the trial button with fade-in.
-  return (
-    <SignUpButton mode="redirect" forceRedirectUrl="/start-trial" signInForceRedirectUrl="/start-trial">
-      <button
-        className={`${navTrialSize} cursor-pointer text-black no-underline transition-opacity duration-400 hover:opacity-90 ${isVisible ? "opacity-100" : "opacity-0"}`}
+      <Link
+        href="/sign-up"
+        className={`${navTrialSize} cursor-pointer text-center text-black no-underline transition hover:opacity-90`}
         style={{ backgroundColor: accentColor }}
       >
         Start 14 day free trial
-      </button>
-    </SignUpButton>
+      </Link>
+    );
+  }
+
+  return (
+    <span className={`${navTrialSize} invisible`} aria-hidden>
+      Start 14 day free trial
+    </span>
   );
 }
 
-/** Divider + Sign in/Dashboard: placeholder until Clerk is loaded to avoid layout shift. */
+/** Divider + Sign in/Dashboard: visible fallbacks while Clerk loads. */
 function NavAuthSlot() {
   const { isLoaded } = useAuth();
   if (!isLoaded) {
     return (
       <>
         <div className="ml-1 h-5 w-px bg-[var(--surface-border)] lg:ml-2 lg:h-6" aria-hidden />
-        <div className="flex w-[9.25rem] items-center justify-end gap-1 lg:w-[10.75rem] lg:gap-2" aria-hidden>
-          <span className="rounded-lg px-2 py-1.5 text-xs lg:py-2 lg:text-sm invisible">Sign in</span>
-          <span className="rounded-lg px-2 py-1.5 text-xs lg:px-4 lg:py-2 lg:text-sm invisible">Dashboard</span>
+        <div className="flex w-[9.25rem] items-center justify-end gap-1 lg:w-[10.75rem] lg:gap-2">
+          <a
+            href="/sign-in"
+            className="cursor-pointer rounded-lg px-2 py-1.5 text-xs font-medium text-[var(--muted-foreground)] no-underline transition hover:bg-[var(--foreground)]/5 hover:text-[var(--foreground)] lg:py-2 lg:text-sm"
+          >
+            Sign in
+          </a>
+          <a
+            href="/sign-up"
+            className="cursor-pointer rounded-lg bg-white px-2 py-1.5 text-xs font-medium text-black no-underline transition hover:bg-gray-100 lg:px-4 lg:py-2 lg:text-sm"
+          >
+            Dashboard
+          </a>
         </div>
       </>
     );
@@ -217,132 +184,89 @@ function NavAuthSlot() {
   return (
     <>
       <div className="ml-1 h-5 w-px bg-[var(--surface-border)] lg:ml-2 lg:h-6" />
-      <NavAuthButtons />
+      <NavAuthButtons skipFade />
     </>
   );
 }
 
 const heroCtaClass = "inline-flex rounded-xl border border-transparent px-5 py-2.5 text-sm font-semibold shadow-lg transition sm:px-6 sm:py-3 sm:text-base";
 
-/** Hero CTAs: one placeholder until Clerk is loaded to avoid layout shift. */
+/** Hero CTA — use isSignedIn only; SignedOut/SignedIn + opacity fade could render nothing or stay invisible. */
 function HeroCtaSlot() {
-  const { isLoaded } = useAuth();
-  const [isVisible, setIsVisible] = useState(false);
-
-  useEffect(() => {
-    if (!isLoaded) {
-      setIsVisible(false);
-      return;
-    }
-    const frame = requestAnimationFrame(() => setIsVisible(true));
-    return () => cancelAnimationFrame(frame);
-  }, [isLoaded]);
+  const { isLoaded, isSignedIn } = useAuth();
 
   if (!isLoaded) {
     return (
-      <span className="inline-grid" aria-hidden>
-        <span className={`${heroCtaClass} invisible col-start-1 row-start-1`}>
-          Start free trial
-        </span>
-      </span>
+      <a
+        href="/sign-up"
+        className={`${heroCtaClass} inline-flex w-full justify-center text-black hover:opacity-90 sm:w-auto`}
+        style={{ backgroundColor: accentColor }}
+      >
+        Start free trial
+      </a>
     );
   }
+
+  if (!isSignedIn) {
+    return (
+      <Link
+        href="/sign-up"
+        className={`${heroCtaClass} inline-flex w-full justify-center text-black hover:opacity-90 sm:w-auto`}
+        style={{ backgroundColor: accentColor }}
+      >
+        Start free trial
+      </Link>
+    );
+  }
+
   return (
-    <>
-      <SignedOut>
-        <span className="inline-grid">
-          <span className={`${heroCtaClass} invisible col-start-1 row-start-1`} aria-hidden>
-            Start free trial
-          </span>
-          <SignUpButton mode="redirect" forceRedirectUrl="/start-trial" signInForceRedirectUrl="/start-trial">
-            <button
-              className={`${heroCtaClass} col-start-1 row-start-1 w-full justify-center text-black hover:opacity-90 transition-opacity duration-400 ${isVisible ? "opacity-100" : "opacity-0"
-                }`}
-              style={{ backgroundColor: accentColor }}
-            >
-              Start free trial
-            </button>
-          </SignUpButton>
-        </span>
-      </SignedOut>
-      <SignedIn>
-        <span className="inline-grid">
-          <span className={`${heroCtaClass} invisible col-start-1 row-start-1`} aria-hidden>
-            Start free trial
-          </span>
-          <Link
-            href="/dashboard"
-            className={`${heroCtaClass} col-start-1 row-start-1 w-full justify-center text-black hover:opacity-90 transition-opacity duration-400 ${isVisible ? "opacity-100" : "opacity-0"
-              }`}
-            style={{ backgroundColor: accentColor }}
-          >
-            Go to dashboard
-          </Link>
-        </span>
-      </SignedIn>
-    </>
+    <Link
+      href="/dashboard"
+      className={`${heroCtaClass} inline-flex w-full justify-center text-black hover:opacity-90 sm:w-auto`}
+      style={{ backgroundColor: accentColor }}
+    >
+      Go to dashboard
+    </Link>
   );
 }
 
 const bottomCtaClass = "inline-flex rounded-xl border border-transparent px-8 py-4 text-lg font-semibold transition";
 
-/** Bottom CTA block: placeholder until Clerk is loaded to avoid layout shift. */
 function BottomCtaSlot() {
-  const { isLoaded } = useAuth();
-  const [isVisible, setIsVisible] = useState(false);
-
-  useEffect(() => {
-    if (!isLoaded) {
-      setIsVisible(false);
-      return;
-    }
-    const frame = requestAnimationFrame(() => setIsVisible(true));
-    return () => cancelAnimationFrame(frame);
-  }, [isLoaded]);
+  const { isLoaded, isSignedIn } = useAuth();
 
   if (!isLoaded) {
     return (
-      <span className="inline-grid" aria-hidden>
-        <span className={`${bottomCtaClass} invisible col-start-1 row-start-1`}>
-          Join the private beta
-        </span>
-      </span>
+      <a
+        href="/sign-up"
+        className={`${bottomCtaClass} inline-flex w-full justify-center text-black hover:opacity-90 sm:w-auto`}
+        style={{ backgroundColor: accentColor }}
+      >
+        Join the private beta
+      </a>
     );
   }
+
+  if (!isSignedIn) {
+    return (
+      <Link
+        href="/sign-up"
+        className={`${bottomCtaClass} inline-flex w-full justify-center text-black hover:opacity-90 sm:w-auto`}
+        style={{ backgroundColor: accentColor }}
+      >
+        Join the private beta
+      </Link>
+    );
+  }
+
   return (
-    <>
-      <SignedOut>
-        <span className="inline-grid">
-          <span className={`${bottomCtaClass} invisible col-start-1 row-start-1`} aria-hidden>
-            Join the private beta
-          </span>
-          <SignUpButton mode="redirect" forceRedirectUrl="/start-trial" signInForceRedirectUrl="/start-trial">
-            <button
-              className={`${bottomCtaClass} col-start-1 row-start-1 w-full justify-center text-black hover:opacity-90 transition-opacity duration-400 ${isVisible ? "opacity-100" : "opacity-0"
-                }`}
-              style={{ backgroundColor: accentColor }}
-            >
-              Join the private beta
-            </button>
-          </SignUpButton>
-        </span>
-      </SignedOut>
-      <SignedIn>
-        <span className="inline-grid">
-          <span className={`${bottomCtaClass} invisible col-start-1 row-start-1`} aria-hidden>
-            Join the private beta
-          </span>
-          <Link
-            href="/dashboard"
-            className={`${bottomCtaClass} col-start-1 row-start-1 w-full justify-center text-black hover:opacity-90 transition-opacity duration-400 ${isVisible ? "opacity-100" : "opacity-0"
-              }`}
-            style={{ backgroundColor: accentColor }}
-          >
-            Go to dashboard
-          </Link>
-        </span>
-      </SignedIn>
-    </>
+    <Link
+      href="/dashboard"
+      className={`${bottomCtaClass} inline-flex w-full justify-center text-black hover:opacity-90 sm:w-auto`}
+      style={{ backgroundColor: accentColor }}
+    >
+      Go to dashboard
+    </Link>
   );
 }
 
@@ -1252,13 +1176,12 @@ export default function LandingPage() {
                   {plan.name === "Starter" ? (
                     <>
                       <SignedOut>
-                        <SignUpButton mode="redirect" forceRedirectUrl="/start-trial" signInForceRedirectUrl="/start-trial">
-                          <button
-                            className="mt-6 w-full rounded-xl bg-white py-3 text-sm font-semibold text-black transition hover:bg-gray-100"
-                          >
-                            {plan.cta}
-                          </button>
-                        </SignUpButton>
+                        <Link
+                          href="/sign-up"
+                          className="mt-6 flex w-full items-center justify-center rounded-xl bg-white py-3 text-sm font-semibold text-black transition hover:bg-gray-100 no-underline"
+                        >
+                          {plan.cta}
+                        </Link>
                       </SignedOut>
                       <SignedIn>
                         <Link
@@ -1270,14 +1193,26 @@ export default function LandingPage() {
                       </SignedIn>
                     </>
                   ) : (
-                    <SignUpButton mode="redirect" forceRedirectUrl="/start-trial" signInForceRedirectUrl="/start-trial">
-                      <button
-                        className={`mt-6 w-full rounded-xl py-3 text-sm font-semibold transition ${plan.featured ? "bg-white text-black hover:bg-gray-100" : "border border-[var(--surface-border)] text-[var(--foreground)] hover:bg-[var(--surface)]"
-                          }`}
-                      >
-                        {plan.cta}
-                      </button>
-                    </SignUpButton>
+                    <>
+                      <SignedOut>
+                        <Link
+                          href="/sign-up"
+                          className={`mt-6 flex w-full items-center justify-center rounded-xl py-3 text-sm font-semibold no-underline transition ${plan.featured ? "bg-white text-black hover:bg-gray-100" : "border border-[var(--surface-border)] text-[var(--foreground)] hover:bg-[var(--surface)]"
+                            }`}
+                        >
+                          {plan.cta}
+                        </Link>
+                      </SignedOut>
+                      <SignedIn>
+                        <Link
+                          href="/start-trial"
+                          className={`mt-6 flex w-full items-center justify-center rounded-xl py-3 text-sm font-semibold no-underline transition ${plan.featured ? "bg-white text-black hover:bg-gray-100" : "border border-[var(--surface-border)] text-[var(--foreground)] hover:bg-[var(--surface)]"
+                            }`}
+                        >
+                          {plan.cta}
+                        </Link>
+                      </SignedIn>
+                    </>
                   )}
                 </div>
               ))}

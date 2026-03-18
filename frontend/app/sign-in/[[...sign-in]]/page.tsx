@@ -11,16 +11,8 @@ export default function SignInPage() {
     window.scrollTo(0, 0);
   }, []);
 
-  if (!isLoaded) {
-    return (
-      <div className="fixed inset-0 z-[100] flex items-center justify-center bg-[var(--background)]/95 backdrop-blur-md">
-        <p className="text-[var(--muted-foreground)]">Loading…</p>
-      </div>
-    );
-  }
-
-  // Already signed in: show a clear page with next step instead of letting Clerk redirect
-  if (isSignedIn) {
+  // Only gate on loaded+signed-in. Waiting on isLoaded alone can hang forever (bad keys, adblock, slow Clerk).
+  if (isLoaded && isSignedIn) {
     return (
       <div className="fixed inset-0 z-[100] flex flex-col items-center justify-center bg-[var(--background)]/95 backdrop-blur-md px-4">
         <div className="absolute left-4 top-4 z-10">
@@ -32,6 +24,13 @@ export default function SignInPage() {
           </Link>
         </div>
         <div className="w-full max-w-md rounded-2xl border border-[var(--surface-border)] bg-[var(--surface)] p-8 text-center">
+          <Link href="/" className="mb-6 inline-block">
+            <img
+              src="/sellerbunker-logo.png"
+              alt="SellerBunker"
+              className="sellerbunker-logo mx-auto h-20 w-auto max-w-[min(90vw,22rem)] object-contain sm:h-24"
+            />
+          </Link>
           <h1 className="text-xl font-semibold text-[var(--foreground)]">You&apos;re already signed in</h1>
           <p className="mt-2 text-sm text-[var(--muted-foreground)]">
             Continue to start your trial or go to the dashboard.

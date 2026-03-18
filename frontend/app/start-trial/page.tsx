@@ -224,6 +224,13 @@ function StartTrialContent() {
   return (
     <div className="flex min-h-screen flex-col items-center justify-center bg-[var(--background)] px-4 text-[var(--foreground)]">
       <div className="w-full max-w-md rounded-2xl border border-[var(--surface-border)] bg-[var(--surface)] p-8 text-center">
+        <Link href="/" className="mb-6 inline-block">
+          <img
+            src="/sellerbunker-logo.png"
+            alt="SellerBunker"
+            className="sellerbunker-logo mx-auto h-10 w-auto object-contain sm:h-12"
+          />
+        </Link>
         <h1 className="text-2xl font-bold">Start your 14-day trial</h1>
         <p className="mt-3 text-[var(--muted-foreground)]">
           Add a card to start your free trial. You won&apos;t be charged until the trial ends.
