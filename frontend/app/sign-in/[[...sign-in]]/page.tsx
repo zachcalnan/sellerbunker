@@ -28,7 +28,7 @@ export default function SignInPage() {
             <img
               src="/sellerbunker-logo.png"
               alt="SellerBunker"
-              className="sellerbunker-logo mx-auto h-20 w-auto max-w-[min(90vw,22rem)] object-contain sm:h-24"
+              className="sellerbunker-logo mx-auto h-24 w-auto max-w-[min(88vw,26rem)] object-contain sm:h-28"
             />
           </Link>
           <h1 className="text-xl font-semibold text-[var(--foreground)]">You&apos;re already signed in</h1>
@@ -63,16 +63,14 @@ export default function SignInPage() {
   }
 
   return (
-    <div className="fixed inset-0 z-[100] flex flex-col items-center justify-center bg-[var(--background)]/95 backdrop-blur-md">
-      <div className="absolute left-4 top-4 z-10">
-        <Link
-          href="/"
-          className="rounded-lg border border-[var(--surface-border)] bg-[var(--surface)] px-4 py-2 text-sm font-medium text-[var(--foreground)] no-underline transition hover:bg-[var(--foreground)]/5"
-        >
-          ← Back
-        </Link>
-      </div>
-      <div className="w-auto max-w-md">
+    <div className="clerk-auth-shell fixed inset-0 z-[100] flex items-center justify-center bg-[var(--background)]/95 backdrop-blur-md p-4">
+      <Link
+        href="/"
+        className="fixed left-4 top-4 z-[10000] rounded-lg border border-[var(--surface-border)] bg-[var(--surface)] px-4 py-2 text-sm font-medium text-[var(--foreground)] no-underline shadow-lg transition hover:bg-[var(--foreground)]/5"
+      >
+        ← Back
+      </Link>
+      <div className="relative z-10 flex w-full max-w-[calc(100vw-2rem)] justify-center">
         <SignIn fallbackRedirectUrl="/start-trial" />
       </div>
     </div>

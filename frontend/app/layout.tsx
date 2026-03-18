@@ -35,6 +35,7 @@ export default function RootLayout({
         elements: {
           socialButtonsBlockButton__oauth_google: "!hidden",
           socialButtonsIconButton__oauth_google: "!hidden",
+          otpCodeFieldInput: "!bg-white !text-neutral-900 !border-neutral-300",
         },
       }}
       signInUrl="/sign-in"

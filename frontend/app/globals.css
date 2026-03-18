@@ -109,21 +109,59 @@ body {
   display: none !important;
 }
 
-/* SellerBunker logo on Clerk sign-in / sign-up — much larger */
+/* SellerBunker logo on Clerk sign-in / sign-up */
 .cl-rootBox img[src*="sellerbunker-logo"] {
-  width: min(90vw, 20rem) !important;
-  max-width: 22rem !important;
+  width: min(88vw, 26rem) !important;
+  max-width: 100% !important;
   height: auto !important;
-  max-height: 7rem !important;
+  max-height: 12rem !important;
   object-fit: contain !important;
   object-position: center !important;
+  margin-top: 0.75rem !important;
+  margin-left: auto !important;
+  margin-right: auto !important;
+  display: block !important;
 }
 .cl-rootBox .cl-header,
 .cl-rootBox [class*="logoBox"] {
-  min-height: 5.5rem !important;
+  min-height: 10rem !important;
   align-items: center !important;
+  justify-content: center !important;
+  padding-top: 1rem !important;
+  padding-bottom: 0.75rem !important;
+}
+/* Center SignIn/SignUp card in viewport */
+.clerk-auth-shell .cl-rootBox {
+  margin-left: auto !important;
+  margin-right: auto !important;
+  width: 100% !important;
+  max-width: min(32rem, calc(100vw - 2rem)) !important;
+}
+.clerk-auth-shell {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
 }
 /* Dark theme: asset is dark; invert for visibility */
 [data-theme="dark"] .cl-rootBox img[src*="sellerbunker-logo"] {
   filter: brightness(0) invert(1);
+}
+
+/* Email verification code (OTP) digit boxes — white so codes are readable on dark auth */
+.cl-rootBox [data-slot="input-otp-slot"] {
+  background-color: #ffffff !important;
+  color: #111827 !important;
+  border-color: #d1d5db !important;
+  caret-color: #111827 !important;
+}
+.cl-rootBox [data-slot="input-otp-slot"][data-active="true"],
+.cl-rootBox [data-slot="input-otp-slot"]:focus-within {
+  border-color: #6b7280 !important;
+  box-shadow: 0 0 0 1px #6b7280 !important;
+}
+/* Fallback if Clerk uses different OTP markup (single hidden input + visual cells) */
+.cl-rootBox .cl-otpCodeFieldInput,
+.cl-rootBox input.cl-otpCodeFieldInput {
+  background-color: #ffffff !important;
+  color: #111827 !important;
 }
