@@ -707,8 +707,12 @@ export default function LandingPage() {
           <div className="mx-auto max-w-7xl px-5 pt-5 pb-10 sm:px-6 sm:pt-3 sm:pb-12 lg:px-8 lg:pt-4 lg:pb-16">
             <div className="grid gap-12 lg:grid-cols-2 lg:gap-16 lg:items-center">
               <div className="min-w-0">
-                <h1 className="text-3xl font-bold leading-tight tracking-tight text-[var(--foreground)] sm:text-4xl lg:text-5xl">
-                  See your REAL Amazon profit - not just revenue
+                <h1 className="text-3xl font-bold leading-tight tracking-normal text-[var(--foreground)] sm:text-4xl lg:text-5xl">
+                  See your{" "}
+                  <span className="whitespace-nowrap">
+                    REAL{" "}Amazon
+                  </span>{" "}
+                  profit - not just revenue
                 </h1>
                 <p className="mt-4 max-w-xl text-base leading-relaxed text-[var(--muted-foreground)] sm:mt-4 sm:text-lg">
                   Track profit, inventory, lost shipments and restocking in one simple dashboard
@@ -723,17 +727,17 @@ export default function LandingPage() {
                   </span>
                 </div>
               </div>
-              <div className="relative mt-2 sm:mt-4 lg:mt-0 mx-auto w-full max-w-[560px] lg:max-w-[600px]">
+              <div className="relative mt-2 sm:mt-4 lg:mt-0 mx-auto w-full max-w-[360px] lg:max-w-[420px]">
                 <div
                   className="relative overflow-hidden rounded-2xl border-2 border-white/60 bg-[var(--surface)] shadow-2xl ring-2 ring-white/30"
                   style={{ boxShadow: "0 0 0 1px rgba(255,255,255,0.35), 0 0 56px -8px rgba(96,165,250,0.35), 0 30px 70px -18px rgba(0,0,0,0.75)" }}
                 >
-                  <div className="aspect-[16/11] flex flex-col p-4 sm:p-5">
-                    <div className="mb-4 flex items-center justify-between gap-2 sm:mb-3">
+                  <div className="aspect-[16/10] flex flex-col p-3 sm:p-4">
+                    <div className="mb-3 flex items-center justify-between gap-2 sm:mb-2.5">
                       <span className="text-xs font-medium uppercase tracking-widest text-[var(--foreground)]">Performance snapshot</span>
                       <span className="shrink-0 rounded-md border border-white/20 bg-white/5 px-2 py-1 text-[10px] text-[var(--muted-foreground)]">Last 30 days</span>
                     </div>
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-5 sm:gap-4 flex-1 items-center justify-items-center">
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-3 flex-1 items-center justify-items-center">
                       {[
                         { label: "Profit", value: "£2,847", color: "#60A5FA" },
                         { label: "Sales", value: "£12,430", color: "#818CF8" },
@@ -742,7 +746,7 @@ export default function LandingPage() {
                       ].map((card) => (
                         <div
                           key={card.label}
-                          className="aspect-square w-full max-w-[90px] sm:max-w-[110px] lg:max-w-[120px] rounded-full border-[3px] p-2.5 sm:p-3 flex flex-col items-center justify-center text-center"
+                          className="aspect-square w-full max-w-[70px] sm:max-w-[85px] lg:max-w-[95px] rounded-full border-[3px] p-2 sm:p-2.5 flex flex-col items-center justify-center text-center"
                           style={{
                             borderColor: card.color,
                             backgroundColor: "rgba(0,0,0,0.35)",
@@ -754,7 +758,7 @@ export default function LandingPage() {
                         </div>
                       ))}
                     </div>
-                    <div className="mt-3 h-24 rounded-lg border border-[var(--surface-border)] bg-[var(--background)]/30 flex items-end gap-0.5 px-1 pb-1">
+                    <div className="mt-2.5 h-20 rounded-lg border border-[var(--surface-border)] bg-[var(--background)]/30 flex items-end gap-0.5 px-1 pb-1">
                       {[40, 65, 45, 80, 55, 70, 90, 60, 75, 85, 70, 95].map((h, i) => {
                         const blueShades = ["#93C5FD", "#60A5FA", "#3B82F6", "#2563EB", "#1D4ED8", "#6366F1", "#818CF8", "#A5B4FC", "#38BDF8", "#0EA5E9", "#0284C7", "#0369A1"];
                         const shade = blueShades[i % blueShades.length];
@@ -768,7 +772,7 @@ export default function LandingPage() {
                       })}
                     </div>
                     <p className="mt-2 text-[10px] text-[var(--muted-foreground)]">Sales v Profit · Revenue vs profit</p>
-                    <div className="mt-4 flex flex-col gap-3 sm:mt-3 sm:flex-row sm:flex-wrap sm:gap-2">
+                    <div className="mt-3 flex flex-col gap-2 sm:mt-2.5 sm:flex-row sm:flex-wrap sm:gap-2">
                       <div className="flex items-center gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5">
                         <span className="text-amber-400" aria-hidden>
                           <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
@@ -794,11 +798,6 @@ export default function LandingPage() {
                       </div>
                     </div>
                   </div>
-                  <img
-                    src="/sellerbunker-logo.png"
-                    alt="SellerBunker"
-                    className="sellerbunker-logo pointer-events-none absolute bottom-3 right-3 h-14 w-auto opacity-90 sm:bottom-4 sm:right-4 sm:h-16"
-                  />
                 </div>
               </div>
             </div>
