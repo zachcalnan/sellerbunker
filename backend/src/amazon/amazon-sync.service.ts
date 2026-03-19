@@ -20,7 +20,7 @@ export class AmazonSyncService implements OnModuleInit {
     stableJobId: string,
     data: Record<string, unknown>,
     logPrefix: string,
-    opts?: { delay?: number },
+    opts?: { delay?: number; lockDurationMs?: number },
   ): Promise<void> {
     let jobId = stableJobId;
     const existingJob = await this.queue.getJob(stableJobId);
@@ -58,6 +58,9 @@ export class AmazonSyncService implements OnModuleInit {
       removeOnFail: 500,
       jobId,
       ...(opts?.delay != null && opts.delay > 0 ? { delay: opts.delay } : {}),
+      ...(opts?.lockDurationMs != null && opts.lockDurationMs > 0
+        ? { lockDuration: opts.lockDurationMs }
+        : {}),
     });
   }
 
@@ -315,12 +318,39 @@ export class AmazonSyncService implements OnModuleInit {
       JSON.stringify({ progress: 0 }),
       SYNC_PROGRESS_TTL,
     );
+    // Large catalogs can exceed BullMQ’s default lock (~30s) and get marked stalled mid-run.
+    const lockDurationMs = Math.max(
+      600_000,
+      Number(process.env.FEE_SYNC_JOB_LOCK_DURATION_MS) || 4 * 60 * 60 * 1000,
+    );
     await this.enqueueUniqueJob(
       'fee-sync',
       `fee-sync-${userId}`,
       { userId, orgId },
       `Fee-sync for userId=${userId}`,
+      { lockDurationMs },
     );
+  }
+
+  /**
+   * Enqueue full fee + list-price refresh for an org (first member with an active Amazon link).
+   * Used after inventory batch when some SKUs still lack data for stock value.
+   */
+  async enqueueFeeSyncForOrg(orgId: string): Promise<void> {
+    const members = await this.prisma.organizationMembership.findMany({
+      where: { orgId },
+      select: { userId: true },
+    });
+    for (const { userId } of members) {
+      const linked = await this.prisma.sellerAccount.findFirst({
+        where: { userId, marketplace: 'amazon', isActive: true },
+        select: { id: true },
+      });
+      if (linked) {
+        await this.enqueueFeeSync(userId, orgId);
+        return;
+      }
+    }
   }
 
   /** Enqueue titles backfill to run in background after initial sync (Catalog API, 1 req per product). */

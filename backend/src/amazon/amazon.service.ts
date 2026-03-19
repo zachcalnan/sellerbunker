@@ -5297,6 +5297,23 @@ try {
 } // closes: syncFbaInventory
 
   /**
+   * SKUs with an inventory row but no fee snapshot or listed price yet.
+   * Dashboard stock value uses currentListedPrice × qty (0 when null), so missing rows skew totals.
+   */
+  async countInventoryProductsMissingFeeSnapshot(orgId: string): Promise<number> {
+    const userIds = await this.getOrgMemberUserIds(orgId);
+    if (userIds.length === 0) return 0;
+    return this.prisma.product.count({
+      where: {
+        userId: { in: userIds },
+        sku: { not: '' },
+        inventory: { isNot: null },
+        OR: [{ estimatedAmazonFeeUpdatedAt: null }, { currentListedPrice: null }],
+      },
+    });
+  }
+
+  /**
    * Refresh estimated Amazon fees per product and current listed price.
    * - Fetches this seller's current listed price from Listings API and upserts Product.currentListedPrice.
    * - Calls Product Fees API with that price (or sold price when we have orders) and saves estimated referral/FBA/total.

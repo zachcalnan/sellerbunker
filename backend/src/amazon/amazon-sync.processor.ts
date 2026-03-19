@@ -97,6 +97,13 @@ export class AmazonSyncProcessor extends WorkerHost {
         }
         try {
           await this.amazonService.syncFbaInventory(org.id);
+          const missingFees = await this.amazonService.countInventoryProductsMissingFeeSnapshot(org.id);
+          if (missingFees > 0) {
+            await this.amazonSyncService.enqueueFeeSyncForOrg(org.id);
+            this.logger.log(
+              `[AmazonSync] inventory-batch-sync: org ${org.id} — ${missingFees} SKU(s) still missing fee/list price; enqueued fee-sync`,
+            );
+          }
         } catch (e: any) {
           const msg = e instanceof Error ? e.message : String(e);
           if (msg.includes('Amazon account not linked') || msg.includes('link your Amazon account first')) {
@@ -217,25 +224,36 @@ export class AmazonSyncProcessor extends WorkerHost {
       if (!userId || !orgId) {
         throw new Error('Missing userId or orgId for post-initial-sync job');
       }
+      this.logger.log(`[post-initial-sync] Starting for userId=${userId}, orgId=${orgId}`);
+      // Do NOT sync full orders here: that was causing "34 orders" to appear right after the bar hit 100%
+      // (initial sync correctly caps at 15; this job ran 2s later and pulled the rest). Full 30-day order
+      // backfill is done by the recurring orders-batch-sync job (every 10 min), so the user sees only 15
+      // until the next batch run.
       try {
-        this.logger.log(`[post-initial-sync] Starting for userId=${userId}, orgId=${orgId}`);
-        // Do NOT sync full orders here: that was causing "34 orders" to appear right after the bar hit 100%
-        // (initial sync correctly caps at 15; this job ran 2s later and pulled the rest). Full 30-day order
-        // backfill is done by the recurring orders-batch-sync job (every 10 min), so the user sees only 15
-        // until the next batch run.
         await this.amazonService.syncFbaInventory(orgId, userId);
         this.logger.log(`[post-initial-sync] full inventory done`);
-        await this.amazonService.syncShipments(orgId, userId);
-        this.logger.log(`[post-initial-sync] shipments done`);
-        this.logger.log(`[post-initial-sync] Completed for userId=${userId}, orgId=${orgId}`);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         this.logger.error(
-          `[post-initial-sync] Failed for userId=${userId}, orgId=${orgId}: ${msg}`,
+          `[post-initial-sync] FBA inventory failed for userId=${userId}, orgId=${orgId}: ${msg}`,
           err instanceof Error ? err.stack : undefined,
         );
         throw err;
       }
+      try {
+        await this.amazonService.syncShipments(orgId, userId);
+        this.logger.log(`[post-initial-sync] shipments done`);
+      } catch (shipErr) {
+        const msg = shipErr instanceof Error ? shipErr.message : String(shipErr);
+        this.logger.warn(`[post-initial-sync] shipments failed (non-fatal): ${msg}`);
+      }
+      // Full fee + list-price for every SKU (initial bar only did top 10). Required for stock value / profit.
+      // Runs after inventory is written so no SKU is missed; not blocked by shipment errors.
+      await this.amazonSyncService.enqueueFeeSync(userId, orgId);
+      this.logger.log(
+        `[post-initial-sync] enqueued fee-sync for all products (userId=${userId}); background job may take a while for large catalogs`,
+      );
+      this.logger.log(`[post-initial-sync] Completed for userId=${userId}, orgId=${orgId}`);
     }
 
     if (job.name === 'fee-sync') {
@@ -342,7 +360,9 @@ export class AmazonSyncProcessor extends WorkerHost {
     }
 
     if (job.name === 'fee-estimate-refresh') {
-      this.logger.log('[AmazonSync] Running fee estimate refresh (top 10 by stock only) for orgs with Amazon linked');
+      this.logger.log(
+        '[AmazonSync] Running fee estimate refresh (all SKUs, batched) for orgs with Amazon linked',
+      );
 
       // Only orgs that have at least one member with a linked Amazon account (avoid touching orphan/test orgs).
       const orgs = await this.prisma.organization.findMany({
@@ -367,7 +387,8 @@ export class AmazonSyncProcessor extends WorkerHost {
           continue;
         }
         try {
-          await this.amazonService.refreshFeeEstimatesForOrg(org.id, { topByQuantityInStock: 10 });
+          // Full pass: list price + Product Fees API for every product (not just top 10 by qty).
+          await this.amazonService.refreshFeeEstimatesForOrg(org.id);
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e);
           const isNotLinked = /amazon account not linked|link your amazon account/i.test(msg);
