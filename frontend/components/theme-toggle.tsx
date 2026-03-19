@@ -11,13 +11,11 @@ export function ThemeToggle() {
   useEffect(() => {
     if (typeof window === "undefined") return;
 
+    // Default dark for new users; do not follow OS light mode (mobile was flipping to light after hydration).
     let initial: Theme = "dark";
     const stored = window.localStorage.getItem("theme");
-
     if (stored === "light" || stored === "dark") {
       initial = stored;
-    } else if (window.matchMedia("(prefers-color-scheme: light)").matches) {
-      initial = "light";
     }
 
     document.documentElement.dataset.theme = initial;
