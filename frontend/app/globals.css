@@ -54,6 +54,11 @@ body {
   font-family: Arial, Helvetica, sans-serif;
 }
 
+/* Landing page gets a more modern SaaS font, dashboard stays unchanged. */
+.landing-page {
+  font-family: var(--font-landing), "Inter", "Segoe UI", Arial, Helvetica, sans-serif;
+}
+
 /* Dashboard page backgrounds with subtle shine */
 .bg-dark-shine {
   background-color: #404040;

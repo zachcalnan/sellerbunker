@@ -1,7 +1,14 @@
 import type { Metadata } from "next";
 import { ClerkProvider } from "@clerk/nextjs";
 import { shadcn } from "@clerk/themes";
+import { Manrope } from "next/font/google";
 import "./globals.css";
+
+const landingFont = Manrope({
+  subsets: ["latin"],
+  variable: "--font-landing",
+  weight: ["400", "500", "600", "700", "800"],
+});
 
 export const metadata: Metadata = {
   title: "SellerBunker — Amazon Profit Dashboard",
@@ -65,7 +72,7 @@ export default function RootLayout({
             dangerouslySetInnerHTML={{ __html: themeScript }}
           />
         </head>
-        <body className="antialiased">
+        <body className={`${landingFont.variable} antialiased`}>
           {children}
         </body>
       </html>

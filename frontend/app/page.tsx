@@ -132,31 +132,6 @@ function NavAuthButtons({ skipFade }: { skipFade?: boolean } = {}) {
   );
 }
 
-/** Trial CTA — always visible when signed out (no opacity fade; rAF + Strict Mode could leave buttons invisible forever). */
-function NavTrialSlot() {
-  const { isLoaded, isSignedIn } = useAuth();
-  const navTrialSize =
-    "inline-flex w-[11.75rem] items-center justify-center rounded-lg border-t-2 border-b-2 border-transparent px-2 py-1.5 text-xs font-medium lg:w-[13.5rem] lg:px-4 lg:py-2 lg:text-sm";
-
-  if (!isLoaded || !isSignedIn) {
-    return (
-      <Link
-        href="/sign-up"
-        className={`${navTrialSize} cursor-pointer text-center text-black no-underline transition hover:opacity-90`}
-        style={{ backgroundColor: accentColor }}
-      >
-        Start 14 day free trial
-      </Link>
-    );
-  }
-
-  return (
-    <span className={`${navTrialSize} invisible`} aria-hidden>
-      Start 14 day free trial
-    </span>
-  );
-}
-
 /** Divider + Sign in/Dashboard: visible fallbacks while Clerk loads. */
 function NavAuthSlot() {
   const { isLoaded } = useAuth();
@@ -194,28 +169,47 @@ const heroCtaClass = "inline-flex rounded-xl border border-transparent px-5 py-2
 /** Hero CTA — use isSignedIn only; SignedOut/SignedIn + opacity fade could render nothing or stay invisible. */
 function HeroCtaSlot() {
   const { isLoaded, isSignedIn } = useAuth();
+  const discordCta = (
+    <a
+      href="https://discord.gg/sbDwPbV9"
+      target="_blank"
+      rel="noopener noreferrer"
+      className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-white/30 bg-transparent px-5 py-2.5 text-sm font-semibold text-[var(--foreground)] transition hover:bg-white/10 sm:w-auto sm:px-6 sm:py-3 sm:text-base"
+    >
+      <svg className="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+        <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028 14.09 14.09 0 0 0 1.226-1.994.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03z" />
+      </svg>
+      Join the discord
+    </a>
+  );
 
   if (!isLoaded) {
     return (
-      <a
-        href="/sign-up"
-        className={`${heroCtaClass} inline-flex w-full justify-center text-black hover:opacity-90 sm:w-auto`}
-        style={{ backgroundColor: accentColor }}
-      >
-        Start free trial
-      </a>
+      <>
+        <a
+          href="/sign-up"
+          className={`${heroCtaClass} inline-flex w-full justify-center text-black hover:opacity-90 sm:w-auto`}
+          style={{ backgroundColor: accentColor }}
+        >
+          Try free today
+        </a>
+        {discordCta}
+      </>
     );
   }
 
   if (!isSignedIn) {
     return (
-      <Link
-        href="/sign-up"
-        className={`${heroCtaClass} inline-flex w-full justify-center text-black hover:opacity-90 sm:w-auto`}
-        style={{ backgroundColor: accentColor }}
-      >
-        Start free trial
-      </Link>
+      <>
+        <Link
+          href="/sign-up"
+          className={`${heroCtaClass} inline-flex w-full justify-center text-black hover:opacity-90 sm:w-auto`}
+          style={{ backgroundColor: accentColor }}
+        >
+          Try free today
+        </Link>
+        {discordCta}
+      </>
     );
   }
 
@@ -594,7 +588,6 @@ export default function LandingPage() {
 
         {/* Desktop nav */}
         <div className="hidden sm:flex flex-wrap items-center justify-center gap-2 sm:gap-2 lg:flex-nowrap lg:justify-end">
-          <NavTrialSlot />
           <NavDropdown label="Product">
             <Link href="#features" className="block px-4 py-2 text-sm text-[var(--foreground)] hover:bg-[var(--foreground)]/5 no-underline">
               Features
@@ -668,7 +661,6 @@ export default function LandingPage() {
               </button>
             </div>
             <nav className="flex min-h-0 flex-1 flex-col gap-1 overflow-auto p-4">
-              <NavTrialSlot />
               <button
                 type="button"
                 className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:bg-[var(--foreground)]/5"
@@ -716,11 +708,10 @@ export default function LandingPage() {
             <div className="grid gap-12 lg:grid-cols-2 lg:gap-16 lg:items-center">
               <div className="min-w-0">
                 <h1 className="text-3xl font-bold leading-tight tracking-tight text-[var(--foreground)] sm:text-4xl lg:text-5xl">
-                  Stop guessing your Amazon profits.{" "}
-                  <span style={{ color: accentColor }}>SellerBunker tracks every cost Amazon hides.</span>
+                  See your REAL Amazon profit - not just revenue
                 </h1>
                 <p className="mt-4 max-w-xl text-base leading-relaxed text-[var(--muted-foreground)] sm:mt-4 sm:text-lg">
-                  SellerBunker tracks your sales, profit, ROI, orders, inventory, shipments and displays it in one powerful dashboard. Designed for serious Amazon sellers in FBA (Fulfilled by Amazon), FBM (Fulfilled by Merchant), with focus on online arbitrage or wholesale.
+                  Track profit, inventory, lost shipments and restocking in one simple dashboard
                 </p>
                 <div className="mt-4 flex flex-wrap gap-3 sm:mt-6 sm:gap-4">
                   <HeroCtaSlot />
@@ -732,9 +723,12 @@ export default function LandingPage() {
                   </span>
                 </div>
               </div>
-              <div className="relative -mt-4 sm:-mt-16 lg:-mt-24">
-                <div className="overflow-hidden rounded-2xl border-2 border-white/20 bg-[var(--surface)] shadow-2xl ring-1 ring-white/10" style={{ boxShadow: "0 0 40px -8px rgba(96,165,250,0.25), 0 25px 50px -12px rgba(0,0,0,0.5)" }}>
-                  <div className="aspect-[16/10] flex flex-col p-5 sm:p-5">
+              <div className="relative mt-2 sm:mt-4 lg:mt-0 mx-auto w-full max-w-[560px] lg:max-w-[600px]">
+                <div
+                  className="relative overflow-hidden rounded-2xl border-2 border-white/60 bg-[var(--surface)] shadow-2xl ring-2 ring-white/30"
+                  style={{ boxShadow: "0 0 0 1px rgba(255,255,255,0.35), 0 0 56px -8px rgba(96,165,250,0.35), 0 30px 70px -18px rgba(0,0,0,0.75)" }}
+                >
+                  <div className="aspect-[16/11] flex flex-col p-4 sm:p-5">
                     <div className="mb-4 flex items-center justify-between gap-2 sm:mb-3">
                       <span className="text-xs font-medium uppercase tracking-widest text-[var(--foreground)]">Performance snapshot</span>
                       <span className="shrink-0 rounded-md border border-white/20 bg-white/5 px-2 py-1 text-[10px] text-[var(--muted-foreground)]">Last 30 days</span>
@@ -748,7 +742,7 @@ export default function LandingPage() {
                       ].map((card) => (
                         <div
                           key={card.label}
-                          className="aspect-square w-full max-w-[100px] sm:max-w-[130px] lg:max-w-[140px] rounded-full border-[3px] p-2.5 sm:p-3 flex flex-col items-center justify-center text-center"
+                          className="aspect-square w-full max-w-[90px] sm:max-w-[110px] lg:max-w-[120px] rounded-full border-[3px] p-2.5 sm:p-3 flex flex-col items-center justify-center text-center"
                           style={{
                             borderColor: card.color,
                             backgroundColor: "rgba(0,0,0,0.35)",
@@ -800,6 +794,11 @@ export default function LandingPage() {
                       </div>
                     </div>
                   </div>
+                  <img
+                    src="/sellerbunker-logo.png"
+                    alt="SellerBunker"
+                    className="sellerbunker-logo pointer-events-none absolute bottom-3 right-3 h-14 w-auto opacity-90 sm:bottom-4 sm:right-4 sm:h-16"
+                  />
                 </div>
               </div>
             </div>
@@ -810,7 +809,7 @@ export default function LandingPage() {
         <section id="dashboard-preview" className="border-b border-[var(--surface-border)] bg-[var(--surface)]/50 py-16 sm:py-20">
           <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
             <h2 className="text-center text-2xl font-bold text-[var(--foreground)] sm:text-3xl mb-10">
-              See your Amazon business at a glance
+              One easy place to manage your Amazon business
             </h2>
             <div className="overflow-hidden rounded-2xl border border-[var(--surface-border)] bg-[var(--surface)] shadow-xl w-full max-w-7xl mx-auto">
               <Image
@@ -834,34 +833,55 @@ export default function LandingPage() {
         <section className="border-b border-[var(--surface-border)] bg-[var(--surface)]/30 py-20 sm:py-24">
           <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
             <h2 className="text-center text-3xl font-bold text-[var(--foreground)] sm:text-4xl">
-              Amazon profit numbers are wrong.
+              Amazon doesn&apos;t show you the full picture:
             </h2>
-            <p className="mx-auto mt-6 max-w-2xl text-center text-lg text-[var(--muted-foreground)]">
-              Seller Central ignores:
-            </p>
-            <ul className="mx-auto mt-8 grid max-w-2xl gap-3 sm:grid-cols-2 lg:grid-cols-3 lg:max-w-4xl">
+            <ul className="mx-auto mt-8 max-w-2xl space-y-3 text-left text-[var(--foreground)]">
               {[
-                "Inbound shipping",
-                "Prep costs",
-                "Refunds",
-                "Damaged inventory",
-                "Cross-border VAT",
-                "True profit / ROI",
+                "You don't know your real profit",
+                "Inventory goes missing",
+                "Shipments get delayed",
+                "You restock blindly",
               ].map((item) => (
                 <li
                   key={item}
-                  className="flex items-center gap-3 rounded-xl border-2 border-white/25 bg-[var(--background)] px-4 py-3 shadow-[0_0_0_1px_rgba(255,255,255,0.15)]"
+                  className="rounded-xl border-2 border-white/40 bg-[var(--background)] px-5 py-4 text-xl font-bold leading-snug shadow-[0_0_0_1px_rgba(255,255,255,0.12)] sm:text-2xl"
                 >
-                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[var(--foreground)]" style={{ backgroundColor: accentMuted }}>
-                    <span className="text-sm" style={{ color: accentColor }}>✕</span>
+                  <span className="inline-flex items-start gap-3">
+                    <span className="mt-1.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white/10 ring-1 ring-white/35">
+                      <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: accentColor }} />
+                    </span>
+                    <span>{item}</span>
                   </span>
-                  <span className="text-[var(--foreground)]">{item}</span>
                 </li>
               ))}
             </ul>
-            <p className="mx-auto mt-10 text-center text-xl font-semibold" style={{ color: accentColor }}>
-              SellerBunker fixes this.
-            </p>
+
+            <div className="mx-auto mt-14 max-w-4xl rounded-2xl border border-white/20 bg-[var(--background)]/70 p-6 sm:mt-16 sm:p-10">
+              <p className="text-center text-xl font-bold text-[var(--foreground)] sm:text-2xl">
+                SellerBunker brings everything together:
+              </p>
+              <ul className="mt-8 grid gap-4 sm:mt-10 sm:gap-5 sm:grid-cols-2">
+                {[
+                  "Real profit tracking",
+                  "Missing inventory detection",
+                  "Shipment delay tracking",
+                  "Smart replenishment",
+                ].map((item) => (
+                  <li
+                    key={item}
+                    className="flex items-center gap-4 rounded-xl border border-white/25 bg-[var(--surface)]/90 px-5 py-4 text-base font-semibold leading-snug text-[var(--foreground)] sm:px-6 sm:py-5 sm:text-lg"
+                  >
+                    <span
+                      className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-sm font-bold text-black"
+                      style={{ backgroundColor: accentColor }}
+                    >
+                      ✓
+                    </span>
+                    <span>{item}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
           </div>
         </section>
 
@@ -882,7 +902,6 @@ export default function LandingPage() {
                 "Shipping",
                 "Refunds",
                 "Lost inventory",
-                "Inbound shipment costs",
               ].map((item) => (
                 <li
                   key={item}
@@ -926,38 +945,6 @@ export default function LandingPage() {
                 <span>True profit</span>
                 <span className="tabular-nums">£12.09</span>
               </div>
-            </div>
-          </div>
-        </section>
-
-        {/* 3. Dashboard highlight */}
-        <section className="border-b border-[var(--surface-border)] py-20 sm:py-24">
-          <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
-            <h2 className="text-center text-3xl font-bold text-[var(--foreground)] sm:text-4xl">
-              See your entire Amazon business in one dashboard
-            </h2>
-            <p className="mx-auto mt-4 max-w-2xl text-center text-lg text-[var(--muted-foreground)]">
-              Instantly understand how your products are performing with real-time sales, profit, and ROI tracking.
-            </p>
-            <div className="mt-16 grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
-              {[
-                { title: "Profit tracking", desc: "True profit after fees & COGS" },
-                { title: "Sales performance", desc: "Revenue and units sold" },
-                { title: "ROI & margins", desc: "Per product and category" },
-                { title: "Inventory summary", desc: "FBA status and stock value" },
-                { title: "Recent orders", desc: "Profit per order at a glance" },
-                { title: "Category performance", desc: "Sales, profit, ROI by category" },
-                { title: "Sales vs profit charts", desc: "Time range filters" },
-                { title: "Performance snapshot", desc: "Key metrics in one view" },
-              ].map((item) => (
-                <div
-                  key={item.title}
-                  className="rounded-xl border border-[var(--surface-border)] bg-[var(--surface)] p-5"
-                >
-                  <h3 className="font-semibold text-[var(--foreground)]" style={{ color: accentColor }}>{item.title}</h3>
-                  <p className="mt-1 text-sm text-[var(--muted-foreground)]">{item.desc}</p>
-                </div>
-              ))}
             </div>
           </div>
         </section>
@@ -1144,9 +1131,9 @@ export default function LandingPage() {
             </p>
             <div className="mt-16 grid gap-8 md:grid-cols-3">
               {[
-                { name: "Starter", price: "£14.99", period: "month", orders: "Up to 5,000 orders per month", note: "Testing price for initial users", priceSubline: "Two weeks free, then", cta: "Start free trial", featured: true, badge: "For initial testing" },
-                { name: "Growth", price: "£26.99", period: "month", orders: "5,000 – 50,000 orders per month", priceSubline: "Two weeks free, then", cta: "Start free trial", featured: false },
-                { name: "Pro", price: "£44.99", period: "month", orders: "50,000+ orders per month", priceSubline: "Two weeks free, then", cta: "Start free trial", featured: false },
+                { name: "Starter", price: "£14.99", period: "month", orders: "Up to 5,000 orders per month", note: "Testing price for initial users", priceSubline: "Two weeks free, then", cta: "Try free today", featured: true, badge: "For initial testing" },
+                { name: "Growth", price: "£26.99", period: "month", orders: "5,000 – 50,000 orders per month", priceSubline: "Two weeks free, then", cta: "Try free today", featured: false },
+                { name: "Pro", price: "£44.99", period: "month", orders: "50,000+ orders per month", priceSubline: "Two weeks free, then", cta: "Try free today", featured: false },
               ].map((plan) => (
                 <div
                   key={plan.name}
