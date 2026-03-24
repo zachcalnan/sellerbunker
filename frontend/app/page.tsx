@@ -241,9 +241,12 @@ function BottomCtaSlot() {
     return (
       <a
         href="/sign-up"
-        className={`${bottomCtaClass} inline-flex w-full justify-center text-black hover:opacity-90 sm:w-auto`}
+        className={`${bottomCtaClass} inline-flex w-full items-center justify-center gap-2 text-black hover:opacity-90 sm:w-auto`}
         style={{ backgroundColor: accentColor }}
       >
+        <svg className="h-5 w-5 shrink-0" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+          <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028 14.09 14.09 0 0 0 1.226-1.994.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03z" />
+        </svg>
         Join the private beta
       </a>
     );
@@ -253,9 +256,12 @@ function BottomCtaSlot() {
     return (
       <Link
         href="/sign-up"
-        className={`${bottomCtaClass} inline-flex w-full justify-center text-black hover:opacity-90 sm:w-auto`}
+        className={`${bottomCtaClass} inline-flex w-full items-center justify-center gap-2 text-black hover:opacity-90 sm:w-auto`}
         style={{ backgroundColor: accentColor }}
       >
+        <svg className="h-5 w-5 shrink-0" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+          <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028 14.09 14.09 0 0 0 1.226-1.994.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03z" />
+        </svg>
         Join the private beta
       </Link>
     );
@@ -1349,7 +1355,11 @@ export default function LandingPage() {
         <section className="border-b border-[var(--surface-border)] bg-[var(--background)]">
           <div className="mx-auto w-full max-w-[min(100%,88rem)] px-5 pt-5 pb-10 sm:px-6 sm:pt-3 sm:pb-12 lg:px-8 lg:pt-4 lg:pb-16 xl:max-w-[min(100%,96rem)] xl:px-10 2xl:pr-16">
             <div className="grid gap-12 lg:grid-cols-[minmax(20rem,1.1fr)_minmax(0,1.9fr)] lg:gap-10 lg:items-center xl:grid-cols-[minmax(22rem,1fr)_minmax(34rem,2fr)] xl:gap-12">
-              <div className="min-w-0 lg:max-w-2xl xl:max-w-[44rem]">
+              <div
+                className={`min-w-0 transform-gpu transition-all duration-700 ease-out lg:max-w-2xl xl:max-w-[44rem] ${
+                  heroVisualReady ? "translate-y-0 opacity-100" : "-translate-y-8 opacity-0"
+                }`}
+              >
                 <h1 className="text-3xl font-bold leading-tight tracking-normal text-[var(--foreground)] sm:text-4xl lg:text-5xl">
                   See your{" "}
                   <span className="whitespace-nowrap">REAL Amazon profit</span>
@@ -1372,8 +1382,23 @@ export default function LandingPage() {
               <div
                 className={`relative mx-auto mt-2 w-full max-w-[980px] transform-gpu transition-all duration-700 ease-out sm:mt-4 lg:mt-0 lg:ml-auto lg:w-[min(100%,920px)] lg:max-w-[920px] lg:translate-x-0 xl:w-[min(100%,1040px)] xl:max-w-[1040px] xl:translate-x-6 2xl:w-[min(100%,1160px)] 2xl:max-w-[1160px] 2xl:translate-x-10 ${heroVisualReady ? "translate-y-0 opacity-100" : "translate-y-3 opacity-0"}`}
               >
-                <div className="rounded-2xl bg-gradient-to-br from-white/80 via-white/35 to-white/5 p-[1.5px] shadow-[0_18px_50px_-28px_rgba(255,255,255,0.65)]">
-                  <HeroDashboardMock />
+                <div
+                  className={`transform-gpu transition-all duration-700 ease-out ${
+                    heroVisualReady ? "translate-x-0 opacity-100" : "translate-x-12 opacity-0"
+                  }`}
+                >
+                  <div className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-white/95 via-white/70 to-white/35 p-[2.5px] shadow-[0_22px_60px_-24px_rgba(255,255,255,0.8)]">
+                    <div
+                      className="pointer-events-none absolute inset-0 rounded-2xl"
+                      style={{
+                        boxShadow:
+                          "inset 0 0 34px rgba(255,255,255,0.52), inset 0 0 8px rgba(255,255,255,0.95), 0 0 18px rgba(255,255,255,0.45)",
+                        backdropFilter: "blur(2.5px)",
+                      }}
+                      aria-hidden
+                    />
+                    <HeroDashboardMock />
+                  </div>
                 </div>
               </div>
             </div>
@@ -1570,7 +1595,7 @@ export default function LandingPage() {
             </p>
             <ul className="mx-auto mt-12 flex max-w-2xl flex-col gap-3 sm:mx-0 sm:max-w-none sm:grid sm:grid-cols-2 lg:grid-cols-3">
               {[
-                "Amazon fees",
+                "FBA, referral & digital services fees",
                 "VAT",
                 "Prep costs",
                 "Shipping",
@@ -1599,8 +1624,20 @@ export default function LandingPage() {
                   <span className="tabular-nums">£24.99</span>
                 </div>
                 <div className="flex justify-between text-[var(--muted-foreground)]">
-                  <span>Amazon fees (FBA &amp; Referral)</span>
-                  <span className="tabular-nums">−£8.40</span>
+                  <span>Amazon referral fee</span>
+                  <span className="tabular-nums">−£3.75</span>
+                </div>
+                <div className="flex justify-between text-[var(--muted-foreground)]">
+                  <span>Amazon FBA fee</span>
+                  <span className="tabular-nums">−£4.51</span>
+                </div>
+                <div className="flex justify-between text-[var(--muted-foreground)]">
+                  <span>Digital services fee</span>
+                  <span className="tabular-nums">−£0.14</span>
+                </div>
+                <div className="flex justify-between text-[var(--muted-foreground)]">
+                  <span>Storage fee (est.)</span>
+                  <span className="tabular-nums">−£0.08</span>
                 </div>
                 <div className="flex justify-between text-[var(--muted-foreground)]">
                   <span>Prep cost</span>
@@ -1617,7 +1654,7 @@ export default function LandingPage() {
               </div>
               <div className="mt-4 flex justify-between border-t border-[var(--surface-border)] pt-4 text-base font-semibold" style={{ color: accentColor }}>
                 <span>True profit</span>
-                <span className="tabular-nums">£12.09</span>
+                <span className="tabular-nums">£12.01</span>
               </div>
             </div>
           </div>
@@ -1766,18 +1803,39 @@ export default function LandingPage() {
               Coming soon
             </div>
             <h2 className="text-3xl font-bold text-[var(--foreground)] sm:text-4xl">
-              Repricer module in development
+              SellerBunker is continuously developing new products
             </h2>
             <p className="mt-4 text-lg text-[var(--muted-foreground)]">
-              We&apos;re building a repricer to help you stay competitive on Amazon. It will integrate with your existing SellerBunker dashboard—more updates as we get closer to launch.
+              We keep shipping practical tools that work with your existing dashboard so you can make faster, more confident decisions.
             </p>
             <p className="mx-auto mt-4 max-w-2xl text-center text-sm text-[var(--muted-foreground)]">
-              We currently support UK marketplaces within the EU region while in early beta, and will be covering all EU markets very soon.
+              Our roadmap is focused on real seller workflows: improving profitability, automation, and day-to-day clarity.
             </p>
-            <div className="mt-8 flex flex-wrap items-center justify-center gap-3 text-sm text-[var(--muted-foreground)]">
-              <span className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5">Automated repricing</span>
-              <span className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5">Dashboard integration</span>
-              <span className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5">Stay competitive</span>
+            <div className="mt-8 grid w-full max-w-4xl grid-cols-1 gap-4 sm:grid-cols-3">
+              {[
+                {
+                  title: "PPC",
+                  desc: "Campaign insights, spend breakdowns, and performance signals to help you optimize ad efficiency.",
+                },
+                {
+                  title: "Repricer",
+                  desc: "Smarter pricing rules to stay competitive while protecting margin across your catalog.",
+                },
+                {
+                  title: "AI Data Help Agent",
+                  desc: "Ask questions about your seller data and get quick, actionable answers in plain English.",
+                },
+              ].map((item) => (
+                <div
+                  key={item.title}
+                  className="rounded-2xl border border-white/20 bg-white/10 px-5 py-5 text-left shadow-sm sm:min-h-[170px]"
+                >
+                  <p className="text-base font-semibold text-[var(--foreground)]">{item.title}</p>
+                  <p className="mt-2 text-xs leading-relaxed text-[var(--muted-foreground)] sm:text-sm">
+                    {item.desc}
+                  </p>
+                </div>
+              ))}
             </div>
           </div>
         </section>
@@ -1913,17 +1971,6 @@ export default function LandingPage() {
             <div className="mt-10">
               <BottomCtaSlot />
             </div>
-            <a
-              href="https://discord.gg/sbDwPbV9"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="mt-8 inline-flex items-center justify-center gap-3 rounded-xl border-2 border-white/25 bg-white/5 px-8 py-4 text-lg font-semibold text-[var(--foreground)] transition hover:bg-white/10 hover:border-white/35 no-underline"
-            >
-              <svg className="h-8 w-8 shrink-0" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-                <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028 14.09 14.09 0 0 0 1.226-1.994.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03z" />
-              </svg>
-              Join our Discord
-            </a>
           </div>
         </section>
         </div>
