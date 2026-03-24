@@ -1900,9 +1900,16 @@ function SalesTrend({
   const barAreaWidth = width - paddingX * 2;
   const numPoints = Math.max(1, points.length);
   const bucketWidth = barAreaWidth / numPoints;
-  const barWidth = bucketWidth * 0.88; // one overlapping stacked bar per day
+  /** Pair of bars per bucket: revenue (left) + profit (right); keep total width ≤ bucket */
+  const pairGap = Math.max(0.5, bucketWidth * 0.12);
+  const barWidth = Math.max(
+    0.75,
+    (bucketWidth * 0.96 - pairGap) / 2,
+  );
   const revenueColor = ringColor; // matches display settings theme
-  const profitColor = "rgb(251, 191, 36)"; // amber
+  const profitColor = "rgb(16, 185, 129)"; // emerald — distinct from revenue
+  const minBarH =
+    barAreaHeight > 0 ? Math.min(4, barAreaHeight * 0.02) : 0;
 
   const content = (
     <>
@@ -1946,7 +1953,7 @@ function SalesTrend({
         <svg
           viewBox={`-50 0 ${width + 50} ${height}`}
           className="mt-2 h-[18rem] min-h-[12rem] w-full"
-          preserveAspectRatio="none"
+          preserveAspectRatio="xMidYMid meet"
         >
           {/* X-axis line */}
           <line
@@ -2009,14 +2016,19 @@ function SalesTrend({
 
           {points.map((p, idx) => {
             const bucketLeft = paddingX + idx * bucketWidth;
-            const barX = bucketLeft + (bucketWidth - barWidth) / 2;
+            const pairTotal = barWidth * 2 + pairGap;
+            const pairLeft = bucketLeft + (bucketWidth - pairTotal) / 2;
+            const revenueX = pairLeft;
+            const profitX = pairLeft + barWidth + pairGap;
             const revenueRatio = maxValue > 0 ? p.revenue / maxValue : 0;
-            const profitRatio = maxValue > 0 ? p.profit / maxValue : 0;
-            const revenueHeight = revenueRatio * barAreaHeight;
-            const profitHeight = profitRatio * barAreaHeight;
+            const profitRatio = maxValue > 0 ? Math.max(0, p.profit) / maxValue : 0;
+            const rawRevH = revenueRatio * barAreaHeight;
+            const rawProfH = profitRatio * barAreaHeight;
+            const revenueHeight =
+              p.revenue > 0 ? Math.max(rawRevH, minBarH) : 0;
+            const profitHeight =
+              p.profit > 0 ? Math.max(rawProfH, minBarH) : 0;
             const barBottomY = paddingTop + barAreaHeight;
-            const profitSegmentTopY = barBottomY - profitHeight;
-            const barTopY = barBottomY - revenueHeight;
             const isHovered = hoveredIndex === idx;
 
             return (
@@ -2025,29 +2037,30 @@ function SalesTrend({
                 onMouseEnter={() => setHoveredIndex(idx)}
                 onMouseLeave={() => setHoveredIndex(null)}
               >
-                {/* Profit (amber) – bottom segment, drawn first */}
                 <rect
-                  x={barX}
-                  y={profitSegmentTopY}
+                  x={revenueX}
+                  y={barBottomY - revenueHeight}
                   width={barWidth}
-                  height={profitHeight}
-                  fill={isHovered ? profitColor : "rgba(251, 191, 36, 0.7)"}
-                  rx={2}
+                  height={revenueHeight}
+                  fill={revenueColor}
+                  fillOpacity={isHovered ? 1 : 0.9}
+                  stroke="rgba(255,255,255,0.12)"
+                  strokeWidth={0.4}
+                  rx={1.5}
                   className="cursor-pointer"
                 />
-                {/* Revenue extends above profit – colour matches display settings theme */}
-                {revenueHeight > profitHeight && (
-                  <rect
-                    x={barX}
-                    y={barTopY}
-                    width={barWidth}
-                    height={revenueHeight - profitHeight}
-                    fill={revenueColor}
-                    fillOpacity={isHovered ? 1 : 0.6}
-                    rx={2}
-                    className="cursor-pointer"
-                  />
-                )}
+                <rect
+                  x={profitX}
+                  y={barBottomY - profitHeight}
+                  width={barWidth}
+                  height={profitHeight}
+                  fill={profitColor}
+                  fillOpacity={isHovered ? 1 : 0.92}
+                  stroke="rgba(255,255,255,0.12)"
+                  strokeWidth={0.4}
+                  rx={1.5}
+                  className="cursor-pointer"
+                />
               </g>
             );
           })}
@@ -2059,8 +2072,10 @@ function SalesTrend({
                 hoveredIndex * bucketWidth +
                 bucketWidth / 2;
               const revenueRatio = maxValue > 0 ? p.revenue / maxValue : 0;
+              const profitRatio = maxValue > 0 ? p.profit / maxValue : 0;
               const revenueHeight = revenueRatio * barAreaHeight;
-              const y = paddingTop + (barAreaHeight - revenueHeight);
+              const profitHeight = profitRatio * barAreaHeight;
+              const y = paddingTop + barAreaHeight - Math.max(revenueHeight, profitHeight);
               const isZero = p.revenue === 0 && p.profit === 0;
               const label = isZero
                 ? "Zero sales"
