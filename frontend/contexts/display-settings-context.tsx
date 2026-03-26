@@ -23,7 +23,8 @@ const BACKGROUND_CLASSES: Record<BackgroundTheme, string> = {
   green: "bg-green-shine",
 };
 
-const DEFAULT_RING_COLOR = "rgb(2, 242, 170)";
+// Match the landing-page dashboard mock accent by default.
+const DEFAULT_RING_COLOR = "rgb(96, 165, 250)";
 
 function readBackground(): BackgroundTheme {
   if (typeof window === "undefined") return "dark";

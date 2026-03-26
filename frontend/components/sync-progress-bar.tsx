@@ -13,6 +13,7 @@ export function SyncProgressBar() {
     showBackgroundSyncNote,
     backgroundSyncTooltip,
     dismissSyncBar,
+    triggerSyncNow,
   } = useNotifications();
 
   if (!showSyncBox) return null;
@@ -39,12 +40,21 @@ export function SyncProgressBar() {
                 ? "bg-sb-accent"
                 : "bg-sb-accent/80"
           }`}
-          style={{ width: barIsIndeterminate ? "40%" : `${visibleSyncProgress}%` }}
+          style={{ width: barIsIndeterminate ? "0%" : `${visibleSyncProgress}%` }}
         />
       </div>
       <span className="shrink-0 tabular-nums text-sm font-medium text-[var(--foreground)]">
         {Math.round(barIsIndeterminate ? 0 : visibleSyncProgress)}%
       </span>
+      {!barIsIndeterminate && Math.round(visibleSyncProgress) === 0 && !syncComplete && (
+        <button
+          type="button"
+          onClick={() => void triggerSyncNow()}
+          className="shrink-0 rounded-md border border-[var(--surface-border)] px-2 py-1 text-xs text-[var(--foreground)] hover:bg-[var(--foreground)]/10"
+        >
+          Start sync now
+        </button>
+      )}
       {showBackgroundSyncNote && (
         <span
           className="inline-flex shrink-0 items-center text-[var(--muted-foreground)]"

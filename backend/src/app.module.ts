@@ -13,6 +13,7 @@ import { ClerkModule } from './clerk/clerk.module';
 import { OrgsModule } from './orgs/orgs.module';
 import { SubscriptionModule } from './subscription/subscription.module';
 import { StripeModule } from './stripe/stripe.module';
+import { MarketplaceModule } from './marketplace/marketplace.module';
 
 @Module({
   imports: [
@@ -45,6 +46,7 @@ import { StripeModule } from './stripe/stripe.module';
     ClerkModule,
     SubscriptionModule,
     StripeModule,
+    MarketplaceModule,
   ],
   controllers: [AppController],
   providers: [AppService],

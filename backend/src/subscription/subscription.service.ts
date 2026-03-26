@@ -1,12 +1,16 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, Logger, forwardRef } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { StripeService } from '../stripe/stripe.service';
+import { AmazonSyncService } from '../amazon/amazon-sync.service';
 
 @Injectable()
 export class SubscriptionService {
+  private readonly logger = new Logger(SubscriptionService.name);
   constructor(
     private readonly prisma: PrismaService,
     private readonly stripeService: StripeService,
+    @Inject(forwardRef(() => AmazonSyncService))
+    private readonly amazonSyncService: AmazonSyncService,
   ) {}
 
   private isBillingBypassed(): boolean {
@@ -150,5 +154,27 @@ export class SubscriptionService {
         trialEndAt: trialEndAt ?? undefined,
       },
     });
+
+    // After card signup/payment, start (or restart) background Amazon sync
+    // when the user already connected Amazon during onboarding.
+    try {
+      const hasAmazonLink = await this.prisma.sellerAccount.findFirst({
+        where: {
+          userId: user.id,
+          marketplace: 'amazon',
+          isActive: true,
+        },
+        select: { id: true },
+      });
+      if (hasAmazonLink) {
+        await this.amazonSyncService.enqueueFullSync(user.id);
+      }
+    } catch (e) {
+      this.logger.warn(
+        `recordFromCheckout: failed to enqueue full sync for userId=${user.id}: ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+      );
+    }
   }
 }

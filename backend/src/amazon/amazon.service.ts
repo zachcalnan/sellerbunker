@@ -20,6 +20,7 @@ import {
   vatAmountFromIncl,
   vatAmountFromEx,
 } from '../common/vat.util';
+import { MARKETPLACE_MAP } from '../marketplace/marketplace.constants';
 
 /** When we have no settled fees and no product fee estimate, use this share of revenue as fee so profit/ROI are not overstated. */
 const DEFAULT_AMAZON_FEE_RATE_WHEN_UNKNOWN = 0.35;
@@ -36,6 +37,18 @@ export class AmazonService {
 
   private async getOrgMemberUserIds(orgId: string): Promise<string[]> {
     return this.usersService.getOrgMemberUserIds(orgId);
+  }
+
+  private resolveCurrencyFromMarketplace(
+    defaultCurrency: string,
+    marketplaceId?: string,
+  ): string {
+    if (!marketplaceId) return defaultCurrency;
+    return MARKETPLACE_MAP.get(marketplaceId)?.currencyCode ?? defaultCurrency;
+  }
+
+  private resolveMarketplaceFilter(marketplaceId?: string) {
+    return marketplaceId ? { in: [marketplaceId, 'amazon'] } : 'amazon';
   }
 
   /** Load org VAT settings for a user (uses user's active org). Returns null if no org or no VAT settings. */
@@ -502,7 +515,9 @@ export class AmazonService {
     orgId: string,
     preferredUserId?: string,
     range?: { start?: string; end?: string },
+    marketplaceId?: string,
   ) {
+    const marketplaceFilter = this.resolveMarketplaceFilter(marketplaceId);
     let credentials: SpApiCredentials;
 
     // Ensure the user has a linked Amazon account; preserve existing 404 behavior.
@@ -554,7 +569,7 @@ export class AmazonService {
     const orders = await this.prisma.order.findMany({
       where: {
         userId: { in: userIds },
-        marketplace: 'amazon',
+        marketplace: marketplaceFilter,
         orderDate: { gte: safeStart, lte: safeEnd },
       },
       select: {
@@ -567,7 +582,10 @@ export class AmazonService {
     });
 
     if (!orders.length) {
-      const currency = credentials.region === 'eu' ? 'GBP' : 'USD';
+      const currency = this.resolveCurrencyFromMarketplace(
+        credentials.region === 'eu' ? 'GBP' : 'USD',
+        marketplaceId,
+      );
       return {
         marketplace: 'amazon',
         sellerId: 'LIVE-SELLER',
@@ -646,7 +664,7 @@ export class AmazonService {
     const orderItems = await (this.prisma as any).orderItem.findMany({
       where: {
         userId: { in: userIds },
-        marketplace: 'amazon',
+        marketplace: marketplaceFilter,
         orderDbId: { in: uniqueOrderDbIds },
       },
       select: {
@@ -801,7 +819,10 @@ export class AmazonService {
       }
     }
 
-    const currency = credentials.region === 'eu' ? 'GBP' : 'USD';
+    const currency = this.resolveCurrencyFromMarketplace(
+      credentials.region === 'eu' ? 'GBP' : 'USD',
+      marketplaceId,
+    );
     const hasCostData = hasProfitData;
     const profitMargin = hasCostData && revenue > 0 ? totalProfit / revenue : 0;
     const roiPct =
@@ -836,6 +857,7 @@ export class AmazonService {
   async getCategoryBreakdown(
     orgId: string,
     range?: { start?: string; end?: string },
+    marketplaceId?: string,
   ): Promise<{
     sales: Array<{ category: string; value: number }>;
     profit: Array<{ category: string; value: number }>;
@@ -843,13 +865,14 @@ export class AmazonService {
     units: Array<{ category: string; value: number }>;
     currency: string;
   }> {
+    const marketplaceFilter = this.resolveMarketplaceFilter(marketplaceId);
     const empty = (): Array<{ category: string; value: number }> => [];
     const defaultRes = {
       sales: empty(),
       profit: empty(),
       roi: empty(),
       units: empty(),
-      currency: 'GBP',
+      currency: this.resolveCurrencyFromMarketplace('GBP', marketplaceId),
     };
 
     const parseDate = (s: string | undefined): Date | null => {
@@ -868,7 +891,7 @@ export class AmazonService {
     const orderItems = await (this.prisma as any).orderItem.findMany({
       where: {
         userId: { in: userIds },
-        marketplace: 'amazon',
+        marketplace: marketplaceFilter,
         orderDate: { gte: safeStart, lte: safeEnd },
       },
       select: {
@@ -932,6 +955,7 @@ export class AmazonService {
   async getCostBreakdown(
     orgId: string,
     range?: { start?: string; end?: string },
+    marketplaceId?: string,
   ): Promise<{
     totalCogs: number;
     prepFees: number;
@@ -943,6 +967,7 @@ export class AmazonService {
     start: string;
     end: string;
   }> {
+    const marketplaceFilter = this.resolveMarketplaceFilter(marketplaceId);
     const parseDate = (s: string | undefined): Date | null => {
       if (!s || typeof s !== 'string') return null;
       const d = new Date(s);
@@ -966,7 +991,7 @@ export class AmazonService {
         fbaFees: 0,
         digitalServiceFees: 0,
         totalAmazonFees: 0,
-        currency: 'GBP',
+        currency: this.resolveCurrencyFromMarketplace('GBP', marketplaceId),
         start: safeStart.toISOString().slice(0, 10),
         end: safeEnd.toISOString().slice(0, 10),
       };
@@ -975,7 +1000,7 @@ export class AmazonService {
     const orderItems = await (this.prisma as any).orderItem.findMany({
       where: {
         userId: { in: userIds },
-        marketplace: 'amazon',
+        marketplace: marketplaceFilter,
         orderDate: { gte: safeStart, lte: safeEnd },
       },
       select: {
@@ -1040,7 +1065,7 @@ export class AmazonService {
       fbaFees,
       digitalServiceFees,
       totalAmazonFees,
-      currency: 'GBP',
+      currency: this.resolveCurrencyFromMarketplace('GBP', marketplaceId),
       start: safeStart.toISOString().slice(0, 10),
       end: safeEnd.toISOString().slice(0, 10),
     };
@@ -1054,6 +1079,7 @@ export class AmazonService {
   async getProfitAndLoss(
     orgId: string,
     range?: { start?: string; end?: string },
+    marketplaceId?: string,
   ): Promise<{
     revenue: number;
     totalSellingCosts: number;
@@ -1075,7 +1101,8 @@ export class AmazonService {
     start: string;
     end: string;
   }> {
-    const cost = await this.getCostBreakdown(orgId, range);
+    const marketplaceFilter = this.resolveMarketplaceFilter(marketplaceId);
+    const cost = await this.getCostBreakdown(orgId, range, marketplaceId);
     const parseDate = (s: string | undefined): Date | null => {
       if (!s || typeof s !== 'string') return null;
       const d = new Date(s);
@@ -1114,7 +1141,7 @@ export class AmazonService {
       const items = await (this.prisma as any).orderItem.findMany({
         where: {
           userId: { in: userIds },
-          marketplace: 'amazon',
+          marketplace: marketplaceFilter,
           orderDate: { gte: safeStart, lte: safeEnd },
         },
         select: {
@@ -1257,7 +1284,9 @@ export class AmazonService {
     orgId: string,
     range?: { start?: string; end?: string },
     preferredUserId?: string,
+    marketplaceId?: string,
   ) {
+    const marketplaceFilter = this.resolveMarketplaceFilter(marketplaceId);
     let credentials: SpApiCredentials;
 
     try {
@@ -1282,7 +1311,7 @@ export class AmazonService {
     const ordersFromDb = await this.prisma.order.findMany({
       where: {
         userId: { in: userIds },
-        marketplace: 'amazon',
+        marketplace: marketplaceFilter,
         orderDate: {
           gte: startDate,
           lte: endDate,
@@ -1321,7 +1350,10 @@ export class AmazonService {
       byDate.set(key, existing);
     }
 
-    const currency = credentials.region === 'eu' ? 'GBP' : 'USD';
+    const currency = this.resolveCurrencyFromMarketplace(
+      credentials.region === 'eu' ? 'GBP' : 'USD',
+      marketplaceId,
+    );
 
     // One bar per day from start to end (inclusive); fill missing days with 0. Cap at 30 days.
     const dayMs = 24 * 60 * 60 * 1000;
@@ -2173,7 +2205,7 @@ export class AmazonService {
         userId,
         productId: selectedProduct.id,
         orderId: amazonOrderId,
-        marketplace: 'amazon',
+        marketplace: String((order as any)?.MarketplaceId ?? (order as any)?.marketplaceId ?? 'amazon'),
         sku: selectedSku,
         asin: selectedAsin,
         quantity,
@@ -2192,7 +2224,7 @@ export class AmazonService {
           userId_orderId_marketplace: {
             userId,
             orderId: amazonOrderId,
-            marketplace: 'amazon',
+            marketplace: String((order as any)?.MarketplaceId ?? (order as any)?.marketplaceId ?? 'amazon'),
           },
         } as any,
         update: updateData,
@@ -2214,6 +2246,10 @@ export class AmazonService {
           return Number.isNaN(revenue) ? 0 : revenue;
         });
         const totalItemRevenue = itemRevenues.reduce((a, b) => a + b, 0);
+        const totalQtyFromItems = orderItems.reduce((sum: number, it: any) => {
+          const q = Number(it?.QuantityOrdered ?? 0);
+          return sum + (Number.isFinite(q) && q > 0 ? q : 0);
+        }, 0);
 
         for (let idx = 0; idx < itemsToWrite; idx++) {
           const it = orderItems[idx];
@@ -2229,7 +2265,19 @@ export class AmazonService {
           const qty = Number(it?.QuantityOrdered ?? 0);
           const quantityOrdered = qty > 0 ? qty : 1;
 
-          const revenueTotal = itemRevenues[idx] ?? 0;
+          // Some SP-API responses omit ItemPrice on order items. In that case, fall back
+          // to proportional allocation from order total so we never persist zero-price lines.
+          let revenueTotal = itemRevenues[idx] ?? 0;
+          if (
+            (!Number.isFinite(revenueTotal) || revenueTotal <= 0) &&
+            totalAmount > 0 &&
+            totalQtyFromItems > 0 &&
+            quantityOrdered > 0
+          ) {
+            revenueTotal = Number(
+              ((totalAmount * quantityOrdered) / totalQtyFromItems).toFixed(2),
+            );
+          }
           const shippingCharged = Number(it?.ShippingPrice?.Amount ?? 0);
           const taxCharged = Number(it?.ItemTax?.Amount ?? 0);
 
@@ -2254,7 +2302,7 @@ export class AmazonService {
             const sameAsinSettled = await (this.prisma as any).orderItem.findFirst({
               where: {
                 userId,
-                marketplace: 'amazon',
+                marketplace: String((order as any)?.MarketplaceId ?? (order as any)?.marketplaceId ?? 'amazon'),
                 asin: asinTrim,
                 feesSource: 'finances',
                 quantity: { gt: 0 },
@@ -2472,7 +2520,7 @@ export class AmazonService {
           const updatePayload = {
             userId,
             productId: itemProduct.id,
-            marketplace: 'amazon',
+            marketplace: String((order as any)?.MarketplaceId ?? (order as any)?.marketplaceId ?? 'amazon'),
             orderId: amazonOrderId,
             sku: sku || genericSku,
             asin,
@@ -2505,7 +2553,7 @@ export class AmazonService {
               userId,
               orderDbId: persistedOrder.id,
               productId: itemProduct.id,
-              marketplace: 'amazon',
+              marketplace: String((order as any)?.MarketplaceId ?? (order as any)?.marketplaceId ?? 'amazon'),
               orderId: amazonOrderId,
               orderItemId,
               sku: sku || genericSku,
@@ -2896,7 +2944,9 @@ export class AmazonService {
     orgId: string,
     limit = 10,
     period: '30d' | 'month' = '30d',
+    marketplaceId?: string,
   ) {
+    const marketplaceFilter = this.resolveMarketplaceFilter(marketplaceId);
     const nowSafe = new Date(Date.now() - 5 * 60 * 1000);
     const startDate =
       period === 'month'
@@ -2946,7 +2996,7 @@ export class AmazonService {
         by: ['productId'],
         where: {
           userId: { in: userIds },
-          marketplace: 'amazon',
+          marketplace: marketplaceFilter,
           ...dateFilter,
           ...(excludeIds.length > 0 ? { productId: { notIn: excludeIds } } : {}),
         },
@@ -2964,7 +3014,7 @@ export class AmazonService {
         by: ['productId'],
         where: {
           userId: { in: userIds },
-          marketplace: 'amazon',
+          marketplace: marketplaceFilter,
           ...dateFilter,
           profit: { not: null },
         },
@@ -2980,7 +3030,7 @@ export class AmazonService {
           by: ['productId'],
           where: {
             userId: { in: userIds },
-            marketplace: 'amazon',
+          marketplace: marketplaceFilter,
             ...dateFilter,
             ...(excludeIds.length > 0 ? { productId: { notIn: excludeIds } } : {}),
           },
@@ -2996,7 +3046,7 @@ export class AmazonService {
           by: ['productId'],
           where: {
             userId: { in: userIds },
-            marketplace: 'amazon',
+            marketplace: marketplaceFilter,
             ...dateFilter,
           },
           _sum: { quantity: true, totalProfit: true },
@@ -3051,7 +3101,8 @@ export class AmazonService {
    * Replenishment list: all products with stock value zero (out of stock), sorted by most sold first, then estimated profit.
    * Includes every SKU that has availableQty <= 0 (or no inventory record). Order stats are attached when present.
    */
-  async getReplenishProducts(orgId: string, limit = 5000) {
+  async getReplenishProducts(orgId: string, limit = 5000, marketplaceId?: string) {
+    const marketplaceFilter = this.resolveMarketplaceFilter(marketplaceId);
     const userIds = await this.getOrgMemberUserIds(orgId);
 
     // All products for org, with inventory (so we can filter by stock)
@@ -3079,7 +3130,7 @@ export class AmazonService {
       by: ['productId'],
       where: {
         userId: { in: userIds },
-        marketplace: 'amazon',
+        marketplace: marketplaceFilter,
         productId: { in: productIds },
       },
       _sum: { quantity: true, profit: true },
@@ -3092,7 +3143,7 @@ export class AmazonService {
         by: ['productId'],
         where: {
           userId: { in: userIds },
-          marketplace: 'amazon',
+          marketplace: marketplaceFilter,
           productId: { in: productIds },
         },
         _sum: { quantity: true, totalProfit: true },
@@ -3206,15 +3257,21 @@ export class AmazonService {
   async listProductsFromInventory(
     orgId: string,
     opts?: { take?: number; skip?: number },
+    marketplaceId?: string,
   ): Promise<{ total: number; items: Array<{ id: string; sku: string; asin: string | null; title: string | null; imageUrl: string | null }> }> {
     const userIds = await this.getOrgMemberUserIds(orgId);
     const take = Math.max(1, Math.min(100, opts?.take ?? 10));
     const skip = Math.max(0, opts?.skip ?? 0);
 
-    const invRows = await this.prisma.inventory.findMany({
-      where: { userId: { in: userIds } },
-      select: { productId: true },
-    });
+    const invRows = marketplaceId
+      ? await this.prisma.inventoryByMarketplace.findMany({
+          where: { userId: { in: userIds }, marketplaceId },
+          select: { productId: true },
+        })
+      : await this.prisma.inventory.findMany({
+          where: { userId: { in: userIds } },
+          select: { productId: true },
+        });
     const productIds = [...new Set(invRows.map((r) => r.productId))];
     const total = productIds.length;
     if (total === 0) return { total: 0, items: [] };
@@ -3242,15 +3299,21 @@ export class AmazonService {
   async listProductsWithCostFromInventory(
     orgId: string,
     opts?: { take?: number; skip?: number },
+    marketplaceId?: string,
   ): Promise<{ total: number; items: Array<{ id: string; sku: string; asin: string | null; title: string | null; imageUrl: string | null }> }> {
     const userIds = await this.getOrgMemberUserIds(orgId);
     const take = Math.max(1, Math.min(100, opts?.take ?? 10));
     const skip = Math.max(0, opts?.skip ?? 0);
 
-    const invRows = await this.prisma.inventory.findMany({
-      where: { userId: { in: userIds } },
-      select: { productId: true },
-    });
+    const invRows = marketplaceId
+      ? await this.prisma.inventoryByMarketplace.findMany({
+          where: { userId: { in: userIds }, marketplaceId },
+          select: { productId: true },
+        })
+      : await this.prisma.inventory.findMany({
+          where: { userId: { in: userIds } },
+          select: { productId: true },
+        });
     const inventoryProductIds = [...new Set(invRows.map((r) => r.productId))];
     if (inventoryProductIds.length === 0) return { total: 0, items: [] };
 
@@ -3695,7 +3758,8 @@ export class AmazonService {
    * List order items for the org (most recent first). Each row uses stored amazonFeesTotal and profit:
    * when Finances API has settled (feesSource='finances') those are exact concluded values for past sales.
    */
-  async listOrders(orgId: string) {
+  async listOrders(orgId: string, marketplaceId?: string) {
+    const marketplaceFilter = this.resolveMarketplaceFilter(marketplaceId);
     let userIds: string[];
     try {
       userIds = await this.getOrgMemberUserIds(orgId);
@@ -3721,6 +3785,7 @@ export class AmazonService {
             sku: true;
             asin: true;
             quantity: true;
+            orderDbId: true;
             revenueTotal: true;
             taxChargedTotal: true;
             amazonFeesTotal: true;
@@ -3738,7 +3803,7 @@ export class AmazonService {
     >;
     try {
       items = await this.prisma.orderItem.findMany({
-        where: { userId: { in: userIds }, marketplace: 'amazon' },
+        where: { userId: { in: userIds }, marketplace: marketplaceFilter as any },
         orderBy: [{ orderDate: 'desc' }],
         select: {
           id: true,
@@ -3747,6 +3812,7 @@ export class AmazonService {
           sku: true,
           asin: true,
           quantity: true,
+          orderDbId: true,
           revenueTotal: true,
           taxChargedTotal: true,
           amazonFeesTotal: true,
@@ -3778,14 +3844,33 @@ export class AmazonService {
 
     this.logger.log(`[listOrders] orgId=${orgId} orderItemCount=${items.length}`);
     const productIds = [...new Set(items.map((i) => i.productId).filter(Boolean))];
+    const orderDbIds = [
+      ...new Set(
+        items
+          .map((i: any) => (i.orderDbId != null ? String(i.orderDbId) : ''))
+          .filter(Boolean),
+      ),
+    ];
     const inventoryByProductId = new Map<
       string,
       { availableQty: number; totalQty: number }
     >();
+    const orderPriceByDbId = new Map<string, { itemPrice: number; quantity: number }>();
+    const skuUnitPriceFallback = new Map<string, number>();
     const productFeesById = new Map<
       string,
       { referralPerUnit: number | null; fbaPerUnit: number | null; digitalServicePerUnit: number | null; amazonFeePerUnit: number | null }
     >();
+    const safeNum = (v: unknown): number => {
+      if (v == null) return 0;
+      if (typeof v === 'number' && Number.isFinite(v)) return v;
+      const o = v as { toNumber?: () => number; toString?: () => string };
+      if (o?.toNumber && typeof o.toNumber === 'function') return o.toNumber();
+      if (o?.toString && typeof o.toString === 'function') return Number(o.toString()) || 0;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : 0;
+    };
+
     if (productIds.length > 0) {
       try {
         const inv = await this.prisma.inventory.findMany({
@@ -3829,16 +3914,31 @@ export class AmazonService {
         // Raw query or product columns may fail; table still shows with totals and 50/50 fallback
       }
     }
-
-    const safeNum = (v: unknown): number => {
-      if (v == null) return 0;
-      if (typeof v === 'number' && Number.isFinite(v)) return v;
-      const o = v as { toNumber?: () => number; toString?: () => string };
-      if (o?.toNumber && typeof o.toNumber === 'function') return o.toNumber();
-      if (o?.toString && typeof o.toString === 'function') return Number(o.toString()) || 0;
-      const n = Number(v);
-      return Number.isFinite(n) ? n : 0;
-    };
+    if (orderDbIds.length > 0) {
+      try {
+        const rows = await this.prisma.order.findMany({
+          where: { id: { in: orderDbIds } },
+          select: { id: true, itemPrice: true, quantity: true },
+        });
+        for (const row of rows) {
+          orderPriceByDbId.set(String(row.id), {
+            itemPrice: safeNum(row.itemPrice),
+            quantity: safeNum(row.quantity),
+          });
+        }
+      } catch {
+        // Non-fatal: keep existing revenueTotal path.
+      }
+    }
+    for (const it of items) {
+      const sku = String((it as any).sku ?? '').trim();
+      if (!sku || skuUnitPriceFallback.has(sku)) continue;
+      const rev = safeNum((it as any).revenueTotal);
+      const qty = safeNum((it as any).quantity);
+      if (rev > 0 && qty > 0) {
+        skuUnitPriceFallback.set(sku, rev / qty);
+      }
+    }
 
     const toNum = (v: unknown): number | null => {
       if (v == null) return null;
@@ -3870,15 +3970,28 @@ export class AmazonService {
     };
 
     try {
-      return items.map((it) => {
+      const mappedRows = items.map((it) => {
       const productRaw = (it as any).product ?? null;
       const product = productRaw as { title?: string | null; imageUrl?: string | null; estimatedReferralFeePerUnit?: unknown; estimatedFbaFeePerUnit?: unknown; estimatedDigitalServiceFeePerUnit?: unknown; estimatedAmazonFeePerUnit?: unknown } | null;
       const inv = inventoryByProductId.get(it.productId) ?? null;
       const fees = productFeesById.get(it.productId) ?? null;
-      const revenueTotal = safeNum(it.revenueTotal);
+      const qty = safeNum(it.quantity) || 1;
+      const skuKey = String((it as any).sku ?? '').trim();
+      const rawRevenueTotal = safeNum(it.revenueTotal);
+      const orderDbId = (it as any).orderDbId != null ? String((it as any).orderDbId) : '';
+      const orderFallback = orderDbId ? orderPriceByDbId.get(orderDbId) : null;
+      const revenueTotal =
+        rawRevenueTotal > 0
+          ? rawRevenueTotal
+          : orderFallback != null &&
+              orderFallback.itemPrice > 0 &&
+              orderFallback.quantity > 0
+            ? orderFallback.itemPrice * qty
+            : skuKey && skuUnitPriceFallback.has(skuKey)
+              ? (skuUnitPriceFallback.get(skuKey) as number) * qty
+            : rawRevenueTotal;
       const taxChargedTotal = safeNum(it.taxChargedTotal);
       const settledFees = safeNum(it.amazonFeesTotal);
-      const qty = safeNum(it.quantity) || 1;
       // Use order item stored fees when present; else product's saved estimate (so we always pick up estimates from DB).
       const estPerUnit = fees?.amazonFeePerUnit ?? toNum(product?.estimatedAmazonFeePerUnit) ?? null;
       const estReferral = fees?.referralPerUnit ?? toNum(product?.estimatedReferralFeePerUnit) ?? null;
@@ -3957,6 +4070,7 @@ export class AmazonService {
       const orderDate = it.orderDate instanceof Date ? it.orderDate.toISOString() : String(it.orderDate ?? '');
       return {
         id: String(it.id),
+        __productId: String(it.productId ?? ''),
         orderId: String(it.orderId),
         orderDate,
         sku: String(it.sku),
@@ -3976,6 +4090,22 @@ export class AmazonService {
         totalStock: inv?.totalQty ?? null,
       };
     });
+      // Show a realistic stock progression across recent rows for the same product:
+      // newest row uses current available stock, older rows step up by sold qty.
+      const soldSoFarByProduct = new Map<string, number>();
+      for (const row of mappedRows) {
+        const pid = row.__productId;
+        if (!pid) continue;
+        const soldBefore = soldSoFarByProduct.get(pid) ?? 0;
+        if (row.availableStock != null && Number.isFinite(row.availableStock)) {
+          row.availableStock = Math.max(0, row.availableStock + soldBefore);
+        }
+        soldSoFarByProduct.set(
+          pid,
+          soldBefore + (Number.isFinite(row.quantity) ? Math.max(0, row.quantity) : 0),
+        );
+      }
+      return mappedRows.map(({ __productId, ...row }) => row);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.logger.warn(`[listOrders] mapping order items failed (orgId=${orgId}): ${msg}`);
@@ -3983,7 +4113,7 @@ export class AmazonService {
     }
   }
 
-  async listInventory(orgId: string) {
+  async listInventory(orgId: string, marketplaceId?: string) {
     const userIds = await this.getOrgMemberUserIds(orgId);
     type InventoryProductRow = {
       id: string;
@@ -4121,7 +4251,36 @@ export class AmazonService {
       (a, b) => b.updatedAt.getTime() - a.updatedAt.getTime(),
     );
 
-    return uniqueRows.map((p) => ({
+    return uniqueRows.map((p) => {
+      const selectedMarketplace = marketplaceId
+        ? ((p as any).inventoryByMarketplace ?? []).find(
+            (m: any) => m.marketplaceId === marketplaceId,
+          )
+        : null;
+      const selectedAvailable =
+        selectedMarketplace != null
+          ? Number(selectedMarketplace.fulfillableQty ?? 0)
+          : null;
+      const selectedReserved =
+        selectedMarketplace != null
+          ? Number(selectedMarketplace.reservedQty ?? 0)
+          : null;
+      const selectedInbound =
+        selectedMarketplace != null
+          ? Number(selectedMarketplace.inboundQty ?? 0)
+          : null;
+      const selectedIssue =
+        selectedMarketplace != null
+          ? Number(
+              (selectedMarketplace.unfulfillableQty ?? 0) +
+                (selectedMarketplace.researchingQty ?? 0),
+            )
+          : null;
+      const selectedTotal =
+        selectedMarketplace != null
+          ? Number(selectedMarketplace.currentQty ?? 0)
+          : null;
+      return {
       productId: p.id,
       sku: p.sku,
       asin: p.asin,
@@ -4137,11 +4296,11 @@ export class AmazonService {
       currentListedPrice: (p as any).currentListedPrice != null ? Number((p as any).currentListedPrice) : null,
       costOfGoods: (p as any).costOfGoods != null ? Number((p as any).costOfGoods) : null,
       feeEstimateRawJson: (p as any).feeEstimateRawJson ?? null,
-      availableQty: p.inventory?.availableQty ?? null,
-      reservedQty: p.inventory?.reservedQty ?? null,
-      inboundQty: p.inventory?.inboundQty ?? null,
-      issueQty: p.inventory?.issueQty ?? null,
-      totalQty: p.inventory?.totalQty ?? null,
+      availableQty: marketplaceId ? selectedAvailable : p.inventory?.availableQty ?? null,
+      reservedQty: marketplaceId ? selectedReserved : p.inventory?.reservedQty ?? null,
+      inboundQty: marketplaceId ? selectedInbound : p.inventory?.inboundQty ?? null,
+      issueQty: marketplaceId ? selectedIssue : p.inventory?.issueQty ?? null,
+      totalQty: marketplaceId ? selectedTotal : p.inventory?.totalQty ?? null,
       inventoryUpdatedAt: p.inventory?.updatedAt ?? null,
       rawJson: p.inventory?.rawJson ?? null,
       byMarketplace: (p as any).inventoryByMarketplace?.map((m: any) => ({
@@ -4162,7 +4321,8 @@ export class AmazonService {
         expiredQty: Number(m.expiredQty ?? 0),
         updatedAt: m.updatedAt ?? null,
       })) ?? [],
-    }));
+    };
+    });
   }
 
   /**
@@ -4206,7 +4366,7 @@ export class AmazonService {
    * Masks createdDate/checkedInDate when they fall on the same calendar day as createdAt/updatedAt,
    * since those were likely stored as "today" at sync time rather than real API dates.
    */
-  async listShipments(orgId: string) {
+  async listShipments(orgId: string, marketplaceId?: string) {
     const userIds = await this.getOrgMemberUserIds(orgId);
     const rows = await this.prisma.shipment.findMany({
       where: { userId: { in: userIds } },
@@ -7176,6 +7336,37 @@ try {
     return this.spApiClient.getMarketplaceParticipations(credentials);
   }
 
+  async getMarketplaceParticipationsForUser(userId: string) {
+    const credentials = await this.getAmazonCredentialsForUser(userId);
+    const participations = (await this.spApiClient.getMarketplaceParticipations(
+      credentials,
+    )) as any;
+    return {
+      region: credentials.region ?? 'eu',
+      participations,
+    };
+  }
+
+  async getOrderCountLast24HoursForMarketplace(
+    userId: string,
+    marketplaceId: string,
+  ): Promise<number> {
+    const credentials = await this.getAmazonCredentialsForUser(userId);
+    const lastUpdatedAfter = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const response = (await this.spApiClient.getOrders(credentials, {
+      lastUpdatedAfter,
+      marketplaceIds: [marketplaceId],
+      orderStatuses: ['Pending', 'Unshipped', 'PartiallyShipped', 'Shipped', 'InvoiceUnconfirmed'],
+    })) as any;
+    const payload = response?.payload ?? response;
+    const orders = Array.isArray(payload?.Orders)
+      ? payload.Orders
+      : Array.isArray(payload?.orders)
+        ? payload.orders
+        : [];
+    return orders.length;
+  }
+
   // ----------------------------
   // Purchases / inbound costs
   // ----------------------------
@@ -7183,6 +7374,7 @@ try {
   async listPurchases(
     orgId: string,
     opts?: { query?: string; take?: number; skip?: number },
+    marketplaceId?: string,
   ) {
     const userIds = await this.getOrgMemberUserIds(orgId);
     const q = (opts?.query ?? '').trim();
@@ -7648,6 +7840,7 @@ try {
   async listMissingCostOfGoods(
     orgId: string,
     opts?: { start?: string; end?: string; take?: number; skip?: number },
+    marketplaceId?: string,
   ) {
     const userIds = await this.getOrgMemberUserIds(orgId);
     const take = Math.max(1, Math.min(100, opts?.take ?? 10));

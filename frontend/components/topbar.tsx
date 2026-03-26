@@ -1,11 +1,11 @@
 "use client";
 
 import { useState } from "react";
-import { LanguageSelector } from "./language-selector";
 import { ThemeToggle } from "./theme-toggle";
 import { SettingsModal } from "./settings-modal";
 import { useFullscreen } from "@/contexts/fullscreen-context";
 import { NotificationsDropdown } from "./notifications-dropdown";
+import { MarketplaceSelector } from "./marketplace-selector";
 
 export function Topbar() {
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -14,7 +14,7 @@ export function Topbar() {
   return (
     <>
       <header
-        className="flex h-14 min-w-0 shrink-0 items-center justify-between gap-2 overflow-hidden border-b border-[var(--surface-border)] bg-[var(--surface)] px-3 md:gap-4 md:px-4"
+        className="flex h-14 min-w-0 shrink-0 items-center justify-between gap-2 border-b border-[var(--surface-border)] bg-[var(--surface)] px-3 md:gap-4 md:px-4"
         role="banner"
       >
         <div id="topbar-notifications" className="flex min-w-0 shrink items-center gap-2">
@@ -65,7 +65,7 @@ export function Topbar() {
               </svg>
             </button>
             <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
-            <LanguageSelector />
+            <MarketplaceSelector />
             <ThemeToggle />
           </div>
         </div>

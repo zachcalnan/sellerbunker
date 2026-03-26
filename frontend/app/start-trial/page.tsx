@@ -9,6 +9,8 @@ import { StripeCheckoutButton } from "@/components/stripe-checkout-button";
 const accentColor = "rgb(96, 165, 250)";
 const BILLING_BYPASSED =
   (process.env.NEXT_PUBLIC_BYPASS_BILLING ?? "").toLowerCase() === "true";
+const CHECKOUT_SYNC_MODAL_PENDING_KEY =
+  "sellerbunker_show_sync_modal_after_checkout";
 
 function StartTrialContent() {
   const { isSignedIn, isLoaded, getToken } = useAuth();
@@ -24,6 +26,9 @@ function StartTrialContent() {
 
   const confirmAndGoToDashboard = async () => {
     if (!sessionId) {
+      try {
+        sessionStorage.setItem(CHECKOUT_SYNC_MODAL_PENDING_KEY, "1");
+      } catch {}
       router.push("/dashboard");
       return;
     }
@@ -45,10 +50,16 @@ function StartTrialContent() {
         credentials: "include",
       });
       if (res.ok) {
+        try {
+          sessionStorage.setItem(CHECKOUT_SYNC_MODAL_PENDING_KEY, "1");
+        } catch {}
         router.push("/dashboard");
       } else {
         const err = await res.json().catch(() => ({}));
         alert(err?.message ?? "Could not confirm payment. Try opening the dashboard link in the same browser.");
+        try {
+          sessionStorage.setItem(CHECKOUT_SYNC_MODAL_PENDING_KEY, "1");
+        } catch {}
         router.push("/dashboard");
       }
     } catch (e) {
@@ -59,6 +70,9 @@ function StartTrialContent() {
           ? "Could not reach the backend. Make sure it's running (e.g. on port 3001) and that NEXT_PUBLIC_API_URL in the frontend points to it."
           : "Request failed. If you're on a custom domain, the backend may need to allow it (CORS). Opening dashboard."
       );
+      try {
+        sessionStorage.setItem(CHECKOUT_SYNC_MODAL_PENDING_KEY, "1");
+      } catch {}
       router.push("/dashboard");
     } finally {
       setConfirming(false);
@@ -90,6 +104,9 @@ function StartTrialContent() {
         if (res.ok) {
           setConfirmError(null);
           setHasAccess(true);
+          try {
+            sessionStorage.setItem(CHECKOUT_SYNC_MODAL_PENDING_KEY, "1");
+          } catch {}
           router.replace("/dashboard");
           return;
         }
@@ -167,7 +184,12 @@ function StartTrialContent() {
           });
           if (!res.ok) return;
           const data = (await res.json()) as { hasAccess?: boolean; lockoutAt?: string | null };
-          if (data.hasAccess) router.replace("/dashboard");
+          if (data.hasAccess) {
+            try {
+              sessionStorage.setItem(CHECKOUT_SYNC_MODAL_PENDING_KEY, "1");
+            } catch {}
+            router.replace("/dashboard");
+          }
         } catch {
           // ignore
         }

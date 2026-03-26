@@ -74,6 +74,107 @@ export class AmazonSyncProcessor extends WorkerHost {
   /**
    * Runs when queue job name = inventory-batch-sync
    */
+  public async runFullSyncInline(userId: string): Promise<void> {
+    this.logger.log(`[full-sync:inline] Starting for userId=${userId}`);
+    const setProgress = async (p: number, phase?: string) => {
+      await this.setCoreSyncProgress(userId, p, phase);
+      try {
+        await this.amazonSyncService.setInitialSyncProgressInDb(userId, p);
+      } catch (e) {
+        this.logger.warn(
+          `[full-sync:inline] setInitialSyncProgressInDb failed (progress=${p}): ${
+            e instanceof Error ? e.message : String(e)
+          }`,
+        );
+      }
+    };
+    await this.runFullSyncFlow(userId, setProgress);
+  }
+
+  private async runFullSyncFlow(
+    userId: string,
+    setProgress: (p: number, phase?: string) => Promise<void>,
+  ): Promise<void> {
+    await setProgress(0, 'Syncing orders');
+    await this.amazonService.syncRecentOrdersToDb(userId, {
+      days: 30,
+      maxOrders: 5,
+      maxOrderItems: 5,
+      onProgress: (p) => setProgress(p, 'Syncing orders'),
+    });
+    await setProgress(25, 'Syncing orders');
+    this.logger.log(`[full-sync] 30-day orders + finances done → 25%`);
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { activeOrgId: true },
+    });
+    let orgIdForSync = user?.activeOrgId ?? null;
+    if (!orgIdForSync) {
+      const membership = await this.prisma.organizationMembership.findFirst({
+        where: { userId },
+        select: { orgId: true },
+      });
+      orgIdForSync = membership?.orgId ?? null;
+      if (orgIdForSync) {
+        this.logger.log(
+          `[full-sync] userId=${userId} has no activeOrgId; using first org ${orgIdForSync}`,
+        );
+      }
+    }
+    if (orgIdForSync) {
+      await setProgress(25, 'Syncing inventory');
+      await this.amazonService.syncFbaInventory(orgIdForSync, userId, {
+        maxPages: 1,
+      });
+      await setProgress(50, 'Syncing inventory');
+      this.logger.log(`[full-sync] minimal inventory done → 50%`);
+      await setProgress(50, 'Syncing shipments');
+      try {
+        await this.amazonService.syncShipments(orgIdForSync, userId, {
+          days: 30,
+          maxShipments: 2,
+          onProgress: async ({ processed, total }) => {
+            if (total <= 0) return;
+            const nextProgress = Math.min(
+              75,
+              50 + Math.floor((processed / total) * 25),
+            );
+            await setProgress(nextProgress, 'Syncing shipments');
+          },
+        });
+      } catch (shipErr) {
+        const msg =
+          shipErr instanceof Error ? shipErr.message : String(shipErr);
+        this.logger.warn(`[full-sync] 30-day shipments failed: ${msg}`);
+      }
+      await setProgress(75, 'Syncing shipments');
+      this.logger.log(`[full-sync] last 30-day shipments done → 75%`);
+      await setProgress(75, 'Syncing fee estimates');
+      try {
+        await this.amazonService.refreshFeeEstimatesForOrg(orgIdForSync, {
+          topByQuantityInStock: 3,
+          onProgress: async ({ processed, total }) => {
+            if (total <= 0) return;
+            const pct = processed / total;
+            const nextProgress = Math.min(100, 75 + Math.floor(pct * 25));
+            await setProgress(nextProgress, 'Syncing fee estimates');
+          },
+        });
+      } catch (feeErr) {
+        const msg = feeErr instanceof Error ? feeErr.message : String(feeErr);
+        this.logger.warn(`[full-sync] Top 10 fee estimate failed: ${msg}`);
+      }
+      await setProgress(100, 'Complete');
+      this.logger.log(`[full-sync] Initial mini sync completed → 100%`);
+    } else {
+      this.logger.warn(
+        `[full-sync] userId=${userId} has no activeOrgId and no org membership; skipping inventory/fees`,
+      );
+    }
+    await setProgress(100, 'Complete');
+    this.logger.log(`[full-sync] Completed → 100%`);
+  }
+
   async process(
     job: Job<AmazonSyncJobData | Record<string, never>>,
   ): Promise<void> {
@@ -130,7 +231,9 @@ export class AmazonSyncProcessor extends WorkerHost {
         throw new Error('Missing userId for full-sync job');
       }
       try {
-        this.logger.log(`[full-sync] Starting for userId=${userId} (initial sync: all 30-day orders + finances, minimal inventory, last 30-day shipments, top 10 fee estimates)`);
+        this.logger.log(
+          `[full-sync] Starting for userId=${userId} (initial mini sync: 5 orders, minimal inventory sample, 2 latest shipments)`,
+        );
         const setProgress = async (p: number, phase?: string) => {
           await job.updateProgress(p);
           await this.setCoreSyncProgress(userId, p, phase);
@@ -140,78 +243,7 @@ export class AmazonSyncProcessor extends WorkerHost {
             this.logger.warn(`[full-sync] setInitialSyncProgressInDb failed (progress=${p}): ${e instanceof Error ? e.message : String(e)}`);
           }
         };
-        await setProgress(0, 'Syncing orders');
-        // 1) All orders in last 30 days + finances per order (0→25%)
-        await this.amazonService.syncRecentOrdersToDb(userId, {
-          days: 30,
-          onProgress: (p) => setProgress(p, 'Syncing orders'),
-        });
-        await setProgress(25, 'Syncing orders');
-        this.logger.log(`[full-sync] 30-day orders + finances done → 25%`);
-        const user = await this.prisma.user.findUnique({
-          where: { id: userId },
-          select: { activeOrgId: true },
-        });
-        let orgIdForSync = user?.activeOrgId ?? null;
-        if (!orgIdForSync) {
-          const membership = await this.prisma.organizationMembership.findFirst({
-            where: { userId },
-            select: { orgId: true },
-          });
-          orgIdForSync = membership?.orgId ?? null;
-          if (orgIdForSync) {
-            this.logger.log(`[full-sync] userId=${userId} has no activeOrgId; using first org ${orgIdForSync}`);
-          }
-        }
-        if (orgIdForSync) {
-          // 2) Minimal FBA inventory (first page, first marketplace) → 25→50%
-          await setProgress(25, 'Syncing inventory');
-          await this.amazonService.syncFbaInventory(orgIdForSync, userId, { maxPages: 1 });
-          await setProgress(50, 'Syncing inventory');
-          this.logger.log(`[full-sync] minimal inventory done → 50%`);
-          // 3) Last 30 days shipments → 50→75%
-          await setProgress(50, 'Syncing shipments');
-          try {
-            await this.amazonService.syncShipments(orgIdForSync, userId, {
-              days: 30,
-              onProgress: async ({ processed, total }) => {
-                if (total <= 0) return;
-                const nextProgress = Math.min(75, 50 + Math.floor((processed / total) * 25));
-                await setProgress(nextProgress, 'Syncing shipments');
-              },
-            });
-          } catch (shipErr) {
-            const msg = shipErr instanceof Error ? shipErr.message : String(shipErr);
-            this.logger.warn(`[full-sync] 30-day shipments failed: ${msg}`);
-          }
-          await setProgress(75, 'Syncing shipments');
-          this.logger.log(`[full-sync] last 30-day shipments done → 75%`);
-          // 4) Fee estimates for top 10 in-stock → 75→100%
-          await setProgress(75, 'Syncing fee estimates');
-          try {
-            await this.amazonService.refreshFeeEstimatesForOrg(orgIdForSync, {
-              topByQuantityInStock: 10,
-              onProgress: async ({ processed, total }) => {
-                if (total <= 0) return;
-                const pct = processed / total;
-                const nextProgress = Math.min(100, 75 + Math.floor(pct * 25));
-                await setProgress(nextProgress, 'Syncing fee estimates');
-              },
-            });
-          } catch (feeErr) {
-            const msg = feeErr instanceof Error ? feeErr.message : String(feeErr);
-            this.logger.warn(`[full-sync] Top 10 fee estimate failed: ${msg}`);
-          }
-          await setProgress(100, 'Complete');
-          this.logger.log(`[full-sync] Initial sync completed → 100%. Enqueuing full inventory, shipments, titles in background.`);
-          await this.amazonSyncService.enqueuePostInitialSync(userId, orgIdForSync);
-          await this.amazonSyncService.enqueueTitlesBackfill(orgIdForSync, userId);
-          await this.amazonSyncService.enqueueCategoryBackfill(orgIdForSync, userId);
-        } else {
-          this.logger.warn(`[full-sync] userId=${userId} has no activeOrgId and no org membership; skipping inventory/fees`);
-        }
-        await setProgress(100, 'Complete');
-        this.logger.log(`[full-sync] Completed → 100%`);
+        await this.runFullSyncFlow(userId, setProgress);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         this.logger.error(`[full-sync] Failed for userId=${userId}: ${msg}`, err instanceof Error ? err.stack : undefined);

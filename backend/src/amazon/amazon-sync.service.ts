@@ -265,10 +265,15 @@ export class AmazonSyncService implements OnModuleInit {
     const done = coreProgress >= 100;
     const feeDone = feeProgress == null || feeProgress >= 100;
     const phase = redisSync.phase;
-    const isFeePhase = typeof phase === 'string' && /fee|Fee/.test(phase);
-
-    // During initial sync, fee phase runs 75→100%. Always use corePhaseEndPct 75 when stage is "fees" so the bar never drops to 50%.
+    // During initial sync, fee phase runs 75→100%.
     const feePhaseStartPct = 75;
+    // Guard against stale/early phase labels: only enter fee stage once core progress is actually in fee range.
+    const isFeePhase =
+      typeof phase === 'string' &&
+      /fee|Fee/.test(phase) &&
+      coreProgress >= feePhaseStartPct;
+
+    // Always use corePhaseEndPct 75 when stage is "fees" so the bar never drops to 50%.
     const stage: 'core' | 'fees' | 'complete' = done ? 'complete' : isFeePhase ? 'fees' : 'core';
     const corePhaseEndPct = stage === 'fees' ? feePhaseStartPct : 50;
 

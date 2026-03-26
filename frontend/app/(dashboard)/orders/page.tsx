@@ -3,6 +3,7 @@
 import { useAuth, SignedIn, SignedOut, SignInButton } from "@clerk/nextjs";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useDisplaySettings } from "@/contexts/display-settings-context";
+import { useMarketplace } from "@/contexts/marketplace-context";
 
 type OrderRow = {
   id: string;
@@ -38,6 +39,7 @@ const PAGE_SIZE = 20;
 export default function OrdersPage() {
   const baseUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
   const { isSignedIn, getToken } = useAuth();
+  const { selectedMarketplaceId, selectedCurrency } = useMarketplace();
 
   const [rows, setRows] = useState<OrderRow[]>([]);
   const [loading, setLoading] = useState(false);
@@ -52,7 +54,10 @@ export default function OrdersPage() {
     try {
       const token = await getToken({ template: "backend" });
       const res = await fetch(`${baseUrl}/api/amazon/orders`, {
-        headers: { Authorization: `Bearer ${token}` },
+        headers: {
+          Authorization: `Bearer ${token}`,
+          ...(selectedMarketplaceId ? { "x-marketplace-id": selectedMarketplaceId } : {}),
+        },
       });
       if (!res.ok) throw new Error("Failed to load orders.");
       const data = (await res.json()) as OrderRow[];
@@ -62,7 +67,7 @@ export default function OrdersPage() {
     } finally {
       setLoading(false);
     }
-  }, [getToken, baseUrl]);
+  }, [getToken, baseUrl, selectedMarketplaceId]);
 
   useEffect(() => {
     if (!isSignedIn) {
@@ -123,7 +128,7 @@ export default function OrdersPage() {
 
   const formatDate = (d: string) => new Date(d).toLocaleDateString(undefined, { dateStyle: "short" });
   const formatCurrency = (n: number) =>
-    new Intl.NumberFormat(undefined, { style: "currency", currency: "GBP", minimumFractionDigits: 2 }).format(n);
+    new Intl.NumberFormat(undefined, { style: "currency", currency: selectedCurrency, minimumFractionDigits: 2 }).format(n);
   const nil = (v: string | number | null | undefined) => (v == null || v === "" ? "—" : String(v));
 
   const { backgroundClass } = useDisplaySettings();

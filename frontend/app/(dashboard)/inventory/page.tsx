@@ -3,6 +3,7 @@
 import { useAuth, SignedIn, SignedOut, SignInButton } from "@clerk/nextjs";
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { useDisplaySettings } from "@/contexts/display-settings-context";
+import { useMarketplace } from "@/contexts/marketplace-context";
 
 type InventoryRow = {
   productId: string;
@@ -45,6 +46,7 @@ const PAGE_SIZE = 20;
 export default function InventoryPage() {
   const baseUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
   const { isSignedIn, getToken } = useAuth();
+  const { selectedMarketplaceId, selectedCurrency } = useMarketplace();
 
   const [rows, setRows] = useState<InventoryRow[]>([]);
   const [loading, setLoading] = useState(false);
@@ -60,7 +62,10 @@ export default function InventoryPage() {
     try {
       const token = await getToken();
       const res = await fetch(`${baseUrl}/api/amazon/inventory`, {
-        headers: { Authorization: `Bearer ${token}` },
+        headers: {
+          Authorization: `Bearer ${token}`,
+          ...(selectedMarketplaceId ? { "x-marketplace-id": selectedMarketplaceId } : {}),
+        },
       });
       if (!res.ok) throw new Error("Failed to load inventory.");
       const data = (await res.json()) as InventoryRow[];
@@ -70,7 +75,7 @@ export default function InventoryPage() {
     } finally {
       setLoading(false);
     }
-  }, [getToken, baseUrl]);
+  }, [getToken, baseUrl, selectedMarketplaceId]);
 
   useEffect(() => {
     if (!isSignedIn) {
@@ -302,8 +307,8 @@ export default function InventoryPage() {
                             <span>Reserved {num(r.reservedQty)}</span>
                             <span>Inbound {num(r.inboundQty)}</span>
                             <span>Issue {num(r.issueQty)}</span>
-                            {r.currentListedPrice != null && <span>Price: £{Number(r.currentListedPrice).toFixed(2)}</span>}
-                            {estProfit != null && <span>Est profit: £{estProfit.toFixed(2)}</span>}
+                            {r.currentListedPrice != null && <span>Price: {new Intl.NumberFormat(undefined, { style: "currency", currency: selectedCurrency }).format(Number(r.currentListedPrice))}</span>}
+                            {estProfit != null && <span>Est profit: {new Intl.NumberFormat(undefined, { style: "currency", currency: selectedCurrency }).format(estProfit)}</span>}
                           </div>
                         </div>
                         <svg className="h-5 w-5 shrink-0 text-[var(--muted-foreground)]" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
@@ -358,10 +363,10 @@ export default function InventoryPage() {
                         {num(r.issueQty)}
                       </div>
                       <div className="text-left text-[11px] text-[var(--foreground)] tabular-nums min-w-0 pl-2">
-                        {r.currentListedPrice != null ? `£${Number(r.currentListedPrice).toFixed(2)}` : "—"}
+                        {r.currentListedPrice != null ? new Intl.NumberFormat(undefined, { style: "currency", currency: selectedCurrency }).format(Number(r.currentListedPrice)) : "—"}
                       </div>
                       <div className="text-right text-[11px] text-[var(--foreground)] tabular-nums min-w-0">
-                        {estProfit != null ? `£${estProfit.toFixed(2)}` : "—"}
+                        {estProfit != null ? new Intl.NumberFormat(undefined, { style: "currency", currency: selectedCurrency }).format(estProfit) : "—"}
                       </div>
                       <div className="flex items-center justify-center">
                         <svg className="h-4 w-4 text-[var(--muted-foreground)]" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>

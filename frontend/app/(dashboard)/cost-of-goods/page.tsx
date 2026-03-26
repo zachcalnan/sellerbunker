@@ -4,6 +4,7 @@ import { RedirectToSignIn, SignedIn, SignedOut, useAuth } from "@clerk/nextjs";
 import { useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { useDisplaySettings } from "@/contexts/display-settings-context";
+import { useMarketplace } from "@/contexts/marketplace-context";
 
 type ProductRow = {
   id: string;
@@ -35,6 +36,7 @@ type CostEntryRow = {
 function CostOfGoodsInner() {
   const baseUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
   const { isSignedIn, getToken } = useAuth();
+  const { selectedMarketplaceId } = useMarketplace();
   const searchParams = useSearchParams();
   const missingParamOn = searchParams.get("missing") === "1";
   const [cogsFilter, setCogsFilter] = useState<"missing" | "complete" | "all">(
@@ -168,6 +170,10 @@ function CostOfGoodsInner() {
     try {
       const token = await getToken({ template: "backend" });
       if (!token) throw new Error("Not authenticated.");
+      const authHeaders = {
+        Authorization: `Bearer ${token}`,
+        ...(selectedMarketplaceId ? { "x-marketplace-id": selectedMarketplaceId } : {}),
+      };
 
       const missingQs = new URLSearchParams();
       if (startParam) missingQs.set("start", startParam);
@@ -178,17 +184,17 @@ function CostOfGoodsInner() {
       const allFetches: Promise<Response>[] = [
         fetch(`${baseUrl}/api/amazon/cost-of-goods/entries?` +
           new URLSearchParams({ take: "50", skip: "0" }).toString(),
-          { headers: { Authorization: `Bearer ${token}` } },
+          { headers: authHeaders },
         ),
-        fetch(`${baseUrl}/api/amazon/products`, { headers: { Authorization: `Bearer ${token}` } }),
-        fetch(`${baseUrl}/api/amazon/inventory`, { headers: { Authorization: `Bearer ${token}` } }),
-        fetch(`${baseUrl}/api/orgs/vat-settings`, { headers: { Authorization: `Bearer ${token}` } }),
+        fetch(`${baseUrl}/api/amazon/products`, { headers: authHeaders }),
+        fetch(`${baseUrl}/api/amazon/inventory`, { headers: authHeaders }),
+        fetch(`${baseUrl}/api/orgs/vat-settings`, { headers: authHeaders }),
       ];
 
       if (cogsFilter === "missing") {
         allFetches.push(
           fetch(`${baseUrl}/api/amazon/cost-of-goods/missing?${missingQs.toString()}`, {
-            headers: { Authorization: `Bearer ${token}` },
+            headers: authHeaders,
           }),
         );
       } else if (cogsFilter === "complete") {
@@ -196,7 +202,7 @@ function CostOfGoodsInner() {
           fetch(
             `${baseUrl}/api/amazon/cost-of-goods/complete?` +
             new URLSearchParams({ take: String(SKU_FETCH_SIZE), skip: "0" }).toString(),
-            { headers: { Authorization: `Bearer ${token}` } },
+            { headers: authHeaders },
           ),
         );
       } else {
@@ -204,7 +210,7 @@ function CostOfGoodsInner() {
           fetch(
             `${baseUrl}/api/amazon/cost-of-goods/products?` +
             new URLSearchParams({ take: String(SKU_FETCH_SIZE), skip: "0" }).toString(),
-            { headers: { Authorization: `Bearer ${token}` } },
+            { headers: authHeaders },
           ),
         );
       }
@@ -457,7 +463,7 @@ function CostOfGoodsInner() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isSignedIn, getToken, baseUrl, startParam, endParam, cogsFilter]);
+  }, [isSignedIn, getToken, baseUrl, startParam, endParam, cogsFilter, selectedMarketplaceId]);
 
   // Reset to first page when search query or tab changes (client-side filter)
   useEffect(() => {

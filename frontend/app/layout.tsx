@@ -47,9 +47,9 @@ export default function RootLayout({
       }}
       signInUrl="/sign-in"
       signUpUrl="/sign-up"
-      signInFallbackRedirectUrl="/start-trial"
-      signUpFallbackRedirectUrl="/start-trial"
-      signUpForceRedirectUrl="/start-trial"
+      signInFallbackRedirectUrl="/dashboard"
+      signUpFallbackRedirectUrl="/dashboard"
+      signUpForceRedirectUrl="/dashboard"
     >
       <html lang="en" suppressHydrationWarning>
         <head>

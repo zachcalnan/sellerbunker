@@ -26,10 +26,47 @@ model User {
   sellerAccounts SellerAccount[]
   shipments      Shipment[]
   subscriptions  Subscription[]
+  marketplaceSettings UserMarketplaceSetting[]
   initialSyncProgress InitialSyncProgress?
   activeOrg      Organization?            @relation("ActiveOrg", fields: [activeOrgId], references: [id])
 
   @@map("users")
+}
+
+enum MarketplaceRegion {
+  NA
+  EU
+  AUSTRALASIA
+}
+
+enum MarketplaceActivityClass {
+  HIGH
+  MEDIUM
+  INACTIVE
+}
+
+model UserMarketplaceSetting {
+  id               String                   @id @default(uuid())
+  userId           String                   @map("user_id")
+  marketplaceId    String                   @map("marketplace_id")
+  countryCode      String                   @map("country_code")
+  region           MarketplaceRegion
+  currencyCode     String                   @map("currency_code")
+  isBase           Boolean                  @default(false) @map("is_base")
+  isEnabledByUser  Boolean                  @default(false) @map("is_enabled_by_user")
+  detectedBySystem Boolean                  @default(false) @map("detected_by_system")
+  activityClass    MarketplaceActivityClass @default(INACTIVE) @map("activity_class")
+  orderCount24h    Int                      @default(0) @map("order_count_24h")
+  lastActivityCheckAt DateTime?             @map("last_activity_check_at")
+  nextSyncAt       DateTime?                @map("next_sync_at")
+  createdAt        DateTime                 @default(now()) @map("created_at")
+  updatedAt        DateTime                 @updatedAt @map("updated_at")
+  user             User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, marketplaceId])
+  @@index([userId, region])
+  @@index([userId, isEnabledByUser])
+  @@map("user_marketplace_settings")
 }
 
 // Single source of truth for "syncing" bar: survives Redis flush and job removal. Worker + enqueue write; API reads.

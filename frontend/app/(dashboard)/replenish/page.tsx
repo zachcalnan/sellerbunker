@@ -3,6 +3,7 @@
 import { useAuth, SignedIn, SignedOut, SignInButton } from "@clerk/nextjs";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useDisplaySettings } from "@/contexts/display-settings-context";
+import { useMarketplace } from "@/contexts/marketplace-context";
 
 type ReplenishRow = {
   productId: string;
@@ -33,6 +34,7 @@ function formatDate(iso: string | null): string {
 export default function ReplenishPage() {
   const baseUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
   const { isSignedIn, getToken } = useAuth();
+  const { selectedMarketplaceId, selectedCurrency } = useMarketplace();
 
   const [rows, setRows] = useState<ReplenishRow[]>([]);
   const [loading, setLoading] = useState(false);
@@ -46,7 +48,10 @@ export default function ReplenishPage() {
     try {
       const token = await getToken({ template: "backend" });
       const res = await fetch(`${baseUrl}/api/amazon/replenish?limit=10000`, {
-        headers: { Authorization: `Bearer ${token}` },
+        headers: {
+          Authorization: `Bearer ${token}`,
+          ...(selectedMarketplaceId ? { "x-marketplace-id": selectedMarketplaceId } : {}),
+        },
         credentials: "include",
       });
       if (!res.ok) {
@@ -61,7 +66,7 @@ export default function ReplenishPage() {
     } finally {
       setLoading(false);
     }
-  }, [getToken, baseUrl]);
+  }, [getToken, baseUrl, selectedMarketplaceId]);
 
   useEffect(() => {
     if (!isSignedIn) {
@@ -189,7 +194,7 @@ export default function ReplenishPage() {
                       {r.unitsSold} sold
                     </span>
                     <span className="tabular-nums text-[var(--muted-foreground)]">
-                      Profit: £{r.estimatedProfit.toFixed(2)}
+                      Profit: {new Intl.NumberFormat(undefined, { style: "currency", currency: selectedCurrency }).format(r.estimatedProfit)}
                     </span>
                   </div>
                 </div>

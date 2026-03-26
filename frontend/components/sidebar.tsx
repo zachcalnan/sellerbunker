@@ -11,6 +11,7 @@ import {
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { MarketplaceSelector } from "./marketplace-selector";
 
 function DashboardIcon({ className }: { className?: string }) {
   return (
@@ -168,6 +169,26 @@ function RepricerIcon({ className }: { className?: string }) {
   );
 }
 
+function PpcIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <path d="m3 11 18-5v12L3 13v-2z" />
+      <path d="M11 13v6" />
+      <path d="M8 19h6" />
+    </svg>
+  );
+}
+
 const NAV_ITEMS: {
   label: string;
   href: string;
@@ -183,6 +204,7 @@ const NAV_ITEMS: {
   { label: "Replenish", href: "/replenish", icon: ReplenishIcon },
   { label: "FBM Orders", href: "#", icon: FbmOrdersIcon, disabled: true, tooltip: "Coming soon" },
   { label: "Repricer", href: "#", icon: RepricerIcon, disabled: true, tooltip: "In development" },
+  { label: "PPC", href: "#", icon: PpcIcon, disabled: true, tooltip: "Coming soon" },
 ];
 
 const BASE_URL =
@@ -222,40 +244,7 @@ export function Sidebar() {
 
   const connectAmazon = async () => {
     if (!isSignedIn) return;
-    setConnectingAmazon(true);
-    try {
-      const token = await getToken({ template: "backend" });
-      if (!token) {
-        setConnectingAmazon(false);
-        alert("Please sign in again and try connecting.");
-        return;
-      }
-      const returnOrigin = typeof window !== 'undefined' ? window.location.origin : '';
-      const params = new URLSearchParams({ region: 'EU' });
-      if (returnOrigin) params.set('returnOrigin', returnOrigin);
-      const res = await fetch(`${BASE_URL}/api/amazon/connect?${params}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      const data = (await res.json()) as { url?: string; message?: string };
-      if (!res.ok) {
-        setConnectingAmazon(false);
-        const msg = data?.message ?? res.statusText ?? "Connection request failed.";
-        alert(`Could not start Amazon connection: ${msg}`);
-        return;
-      }
-      if (data?.url) {
-        window.location.href = data.url;
-      } else {
-        setConnectingAmazon(false);
-        alert("Could not get Amazon sign-in link. Please try again or contact support.");
-      }
-    } catch (e) {
-      setConnectingAmazon(false);
-      const msg = e instanceof Error ? e.message : "Network or server error.";
-      alert(`Could not start Amazon connection: ${msg}`);
-    } finally {
-      setConnectingAmazon(false);
-    }
+    router.push("/connect-amazon");
   };
 
   const disconnectAmazon = async () => {
@@ -404,6 +393,9 @@ export function Sidebar() {
                     : "Sign in for data"}
                 </span>
               )}
+            </div>
+            <div className="flex items-center justify-center rounded-lg border border-[var(--surface-border)] px-2 py-1">
+              <MarketplaceSelector />
             </div>
           </div>
           <SignedOut>

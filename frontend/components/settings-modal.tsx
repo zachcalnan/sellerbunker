@@ -9,6 +9,7 @@ import {
   useDisplaySettings,
   type BackgroundTheme,
 } from "@/contexts/display-settings-context";
+import { useMarketplace } from "@/contexts/marketplace-context";
 
 const VAT_TYPES = [
   { value: "NON_VAT_REGISTERED", label: "Non VAT registered" },
@@ -75,6 +76,12 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
     ringColor,
     applyDisplaySettings,
   } = useDisplaySettings();
+  const {
+    marketplaces,
+    refreshMarketplaces,
+    selectedMarketplaceId,
+    selectedCurrency,
+  } = useMarketplace();
 
   const [vatForm, setVatForm] = useState({
     vatRegistrationType: "NON_VAT_REGISTERED",
@@ -90,7 +97,7 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
   const [displayRingColor, setDisplayRingColor] = useState(ringColor);
   const [displayApplied, setDisplayApplied] = useState(false);
 
-  type SectionKey = "details" | "vat" | "display" | "subscription";
+  type SectionKey = "details" | "marketplaces" | "vat" | "display" | "subscription";
   const [openSection, setOpenSection] = useState<SectionKey | null>(null);
   const [faqModalOpen, setFaqModalOpen] = useState(false);
   const [amazonSellerId, setAmazonSellerId] = useState<string | null | "loading">(null);
@@ -100,6 +107,7 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
   const [showCancelConfirm, setShowCancelConfirm] = useState(false);
   const [cancelSubscriptionLoading, setCancelSubscriptionLoading] = useState(false);
   const [cancelSubscriptionError, setCancelSubscriptionError] = useState<string | null>(null);
+  const [detectingMarketplaces, setDetectingMarketplaces] = useState(false);
 
   const loadVat = useCallback(async () => {
     setVatLoading(true);
@@ -274,6 +282,33 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
     setDisplayApplied(true);
   };
 
+  const detectMarketplaces = async () => {
+    setDetectingMarketplaces(true);
+    try {
+      const token = await getToken({ template: "backend" });
+      await fetch(`${BASE_URL}/api/marketplaces/detect-activity`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      await refreshMarketplaces();
+    } finally {
+      setDetectingMarketplaces(false);
+    }
+  };
+
+  const toggleMarketplace = async (marketplaceId: string, enabled: boolean) => {
+    const token = await getToken({ template: "backend" });
+    await fetch(`${BASE_URL}/api/marketplaces/toggle`, {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ marketplaceId, enabled }),
+    });
+    await refreshMarketplaces();
+  };
+
   if (!open) return null;
 
   return (
@@ -344,6 +379,65 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
                   <p className="mt-1 text-xs text-[var(--muted-foreground)]">
                     Use the <strong>Manage account</strong> link below to change your password or update your email.
                   </p>
+                </div>
+              </div>
+            )}
+          </section>
+
+          {/* Marketplaces */}
+          <section className="border-b border-[var(--surface-border)]">
+            <button
+              type="button"
+              onClick={() => setOpenSection((s) => (s === "marketplaces" ? null : "marketplaces"))}
+              className="flex w-full items-center justify-between px-4 py-3 text-left hover:bg-[var(--foreground)]/5"
+              aria-expanded={openSection === "marketplaces"}
+            >
+              <h3 className="text-sm font-semibold uppercase tracking-wider text-[var(--foreground)]">
+                Marketplaces
+              </h3>
+              <svg
+                className={`h-5 w-5 shrink-0 text-[var(--muted-foreground)] transition-transform ${openSection === "marketplaces" ? "rotate-180" : ""}`}
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+              </svg>
+            </button>
+            {openSection === "marketplaces" && (
+              <div className="border-t border-[var(--surface-border)] px-4 pb-4 pt-2">
+                <p className="text-sm text-[var(--muted-foreground)]">
+                  Active marketplace:{" "}
+                  <span className="font-medium text-[var(--foreground)]">
+                    {marketplaces.find((m) => m.marketplaceId === selectedMarketplaceId)?.flag}{" "}
+                    {marketplaces.find((m) => m.marketplaceId === selectedMarketplaceId)?.displayName ?? "—"} ({selectedCurrency})
+                  </span>
+                </p>
+                <div className="mt-3">
+                  <button
+                    type="button"
+                    onClick={() => void detectMarketplaces()}
+                    disabled={detectingMarketplaces}
+                    className="rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/5 disabled:opacity-60"
+                  >
+                    {detectingMarketplaces ? "Detecting…" : "Detect active marketplaces"}
+                  </button>
+                </div>
+                <div className="mt-3 space-y-2">
+                  {marketplaces.map((m) => (
+                    <label key={m.marketplaceId} className="flex items-center justify-between rounded-lg border border-[var(--surface-border)] px-3 py-2">
+                      <span className="text-sm text-[var(--foreground)]">
+                        {m.flag} {m.displayName}{" "}
+                        <span className="text-xs text-[var(--muted-foreground)]">({m.currencyCode})</span>
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={Boolean(m.isEnabledByUser)}
+                        onChange={(e) => void toggleMarketplace(m.marketplaceId, e.target.checked)}
+                        className="h-4 w-4 accent-[var(--sb-accent)]"
+                      />
+                    </label>
+                  ))}
                 </div>
               </div>
             )}

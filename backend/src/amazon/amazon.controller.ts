@@ -21,6 +21,7 @@ import { CreatePurchaseDto } from './dto/create-purchase.dto';
 import { UpdatePurchaseDto } from './dto/update-purchase.dto';
 import { ClerkAuthGuard } from '../auth/clerk-auth.guard';
 import { AmazonSyncService } from './amazon-sync.service';
+import { AmazonSyncProcessor } from './amazon-sync.processor';
 
 @Controller('amazon')
 export class AmazonController {
@@ -28,6 +29,7 @@ export class AmazonController {
   constructor(
     private readonly amazonService: AmazonService,
     private readonly amazonSyncService: AmazonSyncService,
+    private readonly amazonSyncProcessor: AmazonSyncProcessor,
     private readonly configService: ConfigService,
   ) {}
 
@@ -177,7 +179,7 @@ ping() {
   @UseGuards(ClerkAuthGuard)
   @Get('account/summary')
   getAccountSummary(
-    @Req() req: { user: { orgId: string; userId: string } },
+    @Req() req: { user: { orgId: string; userId: string; marketplaceId?: string } },
     @Query('start') start?: string,
     @Query('end') end?: string,
   ) {
@@ -185,6 +187,7 @@ ping() {
       req.user.orgId,
       req.user.userId,
       { start, end },
+      req.user.marketplaceId,
     );
   }
 
@@ -203,40 +206,40 @@ ping() {
   @UseGuards(ClerkAuthGuard)
   @Get('dashboard/category-breakdown')
   getCategoryBreakdown(
-    @Req() req: { user: { orgId: string } },
+    @Req() req: { user: { orgId: string; marketplaceId?: string } },
     @Query('start') start?: string,
     @Query('end') end?: string,
   ) {
     return this.amazonService.getCategoryBreakdown(req.user.orgId, {
       start,
       end,
-    });
+    }, req.user.marketplaceId);
   }
 
   @UseGuards(ClerkAuthGuard)
   @Get('dashboard/cost-breakdown')
   getCostBreakdown(
-    @Req() req: { user: { orgId: string } },
+    @Req() req: { user: { orgId: string; marketplaceId?: string } },
     @Query('start') start?: string,
     @Query('end') end?: string,
   ) {
     return this.amazonService.getCostBreakdown(req.user.orgId, {
       start,
       end,
-    });
+    }, req.user.marketplaceId);
   }
 
   @UseGuards(ClerkAuthGuard)
   @Get('dashboard/profit-and-loss')
   getProfitAndLoss(
-    @Req() req: { user: { orgId: string } },
+    @Req() req: { user: { orgId: string; marketplaceId?: string } },
     @Query('start') start?: string,
     @Query('end') end?: string,
   ) {
     return this.amazonService.getProfitAndLoss(req.user.orgId, {
       start,
       end,
-    });
+    }, req.user.marketplaceId);
   }
 
   /**
@@ -254,11 +257,22 @@ ping() {
     @Req() req: { user: { userId: string } },
     @Query('days') days?: string,
     @Query('ignoreCursor') ignoreCursor?: string,
+    @Query('inline') inline?: string,
   ) {
     const n = Number(days ?? 30);
     const safeDays = Number.isFinite(n) ? Math.max(1, Math.min(365, n)) : 30;
     const direct =
       ignoreCursor === '1' || ignoreCursor === 'true' || ignoreCursor === 'yes';
+    const runInline =
+      inline === '1' || inline === 'true' || inline === 'yes';
+
+    if (runInline) {
+      void this.amazonSyncProcessor.runFullSyncInline(req.user.userId).catch((e) => {
+        const msg = e instanceof Error ? e.message : String(e);
+        this.logger.error(`[sync:inline] Failed for userId=${req.user.userId}: ${msg}`);
+      });
+      return { status: 'started-inline' };
+    }
 
     if (direct) {
       const { progress } = await this.amazonSyncService.getSyncProgress(req.user.userId);
@@ -315,7 +329,7 @@ ping() {
   @UseGuards(ClerkAuthGuard)
   @Get('sales/timeseries')
   getSalesTimeSeries(
-    @Req() req: { user: { orgId: string; userId: string } },
+    @Req() req: { user: { orgId: string; userId: string; marketplaceId?: string } },
     @Query('start') start?: string,
     @Query('end') end?: string,
   ) {
@@ -323,13 +337,14 @@ ping() {
       req.user.orgId,
       { start, end },
       req.user.userId,
+      req.user.marketplaceId,
     );
   }
 
   @UseGuards(ClerkAuthGuard)
   @Get('orders')
-  listOrders(@Req() req: { user: { orgId: string } }) {
-    return this.amazonService.listOrders(req.user.orgId);
+  listOrders(@Req() req: { user: { orgId: string; marketplaceId?: string } }) {
+    return this.amazonService.listOrders(req.user.orgId, req.user.marketplaceId);
   }
 
   /**
@@ -573,7 +588,7 @@ ping() {
   @UseGuards(ClerkAuthGuard)
   @Get('products/top-profitable')
   async topProfitableProducts(
-    @Req() req: { user: { orgId: string } },
+    @Req() req: { user: { orgId: string; marketplaceId?: string } },
     @Query('limit') limit?: string,
     @Query('period') period?: string,
   ) {
@@ -584,6 +599,7 @@ ping() {
       req.user.orgId,
       safeLimit,
       periodVal,
+      req.user.marketplaceId,
     );
   }
 
@@ -594,12 +610,12 @@ ping() {
   @UseGuards(ClerkAuthGuard)
   @Get('replenish')
   async getReplenish(
-    @Req() req: { user: { orgId: string } },
+    @Req() req: { user: { orgId: string; marketplaceId?: string } },
     @Query('limit') limit?: string,
   ) {
     const n = Number(limit ?? 5000);
     const safeLimit = Number.isFinite(n) ? Math.max(1, Math.min(10000, n)) : 5000;
-    return this.amazonService.getReplenishProducts(req.user.orgId, safeLimit);
+    return this.amazonService.getReplenishProducts(req.user.orgId, safeLimit, req.user.marketplaceId);
   }
 
   /**
@@ -649,8 +665,8 @@ ping() {
    */
   @UseGuards(ClerkAuthGuard)
   @Get('inventory')
-  async listInventory(@Req() req: { user: { orgId: string } }) {
-    return this.amazonService.listInventory(req.user.orgId);
+  async listInventory(@Req() req: { user: { orgId: string; marketplaceId?: string } }) {
+    return this.amazonService.listInventory(req.user.orgId, req.user.marketplaceId);
   }
 
   /**
@@ -671,8 +687,8 @@ ping() {
    */
   @UseGuards(ClerkAuthGuard)
   @Get('shipments')
-  async listShipments(@Req() req: { user: { orgId: string } }) {
-    return this.amazonService.listShipments(req.user.orgId);
+  async listShipments(@Req() req: { user: { orgId: string; marketplaceId?: string } }) {
+    return this.amazonService.listShipments(req.user.orgId, req.user.marketplaceId);
   }
 
   /**
@@ -741,7 +757,7 @@ ping() {
   @UseGuards(ClerkAuthGuard)
   @Get('cost-of-goods/products')
   async listCostOfGoodsProducts(
-    @Req() req: { user: { orgId: string } },
+    @Req() req: { user: { orgId: string; marketplaceId?: string } },
     @Query('take') take?: string,
     @Query('skip') skip?: string,
   ) {
@@ -752,7 +768,7 @@ ping() {
     return this.amazonService.listProductsFromInventory(req.user.orgId, {
       take: safeTake,
       skip: safeSkip,
-    });
+    }, req.user.marketplaceId);
   }
 
   /**
@@ -762,7 +778,7 @@ ping() {
   @UseGuards(ClerkAuthGuard)
   @Get('cost-of-goods/complete')
   async listCostOfGoodsComplete(
-    @Req() req: { user: { orgId: string } },
+    @Req() req: { user: { orgId: string; marketplaceId?: string } },
     @Query('take') take?: string,
     @Query('skip') skip?: string,
   ) {
@@ -773,7 +789,7 @@ ping() {
     return this.amazonService.listProductsWithCostFromInventory(req.user.orgId, {
       take: safeTake,
       skip: safeSkip,
-    });
+    }, req.user.marketplaceId);
   }
 
   /**
@@ -783,7 +799,7 @@ ping() {
   @UseGuards(ClerkAuthGuard)
   @Get('cost-of-goods/entries')
   async listCostOfGoodsEntries(
-    @Req() req: { user: { orgId: string } },
+    @Req() req: { user: { orgId: string; marketplaceId?: string } },
     @Query('query') query?: string,
     @Query('take') take?: string,
     @Query('skip') skip?: string,
@@ -798,7 +814,7 @@ ping() {
       query: query ?? '',
       take: safeTake,
       skip: safeSkip,
-    });
+    }, req.user.marketplaceId);
   }
 
   /**
@@ -860,7 +876,7 @@ ping() {
   @UseGuards(ClerkAuthGuard)
   @Get('cost-of-goods/missing')
   async listMissingCostOfGoods(
-    @Req() req: { user: { orgId: string } },
+    @Req() req: { user: { orgId: string; marketplaceId?: string } },
     @Query('start') start?: string,
     @Query('end') end?: string,
     @Query('take') take?: string,
@@ -875,7 +891,7 @@ ping() {
       end,
       take: safeTake,
       skip: safeSkip,
-    });
+    }, req.user.marketplaceId);
   }
 
   /**

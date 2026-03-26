@@ -27,6 +27,6 @@ import { AmazonSyncProcessor } from './amazon-sync.processor';
     AmazonSyncService,
     AmazonSyncProcessor,
   ],
-  exports: [AmazonSpApiClient, AmazonSyncService],
+  exports: [AmazonService, AmazonSpApiClient, AmazonSyncService],
 })
 export class AmazonModule {}

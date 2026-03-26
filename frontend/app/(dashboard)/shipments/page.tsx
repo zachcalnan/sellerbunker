@@ -3,6 +3,7 @@
 import { useAuth, SignedIn, SignedOut, SignInButton } from "@clerk/nextjs";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useDisplaySettings } from "@/contexts/display-settings-context";
+import { useMarketplace } from "@/contexts/marketplace-context";
 
 type ShipmentRow = {
   id: string;
@@ -39,6 +40,7 @@ function formatDate(iso: string | null): string {
 export default function ShipmentsPage() {
   const baseUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
   const { isSignedIn, getToken } = useAuth();
+  const { selectedMarketplaceId } = useMarketplace();
 
   const [rows, setRows] = useState<ShipmentRow[]>([]);
   const [loading, setLoading] = useState(false);
@@ -57,7 +59,10 @@ export default function ShipmentsPage() {
     try {
       const token = await getToken({ template: "backend" });
       const res = await fetch(`${baseUrl}/api/amazon/shipments`, {
-        headers: { Authorization: `Bearer ${token}` },
+        headers: {
+          Authorization: `Bearer ${token}`,
+          ...(selectedMarketplaceId ? { "x-marketplace-id": selectedMarketplaceId } : {}),
+        },
       });
       if (!res.ok) throw new Error("Failed to load shipments.");
       const data = (await res.json()) as ShipmentRow[];
@@ -67,7 +72,7 @@ export default function ShipmentsPage() {
     } finally {
       setLoading(false);
     }
-  }, [getToken, baseUrl]);
+  }, [getToken, baseUrl, selectedMarketplaceId]);
 
   useEffect(() => {
     if (!isSignedIn) {

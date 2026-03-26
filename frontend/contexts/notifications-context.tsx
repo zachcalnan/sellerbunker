@@ -77,6 +77,7 @@ type NotificationsContextValue = {
   dismissSyncBar: () => void;
   visibleMissingShipments: Array<{ shipmentId: string; missingUnits: number; sentDate: string | null; shipmentName: string | null }>;
   showSyncBoxInDropdown: boolean;
+  triggerSyncNow: () => Promise<void>;
 };
 
 const NotificationsContext = createContext<NotificationsContextValue | null>(null);
@@ -230,21 +231,51 @@ export function NotificationsProvider({ children }: { children: React.ReactNode 
     try {
       const token = await getToken({ template: "backend" });
       if (!token) return;
-      const syncProgressBase =
-        (typeof window !== "undefined" && sessionStorage.getItem(SYNC_PROGRESS_API_KEY)) ||
+      const storedBase =
+        typeof window !== "undefined" ? sessionStorage.getItem(SYNC_PROGRESS_API_KEY) : null;
+      const primaryBase =
+        storedBase ||
         (SYNC_PROGRESS_API_OVERRIDE && SYNC_PROGRESS_API_OVERRIDE.trim()) ||
         BASE_URL;
-      const url = `${syncProgressBase}/api/amazon/sync-progress`;
-      const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-      if (!res.ok) return;
-      const data = (await res.json()) as {
+      const candidates = [primaryBase, BASE_URL].filter(
+        (v, i, arr) => Boolean(v) && arr.indexOf(v) === i,
+      );
+
+      let data: {
         progress?: number;
         stage?: SyncStage;
         feeProgress?: number;
         feeDone?: boolean;
         corePhaseEndPct?: number;
         phase?: string;
-      };
+      } | null = null;
+
+      for (const base of candidates) {
+        try {
+          const url = `${base}/api/amazon/sync-progress`;
+          const res = await fetch(url, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (!res.ok) continue;
+          data = (await res.json()) as {
+            progress?: number;
+            stage?: SyncStage;
+            feeProgress?: number;
+            feeDone?: boolean;
+            corePhaseEndPct?: number;
+            phase?: string;
+          };
+          if (typeof window !== "undefined") {
+            try {
+              sessionStorage.setItem(SYNC_PROGRESS_API_KEY, base);
+            } catch {}
+          }
+          break;
+        } catch {
+          // try next base
+        }
+      }
+      if (!data) return;
       const p = Number(data.progress);
       const progressNum = Number.isFinite(p) ? Math.min(100, Math.max(0, p)) : null;
       const stage =
@@ -303,12 +334,32 @@ export function NotificationsProvider({ children }: { children: React.ReactNode 
     setSyncDismissed(true);
   };
 
+  const triggerSyncNow = useCallback(async () => {
+    if (!isSignedIn) return;
+    try {
+      const token = await getToken({ template: "backend" });
+      if (!token) return;
+      await fetch(`${BASE_URL}/api/amazon/sync?inline=1`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      try {
+        sessionStorage.setItem(INITIAL_SYNC_PENDING_KEY, "1");
+        localStorage.setItem(SYNC_STARTED_AT_KEY, String(Date.now()));
+      } catch {}
+      setSyncPendingFromSession(true);
+      setSyncDismissed(false);
+    } catch {
+      // ignore - polling will continue
+    }
+  }, [isSignedIn, getToken]);
+
   const hasMissing = (missingCount ?? 0) > 0;
   const visibleMissingShipments = missingUnitsShipments.filter((s) => !dismissedMissingShipmentIds.has(s.shipmentId));
   const hasMissingUnits = visibleMissingShipments.length > 0;
   const hasNotifications = hasMissing || !cogsRoiDismissed || !cogsProfitDismissed || hasMissingUnits;
   const syncInProgress = isSyncInProgress(syncStage, syncProgress);
-  const feeSyncActive = syncStage === "fees";
+  const feeSyncActive = syncStage === "fees" && (syncProgress ?? 0) >= 75;
   const feeSegmentStart = 75;
   const visibleSyncProgress = feeSyncActive
     ? feeSegmentStart + ((feeSyncProgress ?? 0) / 100) * (100 - feeSegmentStart)
@@ -390,6 +441,7 @@ export function NotificationsProvider({ children }: { children: React.ReactNode 
     dismissSyncBar,
     visibleMissingShipments,
     showSyncBoxInDropdown: showSyncBox,
+    triggerSyncNow,
   };
 
   return <NotificationsContext.Provider value={value}>{children}</NotificationsContext.Provider>;

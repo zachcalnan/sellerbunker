@@ -87,6 +87,7 @@ export function VatOnboardingModal() {
       }
       setOpen(false);
       setSelected(null);
+      window.dispatchEvent(new CustomEvent("sellerbunker-vat-onboarding-complete"));
     } catch (e) {
       setError(e instanceof Error ? e.message : "Something went wrong.");
     } finally {

@@ -120,13 +120,13 @@ function NavAuthButtons({ skipFade }: { skipFade?: boolean } = {}) {
     );
   }
 
-  // Signed in but no subscription
+  // Signed in without subscription access: still allow dashboard entry.
   return (
     <div className={wrapperClass}>
       <Link href="/sign-in" className={signInClass}>
         Sign in
       </Link>
-      <Link href="/sign-up" className={dashClass}>
+      <Link href="/dashboard" className={dashClass}>
         Dashboard
       </Link>
     </div>

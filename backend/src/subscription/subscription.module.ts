@@ -3,6 +3,7 @@ import { PrismaModule } from '../prisma/prisma.module';
 import { ClerkModule } from '../clerk/clerk.module';
 import { UsersModule } from '../users/users.module';
 import { StripeModule } from '../stripe/stripe.module';
+import { AmazonModule } from '../amazon/amazon.module';
 import { SubscriptionController } from './subscription.controller';
 import { SubscriptionService } from './subscription.service';
 
@@ -12,6 +13,7 @@ import { SubscriptionService } from './subscription.service';
     forwardRef(() => ClerkModule),
     UsersModule,
     forwardRef(() => StripeModule),
+    forwardRef(() => AmazonModule),
   ],
   controllers: [SubscriptionController],
   providers: [SubscriptionService],

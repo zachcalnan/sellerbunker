@@ -5,6 +5,8 @@ import { Suspense, type ReactNode, useCallback, useEffect, useLayoutEffect, useS
 import { useAuth } from "@clerk/nextjs";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useDisplaySettings } from "@/contexts/display-settings-context";
+import { useMarketplace } from "@/contexts/marketplace-context";
+import { StripeCheckoutButton } from "@/components/stripe-checkout-button";
 
 type AccountSummary = {
   marketplace: string;
@@ -57,12 +59,16 @@ type RecentOrderRow = {
 
 const POST_CONNECT_REFRESH_PENDING_KEY =
   "sellerbunker_post_connect_refresh_pending";
+const CHECKOUT_SYNC_MODAL_PENDING_KEY =
+  "sellerbunker_show_sync_modal_after_checkout";
+const SYNC_RETRIGGERED_KEY = "sellerbunker_sync_retriggered_after_checkout";
 
 function HomeInner() {
   const baseUrl =
     process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
 
   const { isSignedIn, getToken } = useAuth();
+  const { selectedMarketplaceId } = useMarketplace();
   const { backgroundClass, ringColor } = useDisplaySettings();
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -82,6 +88,9 @@ function HomeInner() {
   const [summary, setSummary] = useState<AccountSummary | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [hasSubscriptionAccess, setHasSubscriptionAccess] = useState<boolean | null>(null);
+  const [unlockModalOpen, setUnlockModalOpen] = useState(false);
+  const isLocked = hasSubscriptionAccess === false;
 
   const amazonConnectedParam = searchParams.get("amazon_connected") === "1";
   const [showAmazonConnectThankYou, setShowAmazonConnectThankYou] = useState(false);
@@ -91,6 +100,24 @@ function HomeInner() {
     if (typeof window === "undefined") return;
     const search = window.location.search;
     const hasParam = search.includes("amazon_connected=1");
+    const fromCheckout =
+      sessionStorage.getItem(CHECKOUT_SYNC_MODAL_PENDING_KEY) === "1";
+
+    if (fromCheckout && hasSubscriptionAccess === true) {
+      try {
+        // Payment redirect path does not include amazon_connected=1,
+        // so mark sync as pending here as well to start bar polling.
+        sessionStorage.setItem(POST_CONNECT_REFRESH_PENDING_KEY, "1");
+        sessionStorage.setItem("sellerbunker_initial_sync_pending", "1");
+        localStorage.setItem("sellerbunker_sync_started_at", String(Date.now()));
+        localStorage.removeItem("sellerbunker_initial_sync_dismissed");
+        window.dispatchEvent(new CustomEvent("sellerbunker-initial-sync-pending"));
+      } catch {
+        /* ignore */
+      }
+      setShowAmazonConnectThankYou(true);
+      return;
+    }
 
     if (hasParam) {
       try {
@@ -109,8 +136,10 @@ function HomeInner() {
       } catch {
         /* ignore */
       }
-      // Always show the modal when URL has amazon_connected=1 — no localStorage gate
-      setShowAmazonConnectThankYou(true);
+      // Show full-sync waiting modal only for paid users.
+      if (hasSubscriptionAccess === true) {
+        setShowAmazonConnectThankYou(true);
+      }
       return;
     }
 
@@ -119,10 +148,10 @@ function HomeInner() {
       sessionStorage.getItem(POST_CONNECT_REFRESH_PENDING_KEY) === "1" ||
       sessionStorage.getItem("sellerbunker_initial_sync_pending") === "1";
     const thanksSeen = localStorage.getItem("sellerbunker_amazon_connect_thanks_seen") === "1";
-    if (fromSession && !thanksSeen) {
+    if (fromSession && !thanksSeen && hasSubscriptionAccess === true) {
       setShowAmazonConnectThankYou(true);
     }
-  }, []);
+  }, [hasSubscriptionAccess]);
 
   // Keep sessionStorage in sync when searchParams resolve (e.g. after Suspense)
   useEffect(() => {
@@ -139,9 +168,39 @@ function HomeInner() {
       /* ignore */
     }
   }, [amazonConnectedParam, searchParams]);
+
+  // Safety net: after payment redirect, if sync is pending and still at 0, trigger
+  // a background sync once so users don't need to reconnect Amazon manually.
+  useEffect(() => {
+    if (!isSignedIn || hasSubscriptionAccess !== true) return;
+    if (typeof window === "undefined") return;
+    const checkoutPending =
+      sessionStorage.getItem(CHECKOUT_SYNC_MODAL_PENDING_KEY) === "1";
+    const syncPending =
+      sessionStorage.getItem(POST_CONNECT_REFRESH_PENDING_KEY) === "1" ||
+      sessionStorage.getItem("sellerbunker_initial_sync_pending") === "1";
+    if (!checkoutPending && !syncPending) return;
+    if (sessionStorage.getItem(SYNC_RETRIGGERED_KEY) === "1") return;
+
+    const run = async () => {
+      try {
+        const token = await getToken({ template: "backend" });
+        if (!token) return;
+        await fetch(`${baseUrl}/api/amazon/sync`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        sessionStorage.setItem(SYNC_RETRIGGERED_KEY, "1");
+      } catch {
+        // ignore; normal poller will continue
+      }
+    };
+    void run();
+  }, [isSignedIn, hasSubscriptionAccess, getToken, baseUrl]);
   const dismissAmazonConnectThankYou = () => {
     try {
       localStorage.setItem("sellerbunker_amazon_connect_thanks_seen", "1");
+      sessionStorage.removeItem(CHECKOUT_SYNC_MODAL_PENDING_KEY);
     } catch {
       /* ignore */
     }
@@ -296,6 +355,7 @@ function HomeInner() {
           {
             headers: {
               Authorization: `Bearer ${token}`,
+              ...(selectedMarketplaceId ? { "x-marketplace-id": selectedMarketplaceId } : {}),
             },
           },
         );
@@ -329,6 +389,25 @@ function HomeInner() {
     }
     fetchSummary();
   }, [isSignedIn, fetchSummary]);
+
+  useEffect(() => {
+    if (!isSignedIn) return;
+    const checkAccess = async () => {
+      try {
+        const token = await getToken({ template: "backend" });
+        if (!token) return;
+        const res = await fetch(`${baseUrl}/api/subscription/status`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok) return;
+        const data = (await res.json()) as { hasAccess?: boolean };
+        setHasSubscriptionAccess(Boolean(data.hasAccess));
+      } catch {
+        // Keep default true so dashboard stays usable if check fails.
+      }
+    };
+    void checkAccess();
+  }, [isSignedIn, getToken, baseUrl]);
 
   useEffect(() => {
     if (!isSignedIn) return;
@@ -397,7 +476,7 @@ function HomeInner() {
           label: "Profit",
           value: hasCostData ? formatCurrency(profit, effectiveCurrency, 2) : "—",
           percentage: hasCostData ? Math.round(summary.profitMargin * 100) : 0,
-          color: ringColor,
+          color: "#22C55E",
           fullRing: true,
           centerLine1: hasCostData ? formatCurrency(profit, effectiveCurrency, 2) : "—",
           centerLine2: "",
@@ -407,7 +486,7 @@ function HomeInner() {
           label: "Sales",
           value: formatCurrency(summary.revenue, effectiveCurrency, 2),
           percentage: 0,
-          color: ringColor,
+          color: "#60A5FA",
           fullRing: true,
           hidePercentage: true,
         },
@@ -415,7 +494,7 @@ function HomeInner() {
           label: "Units",
           value: summary.unitsSold.toLocaleString(),
           percentage: 0,
-          color: ringColor,
+          color: "#F59E0B",
           fullRing: true,
           hidePercentage: true,
         },
@@ -423,7 +502,7 @@ function HomeInner() {
           label: "ROI",
           value: hasCostData ? `${Math.round(roiPct)}%` : "—",
           percentage: hasCostData ? Math.min(100, Math.round(roiPct)) : 0,
-          color: ringColor,
+          color: "#A78BFA",
           fullRing: true,
           hidePercentage: !hasCostData,
           centerLine1: hasCostData ? `${Math.round(roiPct)}%` : "—",
@@ -474,6 +553,40 @@ function HomeInner() {
           </div>
         </div>
       )}
+      {unlockModalOpen && (
+        <div className="fixed inset-0 z-[210] flex items-center justify-center bg-black/60 p-6">
+          <div className="w-full max-w-lg rounded-2xl border border-[var(--surface-border)] bg-[var(--surface)] p-6 shadow-2xl">
+            <div className="mb-3 flex items-center gap-2 text-[var(--foreground)]">
+              <span aria-hidden>🔒</span>
+              <h3 className="text-lg font-semibold">Unlock full order history</h3>
+            </div>
+            <p className="text-sm text-[var(--muted-foreground)]">
+              We are currently in testing. Access is free if you have a code.
+            </p>
+            <div className="mt-4">
+              <StripeCheckoutButton className="w-full rounded-lg bg-sb-accent px-4 py-2.5 text-sm font-semibold text-black hover:opacity-90">
+                Continue
+              </StripeCheckoutButton>
+            </div>
+            <p className="mt-3 text-xs text-[var(--muted-foreground)]">
+              You can request the free sign up code:
+            </p>
+            <div className="mt-2 flex flex-wrap items-center gap-3 text-xs">
+              <a href="https://discord.gg/sbDwPbV9" target="_blank" rel="noopener noreferrer" className="underline">Discord</a>
+              <a href="https://www.instagram.com/sellerbunker" target="_blank" rel="noopener noreferrer" className="underline">Instagram</a>
+              <a href="https://www.tiktok.com/@sellerbunker" target="_blank" rel="noopener noreferrer" className="underline">TikTok</a>
+              <a href="mailto:support@sellerbunker.com" className="underline">Email</a>
+            </div>
+            <button
+              type="button"
+              onClick={() => setUnlockModalOpen(false)}
+              className="mt-5 w-full rounded-lg border border-[var(--surface-border)] px-4 py-2 text-sm text-[var(--foreground)] hover:bg-[var(--foreground)]/5"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      )}
       <main className="flex min-h-screen w-full flex-col gap-6 px-4 pt-2 pb-6">
 
         {loading && (
@@ -498,7 +611,10 @@ function HomeInner() {
                     const params = new URLSearchParams({ region: 'EU' });
                     if (returnOrigin) params.set('returnOrigin', returnOrigin);
                     const res = await fetch(`${baseUrl}/api/amazon/connect?${params}`, {
-                      headers: { Authorization: `Bearer ${token}` },
+                      headers: {
+                        Authorization: `Bearer ${token}`,
+                        ...(selectedMarketplaceId ? { "x-marketplace-id": selectedMarketplaceId } : {}),
+                      },
                     });
                     const data = (await res.json()) as { url?: string; message?: string };
                     if (!res.ok) {
@@ -530,7 +646,7 @@ function HomeInner() {
                 {/* Performance Snapshot */}
                 <div className="flex w-full flex-col rounded-2xl border border-[var(--surface-border)] bg-[var(--surface)] p-4 shadow-sm">
                   <div className="mb-4 flex w-full flex-wrap items-center justify-between gap-3">
-                    <h2 className="text-xs font-semibold uppercase tracking-[0.2em] text-[var(--muted-foreground)]">
+                    <h2 className="text-xs font-semibold uppercase tracking-[0.2em] text-[var(--foreground)]">
                       Performance Snapshot
                     </h2>
                     <div className="flex flex-wrap items-center justify-end gap-2 text-xs text-[var(--muted-foreground)]">
@@ -568,14 +684,14 @@ function HomeInner() {
                                   : allTimeStart;
                         setRangeInUrl(start, end);
                       }}
-                      className="h-8 cursor-pointer rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-2.5 text-xs text-[var(--foreground)] outline-none focus:ring-2 focus:ring-sb-accent/40"
+                      className="h-8 cursor-pointer rounded-lg border border-[var(--surface-border)] bg-black px-2.5 text-xs text-white outline-none focus:ring-2 focus:ring-sb-accent/40"
                     >
-                      <option value="today">Today</option>
-                      <option value="yesterday">Yesterday</option>
-                      <option value="7d">7 days</option>
-                      <option value="30d">30 days</option>
-                      <option value="all">All time</option>
-                      <option value="custom">Custom</option>
+                      <option className="bg-black text-white" value="today">Today</option>
+                      <option className="bg-black text-white" value="yesterday">Yesterday</option>
+                      <option className="bg-black text-white" value="7d">7 days</option>
+                      <option className="bg-black text-white" value="30d">30 days</option>
+                      <option className="bg-black text-white" value="all">All time</option>
+                      <option className="bg-black text-white" value="custom">Custom</option>
                     </select>
                     {rangePreset === "custom" ? (
                       <>
@@ -606,6 +722,18 @@ function HomeInner() {
                         </button>
                       </>
                     ) : null}
+                    {isLocked && (
+                      <div className="rounded-md border border-[var(--surface-border)] bg-[var(--background)]/50 px-2 py-1 text-[10px] text-[var(--foreground)]">
+                        🔒 Unlock full performance snapshot{" "}
+                        <button
+                          type="button"
+                          onClick={() => setUnlockModalOpen(true)}
+                          className="ml-1 rounded bg-sb-accent px-1.5 py-0.5 text-[10px] font-semibold text-black"
+                        >
+                          Unlock access
+                        </button>
+                      </div>
+                    )}
                     </div>
                   </div>
                   <div className="grid w-full grid-cols-2 gap-4 sm:grid-cols-4">
@@ -621,9 +749,24 @@ function HomeInner() {
                   isSignedIn={isSignedIn}
                   getToken={getToken}
                   currency={effectiveCurrency}
+                  maxRows={hasSubscriptionAccess ? 10 : 5}
                 />
+                {isLocked && (
+                  <div className="rounded-lg border border-[var(--surface-border)] bg-[var(--surface)] px-3 py-2 text-xs text-[var(--foreground)]">
+                    <span className="mr-2">🔒</span>
+                    Unlock full order history
+                    <button
+                      type="button"
+                      onClick={() => setUnlockModalOpen(true)}
+                      className="ml-2 rounded bg-sb-accent px-2 py-0.5 font-semibold text-black"
+                    >
+                      Unlock access
+                    </button>
+                  </div>
+                )}
 
                 {/* Top categories by metric (4 pie charts by displayGroup) */}
+                <div className={isLocked ? "blur-sm pointer-events-none select-none" : ""}>
                 <CategoryPieCharts
                   baseUrl={baseUrl}
                   isSignedIn={isSignedIn}
@@ -632,29 +775,34 @@ function HomeInner() {
                   start={effectiveStart}
                   end={effectiveEnd}
                 />
+                </div>
 
                 {/* Top Sellers (this month) */}
+                <div className={isLocked ? "blur-sm pointer-events-none select-none" : ""}>
                 <TopSellers
                   baseUrl={baseUrl}
                   isSignedIn={isSignedIn}
                   getToken={getToken}
                   currency={effectiveCurrency}
                 />
+                </div>
 
                 {/* Cost Breakdown (actual sales costs) */}
+                <div className={isLocked ? "blur-sm pointer-events-none select-none" : ""}>
                 <CostBreakdown
                   baseUrl={baseUrl}
                   isSignedIn={isSignedIn}
                   getToken={getToken}
                   currency={effectiveCurrency}
                 />
+                </div>
               </div>
 
               {/* Right column: Sales v Profit + Inventory Summary + Category Pie Charts + Profit & Loss */}
-              <div className="flex min-w-0 flex-col gap-3">
+              <div className={`flex min-w-0 flex-col gap-3 ${isLocked ? "blur-sm pointer-events-none select-none" : ""}`}>
               <div className="flex min-w-0 w-full flex-col overflow-hidden rounded-xl bg-[var(--surface)] p-4 ring-1 ring-[var(--surface-border)]">
                 <div className="mb-3 flex w-full items-center justify-between gap-2">
-                  <h2 className="text-sm font-medium uppercase tracking-[0.2em] text-[var(--muted-foreground)]">
+                  <h2 className="text-sm font-medium uppercase tracking-[0.2em] text-[var(--foreground)]">
                     Sales v Profit
                   </h2>
                   <div className="flex flex-wrap items-center justify-end gap-2 text-xs text-[var(--muted-foreground)]">
@@ -693,14 +841,14 @@ function HomeInner() {
                         setTrendCustomStart(start);
                         setTrendCustomEnd(end);
                       }}
-                      className="h-8 cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-xs text-[var(--foreground)] outline-none"
+                      className="h-8 cursor-pointer rounded-lg border border-[var(--surface-border)] bg-black px-2 text-xs text-white outline-none"
                     >
-                      <option value="today">Today</option>
-                      <option value="yesterday">Yesterday</option>
-                      <option value="7d">7 days</option>
-                      <option value="30d">30 days</option>
-                      <option value="all">All time</option>
-                      <option value="custom">Custom</option>
+                      <option className="bg-black text-white" value="today">Today</option>
+                      <option className="bg-black text-white" value="yesterday">Yesterday</option>
+                      <option className="bg-black text-white" value="7d">7 days</option>
+                      <option className="bg-black text-white" value="30d">30 days</option>
+                      <option className="bg-black text-white" value="all">All time</option>
+                      <option className="bg-black text-white" value="custom">Custom</option>
                     </select>
                     {trendPreset === "custom" ? (
                       <>
@@ -778,6 +926,7 @@ type RecentOrdersProps = {
   isSignedIn: boolean | undefined;
   getToken: (args: { template?: string }) => Promise<string | null>;
   currency: string;
+  maxRows?: number;
 };
 
 function RecentOrders({
@@ -785,7 +934,9 @@ function RecentOrders({
   isSignedIn,
   getToken,
   currency,
+  maxRows = 10,
 }: RecentOrdersProps) {
+  const { selectedMarketplaceId } = useMarketplace();
   const [orders, setOrders] = useState<RecentOrderRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -801,11 +952,14 @@ function RecentOrders({
       try {
         const token = await getToken({ template: "backend" });
         const res = await fetch(`${baseUrl}/api/amazon/orders`, {
-          headers: { Authorization: `Bearer ${token}` },
+          headers: {
+            Authorization: `Bearer ${token}`,
+            ...(selectedMarketplaceId ? { "x-marketplace-id": selectedMarketplaceId } : {}),
+          },
         });
         if (!res.ok) throw new Error("Failed to load orders");
         const data = (await res.json()) as RecentOrderRow[];
-        setOrders(Array.isArray(data) ? data.slice(0, 10) : []);
+        setOrders(Array.isArray(data) ? data.slice(0, maxRows) : []);
       } catch (e) {
         setError(e instanceof Error ? e.message : "Error");
         setOrders([]);
@@ -814,7 +968,7 @@ function RecentOrders({
       }
     };
     void fetchOrders();
-  }, [isSignedIn, getToken, baseUrl]);
+  }, [isSignedIn, getToken, baseUrl, selectedMarketplaceId, maxRows]);
 
   const formatDate = (dateStr: string) => {
     const d = new Date(dateStr);
@@ -829,7 +983,7 @@ function RecentOrders({
 
   return (
     <div className="flex w-full flex-col rounded-xl bg-[var(--surface)] p-4 ring-1 ring-[var(--surface-border)]">
-      <h2 className="mb-2 text-sm font-medium uppercase tracking-[0.2em] text-[var(--muted-foreground)]">
+      <h2 className="mb-2 text-sm font-medium uppercase tracking-[0.2em] text-[var(--foreground)]">
         Recent orders
       </h2>
       {loading && (
@@ -933,6 +1087,7 @@ function TopSellers({
   getToken,
   currency,
 }: TopSellersProps) {
+  const { selectedMarketplaceId } = useMarketplace();
   const [rows, setRows] = useState<TopSellerRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -951,14 +1106,24 @@ function TopSellers({
         const token = await getToken({ template: "backend" });
         let res = await fetch(
           `${baseUrl}/api/amazon/products/top-profitable?limit=5&period=month`,
-          { headers: { Authorization: `Bearer ${token}` } },
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+              ...(selectedMarketplaceId ? { "x-marketplace-id": selectedMarketplaceId } : {}),
+            },
+          },
         );
         if (!res.ok) throw new Error("Failed to load top sellers");
         let data = (await res.json()) as TopSellerRow[];
         if (Array.isArray(data) && data.length === 0) {
           res = await fetch(
             `${baseUrl}/api/amazon/products/top-profitable?limit=5&period=30d`,
-            { headers: { Authorization: `Bearer ${token}` } },
+            {
+              headers: {
+                Authorization: `Bearer ${token}`,
+                ...(selectedMarketplaceId ? { "x-marketplace-id": selectedMarketplaceId } : {}),
+              },
+            },
           );
           if (res.ok) {
             data = (await res.json()) as TopSellerRow[];
@@ -974,11 +1139,11 @@ function TopSellers({
       }
     };
     void fetchTop();
-  }, [isSignedIn, getToken, baseUrl]);
+  }, [isSignedIn, getToken, baseUrl, selectedMarketplaceId]);
 
   return (
     <div className="flex w-full flex-col rounded-xl bg-[var(--surface)] p-3 ring-1 ring-[var(--surface-border)]">
-      <h2 className="mb-1.5 text-xs font-medium uppercase tracking-[0.2em] text-[var(--muted-foreground)]">
+      <h2 className="mb-1.5 text-xs font-medium uppercase tracking-[0.2em] text-[var(--foreground)]">
         Top Sellers (this month)
       </h2>
       {isFallbackPeriod && rows.length > 0 && (
@@ -1090,6 +1255,7 @@ function CostBreakdown({
   getToken,
   currency,
 }: CostBreakdownProps) {
+  const { selectedMarketplaceId } = useMarketplace();
   const [data, setData] = useState<CostBreakdownData | null>(null);
   const [loading, setLoading] = useState(false);
   const [periodPreset, setPeriodPreset] = useState<CostBreakdownPreset>("30d");
@@ -1140,7 +1306,12 @@ function CostBreakdown({
             start: effectiveStart,
             end: effectiveEnd,
           }).toString()}`,
-          { headers: { Authorization: `Bearer ${token}` } },
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+              ...(selectedMarketplaceId ? { "x-marketplace-id": selectedMarketplaceId } : {}),
+            },
+          },
         );
         if (!res.ok) throw new Error("Failed to load cost breakdown");
         const json = (await res.json()) as CostBreakdownData;
@@ -1152,7 +1323,7 @@ function CostBreakdown({
       }
     };
     void fetchData();
-  }, [isSignedIn, getToken, baseUrl, effectiveStart, effectiveEnd]);
+  }, [isSignedIn, getToken, baseUrl, effectiveStart, effectiveEnd, selectedMarketplaceId]);
 
   const cur = data?.currency ?? currency;
   const fmt = (n: number) =>
@@ -1181,22 +1352,22 @@ function CostBreakdown({
   return (
     <div className="flex w-full flex-col rounded-xl bg-[var(--surface)] p-4 ring-1 ring-[var(--surface-border)]">
       <div className="mb-2 flex w-full flex-wrap items-center justify-between gap-2">
-        <h2 className="text-sm font-medium uppercase tracking-[0.2em] text-[var(--muted-foreground)]">
+        <h2 className="text-sm font-medium uppercase tracking-[0.2em] text-[var(--foreground)]">
           Cost Breakdown
         </h2>
         <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--muted-foreground)]">
           <select
             value={periodPreset}
             onChange={(e) => setPeriodPreset(e.target.value as CostBreakdownPreset)}
-            className="h-8 cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-[var(--foreground)] outline-none"
+            className="h-8 cursor-pointer rounded-lg border border-[var(--surface-border)] bg-black px-2 text-white outline-none"
           >
-            <option value="yesterday">Yesterday</option>
-            <option value="today">Today</option>
-            <option value="7d">7 days</option>
-            <option value="14d">Two weeks</option>
-            <option value="30d">30 days</option>
-            <option value="all">All time</option>
-            <option value="custom">Custom</option>
+            <option className="bg-black text-white" value="yesterday">Yesterday</option>
+            <option className="bg-black text-white" value="today">Today</option>
+            <option className="bg-black text-white" value="7d">7 days</option>
+            <option className="bg-black text-white" value="14d">Two weeks</option>
+            <option className="bg-black text-white" value="30d">30 days</option>
+            <option className="bg-black text-white" value="all">All time</option>
+            <option className="bg-black text-white" value="custom">Custom</option>
           </select>
           {periodPreset === "custom" && (
             <>
@@ -1300,6 +1471,7 @@ function ProfitAndLoss({
   getToken,
   currency,
 }: ProfitAndLossProps) {
+  const { selectedMarketplaceId } = useMarketplace();
   const [data, setData] = useState<ProfitAndLossData | null>(null);
   const [loading, setLoading] = useState(false);
   const [periodPreset, setPeriodPreset] = useState<CostBreakdownPreset>("30d");
@@ -1350,7 +1522,12 @@ function ProfitAndLoss({
             start: effectiveStart,
             end: effectiveEnd,
           }).toString()}`,
-          { headers: { Authorization: `Bearer ${token}` } },
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+              ...(selectedMarketplaceId ? { "x-marketplace-id": selectedMarketplaceId } : {}),
+            },
+          },
         );
         if (!res.ok) throw new Error("Failed to load profit & loss");
         const json = (await res.json()) as ProfitAndLossData;
@@ -1362,7 +1539,7 @@ function ProfitAndLoss({
       }
     };
     void fetchData();
-  }, [isSignedIn, getToken, baseUrl, effectiveStart, effectiveEnd]);
+  }, [isSignedIn, getToken, baseUrl, effectiveStart, effectiveEnd, selectedMarketplaceId]);
 
   const cur = data?.currency ?? currency;
   const fmt = (n: number) =>
@@ -1376,7 +1553,7 @@ function ProfitAndLoss({
   return (
     <div className="flex w-full flex-col rounded-xl bg-[var(--surface)] p-4 ring-1 ring-[var(--surface-border)]">
       <div className="mb-2 flex w-full flex-wrap items-center justify-between gap-2">
-        <h2 className="text-sm font-medium uppercase tracking-[0.2em] text-[var(--muted-foreground)]">
+        <h2 className="text-sm font-medium uppercase tracking-[0.2em] text-[var(--foreground)]">
           Profit &amp; Loss
         </h2>
         <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--muted-foreground)]">
@@ -1553,6 +1730,7 @@ function InventorySummary({
   getToken,
   currency,
 }: InventorySummaryProps) {
+  const { selectedMarketplaceId } = useMarketplace();
   const [rows, setRows] = useState<InventorySummaryRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1568,7 +1746,10 @@ function InventorySummary({
       try {
         const token = await getToken({ template: "backend" });
         const res = await fetch(`${baseUrl}/api/amazon/inventory`, {
-          headers: { Authorization: `Bearer ${token}` },
+          headers: {
+            Authorization: `Bearer ${token}`,
+            ...(selectedMarketplaceId ? { "x-marketplace-id": selectedMarketplaceId } : {}),
+          },
         });
         if (!res.ok) throw new Error("Failed to load inventory");
         const data = (await res.json()) as InventorySummaryRow[];
@@ -1581,7 +1762,7 @@ function InventorySummary({
       }
     };
     void fetchInventory();
-  }, [isSignedIn, getToken, baseUrl]);
+  }, [isSignedIn, getToken, baseUrl, selectedMarketplaceId]);
 
   const n = (v: number | null | undefined) => (v != null && Number.isFinite(v) ? v : 0);
   const total = rows.reduce((sum, r) => sum + n(r.totalQty), 0);
@@ -1732,7 +1913,7 @@ function InventorySummary({
   return (
     <div className="flex w-full flex-col rounded-xl bg-[var(--surface)] p-3 ring-1 ring-[var(--surface-border)]">
       <div className="mb-1 flex items-center gap-1">
-        <h2 className="text-[10px] font-medium uppercase tracking-[0.1em] text-[var(--muted-foreground)]">
+        <h2 className="text-[10px] font-medium uppercase tracking-[0.1em] text-[var(--foreground)]">
           Inventory summary
         </h2>
         <span
@@ -1829,6 +2010,7 @@ function SalesTrend({
   label,
   noWrapper = false,
 }: SalesTrendProps) {
+  const { selectedMarketplaceId } = useMarketplace();
   const { ringColor } = useDisplaySettings();
   const [sales, setSales] = useState<SalesSeries | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1853,6 +2035,7 @@ function SalesTrend({
           {
             headers: {
               Authorization: `Bearer ${token}`,
+              ...(selectedMarketplaceId ? { "x-marketplace-id": selectedMarketplaceId } : {}),
             },
           },
         );
@@ -1874,7 +2057,7 @@ function SalesTrend({
     };
 
     fetchSales();
-  }, [isSignedIn, getToken, baseUrl, start, end]);
+  }, [isSignedIn, getToken, baseUrl, start, end, selectedMarketplaceId]);
 
   if (!sales && !loading && !error) {
     return null;
@@ -2208,7 +2391,7 @@ function CategoryPieChart({
 
   return (
     <div className="flex min-w-0 flex-1 flex-col rounded-lg border border-[var(--surface-border)] bg-[var(--surface)]/30 p-2">
-      <h3 className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
+      <h3 className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--foreground)]">
         {title}
       </h3>
       {hasData ? (
@@ -2259,6 +2442,7 @@ function CategoryPieCharts({
   start,
   end,
 }: CategoryPieChartsProps) {
+  const { selectedMarketplaceId } = useMarketplace();
   const [data, setData] = useState<CategoryBreakdown | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -2276,7 +2460,12 @@ function CategoryPieCharts({
             start,
             end,
           }).toString()}`,
-          { headers: { Authorization: `Bearer ${token}` } },
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+              ...(selectedMarketplaceId ? { "x-marketplace-id": selectedMarketplaceId } : {}),
+            },
+          },
         );
         if (!res.ok) throw new Error("Failed to load category breakdown");
         const json = (await res.json()) as CategoryBreakdown;
@@ -2288,12 +2477,12 @@ function CategoryPieCharts({
       }
     };
     void fetchData();
-  }, [isSignedIn, getToken, baseUrl, start, end]);
+  }, [isSignedIn, getToken, baseUrl, start, end, selectedMarketplaceId]);
 
   if (loading) {
     return (
       <div className="flex w-full flex-col rounded-xl bg-[var(--surface)] p-3 ring-1 ring-[var(--surface-border)]">
-        <h2 className="mb-2 text-xs font-medium uppercase tracking-[0.2em] text-[var(--muted-foreground)]">
+        <h2 className="mb-2 text-xs font-medium uppercase tracking-[0.2em] text-[var(--foreground)]">
           Top categories by metric
         </h2>
         <p className="text-[10px] text-[var(--muted-foreground)]">Loading…</p>
@@ -2314,7 +2503,7 @@ function CategoryPieCharts({
 
   return (
     <div className="flex w-full flex-col rounded-xl bg-[var(--surface)] p-3 ring-1 ring-[var(--surface-border)]">
-      <h2 className="mb-2 text-xs font-medium uppercase tracking-[0.2em] text-[var(--muted-foreground)]">
+      <h2 className="mb-2 text-xs font-medium uppercase tracking-[0.2em] text-[var(--foreground)]">
         Top categories by metric
       </h2>
       <div className="grid grid-cols-2 gap-2 sm:gap-3">
@@ -2374,7 +2563,7 @@ function DonutCard({
   fullRing,
 }: DonutCardProps) {
   const radius = 54;
-  const strokeWidth = 12;
+  const strokeWidth = 8;
   const circumference = 2 * Math.PI * radius;
   const clamped = Math.max(0, Math.min(100, percentage));
   const ringFill = fullRing ? 100 : clamped;
