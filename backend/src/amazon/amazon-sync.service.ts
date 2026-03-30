@@ -177,13 +177,21 @@ export class AmazonSyncService implements OnModuleInit {
       SYNC_PROGRESS_TTL,
     );
     await this.redis.del(`amazon-fee-sync:${userId}`);
-    // Delay job start by 2.5s so the redirect + frontend load happens first; avoids "backend already started" and gives the bar time to show 0%
+    // Mini + full catalog continuation run in one worker job; needs a long lock (default 4h). Override with FULL_SYNC_JOB_LOCK_DURATION_MS.
+    const fullSyncDelayMs = Math.max(
+      0,
+      Number(process.env.AMAZON_FULL_SYNC_DELAY_MS) || 0,
+    );
+    const fullSyncLockMs = Math.max(
+      600_000,
+      Number(process.env.FULL_SYNC_JOB_LOCK_DURATION_MS) || 4 * 60 * 60 * 1000,
+    );
     await this.enqueueUniqueJob(
       'full-sync',
       `full-sync-${userId}`,
       { userId },
       `Full-sync for userId=${userId}`,
-      { delay: 2500 },
+      { delay: fullSyncDelayMs, lockDurationMs: fullSyncLockMs },
     );
   }
 
@@ -409,9 +417,97 @@ export class AmazonSyncService implements OnModuleInit {
     );
   }
 
+  private billingBypassed(): boolean {
+    const flag = (process.env.BYPASS_BILLING ?? '').toLowerCase();
+    return ['1', 'true', 'yes', 'on'].includes(flag);
+  }
+
   /**
-   * Enqueue post-initial-sync: orders, full inventory, shipments.
-   * Runs after initial sync (minimal inventory + top 10 fees) hits 100%.
+   * Same rules as SubscriptionService.hasAccess (no Subscription import — avoids module cycle).
+   * Full catalog sync after the limited initial pass only runs when this is true.
+   */
+  async userHasPaidAccess(userId: string): Promise<boolean> {
+    if (this.billingBypassed()) return true;
+    const sub = await this.prisma.subscription.findUnique({
+      where: { userId },
+      select: { status: true, trialEndAt: true },
+    });
+    if (!sub) return false;
+    if (sub.status === 'active' || sub.status === 'trialing') return true;
+    if (sub.status === 'canceled' && sub.trialEndAt && new Date() < sub.trialEndAt)
+      return true;
+    return false;
+  }
+
+  /** True when the limited initial-sync job has written 100% to InitialSyncProgress. */
+  async isInitialMiniSyncComplete(userId: string): Promise<boolean> {
+    const row = await this.prisma.initialSyncProgress.findUnique({
+      where: { userId },
+      select: { progress: true },
+    });
+    const p = row?.progress ?? 0;
+    return Number.isFinite(p) && p >= 100;
+  }
+
+  /** Fee-sync Redis key exists (full catalog pipeline was started or completed). */
+  async hasAmazonFeeSyncProgressKey(userId: string): Promise<boolean> {
+    const raw = await this.redis.get(`amazon-fee-sync:${userId}`);
+    return raw != null && raw !== '';
+  }
+
+  async resolveOrgIdForAmazonSync(userId: string): Promise<string | null> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { activeOrgId: true },
+    });
+    let orgId = user?.activeOrgId ?? null;
+    if (!orgId) {
+      const membership = await this.prisma.organizationMembership.findFirst({
+        where: { userId },
+        select: { orgId: true },
+      });
+      orgId = membership?.orgId ?? null;
+    }
+    return orgId;
+  }
+
+  /**
+   * After Stripe checkout (subscription row exists): kick the right Amazon job.
+   * - No Amazon link → no-op.
+   * - Mini sync not finished → full-sync (limited pass; full catalog runs at end only if still paid).
+   * - Mini done, no fee-sync key (connected Amazon while unpaid) → post-initial only.
+   * - Fee-sync key already present → no-op (renewal / repeat webhook).
+   */
+  async enqueueAmazonSyncAfterSubscription(userId: string): Promise<void> {
+    const linked = await this.prisma.sellerAccount.findFirst({
+      where: { userId, marketplace: 'amazon', isActive: true },
+      select: { id: true },
+    });
+    if (!linked) return;
+
+    const miniDone = await this.isInitialMiniSyncComplete(userId);
+    if (!miniDone) {
+      await this.enqueueFullSync(userId);
+      return;
+    }
+    if (await this.hasAmazonFeeSyncProgressKey(userId)) {
+      this.logger.log(
+        `[subscription-sync] Skip post-initial (fee-sync key exists) userId=${userId.slice(0, 8)}…`,
+      );
+      return;
+    }
+    const orgId = await this.resolveOrgIdForAmazonSync(userId);
+    if (!orgId) {
+      this.logger.warn(
+        `[subscription-sync] Cannot enqueue post-initial — no org userId=${userId.slice(0, 8)}…`,
+      );
+      return;
+    }
+    await this.enqueuePostInitialSync(userId, orgId);
+  }
+
+  /**
+   * Enqueue full catalog sync as its own job (after subscription when mini sync was done unpaid, or retries).
    */
   async enqueuePostInitialSync(userId: string, orgId: string): Promise<void> {
     this.logger.log(`Enqueuing post-initial-sync job (userId=${userId}, orgId=${orgId})`);
@@ -420,7 +516,6 @@ export class AmazonSyncService implements OnModuleInit {
       `post-initial-sync-${userId}`,
       { userId, orgId },
       `Post-initial sync for userId=${userId}`,
-      { delay: 2000 },
     );
   }
 

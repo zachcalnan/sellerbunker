@@ -63,7 +63,48 @@ export class AmazonSyncProcessor extends WorkerHost {
     return orgId;
   }
 
-  /** After initial mini sync completes: mark extended sync as pending and enqueue post-initial (inventory, fees). */
+  /**
+   * Full catalog pass after the mini initial sync: all FBA inventory, shipments, then enqueue fee-sync.
+   * Shared by the post-initial-sync job (retries / legacy) and inline continuation right after full-sync.
+   */
+  private async executePostInitialCatalogSync(userId: string, orgId: string): Promise<void> {
+    this.logger.log(`[post-initial-sync] Starting for userId=${userId}, orgId=${orgId}`);
+    await this.setFeeSyncProgress(
+      userId,
+      0,
+      'Syncing full inventory & shipments',
+    );
+    // Do NOT sync full orders here: that was causing many orders to appear right after the bar moved.
+    // Full 30-day order backfill is done by recurring orders-batch-sync.
+    try {
+      await this.amazonService.syncFbaInventory(orgId, userId);
+      this.logger.log(`[post-initial-sync] full inventory done`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.error(
+        `[post-initial-sync] FBA inventory failed for userId=${userId}, orgId=${orgId}: ${msg}`,
+        err instanceof Error ? err.stack : undefined,
+      );
+      throw err;
+    }
+    try {
+      await this.amazonService.syncShipments(orgId, userId);
+      this.logger.log(`[post-initial-sync] shipments done`);
+    } catch (shipErr) {
+      const msg = shipErr instanceof Error ? shipErr.message : String(shipErr);
+      this.logger.warn(`[post-initial-sync] shipments failed (non-fatal): ${msg}`);
+    }
+    await this.amazonSyncService.enqueueFeeSync(userId, orgId);
+    this.logger.log(
+      `[post-initial-sync] enqueued fee-sync for all products (userId=${userId}); background job may take a while for large catalogs`,
+    );
+    this.logger.log(`[post-initial-sync] Completed for userId=${userId}, orgId=${orgId}`);
+  }
+
+  /**
+   * After limited mini sync: full inventory / fees only if the user has paid access (subscription).
+   * Unpaid users get the limited pass only; checkout calls enqueueAmazonSyncAfterSubscription to run the rest.
+   */
   private async afterInitialMiniSyncComplete(userId: string): Promise<void> {
     const orgId = await this.resolveOrgIdForUser(userId);
     if (!orgId) {
@@ -72,14 +113,16 @@ export class AmazonSyncProcessor extends WorkerHost {
       );
       return;
     }
-    await this.setFeeSyncProgress(
-      userId,
-      0,
-      'Syncing full inventory & shipments',
-    );
-    await this.amazonSyncService.enqueuePostInitialSync(userId, orgId);
+    const paid = await this.amazonSyncService.userHasPaidAccess(userId);
+    if (!paid) {
+      this.logger.log(
+        `[full-sync] Skipping full catalog sync — no paid subscription yet (userId=${userId}). Runs after checkout.`,
+      );
+      return;
+    }
+    await this.executePostInitialCatalogSync(userId, orgId);
     this.logger.log(
-      `[full-sync] Seeded fee-sync progress + enqueued post-initial-sync (userId=${userId}, orgId=${orgId})`,
+      `[full-sync] Ran full catalog sync after mini sync (userId=${userId}, orgId=${orgId})`,
     );
   }
 
@@ -302,36 +345,7 @@ export class AmazonSyncProcessor extends WorkerHost {
       if (!userId || !orgId) {
         throw new Error('Missing userId or orgId for post-initial-sync job');
       }
-      this.logger.log(`[post-initial-sync] Starting for userId=${userId}, orgId=${orgId}`);
-      // Do NOT sync full orders here: that was causing "34 orders" to appear right after the bar hit 100%
-      // (initial sync correctly caps at 15; this job ran 2s later and pulled the rest). Full 30-day order
-      // backfill is done by the recurring orders-batch-sync job (every 10 min), so the user sees only 15
-      // until the next batch run.
-      try {
-        await this.amazonService.syncFbaInventory(orgId, userId);
-        this.logger.log(`[post-initial-sync] full inventory done`);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        this.logger.error(
-          `[post-initial-sync] FBA inventory failed for userId=${userId}, orgId=${orgId}: ${msg}`,
-          err instanceof Error ? err.stack : undefined,
-        );
-        throw err;
-      }
-      try {
-        await this.amazonService.syncShipments(orgId, userId);
-        this.logger.log(`[post-initial-sync] shipments done`);
-      } catch (shipErr) {
-        const msg = shipErr instanceof Error ? shipErr.message : String(shipErr);
-        this.logger.warn(`[post-initial-sync] shipments failed (non-fatal): ${msg}`);
-      }
-      // Full fee + list-price for every SKU (initial bar only did top 10). Required for stock value / profit.
-      // Runs after inventory is written so no SKU is missed; not blocked by shipment errors.
-      await this.amazonSyncService.enqueueFeeSync(userId, orgId);
-      this.logger.log(
-        `[post-initial-sync] enqueued fee-sync for all products (userId=${userId}); background job may take a while for large catalogs`,
-      );
-      this.logger.log(`[post-initial-sync] Completed for userId=${userId}, orgId=${orgId}`);
+      await this.executePostInitialCatalogSync(userId, orgId);
     }
 
     if (job.name === 'fee-sync') {

@@ -155,23 +155,12 @@ export class SubscriptionService {
       },
     });
 
-    // After card signup/payment, start (or restart) background Amazon sync
-    // when the user already connected Amazon during onboarding.
+    // After payment: limited initial sync can have run while unpaid; full catalog only after subscription.
     try {
-      const hasAmazonLink = await this.prisma.sellerAccount.findFirst({
-        where: {
-          userId: user.id,
-          marketplace: 'amazon',
-          isActive: true,
-        },
-        select: { id: true },
-      });
-      if (hasAmazonLink) {
-        await this.amazonSyncService.enqueueFullSync(user.id);
-      }
+      await this.amazonSyncService.enqueueAmazonSyncAfterSubscription(user.id);
     } catch (e) {
       this.logger.warn(
-        `recordFromCheckout: failed to enqueue full sync for userId=${user.id}: ${
+        `recordFromCheckout: failed to enqueue Amazon sync for userId=${user.id}: ${
           e instanceof Error ? e.message : String(e)
         }`,
       );
