@@ -34,9 +34,53 @@ export class AmazonSyncProcessor extends WorkerHost {
     await this.redis.set(key, JSON.stringify(data), SYNC_PROGRESS_TTL);
   }
 
-  private async setFeeSyncProgress(userId: string, progress: number): Promise<void> {
+  private async setFeeSyncProgress(
+    userId: string,
+    progress: number,
+    phase?: string,
+  ): Promise<void> {
     const key = `amazon-fee-sync:${userId}`;
-    await this.redis.set(key, JSON.stringify({ progress }), SYNC_PROGRESS_TTL);
+    const p = Math.min(100, Math.max(0, progress));
+    const data: { progress: number; phase?: string } = { progress: p };
+    if (phase != null && phase.trim() !== '') data.phase = phase.trim();
+    await this.redis.set(key, JSON.stringify(data), SYNC_PROGRESS_TTL);
+  }
+
+  /** Org for Amazon sync: active org or first membership. */
+  private async resolveOrgIdForUser(userId: string): Promise<string | null> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { activeOrgId: true },
+    });
+    let orgId = user?.activeOrgId ?? null;
+    if (!orgId) {
+      const membership = await this.prisma.organizationMembership.findFirst({
+        where: { userId },
+        select: { orgId: true },
+      });
+      orgId = membership?.orgId ?? null;
+    }
+    return orgId;
+  }
+
+  /** After initial mini sync completes: mark extended sync as pending and enqueue post-initial (inventory, fees). */
+  private async afterInitialMiniSyncComplete(userId: string): Promise<void> {
+    const orgId = await this.resolveOrgIdForUser(userId);
+    if (!orgId) {
+      this.logger.warn(
+        `[full-sync] afterInitialMiniSyncComplete: no org for userId=${userId}; skipping post-initial`,
+      );
+      return;
+    }
+    await this.setFeeSyncProgress(
+      userId,
+      0,
+      'Syncing full inventory & shipments',
+    );
+    await this.amazonSyncService.enqueuePostInitialSync(userId, orgId);
+    this.logger.log(
+      `[full-sync] Seeded fee-sync progress + enqueued post-initial-sync (userId=${userId}, orgId=${orgId})`,
+    );
   }
 
   /** True when initial sync has reached 100%. */
@@ -89,6 +133,7 @@ export class AmazonSyncProcessor extends WorkerHost {
       }
     };
     await this.runFullSyncFlow(userId, setProgress);
+    await this.afterInitialMiniSyncComplete(userId);
   }
 
   private async runFullSyncFlow(
@@ -244,6 +289,7 @@ export class AmazonSyncProcessor extends WorkerHost {
           }
         };
         await this.runFullSyncFlow(userId, setProgress);
+        await this.afterInitialMiniSyncComplete(userId);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         this.logger.error(`[full-sync] Failed for userId=${userId}: ${msg}`, err instanceof Error ? err.stack : undefined);
@@ -296,7 +342,11 @@ export class AmazonSyncProcessor extends WorkerHost {
       try {
         this.logger.log(`[fee-sync] Starting for userId=${userId}, orgId=${orgId}`);
         let lastFeeProgress = 0;
-        await this.setFeeSyncProgress(userId, 0);
+        await this.setFeeSyncProgress(
+          userId,
+          0,
+          'Syncing fee estimates for all products',
+        );
         await this.amazonService.refreshFeeEstimatesForOrg(orgId, {
           onProgress: async ({ processed, total }) => {
             if (total <= 0) return;
@@ -306,7 +356,11 @@ export class AmazonSyncProcessor extends WorkerHost {
             );
             if (nextProgress <= lastFeeProgress) return;
             lastFeeProgress = nextProgress;
-            await this.setFeeSyncProgress(userId, nextProgress);
+            await this.setFeeSyncProgress(
+              userId,
+              nextProgress,
+              'Syncing fee estimates for all products',
+            );
           },
         });
         await this.setFeeSyncProgress(userId, 100);

@@ -20,10 +20,18 @@ import {
   vatAmountFromIncl,
   vatAmountFromEx,
 } from '../common/vat.util';
+import { Prisma } from '@prisma/client';
 import { MARKETPLACE_MAP } from '../marketplace/marketplace.constants';
 
 /** When we have no settled fees and no product fee estimate, use this share of revenue as fee so profit/ROI are not overstated. */
 const DEFAULT_AMAZON_FEE_RATE_WHEN_UNKNOWN = 0.35;
+
+/**
+ * Stored on Order / OrderItem. Do not use SP-API `Order.MarketplaceId` here — that ID is not the same
+ * as the literal `"amazon"` used across queries/backfill, so mixing them breaks
+ * @@unique([userId, orderId, marketplace]) and creates duplicate order rows for one Amazon order.
+ */
+const ORDER_MARKETPLACE_CANONICAL = 'amazon';
 
 @Injectable()
 export class AmazonService {
@@ -49,6 +57,149 @@ export class AmazonService {
 
   private resolveMarketplaceFilter(marketplaceId?: string) {
     return marketplaceId ? { in: [marketplaceId, 'amazon'] } : 'amazon';
+  }
+
+  /**
+   * When duplicate `order_items` exist for the same Amazon order line (e.g. duplicate parent `orders` rows),
+   * keep one row: prefer settled finances, then newest updatedAt.
+   */
+  private dedupeOrderItemsByOrderLine<
+    T extends {
+      id: string;
+      orderId: string;
+      orderItemId?: string | null;
+      feesSource?: string | null;
+      updatedAt?: Date | string;
+    },
+  >(items: T[]): T[] {
+    const rank = (it: T) => {
+      const fs = String(it.feesSource ?? '');
+      const fin = fs === 'finances' ? 1e15 : 0;
+      const u =
+        it.updatedAt instanceof Date
+          ? it.updatedAt.getTime()
+          : typeof it.updatedAt === 'string'
+            ? new Date(it.updatedAt).getTime()
+            : 0;
+      return fin + u;
+    };
+    const sorted = [...items].sort((a, b) => rank(b) - rank(a));
+    const seen = new Set<string>();
+    return sorted.filter((it) => {
+      const oiid = String(it.orderItemId ?? '').trim();
+      const key = oiid
+        ? `${String(it.orderId)}\0${oiid}`
+        : `${String(it.orderId)}\0${String(it.id)}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+
+  /**
+   * Same numeric coercion as `listOrders` / `safeNum` for money fields on order lines.
+   */
+  private safeNumOrderMoney(v: unknown): number {
+    if (v == null) return 0;
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
+    const o = v as { toNumber?: () => number; toString?: () => string };
+    if (o?.toNumber && typeof o.toNumber === 'function') return o.toNumber();
+    if (o?.toString && typeof o.toString === 'function') return Number(o.toString()) || 0;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+  }
+
+  /**
+   * Per-SKU unit price from lines that already have revenue (used when `revenueTotal` is still 0 on a sibling line).
+   * Matches `listOrders` fallback order.
+   */
+  private buildSkuUnitPriceFallbackFromOrderItems(
+    items: Array<{ revenueTotal?: unknown; quantity?: unknown; sku?: unknown }>,
+  ): Map<string, number> {
+    const map = new Map<string, number>();
+    for (const it of items) {
+      const sku = String(it.sku ?? '').trim();
+      if (!sku || map.has(sku)) continue;
+      const rev = this.safeNumOrderMoney(it.revenueTotal);
+      const qty = this.safeNumOrderMoney(it.quantity);
+      if (rev > 0 && qty > 0) map.set(sku, rev / qty);
+    }
+    return map;
+  }
+
+  private async loadOrderParentPricesByDbId(
+    orderDbIds: string[],
+  ): Promise<Map<string, { itemPrice: number; quantity: number }>> {
+    const map = new Map<string, { itemPrice: number; quantity: number }>();
+    const ids = [...new Set(orderDbIds.map((id) => String(id).trim()).filter(Boolean))];
+    if (ids.length === 0) return map;
+    try {
+      const rows = await this.prisma.order.findMany({
+        where: { id: { in: ids } },
+        select: { id: true, itemPrice: true, quantity: true },
+      });
+      for (const row of rows) {
+        map.set(String(row.id), {
+          itemPrice: this.safeNumOrderMoney(row.itemPrice),
+          quantity: this.safeNumOrderMoney(row.quantity),
+        });
+      }
+    } catch {
+      // non-fatal: fall back to raw revenueTotal only
+    }
+    return map;
+  }
+
+  /**
+   * Effective line revenue: `revenueTotal` when set; else parent order `itemPrice × line qty` (listOrders parity);
+   * else SKU average from other lines in the batch. Avoids under-counting sales in aggregates when ItemPrice was late.
+   */
+  private resolveOrderLineRevenueTotal(
+    it: {
+      revenueTotal?: unknown;
+      quantity?: unknown;
+      orderDbId?: unknown;
+      sku?: unknown;
+    },
+    orderPriceByDbId: Map<string, { itemPrice: number; quantity: number }>,
+    skuUnitPriceFallback: Map<string, number>,
+  ): number {
+    const rawRevenueTotal = this.safeNumOrderMoney(it.revenueTotal);
+    const qty = this.safeNumOrderMoney(it.quantity) || 1;
+    const orderDbId = it.orderDbId != null ? String(it.orderDbId) : '';
+    const orderFallback = orderDbId ? orderPriceByDbId.get(orderDbId) : undefined;
+    const skuKey = String(it.sku ?? '').trim();
+    if (rawRevenueTotal > 0) return rawRevenueTotal;
+    if (
+      orderFallback != null &&
+      orderFallback.itemPrice > 0 &&
+      orderFallback.quantity > 0
+    ) {
+      return orderFallback.itemPrice * qty;
+    }
+    if (skuKey && skuUnitPriceFallback.has(skuKey)) {
+      return (skuUnitPriceFallback.get(skuKey) as number) * qty;
+    }
+    return rawRevenueTotal;
+  }
+
+  /** Load parent order prices for a deduped order-item list (for revenue fallbacks). */
+  private async buildRevenueFallbackMapsForOrderItems(
+    orderItems: Array<{ orderDbId?: unknown; revenueTotal?: unknown; quantity?: unknown; sku?: unknown }>,
+  ): Promise<{
+    orderPriceByDbId: Map<string, { itemPrice: number; quantity: number }>;
+    skuUnitPriceFallback: Map<string, number>;
+  }> {
+    const orderDbIds = [
+      ...new Set(
+        orderItems
+          .map((i) => (i.orderDbId != null ? String(i.orderDbId) : ''))
+          .filter(Boolean),
+      ),
+    ];
+    const orderPriceByDbId = await this.loadOrderParentPricesByDbId(orderDbIds);
+    const skuUnitPriceFallback = this.buildSkuUnitPriceFallbackFromOrderItems(orderItems);
+    return { orderPriceByDbId, skuUnitPriceFallback };
   }
 
   /** Load org VAT settings for a user (uses user's active org). Returns null if no org or no VAT settings. */
@@ -84,6 +235,57 @@ export class AmazonService {
       vatFlatRatePct: org.vatFlatRatePct != null ? Number(org.vatFlatRatePct) : 0,
       vatCostsIncludeVat: org.vatCostsIncludeVat !== false,
     };
+  }
+
+  /**
+   * SP-API order line: `ItemPrice` is often missing until shipped; `Amount` may be a string;
+   * some payloads expose only `CurrencyAmount`.
+   */
+  private parseOrderItemItemPriceAmount(it: any): number {
+    const ip = it?.ItemPrice ?? it?.itemPrice;
+    if (ip == null) return 0;
+    const raw =
+      ip?.Amount ?? ip?.amount ?? ip?.CurrencyAmount ?? ip?.currencyAmount;
+    if (raw == null || raw === '') return 0;
+    const n = typeof raw === 'string' ? parseFloat(raw) : Number(raw);
+    return Number.isNaN(n) ? 0 : n;
+  }
+
+  /** `OrderTotal` from getOrders payload (stored on Order.rawResponse). */
+  private parseOrderTotalAmountFromOrderJson(orderLike: any): number {
+    const ot = orderLike?.OrderTotal ?? orderLike?.orderTotal;
+    const raw = ot?.Amount ?? ot?.amount;
+    if (raw == null || raw === '') return 0;
+    const n = typeof raw === 'string' ? parseFloat(raw) : Number(raw);
+    return Number.isNaN(n) ? 0 : n;
+  }
+
+  /**
+   * Per-line revenue from ItemPrice; when missing or zero, split order OrderTotal by line quantity.
+   * If OrderTotal is also 0 (pending invoice, etc.), lines stay 0 — there is no reliable total to split.
+   */
+  private computeLineRevenueTotals(orderItems: any[], orderTotalAmount: number): number[] {
+    const itemRevenues = orderItems.map((it) => this.parseOrderItemItemPriceAmount(it));
+    const totalQtyFromItems = orderItems.reduce((sum, it) => {
+      const q = Number(it?.QuantityOrdered ?? 0);
+      return sum + (Number.isFinite(q) && q > 0 ? q : 0);
+    }, 0);
+    return orderItems.map((it, idx) => {
+      let revenueTotal = itemRevenues[idx] ?? 0;
+      const q = Number(it?.QuantityOrdered ?? 0);
+      const quantityOrdered = q > 0 ? q : 1;
+      if (
+        (!Number.isFinite(revenueTotal) || revenueTotal <= 0) &&
+        orderTotalAmount > 0 &&
+        totalQtyFromItems > 0 &&
+        quantityOrdered > 0
+      ) {
+        revenueTotal = Number(
+          ((orderTotalAmount * quantityOrdered) / totalQtyFromItems).toFixed(2),
+        );
+      }
+      return revenueTotal;
+    });
   }
 
   /**
@@ -564,9 +766,28 @@ export class AmazonService {
     const safeEnd = endDate;
 
     const userIds = await this.getOrgMemberUserIds(orgId);
-    // Source of truth for Sales/Units/Orders is the raw Orders table.
-    // aggDailyKpiSummary can drift (historical sync bugs / overwrites), so we avoid using it here.
-    const orders = await this.prisma.order.findMany({
+
+    const toNumber = (value: unknown): number => {
+      if (value == null) return 0;
+      if (typeof value === 'number') return value;
+      if (typeof value === 'string') return Number(value);
+      if (typeof value === 'bigint') return Number(value);
+      if (typeof value === 'object') {
+        const anyVal = value as any;
+        if (typeof anyVal.toNumber === 'function') {
+          return anyVal.toNumber();
+        }
+        if (typeof anyVal.toString === 'function') {
+          return Number(anyVal.toString());
+        }
+      }
+      return Number(value as any);
+    };
+
+    // Sales / units / order count must match the Orders tab: sum `order_items` in the range (same as salePrice×qty per line).
+    // Using the parent `orders` row (itemPrice×quantity) was wrong when duplicate `orders` existed (first row kept could be
+    // stale) or when the aggregate order row did not match line totals; line revenue is the source of truth.
+    const rawOrderItems = await (this.prisma as any).orderItem.findMany({
       where: {
         userId: { in: userIds },
         marketplace: marketplaceFilter,
@@ -575,13 +796,33 @@ export class AmazonService {
       select: {
         id: true,
         orderId: true,
-        orderDate: true,
-        itemPrice: true,
+        orderItemId: true,
+        orderDbId: true,
+        sku: true,
+        updatedAt: true,
+        profit: true,
+        revenueTotal: true,
+        taxChargedTotal: true,
+        amazonFeesTotal: true,
+        feesSource: true,
+        settledReferralFeeTotal: true,
+        settledFbaFeeTotal: true,
+        settledDigitalServiceFeeTotal: true,
+        cogsTotal: true,
         quantity: true,
+        product: {
+          select: {
+            costOfGoods: true,
+            estimatedAmazonFeePerUnit: true,
+            estimatedReferralFeePerUnit: true,
+            estimatedFbaFeePerUnit: true,
+            estimatedDigitalServiceFeePerUnit: true,
+          },
+        },
       },
     });
 
-    if (!orders.length) {
+    if (!rawOrderItems.length) {
       const currency = this.resolveCurrencyFromMarketplace(
         credentials.region === 'eu' ? 'GBP' : 'USD',
         marketplaceId,
@@ -609,102 +850,59 @@ export class AmazonService {
       };
     }
 
-    // Deduplicate by marketplace order id in case historical duplicates exist.
-    const byOrderId = new Map<
-      string,
-      { id: string; itemPrice: number; quantity: number }
-    >();
-    for (const o of orders) {
-      const key = o.orderId;
-      if (!key) continue;
-      if (byOrderId.has(key)) continue;
-      byOrderId.set(key, {
-        id: o.id,
-        itemPrice: Number(o.itemPrice),
-        quantity: Number(o.quantity ?? 0),
-      });
-    }
+    const orderItems = this.dedupeOrderItemsByOrderLine(
+      rawOrderItems,
+    ) as typeof rawOrderItems;
 
-    const uniqueOrderIds = Array.from(byOrderId.keys());
-    const uniqueOrderDbIds = Array.from(byOrderId.values()).map((v) => v.id);
-    const totalOrders = uniqueOrderIds.length;
-    const revenue = uniqueOrderIds.reduce((sum, id) => {
-      const o = byOrderId.get(id);
-      if (!o) return sum;
-      const itemPrice = Number.isFinite(o.itemPrice) ? o.itemPrice : 0;
-      const qty = Number.isFinite(o.quantity) ? o.quantity : 0;
-      return sum + itemPrice * qty;
-    }, 0);
-    const unitsSold = uniqueOrderIds.reduce((sum, id) => {
-      const o = byOrderId.get(id);
-      if (!o) return sum;
-      const qty = Number.isFinite(o.quantity) ? o.quantity : 0;
-      return sum + qty;
-    }, 0);
+    const { orderPriceByDbId, skuUnitPriceFallback } =
+      await this.buildRevenueFallbackMapsForOrderItems(orderItems);
 
-    const toNumber = (value: unknown): number => {
-      if (value == null) return 0;
-      if (typeof value === 'number') return value;
-      if (typeof value === 'string') return Number(value);
-      if (typeof value === 'bigint') return Number(value);
-      if (typeof value === 'object') {
-        const anyVal = value as any;
-        if (typeof anyVal.toNumber === 'function') {
-          return anyVal.toNumber();
-        }
-        if (typeof anyVal.toString === 'function') {
-          return Number(anyVal.toString());
-        }
-      }
-      return Number(value as any);
-    };
-
-    // Compute profit from OrderItem + COGS (immediate, even if COGS was added after the last order sync).
-    // This also supports multi-SKU orders because it's line-item based.
-    const orderItems = await (this.prisma as any).orderItem.findMany({
-      where: {
-        userId: { in: userIds },
-        marketplace: marketplaceFilter,
-        orderDbId: { in: uniqueOrderDbIds },
-      },
-      select: {
-        profit: true,
-        revenueTotal: true,
-        taxChargedTotal: true,
-        amazonFeesTotal: true,
-        feesSource: true,
-        settledReferralFeeTotal: true,
-        settledFbaFeeTotal: true,
-        settledDigitalServiceFeeTotal: true,
-        cogsTotal: true,
-        quantity: true,
-        orderId: true,
-        orderDbId: true,
-        product: {
-          select: {
-            costOfGoods: true,
-            estimatedAmazonFeePerUnit: true,
-            estimatedReferralFeePerUnit: true,
-            estimatedFbaFeePerUnit: true,
-            estimatedDigitalServiceFeePerUnit: true,
+    const revenue = orderItems.reduce(
+      (sum, it) =>
+        sum +
+        this.resolveOrderLineRevenueTotal(
+          it as {
+            revenueTotal?: unknown;
+            quantity?: unknown;
+            orderDbId?: unknown;
+            sku?: unknown;
           },
-        },
-      },
-    });
+          orderPriceByDbId,
+          skuUnitPriceFallback,
+        ),
+      0,
+    );
+    const unitsSold = orderItems.reduce(
+      (sum, it) => sum + toNumber((it as { quantity?: unknown }).quantity ?? 0),
+      0,
+    );
+    const totalOrders = new Set(
+      orderItems
+        .map((it) => String((it as { orderId?: string }).orderId ?? ''))
+        .filter(Boolean),
+    ).size;
 
     const distinctOrderDbIds = new Set(
       orderItems.map((it: any) => String(it.orderDbId ?? '')).filter(Boolean),
     );
     const orderItemsOrdersCount = distinctOrderDbIds.size;
-    const orderItemsCoveragePct =
-      totalOrders > 0 ? orderItemsOrdersCount / totalOrders : 1;
+    const orderItemsCoveragePct = 1;
 
     // Profit = sale price (revenueTotal) - selling fees (amazonFeesTotal, stored negative) - tax - COGS. ROI = profit / cost of goods.
     let totalProfit = 0;
     let totalCostOfGoods = 0;
     let hasProfitData = false;
     for (const it of orderItems) {
-      const revenueTotal = toNumber(it.revenueTotal ?? 0);
+      const revenueTotal = this.resolveOrderLineRevenueTotal(
+        it as {
+          revenueTotal?: unknown;
+          quantity?: unknown;
+          orderDbId?: unknown;
+          sku?: unknown;
+        },
+        orderPriceByDbId,
+        skuUnitPriceFallback,
+      );
       const taxChargedTotal = toNumber(it.taxChargedTotal ?? 0);
       const amazonFeesTotal = toNumber(it.amazonFeesTotal ?? 0);
       const qty = toNumber(it.quantity ?? 0);
@@ -888,13 +1086,20 @@ export class AmazonService {
     const userIds = await this.getOrgMemberUserIds(orgId);
     if (userIds.length === 0) return defaultRes;
 
-    const orderItems = await (this.prisma as any).orderItem.findMany({
+    const rawCategoryItems = await (this.prisma as any).orderItem.findMany({
       where: {
         userId: { in: userIds },
         marketplace: marketplaceFilter,
         orderDate: { gte: safeStart, lte: safeEnd },
       },
       select: {
+        id: true,
+        orderId: true,
+        orderItemId: true,
+        orderDbId: true,
+        sku: true,
+        feesSource: true,
+        updatedAt: true,
         revenueTotal: true,
         profit: true,
         cogsTotal: true,
@@ -902,6 +1107,12 @@ export class AmazonService {
         product: { select: { displayGroup: true } },
       },
     });
+    const orderItems = this.dedupeOrderItemsByOrderLine(
+      rawCategoryItems,
+    ) as typeof rawCategoryItems;
+
+    const { orderPriceByDbId, skuUnitPriceFallback } =
+      await this.buildRevenueFallbackMapsForOrderItems(orderItems);
 
     const toNum = (v: unknown): number => {
       if (v == null) return 0;
@@ -915,7 +1126,16 @@ export class AmazonService {
     for (const it of orderItems) {
       const cat = (it.product?.displayGroup ?? '').trim() || 'Uncategorized';
       const cur = byCategory.get(cat) ?? { sales: 0, profit: 0, cogs: 0, units: 0 };
-      cur.sales += toNum(it.revenueTotal);
+      cur.sales += this.resolveOrderLineRevenueTotal(
+        it as {
+          revenueTotal?: unknown;
+          quantity?: unknown;
+          orderDbId?: unknown;
+          sku?: unknown;
+        },
+        orderPriceByDbId,
+        skuUnitPriceFallback,
+      );
       cur.profit += toNum(it.profit);
       cur.cogs += toNum(it.cogsTotal);
       cur.units += toNum(it.quantity) || 0;
@@ -997,13 +1217,18 @@ export class AmazonService {
       };
     }
 
-    const orderItems = await (this.prisma as any).orderItem.findMany({
+    const rawCostItems = await (this.prisma as any).orderItem.findMany({
       where: {
         userId: { in: userIds },
         marketplace: marketplaceFilter,
         orderDate: { gte: safeStart, lte: safeEnd },
       },
       select: {
+        id: true,
+        orderId: true,
+        orderItemId: true,
+        feesSource: true,
+        updatedAt: true,
         cogsTotal: true,
         prepIncVat: true,
         prepExVat: true,
@@ -1022,6 +1247,9 @@ export class AmazonService {
         },
       },
     });
+    const orderItems = this.dedupeOrderItemsByOrderLine(
+      rawCostItems,
+    ) as typeof rawCostItems;
 
     const toNum = (v: unknown): number => {
       if (v == null) return 0;
@@ -1138,13 +1366,20 @@ export class AmazonService {
     }
 
     if (userIds.length > 0) {
-      const items = await (this.prisma as any).orderItem.findMany({
+      const rawPnlItems = await (this.prisma as any).orderItem.findMany({
         where: {
           userId: { in: userIds },
           marketplace: marketplaceFilter,
           orderDate: { gte: safeStart, lte: safeEnd },
         },
         select: {
+          id: true,
+          orderId: true,
+          orderItemId: true,
+          orderDbId: true,
+          sku: true,
+          feesSource: true,
+          updatedAt: true,
           revenueTotal: true,
           cogsTotal: true,
           quantity: true,
@@ -1159,9 +1394,24 @@ export class AmazonService {
           amazonFeesVatAmount: true,
         },
       });
+      const items = this.dedupeOrderItemsByOrderLine(
+        rawPnlItems,
+      ) as typeof rawPnlItems;
+      const { orderPriceByDbId: pnlOrderPrices, skuUnitPriceFallback: pnlSkuFallback } =
+        await this.buildRevenueFallbackMapsForOrderItems(items);
       for (const it of items) {
-        revenue += toNum(it.revenueTotal);
-        const rev = toNum(it.revenueTotal);
+        const lineRev = this.resolveOrderLineRevenueTotal(
+          it as {
+            revenueTotal?: unknown;
+            quantity?: unknown;
+            orderDbId?: unknown;
+            sku?: unknown;
+          },
+          pnlOrderPrices,
+          pnlSkuFallback,
+        );
+        revenue += lineRev;
+        const rev = lineRev;
         const cogs = it.cogsTotal != null ? toNum(it.cogsTotal) : null;
         const qty = Math.max(1, Number(it.quantity) || 1);
         const orderDateItem = it.orderDate instanceof Date ? it.orderDate : new Date(it.orderDate);
@@ -1308,7 +1558,7 @@ export class AmazonService {
     const endDate = range?.end ? new Date(range.end) : nowSafe;
 
     const userIds = await this.getOrgMemberUserIds(orgId);
-    const ordersFromDb = await this.prisma.order.findMany({
+    const rawTsItems = await (this.prisma as any).orderItem.findMany({
       where: {
         userId: { in: userIds },
         marketplace: marketplaceFilter,
@@ -1318,35 +1568,64 @@ export class AmazonService {
         },
       },
       select: {
-        orderDate: true,
-        itemPrice: true,
+        id: true,
+        orderId: true,
+        orderItemId: true,
+        orderDbId: true,
+        sku: true,
         quantity: true,
-        totalProfit: true,
+        updatedAt: true,
+        feesSource: true,
+        orderDate: true,
+        revenueTotal: true,
+        profit: true,
       },
     });
 
+    const tsItems = this.dedupeOrderItemsByOrderLine(rawTsItems) as typeof rawTsItems;
+
+    const { orderPriceByDbId: tsOrderPrices, skuUnitPriceFallback: tsSkuFallback } =
+      await this.buildRevenueFallbackMapsForOrderItems(tsItems);
+
+    const toNumTs = (v: unknown): number => {
+      if (v == null) return 0;
+      if (typeof v === 'number' && Number.isFinite(v)) return v;
+      const o = v as { toNumber?: () => number; toString?: () => string };
+      if (o?.toNumber && typeof o.toNumber === 'function') return o.toNumber();
+      if (o?.toString && typeof o.toString === 'function') return Number(o.toString()) || 0;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : 0;
+    };
+
     const byDate = new Map<
       string,
-      { revenue: number; orders: number; profit: number }
+      { revenue: number; orderIds: Set<string>; profit: number }
     >();
 
-    for (const order of ordersFromDb) {
-      const d = order.orderDate;
+    for (const it of tsItems) {
+      const d = it.orderDate as Date;
       const key = d.toISOString().slice(0, 10); // YYYY-MM-DD
 
-      const itemPriceNum = Number(order.itemPrice);
-      const quantityNum = order.quantity;
-      const revenueForOrder = itemPriceNum * quantityNum;
-      const profitForOrder = order.totalProfit != null ? Number(order.totalProfit) : 0;
+      const revenueForLine = this.resolveOrderLineRevenueTotal(
+        it as {
+          revenueTotal?: unknown;
+          quantity?: unknown;
+          orderDbId?: unknown;
+          sku?: unknown;
+        },
+        tsOrderPrices,
+        tsSkuFallback,
+      );
+      const profitForLine = it.profit != null ? toNumTs(it.profit) : 0;
 
       const existing = byDate.get(key) ?? {
         revenue: 0,
-        orders: 0,
+        orderIds: new Set<string>(),
         profit: 0,
       };
-      existing.revenue += revenueForOrder;
-      existing.orders += 1;
-      existing.profit += profitForOrder;
+      existing.revenue += revenueForLine;
+      existing.orderIds.add(String(it.orderId ?? ''));
+      existing.profit += profitForLine;
       byDate.set(key, existing);
     }
 
@@ -1382,12 +1661,16 @@ export class AmazonService {
     for (let i = 0; i < numDays; i += 1) {
       const d = new Date(startTime + i * dayMs);
       const key = d.toISOString().slice(0, 10); // YYYY-MM-DD
-      const existing = byDate.get(key) ?? { revenue: 0, orders: 0, profit: 0 };
+      const bucket = byDate.get(key) ?? {
+        revenue: 0,
+        orderIds: new Set<string>(),
+        profit: 0,
+      };
       points.push({
         date: key,
-        revenue: existing.revenue,
-        orders: existing.orders,
-        profit: existing.profit,
+        revenue: bucket.revenue,
+        orders: bucket.orderIds.size,
+        profit: bucket.profit,
       });
     }
 
@@ -1408,6 +1691,96 @@ export class AmazonService {
    */
   /** Default days of orders to sync (used when opts.days not provided). */
   static readonly SYNC_ORDERS_DAYS_DEFAULT = 30;
+
+  /**
+   * Merge duplicate `orders` rows for the same Amazon order id (same user) caused by inconsistent
+   * `marketplace` values. Keeps the best row and re-homes or drops duplicate line items.
+   */
+  async repairDuplicateAmazonOrdersForUser(
+    userId: string,
+  ): Promise<{ ordersRemoved: number }> {
+    let ordersRemoved = 0;
+    const dupGroups = await this.prisma.$queryRaw<Array<{ order_id: string }>>(
+      Prisma.sql`SELECT order_id FROM orders WHERE user_id = ${userId} GROUP BY user_id, order_id HAVING COUNT(*) > 1`,
+    );
+    if (!Array.isArray(dupGroups) || dupGroups.length === 0) {
+      return { ordersRemoved: 0 };
+    }
+    for (const row of dupGroups) {
+      const orderId = row?.order_id;
+      if (!orderId) continue;
+      const orders = await this.prisma.order.findMany({
+        where: { userId, orderId },
+        orderBy: { updatedAt: 'desc' },
+        include: { _count: { select: { orderItems: true } } },
+      });
+      if (orders.length < 2) continue;
+
+      const rank = (o: (typeof orders)[number]) =>
+        (o.marketplace === ORDER_MARKETPLACE_CANONICAL ? 1e9 : 0) +
+        o._count.orderItems * 1e6 +
+        o.updatedAt.getTime();
+      orders.sort((a, b) => rank(b) - rank(a));
+      const keeper = orders[0]!;
+      const losers = orders.slice(1);
+
+      await this.prisma.$transaction(async (tx) => {
+        for (const loser of losers) {
+          const lineItems = await tx.orderItem.findMany({
+            where: { orderDbId: loser.id },
+            select: { id: true, orderItemId: true },
+          });
+          for (const oi of lineItems) {
+            const clash = await tx.orderItem.findUnique({
+              where: {
+                orderDbId_orderItemId: {
+                  orderDbId: keeper.id,
+                  orderItemId: oi.orderItemId,
+                },
+              },
+              select: { id: true },
+            });
+            if (clash) {
+              await tx.orderItem.delete({ where: { id: oi.id } });
+            } else {
+              await tx.orderItem.update({
+                where: { id: oi.id },
+                data: {
+                  orderDbId: keeper.id,
+                  marketplace: ORDER_MARKETPLACE_CANONICAL,
+                },
+              });
+            }
+          }
+          await tx.order.delete({ where: { id: loser.id } });
+          ordersRemoved += 1;
+        }
+        await tx.order.update({
+          where: { id: keeper.id },
+          data: { marketplace: ORDER_MARKETPLACE_CANONICAL },
+        });
+        await tx.orderItem.updateMany({
+          where: { orderDbId: keeper.id },
+          data: { marketplace: ORDER_MARKETPLACE_CANONICAL },
+        });
+      });
+    }
+    return { ordersRemoved };
+  }
+
+  /** Merge duplicate Amazon `orders` rows for every member of the org (same logic as per-user repair). */
+  async repairDuplicateAmazonOrdersForOrg(orgId: string): Promise<{
+    ordersRemoved: number;
+    orgUserIds: string[];
+  }> {
+    const userIds = await this.getOrgMemberUserIds(orgId);
+    let ordersRemoved = 0;
+    for (const uid of userIds) {
+      const r = await this.repairDuplicateAmazonOrdersForUser(uid);
+      ordersRemoved += r.ordersRemoved;
+    }
+    return { ordersRemoved, orgUserIds: userIds };
+  }
 
   /**
    * Sync orders from SP-API into DB (including finances per order via listFinancialEventsByOrderId). Call paths:
@@ -1446,6 +1819,21 @@ export class AmazonService {
     );
     const onProgress = opts?.onProgress;
     if (onProgress) await onProgress(1);
+
+    try {
+      const { ordersRemoved } = await this.repairDuplicateAmazonOrdersForUser(userId);
+      if (ordersRemoved > 0) {
+        this.logger.log(
+          `[syncRecentOrdersToDb] merged duplicate Amazon order rows: removed ${ordersRemoved} extra order(s) (userId=${userId})`,
+        );
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.logger.warn(
+        `[syncRecentOrdersToDb] repairDuplicateAmazonOrdersForUser failed (non-fatal): ${msg}`,
+      );
+    }
+
     const defaultStart = new Date(
       nowSafe.getTime() - days * 24 * 60 * 60 * 1000,
     );
@@ -2196,6 +2584,7 @@ export class AmazonService {
         rawResponse: order,
         orderDate,
         asin: selectedAsin,
+        marketplace: ORDER_MARKETPLACE_CANONICAL,
       };
       if (computedTotalProfit != null) {
         updateData.totalProfit = Number(computedTotalProfit.toFixed(2));
@@ -2205,7 +2594,7 @@ export class AmazonService {
         userId,
         productId: selectedProduct.id,
         orderId: amazonOrderId,
-        marketplace: String((order as any)?.MarketplaceId ?? (order as any)?.marketplaceId ?? 'amazon'),
+        marketplace: ORDER_MARKETPLACE_CANONICAL,
         sku: selectedSku,
         asin: selectedAsin,
         quantity,
@@ -2219,17 +2608,17 @@ export class AmazonService {
             : null,
       };
 
-      const persistedOrder = await (this.prisma as any).order.upsert({
-        where: {
-          userId_orderId_marketplace: {
-            userId,
-            orderId: amazonOrderId,
-            marketplace: String((order as any)?.MarketplaceId ?? (order as any)?.marketplaceId ?? 'amazon'),
-          },
-        } as any,
-        update: updateData,
-        create: createData,
+      const existingOrderRow = await (this.prisma as any).order.findFirst({
+        where: { userId, orderId: amazonOrderId },
+        orderBy: { updatedAt: 'desc' },
+        select: { id: true },
       });
+      const persistedOrder = existingOrderRow
+        ? await (this.prisma as any).order.update({
+            where: { id: existingOrderRow.id },
+            data: updateData,
+          })
+        : await (this.prisma as any).order.create({ data: createData });
 
       // Persist accurate line items for per-product profitability.
       // If we don't have orderItems (e.g. call failed), we skip creating OrderItem rows.
@@ -2240,16 +2629,8 @@ export class AmazonService {
             ? Math.max(0, maxOrderItems - orderItemsWrittenThisSync)
             : orderItems.length;
         const itemsToWrite = Math.min(orderItems.length, itemCap);
-        // Compute total item revenue for proportional allocations when needed.
-        const itemRevenues = orderItems.map((it: any) => {
-          const revenue = Number(it?.ItemPrice?.Amount ?? 0);
-          return Number.isNaN(revenue) ? 0 : revenue;
-        });
-        const totalItemRevenue = itemRevenues.reduce((a, b) => a + b, 0);
-        const totalQtyFromItems = orderItems.reduce((sum: number, it: any) => {
-          const q = Number(it?.QuantityOrdered ?? 0);
-          return sum + (Number.isFinite(q) && q > 0 ? q : 0);
-        }, 0);
+        const lineRevenues = this.computeLineRevenueTotals(orderItems, totalAmount);
+        const totalLineRevenue = lineRevenues.reduce((a, b) => a + b, 0);
 
         for (let idx = 0; idx < itemsToWrite; idx++) {
           const it = orderItems[idx];
@@ -2265,19 +2646,7 @@ export class AmazonService {
           const qty = Number(it?.QuantityOrdered ?? 0);
           const quantityOrdered = qty > 0 ? qty : 1;
 
-          // Some SP-API responses omit ItemPrice on order items. In that case, fall back
-          // to proportional allocation from order total so we never persist zero-price lines.
-          let revenueTotal = itemRevenues[idx] ?? 0;
-          if (
-            (!Number.isFinite(revenueTotal) || revenueTotal <= 0) &&
-            totalAmount > 0 &&
-            totalQtyFromItems > 0 &&
-            quantityOrdered > 0
-          ) {
-            revenueTotal = Number(
-              ((totalAmount * quantityOrdered) / totalQtyFromItems).toFixed(2),
-            );
-          }
+          const revenueTotal = lineRevenues[idx] ?? 0;
           const shippingCharged = Number(it?.ShippingPrice?.Amount ?? 0);
           const taxCharged = Number(it?.ItemTax?.Amount ?? 0);
 
@@ -2291,8 +2660,8 @@ export class AmazonService {
             itemFees = feeByOrderItemId.get(orderItemId) ?? 0;
           } else if (sku && feeBySku.has(sku)) {
             itemFees = feeBySku.get(sku) ?? 0;
-          } else if (totalItemRevenue > 0 && amazonFeesTotal !== 0) {
-            itemFees = (revenueTotal / totalItemRevenue) * amazonFeesTotal;
+          } else if (totalLineRevenue > 0 && amazonFeesTotal !== 0) {
+            itemFees = (revenueTotal / totalLineRevenue) * amazonFeesTotal;
             usedOrderLevelFinances = true;
           }
           // If we don't have this order's settled fees, prefer settled fees from another order item with the same ASIN (overwrites estimates).
@@ -2302,7 +2671,7 @@ export class AmazonService {
             const sameAsinSettled = await (this.prisma as any).orderItem.findFirst({
               where: {
                 userId,
-                marketplace: String((order as any)?.MarketplaceId ?? (order as any)?.marketplaceId ?? 'amazon'),
+                marketplace: ORDER_MARKETPLACE_CANONICAL,
                 asin: asinTrim,
                 feesSource: 'finances',
                 quantity: { gt: 0 },
@@ -2520,7 +2889,7 @@ export class AmazonService {
           const updatePayload = {
             userId,
             productId: itemProduct.id,
-            marketplace: String((order as any)?.MarketplaceId ?? (order as any)?.marketplaceId ?? 'amazon'),
+            marketplace: ORDER_MARKETPLACE_CANONICAL,
             orderId: amazonOrderId,
             sku: sku || genericSku,
             asin,
@@ -2553,7 +2922,7 @@ export class AmazonService {
               userId,
               orderDbId: persistedOrder.id,
               productId: itemProduct.id,
-              marketplace: String((order as any)?.MarketplaceId ?? (order as any)?.marketplaceId ?? 'amazon'),
+              marketplace: ORDER_MARKETPLACE_CANONICAL,
               orderId: amazonOrderId,
               orderItemId,
               sku: sku || genericSku,
@@ -2602,6 +2971,7 @@ export class AmazonService {
           id: true,
           orderId: true,
           orderDate: true,
+          rawResponse: true,
         },
         orderBy: { orderDate: 'desc' },
         take: 5,
@@ -2617,14 +2987,17 @@ export class AmazonService {
           const items = itemsRes?.payload?.OrderItems ?? [];
           if (!Array.isArray(items) || items.length === 0) continue;
 
-          for (const it of items) {
+          const orderTotalAmt = this.parseOrderTotalAmountFromOrderJson(ord.rawResponse);
+          const lineRevenues = this.computeLineRevenueTotals(items, orderTotalAmt);
+
+          for (let itemIdx = 0; itemIdx < items.length; itemIdx++) {
+            const it = items[itemIdx];
             const orderItemId = String(it?.OrderItemId ?? '');
             const sku = String(it?.SellerSKU ?? '');
             const asin = (it?.ASIN as string | undefined) ?? null;
             const qty = Number(it?.QuantityOrdered ?? 0);
             const quantityOrdered = qty > 0 ? qty : 1;
-            const revenue = Number(it?.ItemPrice?.Amount ?? 0);
-            const revenueTotal = Number.isNaN(revenue) ? 0 : revenue;
+            const revenueTotal = lineRevenues[itemIdx] ?? 0;
             const shippingCharged = Number(it?.ShippingPrice?.Amount ?? 0);
             const taxCharged = Number(it?.ItemTax?.Amount ?? 0);
 
@@ -3781,7 +4154,9 @@ export class AmazonService {
           select: {
             id: true;
             orderId: true;
+            orderItemId: true;
             orderDate: true;
+            updatedAt: true;
             sku: true;
             asin: true;
             quantity: true;
@@ -3808,7 +4183,9 @@ export class AmazonService {
         select: {
           id: true,
           orderId: true,
+          orderItemId: true,
           orderDate: true,
+          updatedAt: true,
           sku: true,
           asin: true,
           quantity: true,
@@ -3841,6 +4218,17 @@ export class AmazonService {
       this.logger.warn(`[listOrders] orderItem.findMany failed (orgId=${orgId}): ${msg}`);
       return [];
     }
+
+    // Same Amazon order line can appear twice if duplicate parent `orders` rows existed (marketplace mismatch).
+    items = this.dedupeOrderItemsByOrderLine(
+      items as Array<{
+        id: string;
+        orderId: string;
+        orderItemId?: string | null;
+        feesSource?: string | null;
+        updatedAt?: Date | string;
+      }>,
+    ) as typeof items;
 
     this.logger.log(`[listOrders] orgId=${orgId} orderItemCount=${items.length}`);
     const productIds = [...new Set(items.map((i) => i.productId).filter(Boolean))];
@@ -6122,6 +6510,7 @@ try {
         id: true, // DB id
         orderId: true, // marketplace order id
         orderDate: true,
+        rawResponse: true,
       },
       orderBy: { orderDate: 'desc' },
     });
@@ -6302,11 +6691,9 @@ try {
         );
       }
 
-      const itemRevenues = orderItems.map((it: any) => {
-        const revenue = Number(it?.ItemPrice?.Amount ?? 0);
-        return Number.isNaN(revenue) ? 0 : revenue;
-      });
-      const totalItemRevenue = itemRevenues.reduce((a, b) => a + b, 0);
+      const orderTotalAmt = this.parseOrderTotalAmountFromOrderJson(ord.rawResponse);
+      const lineRevenues = this.computeLineRevenueTotals(orderItems, orderTotalAmt);
+      const totalLineRevenue = lineRevenues.reduce((a, b) => a + b, 0);
 
       for (let idx = 0; idx < orderItems.length; idx++) {
         const it = orderItems[idx];
@@ -6322,7 +6709,7 @@ try {
         const qty = Number(it?.QuantityOrdered ?? 0);
         const quantityOrdered = qty > 0 ? qty : 1;
 
-        const revenueTotal = itemRevenues[idx] ?? 0;
+        const revenueTotal = lineRevenues[idx] ?? 0;
         const shippingCharged = Number(it?.ShippingPrice?.Amount ?? 0);
         const taxCharged = Number(it?.ItemTax?.Amount ?? 0);
 
@@ -6331,8 +6718,8 @@ try {
           itemFees = feeByOrderItemId.get(orderItemId) ?? 0;
         } else if (sku && feeBySku.has(sku)) {
           itemFees = feeBySku.get(sku) ?? 0;
-        } else if (totalItemRevenue > 0 && amazonFeesTotal !== 0) {
-          itemFees = (revenueTotal / totalItemRevenue) * amazonFeesTotal;
+        } else if (totalLineRevenue > 0 && amazonFeesTotal !== 0) {
+          itemFees = (revenueTotal / totalLineRevenue) * amazonFeesTotal;
         }
         // If we don't have this order's settled fees, prefer settled from another order with the same ASIN (overwrites estimates).
         let usedSameAsinSettled = false;

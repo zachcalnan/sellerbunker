@@ -1,11 +1,24 @@
 "use client";
 
 import Link from "next/link";
-import { Suspense, type ReactNode, useCallback, useEffect, useLayoutEffect, useState } from "react";
+import {
+  Suspense,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useState,
+} from "react";
 import { useAuth } from "@clerk/nextjs";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useDisplaySettings } from "@/contexts/display-settings-context";
 import { useMarketplace } from "@/contexts/marketplace-context";
+import {
+  aggregateOrderRows,
+  filterOrderRowsForDashboardPreset,
+  type DashboardRangePreset,
+} from "@/lib/orders-period-metrics";
 import { StripeCheckoutButton } from "@/components/stripe-checkout-button";
 
 type AccountSummary = {
@@ -86,6 +99,10 @@ function HomeInner() {
   const [trendCustomStart, setTrendCustomStart] = useState<string>("");
   const [trendCustomEnd, setTrendCustomEnd] = useState<string>("");
   const [summary, setSummary] = useState<AccountSummary | null>(null);
+  const [orderRowsForRings, setOrderRowsForRings] = useState<RecentOrderRow[]>(
+    [],
+  );
+  const [ordersLoadedForRings, setOrdersLoadedForRings] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hasSubscriptionAccess, setHasSubscriptionAccess] = useState<boolean | null>(null);
@@ -244,6 +261,45 @@ function HomeInner() {
           ? defaultEnd
           : (endParam ?? defaultEnd);
 
+  /** Orders tab "30 days" / "7 days" = rolling N×24h from now, not calendar UTC dates. Rings must use the same window. */
+  const hasCustomRangeInUrl = Boolean(startParam ?? endParam);
+  const summaryRangeForApi = useMemo(() => {
+    if (hasCustomRangeInUrl) {
+      return { start: effectiveStart, end: effectiveEnd };
+    }
+    if (rangePreset === "30d") {
+      const ms = 30 * 24 * 60 * 60 * 1000;
+      return {
+        start: new Date(Date.now() - ms).toISOString(),
+        end: new Date().toISOString(),
+      };
+    }
+    if (rangePreset === "7d") {
+      const ms = 7 * 24 * 60 * 60 * 1000;
+      return {
+        start: new Date(Date.now() - ms).toISOString(),
+        end: new Date().toISOString(),
+      };
+    }
+    return { start: effectiveStart, end: effectiveEnd };
+  }, [
+    hasCustomRangeInUrl,
+    rangePreset,
+    effectiveStart,
+    effectiveEnd,
+  ]);
+
+  /** Same period rules as `filterOrderRowsForDashboardPreset` + Orders tab rolling windows. */
+  const dashboardRingFilterPreset = useMemo((): DashboardRangePreset => {
+    if (hasCustomRangeInUrl || rangePreset === "custom") return "custom";
+    return rangePreset;
+  }, [hasCustomRangeInUrl, rangePreset]);
+
+  const dashboardRingFilterCustom = useMemo(() => {
+    if (dashboardRingFilterPreset !== "custom") return undefined;
+    return { start: effectiveStart, end: effectiveEnd };
+  }, [dashboardRingFilterPreset, effectiveStart, effectiveEnd]);
+
   // Trend has its own range (separate from summary/cards)
   const trendStart =
     trendPreset === "today"
@@ -269,6 +325,38 @@ function HomeInner() {
             : trendPreset === "all"
               ? defaultEnd
               : (trendCustomEnd || defaultEnd);
+
+  const trendRangeForApi = useMemo(() => {
+    if (trendPreset === "custom") {
+      return {
+        start: trendCustomStart || defaultStart30,
+        end: trendCustomEnd || defaultEnd,
+      };
+    }
+    if (trendPreset === "30d") {
+      const ms = 30 * 24 * 60 * 60 * 1000;
+      return {
+        start: new Date(Date.now() - ms).toISOString(),
+        end: new Date().toISOString(),
+      };
+    }
+    if (trendPreset === "7d") {
+      const ms = 7 * 24 * 60 * 60 * 1000;
+      return {
+        start: new Date(Date.now() - ms).toISOString(),
+        end: new Date().toISOString(),
+      };
+    }
+    return { start: trendStart, end: trendEnd };
+  }, [
+    trendPreset,
+    trendCustomStart,
+    trendCustomEnd,
+    trendStart,
+    trendEnd,
+    defaultStart30,
+    defaultEnd,
+  ]);
 
   const rangeLabel =
     rangePreset === "today"
@@ -349,8 +437,8 @@ function HomeInner() {
         const res = await fetch(
           `${baseUrl}/api/amazon/account/summary?` +
             new URLSearchParams({
-              start: effectiveStart,
-              end: effectiveEnd,
+              start: summaryRangeForApi.start,
+              end: summaryRangeForApi.end,
             }).toString(),
           {
             headers: {
@@ -379,8 +467,41 @@ function HomeInner() {
         if (!opts?.silent) setLoading(false);
       }
     },
-    [isSignedIn, getToken, baseUrl, effectiveStart, effectiveEnd],
+    [
+      isSignedIn,
+      getToken,
+      baseUrl,
+      summaryRangeForApi.start,
+      summaryRangeForApi.end,
+      selectedMarketplaceId,
+    ],
   );
+
+  const fetchOrdersForRings = useCallback(async () => {
+    if (!isSignedIn) return;
+    try {
+      const token = await getToken({ template: "backend" });
+      const res = await fetch(`${baseUrl}/api/amazon/orders`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          ...(selectedMarketplaceId
+            ? { "x-marketplace-id": selectedMarketplaceId }
+            : {}),
+        },
+      });
+      if (!res.ok) {
+        setOrderRowsForRings([]);
+        setOrdersLoadedForRings(false);
+        return;
+      }
+      const data = (await res.json()) as RecentOrderRow[];
+      setOrderRowsForRings(Array.isArray(data) ? data : []);
+      setOrdersLoadedForRings(true);
+    } catch {
+      setOrderRowsForRings([]);
+      setOrdersLoadedForRings(false);
+    }
+  }, [isSignedIn, getToken, baseUrl, selectedMarketplaceId]);
 
   useEffect(() => {
     if (!isSignedIn) {
@@ -389,6 +510,15 @@ function HomeInner() {
     }
     fetchSummary();
   }, [isSignedIn, fetchSummary]);
+
+  useEffect(() => {
+    if (!isSignedIn) {
+      setOrderRowsForRings([]);
+      setOrdersLoadedForRings(false);
+      return;
+    }
+    void fetchOrdersForRings();
+  }, [isSignedIn, fetchOrdersForRings]);
 
   useEffect(() => {
     if (!isSignedIn) return;
@@ -414,6 +544,7 @@ function HomeInner() {
     const handleAmazonDisconnected = () => {
       setShowAmazonConnectThankYou(false);
       void fetchSummary({ silent: true });
+      void fetchOrdersForRings();
     };
     window.addEventListener(
       "sellerbunker-amazon-disconnected",
@@ -424,7 +555,7 @@ function HomeInner() {
         "sellerbunker-amazon-disconnected",
         handleAmazonDisconnected,
       );
-  }, [isSignedIn, fetchSummary]);
+  }, [isSignedIn, fetchSummary, fetchOrdersForRings]);
 
   // After connecting Amazon, sync runs in the background. Poll summary until we have data
   // so the dashboard updates without a manual refresh.
@@ -434,7 +565,9 @@ function HomeInner() {
       sessionStorage.getItem(POST_CONNECT_REFRESH_PENDING_KEY) === "1");
   useEffect(() => {
     if (!isPostConnect) return;
-    if (summary?.totalOrders && summary.totalOrders > 0) {
+    const hasOrderLines =
+      (summary?.totalOrders ?? 0) > 0 || orderRowsForRings.length > 0;
+    if (hasOrderLines) {
       try {
         sessionStorage.removeItem(POST_CONNECT_REFRESH_PENDING_KEY);
       } catch {}
@@ -452,39 +585,82 @@ function HomeInner() {
         return;
       }
       await fetchSummary({ silent: true });
-      // Stop when summary.totalOrders > 0 (effect deps change and cleanup runs)
+      await fetchOrdersForRings();
     }, 12000);
     return () => clearInterval(interval);
-  }, [isPostConnect, fetchSummary, summary?.totalOrders]);
+  }, [
+    isPostConnect,
+    fetchSummary,
+    fetchOrdersForRings,
+    summary?.totalOrders,
+    orderRowsForRings.length,
+  ]);
+
+  const ringMetricsFromOrders = useMemo(() => {
+    if (!ordersLoadedForRings) return null;
+    const filtered = filterOrderRowsForDashboardPreset(
+      orderRowsForRings,
+      dashboardRingFilterPreset,
+      dashboardRingFilterCustom,
+    );
+    return aggregateOrderRows(filtered);
+  }, [
+    ordersLoadedForRings,
+    orderRowsForRings,
+    dashboardRingFilterPreset,
+    dashboardRingFilterCustom,
+  ]);
+
+  const displaySummary = useMemo(() => {
+    if (!summary) return null;
+    if (!ringMetricsFromOrders) return summary;
+    const rev = ringMetricsFromOrders.totalSales;
+    const margin =
+      rev > 0
+        ? ringMetricsFromOrders.totalProfit / rev
+        : summary.profitMargin;
+    return {
+      ...summary,
+      revenue: rev,
+      unitsSold: ringMetricsFromOrders.totalUnits,
+      totalOrders: ringMetricsFromOrders.orderCount,
+      totalProfit: ringMetricsFromOrders.totalProfit,
+      profitMargin: margin,
+    };
+  }, [summary, ringMetricsFromOrders]);
 
   const effectiveCurrency = summary?.currency ?? "USD";
 
   const hasCostData = summary?.hasCostData ?? false;
-  // Profit = sale price - selling fees - COGS (from backend totalProfit when present)
+  const showProfitNumbers =
+    (ordersLoadedForRings && summary != null) || hasCostData;
+  // Profit / sales / units: same aggregation as Orders tab when order list has loaded
   const profit =
-    summary != null
-      ? (summary.totalProfit != null ? summary.totalProfit : summary.revenue * summary.profitMargin)
+    displaySummary != null
+      ? (displaySummary.totalProfit != null
+          ? displaySummary.totalProfit
+          : displaySummary.revenue * displaySummary.profitMargin)
       : 0;
-  // ROI = profit / cost of goods (from backend)
+  // ROI = profit / cost of goods (backend; can differ from order-line profit)
   const roiPct =
     summary != null && hasCostData && summary.roiPct != null && Number.isFinite(summary.roiPct)
       ? summary.roiPct
       : 0;
-  const cards = summary
+  const cards = displaySummary
     ? [
         {
           label: "Profit",
-          value: hasCostData ? formatCurrency(profit, effectiveCurrency, 2) : "—",
-          percentage: hasCostData ? Math.round(summary.profitMargin * 100) : 0,
+          value: showProfitNumbers ? formatCurrency(profit, effectiveCurrency, 2) : "—",
+          percentage: showProfitNumbers ? Math.round(displaySummary.profitMargin * 100) : 0,
           color: "#22C55E",
           fullRing: true,
-          centerLine1: hasCostData ? formatCurrency(profit, effectiveCurrency, 2) : "—",
+          centerLine1: showProfitNumbers ? formatCurrency(profit, effectiveCurrency, 2) : "—",
           centerLine2: "",
-          centerLine3: hasCostData ? `${(summary.profitMargin * 100).toFixed(1)}%` : "—",
+          centerLine3: showProfitNumbers ? `${(displaySummary.profitMargin * 100).toFixed(1)}%` : "—",
         },
         {
           label: "Sales",
-          value: formatCurrency(summary.revenue, effectiveCurrency, 2),
+          value: formatCurrency(displaySummary.revenue, effectiveCurrency, 2),
           percentage: 0,
           color: "#60A5FA",
           fullRing: true,
@@ -492,7 +668,7 @@ function HomeInner() {
         },
         {
           label: "Units",
-          value: summary.unitsSold.toLocaleString(),
+          value: displaySummary.unitsSold.toLocaleString(),
           percentage: 0,
           color: "#F59E0B",
           fullRing: true,
@@ -772,8 +948,8 @@ function HomeInner() {
                   isSignedIn={isSignedIn}
                   getToken={getToken}
                   currency={effectiveCurrency}
-                  start={effectiveStart}
-                  end={effectiveEnd}
+                  start={summaryRangeForApi.start}
+                  end={summaryRangeForApi.end}
                 />
                 </div>
 
@@ -876,8 +1052,8 @@ function HomeInner() {
                   isSignedIn={isSignedIn}
                   getToken={getToken}
                   currency={effectiveCurrency}
-                  start={trendStart}
-                  end={trendEnd}
+                  start={trendRangeForApi.start}
+                  end={trendRangeForApi.end}
                   label={trendLabel}
                   noWrapper
                 />
@@ -1004,8 +1180,8 @@ function RecentOrders({
             <div className="flex w-full items-center gap-2 border-b border-[var(--surface-border)] pb-1 pt-0 text-[9px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
               <span className="min-w-0 flex-1">Product</span>
               <div className="flex shrink-0 items-center justify-end gap-1 pl-2">
-                <span className="w-14 text-center text-white">Price</span>
-                <span className="w-12 text-center text-white">Profit</span>
+                <span className="w-16 text-center text-white">Price</span>
+                <span className="w-16 text-center text-white">Profit</span>
                 <span className="w-9 text-center text-white">ROI</span>
               </div>
             </div>
@@ -1043,11 +1219,11 @@ function RecentOrders({
                     </div>
                   </div>
                   <div className="flex shrink-0 items-center justify-end gap-1 pl-2 text-[10px] tabular-nums font-medium text-white">
-                    <span className="w-14 text-center">
-                      {revenue != null && Number.isFinite(revenue) ? formatCurrency(revenue, currency) : "—"}
+                    <span className="w-16 text-center">
+                      {revenue != null && Number.isFinite(revenue) ? formatCurrency(revenue, currency, 2) : "—"}
                     </span>
-                    <span className="w-12 text-center">
-                      {row.profit != null && Number.isFinite(row.profit) ? formatCurrency(row.profit, currency) : "—"}
+                    <span className="w-16 text-center">
+                      {row.profit != null && Number.isFinite(row.profit) ? formatCurrency(row.profit, currency, 2) : "—"}
                     </span>
                     <span className="w-9 text-center">
                       {row.roiPct != null && Number.isFinite(row.roiPct) ? `${row.roiPct.toFixed(1)}%` : "—"}

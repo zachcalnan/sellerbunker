@@ -3,7 +3,7 @@
 import { SignedIn, SignedOut, useAuth } from "@clerk/nextjs";
 import Link from "next/link";
 import Image from "next/image";
-import { useState, useRef, useEffect, type ComponentType } from "react";
+import { useState, useRef, useEffect, useId, type ComponentType } from "react";
 import { FlagIcon } from "@/components/flags";
 
 const accentColor = "rgb(96, 165, 250)";
@@ -168,6 +168,156 @@ function NavAuthSlot() {
 const heroCtaBorderClass = "border-2 border-[#1d4ed8] shadow-lg";
 const heroCtaClass = `inline-flex rounded-xl px-5 py-2.5 text-sm font-semibold transition sm:px-6 sm:py-3 sm:text-base ${heroCtaBorderClass}`;
 
+/** Minimal “launch / get started” mark — reads cleaner than a classic mouse pointer at small sizes. */
+function ModernCtaIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M7 17 17 7M7 7h10M17 7v10" />
+    </svg>
+  );
+}
+
+/** Chart trending up + multi-currency row — below the four bullets on the landing page. */
+function GrowthAndMoneyIllustration() {
+  const line = accentColor;
+  const green = "#22c55e";
+  const uid = useId().replace(/:/g, "");
+  const fillId = `sb-growth-fill-${uid}`;
+  const glowId = `sb-glow-${uid}`;
+  const arrowId = `sb-line-arrow-${uid}`;
+  const curve =
+    "M 64 156 C 140 148, 188 118, 256 96 S 400 52 472 38";
+  return (
+    <div className="mx-auto mt-10 max-w-xl sm:mt-12 sm:max-w-3xl">
+      <div
+        className="overflow-hidden rounded-2xl border border-white/20 bg-gradient-to-b from-[var(--surface)]/95 to-[var(--background)]/80 px-4 py-5 shadow-[0_16px_48px_rgba(0,0,0,0.22)] sm:px-8 sm:py-7"
+        role="img"
+        aria-label="Profit trending up across GBP, USD, and EUR"
+      >
+        <svg
+          className="h-auto w-full max-h-[200px] sm:max-h-[220px]"
+          viewBox="0 0 580 168"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+          aria-hidden
+        >
+          <defs>
+            <linearGradient id={fillId} x1="0" y1="1" x2="0" y2="0">
+              <stop offset="0%" stopColor={green} stopOpacity="0.12" />
+              <stop offset="45%" stopColor={line} stopOpacity="0.2" />
+              <stop offset="100%" stopColor={line} stopOpacity="0.35" />
+            </linearGradient>
+            <filter id={glowId} x="-25%" y="-25%" width="150%" height="150%">
+              <feGaussianBlur stdDeviation="1.8" result="b" />
+              <feMerge>
+                <feMergeNode in="b" />
+                <feMergeNode in="SourceGraphic" />
+              </feMerge>
+            </filter>
+            <marker
+              id={arrowId}
+              markerUnits="strokeWidth"
+              markerWidth="5"
+              markerHeight="5"
+              refX="4"
+              refY="2.5"
+              orient="auto"
+            >
+              <path d="M 0 0 L 5 2.5 L 0 5 Z" fill={line} />
+            </marker>
+          </defs>
+          {/* Y-axis title: Profit only */}
+          <g>
+            <line
+              x1="32"
+              y1="38"
+              x2="32"
+              y2="142"
+              className="stroke-[var(--foreground)]"
+              strokeOpacity="0.22"
+              strokeWidth="2"
+              strokeLinecap="round"
+            />
+            <g transform="translate(12, 90) rotate(-90)">
+              <text
+                textAnchor="middle"
+                dominantBaseline="middle"
+                fill={line}
+                style={{
+                  fontSize: 17,
+                  fontWeight: 800,
+                  fontFamily: "system-ui, ui-sans-serif, sans-serif",
+                  letterSpacing: "0.06em",
+                }}
+              >
+                Profit
+              </text>
+            </g>
+          </g>
+          <rect x="44" y="24" width="500" height="120" rx="14" className="fill-[var(--foreground)]/[0.04]" stroke="currentColor" strokeOpacity="0.08" strokeWidth="1" />
+          <g className="text-[var(--foreground)]" opacity={0.1}>
+            {[132, 100, 68].map((y) => (
+              <line key={y} x1="64" y1={y} x2="536" y2={y} stroke="currentColor" strokeWidth="1" />
+            ))}
+          </g>
+          <path
+            d={`${curve} L 536 156 L 64 156 Z`}
+            fill={`url(#${fillId})`}
+          />
+          <path
+            d={curve}
+            stroke={line}
+            strokeWidth="3"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            markerEnd={`url(#${arrowId})`}
+            filter={`url(#${glowId})`}
+          />
+          {/* Currency symbols along the growth line (left → right ≈ early → peak) */}
+          <g className="pointer-events-none">
+            {(
+              [
+                { sym: "£", cx: 118, cy: 132 },
+                { sym: "$", cx: 256, cy: 74 },
+                { sym: "€", cx: 392, cy: 36 },
+              ] as const
+            ).map(({ sym, cx, cy }) => (
+              <g key={sym} transform={`translate(${cx}, ${cy})`}>
+                <circle r="14" fill="var(--background)" stroke={green} strokeWidth="2.2" />
+                <text
+                  textAnchor="middle"
+                  dominantBaseline="central"
+                  fill={green}
+                  style={{
+                    fontSize: 13,
+                    fontWeight: 800,
+                    fontFamily: "system-ui, ui-sans-serif, sans-serif",
+                  }}
+                >
+                  {sym}
+                </text>
+              </g>
+            ))}
+          </g>
+        </svg>
+
+        <p className="mt-5 text-center text-xs font-medium text-[var(--muted-foreground)] sm:mt-6 sm:text-sm">
+          SellerBunker → Clearer Operations → stronger margins across your marketplaces
+        </p>
+      </div>
+    </div>
+  );
+}
+
 /** Hero CTA — use isSignedIn only; SignedOut/SignedIn + opacity fade could render nothing or stay invisible. */
 function HeroCtaSlot() {
   const { isLoaded, isSignedIn } = useAuth();
@@ -193,9 +343,10 @@ function HeroCtaSlot() {
     <div className={ctaRowClass}>
       <Link
         href="/sign-up"
-        className={`${heroCtaClass} inline-flex min-h-[2.75rem] min-w-0 flex-1 justify-center text-black hover:opacity-90 sm:flex-initial`}
+        className={`${heroCtaClass} inline-flex min-h-[2.75rem] min-w-0 flex-1 items-center justify-center gap-2 text-black hover:opacity-90 sm:flex-initial`}
         style={{ backgroundColor: accentColor }}
       >
+        <ModernCtaIcon className="h-4 w-4 shrink-0" />
         Try free today
       </Link>
       {discordCta}
@@ -207,9 +358,10 @@ function HeroCtaSlot() {
       <div className={ctaRowClass}>
         <a
           href="/sign-up"
-          className={`${heroCtaClass} inline-flex min-h-[2.75rem] min-w-0 flex-1 justify-center text-black hover:opacity-90 sm:flex-initial`}
+          className={`${heroCtaClass} inline-flex min-h-[2.75rem] min-w-0 flex-1 items-center justify-center gap-2 text-black hover:opacity-90 sm:flex-initial`}
           style={{ backgroundColor: accentColor }}
         >
+          <ModernCtaIcon className="h-4 w-4 shrink-0" />
           Try free today
         </a>
         {discordCta}
@@ -1571,6 +1723,7 @@ export default function LandingPage() {
                   </li>
                 ))}
               </ul>
+              <GrowthAndMoneyIllustration />
             </div>
           </div>
         </section>
@@ -1616,45 +1769,88 @@ export default function LandingPage() {
                 </li>
               ))}
             </ul>
-            <div className="mx-auto mt-14 max-w-sm rounded-2xl border border-[var(--surface-border)] bg-[var(--surface)] p-5 shadow-lg">
-              <p className="text-center text-xs font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">Example: one sale</p>
-              <div className="mt-4 space-y-2 text-sm">
-                <div className="flex justify-between text-[var(--foreground)]">
-                  <span>Sale price</span>
-                  <span className="tabular-nums">£24.99</span>
+            <div className="mx-auto mt-14 grid max-w-4xl grid-cols-1 gap-6 md:grid-cols-2 md:items-stretch">
+              <div className="rounded-2xl border border-[var(--surface-border)] bg-[var(--surface)]/80 p-5 shadow-lg ring-1 ring-[var(--surface-border)]/80">
+                <p className="text-center text-xs font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
+                  View without SellerBunker
+                </p>
+                <p className="mt-1 text-center text-[11px] text-[var(--muted-foreground)]">Same order — costs not broken down</p>
+                <div className="mt-4 space-y-2 text-sm">
+                  <div className="flex justify-between text-[var(--foreground)]">
+                    <span>Sale price</span>
+                    <span className="tabular-nums">£24.99</span>
+                  </div>
+                  {[
+                    "Unit cost",
+                    "Amazon referral fee",
+                    "Amazon FBA fee",
+                    "Digital services fee",
+                    "Storage fee (est.)",
+                    "Prep cost",
+                    "Inbound shipping",
+                    "VAT",
+                  ].map((label) => (
+                    <div key={label} className="flex justify-between text-[var(--muted-foreground)]">
+                      <span>{label}</span>
+                      <span className="text-right text-xs font-medium italic text-red-600 dark:text-red-400">
+                        Unknown cost
+                      </span>
+                    </div>
+                  ))}
                 </div>
-                <div className="flex justify-between text-[var(--muted-foreground)]">
-                  <span>Amazon referral fee</span>
-                  <span className="tabular-nums">−£3.75</span>
-                </div>
-                <div className="flex justify-between text-[var(--muted-foreground)]">
-                  <span>Amazon FBA fee</span>
-                  <span className="tabular-nums">−£4.51</span>
-                </div>
-                <div className="flex justify-between text-[var(--muted-foreground)]">
-                  <span>Digital services fee</span>
-                  <span className="tabular-nums">−£0.14</span>
-                </div>
-                <div className="flex justify-between text-[var(--muted-foreground)]">
-                  <span>Storage fee (est.)</span>
-                  <span className="tabular-nums">−£0.08</span>
-                </div>
-                <div className="flex justify-between text-[var(--muted-foreground)]">
-                  <span>Prep cost</span>
-                  <span className="tabular-nums">−£0.60</span>
-                </div>
-                <div className="flex justify-between text-[var(--muted-foreground)]">
-                  <span>Inbound shipping</span>
-                  <span className="tabular-nums">−£0.50</span>
-                </div>
-                <div className="flex justify-between text-[var(--muted-foreground)]">
-                  <span>VAT</span>
-                  <span className="tabular-nums">−£3.40</span>
+                <div className="mt-4 flex justify-between border-t border-[var(--surface-border)] pt-4 text-base font-semibold">
+                  <span className="text-[var(--muted-foreground)]">True profit</span>
+                  <span className="tabular-nums italic text-red-600 dark:text-red-400">Unknown</span>
                 </div>
               </div>
-              <div className="mt-4 flex justify-between border-t border-[var(--surface-border)] pt-4 text-base font-semibold" style={{ color: accentColor }}>
-                <span>True profit</span>
-                <span className="tabular-nums">£12.01</span>
+
+              <div className="rounded-2xl border border-[var(--surface-border)] bg-[var(--surface)] p-5 shadow-lg ring-1 ring-[rgb(96,165,250)]/25">
+                <p className="text-center text-xs font-semibold uppercase tracking-wider text-[var(--foreground)]">
+                  With SellerBunker
+                </p>
+                <p className="mt-1 text-center text-[11px] text-[var(--muted-foreground)]">Example: one sale</p>
+                <div className="mt-4 space-y-2 rounded-xl border border-emerald-500/30 bg-emerald-500/[0.07] p-3 text-sm dark:border-emerald-500/25 dark:bg-emerald-500/10">
+                  <div className="flex justify-between text-emerald-950 dark:text-emerald-50">
+                    <span>Sale price</span>
+                    <span className="tabular-nums font-medium text-emerald-700 dark:text-emerald-300">£24.99</span>
+                  </div>
+                  <div className="flex justify-between text-emerald-900/90 dark:text-emerald-100/90">
+                    <span>Unit cost</span>
+                    <span className="tabular-nums font-medium text-emerald-700 dark:text-emerald-300">−£6.00</span>
+                  </div>
+                  <div className="flex justify-between text-emerald-900/90 dark:text-emerald-100/90">
+                    <span>Amazon referral fee</span>
+                    <span className="tabular-nums font-medium text-emerald-700 dark:text-emerald-300">−£3.75</span>
+                  </div>
+                  <div className="flex justify-between text-emerald-900/90 dark:text-emerald-100/90">
+                    <span>Amazon FBA fee</span>
+                    <span className="tabular-nums font-medium text-emerald-700 dark:text-emerald-300">−£4.51</span>
+                  </div>
+                  <div className="flex justify-between text-emerald-900/90 dark:text-emerald-100/90">
+                    <span>Digital services fee</span>
+                    <span className="tabular-nums font-medium text-emerald-700 dark:text-emerald-300">−£0.14</span>
+                  </div>
+                  <div className="flex justify-between text-emerald-900/90 dark:text-emerald-100/90">
+                    <span>Storage fee (est.)</span>
+                    <span className="tabular-nums font-medium text-emerald-700 dark:text-emerald-300">−£0.08</span>
+                  </div>
+                  <div className="flex justify-between text-emerald-900/90 dark:text-emerald-100/90">
+                    <span>Prep cost</span>
+                    <span className="tabular-nums font-medium text-emerald-700 dark:text-emerald-300">−£0.60</span>
+                  </div>
+                  <div className="flex justify-between text-emerald-900/90 dark:text-emerald-100/90">
+                    <span>Inbound shipping</span>
+                    <span className="tabular-nums font-medium text-emerald-700 dark:text-emerald-300">−£0.50</span>
+                  </div>
+                  <div className="flex justify-between text-emerald-900/90 dark:text-emerald-100/90">
+                    <span>VAT</span>
+                    <span className="tabular-nums font-medium text-emerald-700 dark:text-emerald-300">−£3.40</span>
+                  </div>
+                </div>
+                <div className="mt-4 flex justify-between border-t border-emerald-500/25 pt-4 text-base font-semibold text-emerald-800 dark:text-emerald-300">
+                  <span>True profit</span>
+                  <span className="tabular-nums">£6.01</span>
+                </div>
               </div>
             </div>
           </div>
@@ -1863,7 +2059,7 @@ export default function LandingPage() {
             </p>
             <div className="mt-16 grid gap-8 md:grid-cols-3">
               {[
-                { name: "Starter", price: "£14.99", period: "month", orders: "Up to 5,000 orders per month", note: "Testing price for initial users", priceSubline: "Two weeks free, then", cta: "Try free today", featured: true, badge: "For initial testing" },
+                { name: "Starter", price: "Free", period: "", orders: "Up to 5,000 orders per month", priceSubline: "During testing", cta: "Try free today", featured: true, badge: "For initial testing" },
                 { name: "Growth", price: "£26.99", period: "month", orders: "5,000 – 50,000 orders per month", priceSubline: "Two weeks free, then", cta: "Try free today", featured: false },
                 { name: "Pro", price: "£44.99", period: "month", orders: "50,000+ orders per month", priceSubline: "Two weeks free, then", cta: "Try free today", featured: false },
               ].map((plan) => (
@@ -1897,16 +2093,18 @@ export default function LandingPage() {
                       <SignedOut>
                         <Link
                           href="/sign-up"
-                          className="mt-6 flex w-full items-center justify-center rounded-xl bg-white py-3 text-sm font-semibold text-black transition hover:bg-gray-100 no-underline"
+                          className="mt-6 flex w-full items-center justify-center gap-2 rounded-xl bg-white py-3 text-sm font-semibold text-black transition hover:bg-gray-100 no-underline"
                         >
+                          <ModernCtaIcon className="h-4 w-4 shrink-0" />
                           {plan.cta}
                         </Link>
                       </SignedOut>
                       <SignedIn>
                         <Link
                           href="/start-trial"
-                          className="mt-6 flex w-full items-center justify-center rounded-xl bg-white py-3 text-sm font-semibold text-black transition hover:bg-gray-100"
+                          className="mt-6 flex w-full items-center justify-center gap-2 rounded-xl bg-white py-3 text-sm font-semibold text-black transition hover:bg-gray-100"
                         >
+                          <ModernCtaIcon className="h-4 w-4 shrink-0" />
                           {plan.cta}
                         </Link>
                       </SignedIn>
@@ -1916,18 +2114,20 @@ export default function LandingPage() {
                       <SignedOut>
                         <Link
                           href="/sign-up"
-                          className={`mt-6 flex w-full items-center justify-center rounded-xl py-3 text-sm font-semibold no-underline transition ${plan.featured ? "bg-white text-black hover:bg-gray-100" : "border border-[var(--surface-border)] text-[var(--foreground)] hover:bg-[var(--surface)]"
+                          className={`mt-6 flex w-full items-center justify-center gap-2 rounded-xl py-3 text-sm font-semibold no-underline transition ${plan.featured ? "bg-white text-black hover:bg-gray-100" : "border border-[var(--surface-border)] text-[var(--foreground)] hover:bg-[var(--surface)]"
                             }`}
                         >
+                          <ModernCtaIcon className="h-4 w-4 shrink-0" />
                           {plan.cta}
                         </Link>
                       </SignedOut>
                       <SignedIn>
                         <Link
                           href="/start-trial"
-                          className={`mt-6 flex w-full items-center justify-center rounded-xl py-3 text-sm font-semibold no-underline transition ${plan.featured ? "bg-white text-black hover:bg-gray-100" : "border border-[var(--surface-border)] text-[var(--foreground)] hover:bg-[var(--surface)]"
+                          className={`mt-6 flex w-full items-center justify-center gap-2 rounded-xl py-3 text-sm font-semibold no-underline transition ${plan.featured ? "bg-white text-black hover:bg-gray-100" : "border border-[var(--surface-border)] text-[var(--foreground)] hover:bg-[var(--surface)]"
                             }`}
                         >
+                          <ModernCtaIcon className="h-4 w-4 shrink-0" />
                           {plan.cta}
                         </Link>
                       </SignedIn>

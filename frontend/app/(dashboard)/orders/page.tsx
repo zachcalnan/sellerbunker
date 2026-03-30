@@ -4,6 +4,10 @@ import { useAuth, SignedIn, SignedOut, SignInButton } from "@clerk/nextjs";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useDisplaySettings } from "@/contexts/display-settings-context";
 import { useMarketplace } from "@/contexts/marketplace-context";
+import {
+  aggregateOrderRows,
+  filterOrderRowsForOrdersTabPeriod,
+} from "@/lib/orders-period-metrics";
 
 type OrderRow = {
   id: string;
@@ -97,29 +101,18 @@ export default function OrdersPage() {
     [filtered, safePage],
   );
 
-  const rowsInPeriod = useMemo(() => {
-    const now = Date.now();
-    const oneDayMs = 24 * 60 * 60 * 1000;
-    let startMs: number;
-    if (period === "today") {
-      const d = new Date();
-      d.setUTCHours(0, 0, 0, 0);
-      startMs = d.getTime();
-    } else {
-      const days = Number(period) || 30;
-      startMs = now - days * oneDayMs;
-    }
-    return rows.filter((r) => {
-      const t = new Date(r.orderDate).getTime();
-      return period === "today" ? t >= startMs && t < startMs + oneDayMs : t >= startMs && t <= now;
-    });
-  }, [rows, period]);
+  const rowsInPeriod = useMemo(
+    () => filterOrderRowsForOrdersTabPeriod(rows, period),
+    [rows, period],
+  );
 
   const periodSummary = useMemo(() => {
-    const orderCount = rowsInPeriod.length;
-    const totalSales = rowsInPeriod.reduce((sum, r) => sum + r.salePrice * r.quantity, 0);
-    const totalProfit = rowsInPeriod.reduce((sum, r) => sum + (r.profit ?? 0), 0);
-    return { orderCount, totalSales, totalProfit };
+    const a = aggregateOrderRows(rowsInPeriod);
+    return {
+      orderCount: a.orderCount,
+      totalSales: a.totalSales,
+      totalProfit: a.totalProfit,
+    };
   }, [rowsInPeriod]);
 
   useEffect(() => {

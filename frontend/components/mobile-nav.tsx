@@ -419,12 +419,15 @@ export function MobileNav() {
       <header className="flex h-14 shrink-0 items-center justify-between gap-4 border-b border-[var(--surface-border)] bg-[var(--surface)] px-4 md:hidden">
         <Link
           href="/dashboard"
-          className="flex shrink-0 items-center h-full font-semibold tracking-tight text-[var(--foreground)] no-underline hover:opacity-80"
-          aria-label="Seller Bunker dashboard"
+          prefetch
+          title="Go to dashboard"
+          className="flex h-full shrink-0 cursor-pointer items-center rounded-lg font-semibold tracking-tight text-[var(--foreground)] no-underline outline-none transition-opacity hover:opacity-80 focus-visible:ring-2 focus-visible:ring-sb-accent focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--surface)]"
+          aria-label="Go to dashboard"
         >
           <img
             src="/sellerbunker-logo2.png"
-            alt="Seller Bunker"
+            alt=""
+            draggable={false}
             className="sellerbunker-logo h-full w-auto p-2 object-contain object-left"
           />
         </Link>

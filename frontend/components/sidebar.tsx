@@ -286,12 +286,15 @@ export function Sidebar() {
     <aside className="flex gap-4 h-screen w-full flex-col border-r border-[var(--surface-border)] bg-[var(--surface)]">
       <Link
         href="/dashboard"
-        className="no-underline w-fit"
-        aria-label="Seller Bunker dashboard"
+        prefetch
+        title="Go to dashboard"
+        className="inline-flex w-fit shrink-0 cursor-pointer rounded-lg no-underline outline-none transition-[opacity,box-shadow] hover:opacity-90 focus-visible:ring-2 focus-visible:ring-sb-accent focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--surface)]"
+        aria-label="Go to dashboard"
       >
         <img
           src="/sellerbunker-logo2.png"
-          alt="Seller Bunker"
+          alt=""
+          draggable={false}
           className="sellerbunker-logo h-full max-h-20 w-auto p-4 object-contain object-left"
         />
       </Link>

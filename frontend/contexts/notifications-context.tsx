@@ -50,6 +50,12 @@ function isSyncInProgress(stage: SyncStage, progress: number | null): boolean {
   return false;
 }
 
+function isApiSyncDone(data: { done?: boolean; stage?: SyncStage; progress?: number }): boolean {
+  if (data.done === false) return false;
+  if (data.done === true) return true;
+  return data.stage === "complete" && Number(data.progress) >= 100;
+}
+
 type NotificationsContextValue = {
   hasNotifications: boolean;
   flashingDismissed: boolean;
@@ -118,7 +124,6 @@ export function NotificationsProvider({ children }: { children: React.ReactNode 
     }
   });
   const [syncProgress, setSyncProgress] = useState<number | null>(null);
-  const [feeSyncProgress, setFeeSyncProgress] = useState<number | null>(null);
   const [syncStage, setSyncStage] = useState<SyncStage>("complete");
   const [syncPhase, setSyncPhase] = useState<string | null>(null);
   const [syncDismissed, setSyncDismissed] = useState(() => {
@@ -243,6 +248,7 @@ export function NotificationsProvider({ children }: { children: React.ReactNode 
 
       let data: {
         progress?: number;
+        done?: boolean;
         stage?: SyncStage;
         feeProgress?: number;
         feeDone?: boolean;
@@ -259,6 +265,7 @@ export function NotificationsProvider({ children }: { children: React.ReactNode 
           if (!res.ok) continue;
           data = (await res.json()) as {
             progress?: number;
+            done?: boolean;
             stage?: SyncStage;
             feeProgress?: number;
             feeDone?: boolean;
@@ -290,10 +297,9 @@ export function NotificationsProvider({ children }: { children: React.ReactNode 
         setSyncProgress(progressNum);
         setSyncStage(stage);
       }
-      const feeP = Number(data.feeProgress);
-      if (Number.isFinite(feeP)) setFeeSyncProgress(Math.min(100, Math.max(0, feeP)));
       if (typeof data.phase === "string" && data.phase.trim()) setSyncPhase(data.phase.trim());
-      if (stage === "complete" && data.feeDone !== false) {
+      else setSyncPhase(null);
+      if (isApiSyncDone({ ...data, stage })) {
         try {
           sessionStorage.removeItem(INITIAL_SYNC_PENDING_KEY);
           sessionStorage.removeItem(SYNC_PROGRESS_API_KEY);
@@ -313,7 +319,6 @@ export function NotificationsProvider({ children }: { children: React.ReactNode 
   useEffect(() => {
     if (!isSignedIn) {
       setSyncProgress(null);
-      setFeeSyncProgress(null);
       setSyncStage("complete");
       return;
     }
@@ -359,42 +364,22 @@ export function NotificationsProvider({ children }: { children: React.ReactNode 
   const hasMissingUnits = visibleMissingShipments.length > 0;
   const hasNotifications = hasMissing || !cogsRoiDismissed || !cogsProfitDismissed || hasMissingUnits;
   const syncInProgress = isSyncInProgress(syncStage, syncProgress);
-  const feeSyncActive = syncStage === "fees" && (syncProgress ?? 0) >= 75;
-  const feeSegmentStart = 75;
-  const visibleSyncProgress = feeSyncActive
-    ? feeSegmentStart + ((feeSyncProgress ?? 0) / 100) * (100 - feeSegmentStart)
-    : (syncProgress ?? 0);
+  const visibleSyncProgress = syncProgress ?? 0;
   const noSyncDataYet = isSignedIn && syncProgress === null;
   const awaitingFirstPoll = syncPendingFromSession && syncProgress === null && syncStage === "complete";
   const syncTitle =
     noSyncDataYet || awaitingFirstPoll
-      ? "Initial sync"
+      ? "Syncing"
       : syncInProgress
-        ? feeSyncActive
-          ? "Initial sync (fees)"
-          : "Initial sync"
-        : "Sync complete";
+        ? "Syncing Amazon data"
+        : "Fully synced";
   const barIsIndeterminate = syncProgress === null && (noSyncDataYet || awaitingFirstPoll);
   const displayPhase =
     syncPhase != null && syncPhase.trim() !== ""
-      ? syncPhase
-      : syncProgress != null && syncProgress < 100
-        ? syncProgress < 25
-          ? "Syncing orders"
-          : syncProgress < 50
-            ? "Syncing inventory"
-            : syncProgress < 75
-              ? "Syncing shipments"
-              : "Syncing fee estimates"
+      ? syncPhase.trim()
+      : syncInProgress
+        ? "Working…"
         : null;
-  const syncDetail =
-    displayPhase != null
-      ? `${displayPhase} • ${Math.round(barIsIndeterminate ? 0 : visibleSyncProgress)}%`
-      : feeSyncActive
-        ? `Fees • ${Math.round(visibleSyncProgress)}%`
-        : awaitingFirstPoll || noSyncDataYet
-          ? "Starting • …"
-          : null;
   const showSyncBox =
     (syncPendingFromSession || hasSeenSyncInProgress) &&
     (noSyncDataYet ||
@@ -402,10 +387,22 @@ export function NotificationsProvider({ children }: { children: React.ReactNode 
       awaitingFirstPoll ||
       (syncStage === "complete" && (syncProgress ?? 100) >= 100 && hasSeenSyncInProgress && !syncDismissed));
   const syncComplete =
-    showSyncBox && syncStage === "complete" && (syncProgress ?? 100) >= 100 && !awaitingFirstPoll && !noSyncDataYet;
-  const showBackgroundSyncNote = !syncComplete && showSyncBox;
+    showSyncBox &&
+    syncStage === "complete" &&
+    (syncProgress ?? 100) >= 100 &&
+    !awaitingFirstPoll &&
+    !noSyncDataYet;
+  const syncDetail =
+    displayPhase != null
+      ? `${displayPhase} • ${Math.round(barIsIndeterminate ? 0 : visibleSyncProgress)}%`
+      : awaitingFirstPoll || noSyncDataYet
+        ? "Starting • …"
+        : syncComplete
+          ? "Successfully fully synced — your catalog is up to date."
+          : null;
+  const showBackgroundSyncNote = !syncComplete && showSyncBox && syncStage === "core";
   const backgroundSyncTooltip =
-    "Complete syncing will take place after initial sync in the background.";
+    "Full inventory, shipments, and fee estimates for your whole catalog run after this first pass.";
 
   useEffect(() => {
     if (syncComplete && !syncCompleteFiredRef.current && typeof window !== "undefined") {

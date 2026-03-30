@@ -188,9 +188,8 @@ export class AmazonSyncService implements OnModuleInit {
   }
 
   /**
-   * Resolve current sync progress for the UI. Core progress comes from the
-   * full-sync BullMQ job (job.updateProgress in worker, job.progress here) so
-   * there is a single source of truth – no separate Redis key that can get out of sync.
+   * Resolve sync progress for the UI. Core mini-sync maps to 0–85%; post-initial + full fee job maps 85–100%.
+   * `done` and 100% progress only when core is complete and fee-sync Redis is absent or at 100% (legacy: no fee key after core = complete).
    */
   async getSyncProgress(userId: string): Promise<{
     progress: number;
@@ -208,7 +207,10 @@ export class AmazonSyncService implements OnModuleInit {
         const parsed = JSON.parse(raw) as { progress?: number; phase?: string };
         const p = Number(parsed.progress);
         const progress = Number.isFinite(p) ? Math.min(100, Math.max(0, p)) : null;
-        return { progress, phase: typeof parsed.phase === 'string' ? parsed.phase : undefined };
+        return {
+          progress,
+          phase: typeof parsed.phase === 'string' ? parsed.phase : undefined,
+        };
       } catch {
         return { progress: null };
       }
@@ -234,10 +236,13 @@ export class AmazonSyncService implements OnModuleInit {
         let jobNum: number | null = null;
         if (typeof fromJob === 'number' && Number.isFinite(fromJob)) {
           jobNum = Math.min(100, Math.max(0, fromJob));
-        } else if (fromJob != null && typeof fromJob === 'object' && typeof (fromJob as { progress?: number }).progress === 'number') {
+        } else if (
+          fromJob != null &&
+          typeof fromJob === 'object' &&
+          typeof (fromJob as { progress?: number }).progress === 'number'
+        ) {
           jobNum = Math.min(100, Math.max(0, (fromJob as { progress: number }).progress));
         }
-        // Use the freshest value across DB, job, Redis so we don't show stale progress (e.g. DB replica lag or slow write).
         const dbVal = dbRow?.progress ?? 0;
         const jobVal = jobNum ?? 0;
         const redisVal = fromRedis ?? 0;
@@ -258,35 +263,48 @@ export class AmazonSyncService implements OnModuleInit {
       progressSource = dbRow != null ? 'db' : fromRedis != null ? 'redis' : 'default';
     }
 
-    // Fee progress: fee-sync is a background job; we do NOT block "initial sync complete" on it.
-    // Core = minimal inventory (first page) + top 10 fee estimates. When that hits 100%, initial sync is done.
+    const corePhase = redisSync.phase;
     const feeRaw = await this.redis.get(`amazon-fee-sync:${userId}`);
-    let feeProgress = parseRedisSync(feeRaw).progress;
-    const done = coreProgress >= 100;
-    const feeDone = feeProgress == null || feeProgress >= 100;
-    const phase = redisSync.phase;
-    // During initial sync, fee phase runs 75→100%.
-    const feePhaseStartPct = 75;
-    // Guard against stale/early phase labels: only enter fee stage once core progress is actually in fee range.
-    const isFeePhase =
-      typeof phase === 'string' &&
-      /fee|Fee/.test(phase) &&
-      coreProgress >= feePhaseStartPct;
-
-    // Always use corePhaseEndPct 75 when stage is "fees" so the bar never drops to 50%.
-    const stage: 'core' | 'fees' | 'complete' = done ? 'complete' : isFeePhase ? 'fees' : 'core';
-    const corePhaseEndPct = stage === 'fees' ? feePhaseStartPct : 50;
-
-    // When in fee phase (initial sync), derive feeProgress from coreProgress so the bar shows 75→100.
-    if (stage === 'fees' && feeProgress == null && coreProgress >= feePhaseStartPct) {
-      feeProgress = Math.min(100, Math.round(((coreProgress - feePhaseStartPct) / (100 - feePhaseStartPct)) * 100));
+    const feeKeyPresent = feeRaw != null && feeRaw !== '';
+    let feeProgressNum = 100;
+    let feePhaseLabel: string | undefined;
+    if (feeKeyPresent) {
+      try {
+        const parsed = JSON.parse(feeRaw) as { progress?: number; phase?: string };
+        const p = Number(parsed.progress);
+        feeProgressNum = Number.isFinite(p) ? Math.min(100, Math.max(0, p)) : 0;
+        if (typeof parsed.phase === 'string' && parsed.phase.trim() !== '') {
+          feePhaseLabel = parsed.phase.trim();
+        }
+      } catch {
+        feeProgressNum = 0;
+      }
     }
 
-    // When phase is missing during sync, infer label so the first phase always shows "Syncing orders" etc.
+    const coreComplete = coreProgress >= 100;
+    const feeWorkPending =
+      coreComplete && feeKeyPresent && feeProgressNum < 100;
+
+    const done = coreComplete && !feeWorkPending;
+    const stage: 'core' | 'fees' | 'complete' = !coreComplete
+      ? 'core'
+      : feeWorkPending
+        ? 'fees'
+        : 'complete';
+
+    const unifiedProgress = !coreComplete
+      ? Math.round(Math.min(100, Math.max(0, coreProgress)) * 0.85)
+      : feeWorkPending
+        ? Math.round(85 + (feeProgressNum / 100) * 15)
+        : 100;
+
+    const feeDone = !feeWorkPending;
+    const corePhaseEndPct = 85;
+
     const resolvedPhase =
-      phase != null && phase.trim() !== ''
-        ? phase
-        : !done && coreProgress < 100
+      corePhase != null && corePhase.trim() !== ''
+        ? corePhase
+        : !coreComplete
           ? coreProgress < 25
             ? 'Syncing orders'
             : coreProgress < 50
@@ -294,10 +312,12 @@ export class AmazonSyncService implements OnModuleInit {
               : coreProgress < 75
                 ? 'Syncing shipments'
                 : 'Syncing fee estimates'
-          : undefined;
+          : feeWorkPending
+            ? feePhaseLabel ?? 'Completing catalog sync'
+            : undefined;
 
     this.logger.log(
-      `[sync-progress] userId=${userId.slice(0, 8)}… jobState=${jobState ?? 'none'} progress=${coreProgress} from=${progressSource}`,
+      `[sync-progress] userId=${userId.slice(0, 8)}… jobState=${jobState ?? 'none'} core=${coreProgress} unified=${unifiedProgress} stage=${stage} from=${progressSource}`,
     );
     if (progressSource === 'default' && coreProgress === 0) {
       this.logger.log(
@@ -306,10 +326,10 @@ export class AmazonSyncService implements OnModuleInit {
     }
 
     return {
-      progress: coreProgress,
+      progress: unifiedProgress,
       done,
       stage,
-      feeProgress: feeProgress ?? 100,
+      feeProgress: feeKeyPresent ? feeProgressNum : 100,
       feeDone,
       corePhaseEndPct,
       phase: resolvedPhase,

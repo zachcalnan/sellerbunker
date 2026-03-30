@@ -192,9 +192,8 @@ ping() {
   }
 
   /**
-   * Initial sync progress (0–100) for the post-connect full-sync. Used by topbar to show progress bar.
-   * Returns { progress: number, done: boolean }. When key is missing, checks for active full-sync job
-   * so the bar shows 0% "in progress" instead of appearing complete.
+   * Full initial pipeline progress (0–100): mini full-sync maps to ~0–85%, then post-initial + fee-sync to 100%.
+   * `done` is true only when core mini-sync is complete and fee-sync is finished (or no fee key for legacy users).
    */
   @UseGuards(ClerkAuthGuard)
   @Get('sync-progress')
@@ -275,13 +274,13 @@ ping() {
     }
 
     if (direct) {
-      const { progress } = await this.amazonSyncService.getSyncProgress(req.user.userId);
-      if (progress < 100) {
+      const sp = await this.amazonSyncService.getSyncProgress(req.user.userId);
+      if (!sp.done) {
         this.logger.log(
-          `[sync] Rejecting direct full sync – initial sync in progress (${progress}%). User must wait for 100% or use queue.`,
+          `[sync] Rejecting direct full sync – pipeline not finished (${sp.progress}%). User must wait for completion or use queue.`,
         );
         throw new BadRequestException(
-          `Initial sync is still in progress (${Math.round(progress)}%). Wait for it to reach 100% before running a full order sync.`,
+          `Initial sync is still in progress (${Math.round(sp.progress)}%). Wait until fully synced before running a full order sync.`,
         );
       }
       await this.amazonService.syncRecentOrdersToDb(req.user.userId, {
@@ -345,6 +344,29 @@ ping() {
   @Get('orders')
   listOrders(@Req() req: { user: { orgId: string; marketplaceId?: string } }) {
     return this.amazonService.listOrders(req.user.orgId, req.user.marketplaceId);
+  }
+
+  /**
+   * Merges duplicate `orders` rows (same Amazon order id, different `marketplace` key) and re-homes line items,
+   * then kicks off a 30-day orders sync for each org member (background; does not wait for sync to finish).
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Post('orders/repair-duplicates')
+  async repairOrderDuplicates(@Req() req: { user: { orgId: string } }) {
+    const { ordersRemoved, orgUserIds } =
+      await this.amazonService.repairDuplicateAmazonOrdersForOrg(req.user.orgId);
+    for (const userId of orgUserIds) {
+      void this.amazonService.syncRecentOrdersToDb(userId, { days: 30 }).catch((e) => {
+        const msg = e instanceof Error ? e.message : String(e);
+        this.logger.warn(
+          `[orders/repair-duplicates] follow-up sync failed (userId=${userId.slice(0, 8)}…): ${msg}`,
+        );
+      });
+    }
+    return {
+      ordersRemoved,
+      syncTriggeredForUsers: orgUserIds.length,
+    };
   }
 
   /**
