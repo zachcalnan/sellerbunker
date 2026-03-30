@@ -23,7 +23,9 @@ export function SyncProgressBar() {
       className="flex items-center gap-3 border-b-2 border-sb-accent/40 bg-[var(--surface)] px-4 py-2.5 text-sm shadow-sm"
       role="status"
       aria-live="polite"
-      aria-label={syncComplete ? "Fully synced" : `Syncing Amazon data, ${visibleSyncProgress}%`}
+      aria-label={
+        syncComplete ? "Initial limited sync complete" : `Syncing Amazon data, ${visibleSyncProgress}%`
+      }
     >
       <div className="min-w-0 shrink-0">
         <span className="font-medium text-[var(--foreground)]">{syncTitle}</span>

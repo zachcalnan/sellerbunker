@@ -114,40 +114,43 @@ ping() {
       );
       let dashboardUrl =
         frontendBase.replace(/\/$/, '') + '/dashboard?amazon_connected=1';
-      // When redirecting to a different origin (e.g. localhost), always pass this backend's API URL
-      // so the frontend can poll sync progress from the same backend that ran the callback.
-      // Workaround: without this, local frontend would poll local API and get 0% forever.
-      if (stateData.returnOrigin?.trim()) {
-        const publicApiUrl =
-          this.configService.get<string>('PUBLIC_API_URL') ||
-          (() => {
-            const u = this.configService.get<string>('AMAZON_REDIRECT_URI');
-            if (u) {
-              try {
-                const url = new URL(u);
-                url.pathname = '';
-                url.search = '';
-                return url.toString().replace(/\/$/, '');
-              } catch {
-                /* fall through to request-based fallback */
-              }
+      // Always pass the API base that ran this callback when we can derive it, so the browser polls
+      // the same Redis/queue as the worker (fixes local-vs-prod mismatch and any client that omits returnOrigin).
+      const reqForApi = res.req as {
+        get?(name: string): string | undefined;
+        protocol?: string;
+      };
+      const publicApiUrl =
+        this.configService.get<string>('PUBLIC_API_URL') ||
+        (() => {
+          const u = this.configService.get<string>('AMAZON_REDIRECT_URI');
+          if (u) {
+            try {
+              const url = new URL(u);
+              url.pathname = '';
+              url.search = '';
+              return url.toString().replace(/\/$/, '');
+            } catch {
+              /* fall through */
             }
-            // Fallback: derive from the request that received the OAuth callback (this backend's public URL)
-            const req = res.req as { get?(name: string): string | undefined; protocol?: string };
-            const host = req.get?.('host');
-            if (host) {
-              const proto = req.get?.('x-forwarded-proto') || req.protocol || 'https';
-              return `${proto === 'https' ? 'https' : 'http'}://${host}`.replace(/\/$/, '');
-            }
-            return null;
-          })();
-        if (publicApiUrl) {
-          dashboardUrl += `&sync_progress_api=${encodeURIComponent(publicApiUrl)}`;
-        } else {
-          this.logger.warn(
-            '[AmazonController] Could not derive sync_progress_api for cross-origin redirect – sync bar may stay at 0% on the frontend. Set PUBLIC_API_URL or AMAZON_REDIRECT_URI.',
-          );
-        }
+          }
+          const host = reqForApi.get?.('host');
+          if (host) {
+            const proto =
+              reqForApi.get?.('x-forwarded-proto') || reqForApi.protocol || 'https';
+            return `${proto === 'https' ? 'https' : 'http'}://${host}`.replace(
+              /\/$/,
+              '',
+            );
+          }
+          return null;
+        })();
+      if (publicApiUrl) {
+        dashboardUrl += `&sync_progress_api=${encodeURIComponent(publicApiUrl)}`;
+      } else {
+        this.logger.warn(
+          '[AmazonController] Could not derive sync_progress_api – sync bar may stay at 0% if the frontend polls a different API. Set PUBLIC_API_URL or AMAZON_REDIRECT_URI.',
+        );
       }
       return res.redirect(dashboardUrl);
     } catch (e) {

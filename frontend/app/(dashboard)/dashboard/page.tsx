@@ -712,6 +712,9 @@ function HomeInner() {
                   This only has to happen once. When you return, your data will be available for immediate loading.
                 </p>
                 <p>
+                  Right now we&apos;re syncing your full Amazon estate, including the last 30 days of orders and shipments (plus inventory and fees as they load).
+                </p>
+                <p>
                   Initial sync can take up to 30 minutes if things are slow. You can close this and use the app — some data will continue syncing in the background while you navigate. That’s normal.
                 </p>
                 <p className="mt-2 font-medium text-[var(--foreground)]">

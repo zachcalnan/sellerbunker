@@ -11,6 +11,49 @@ const accentMuted = "rgba(96, 165, 250, 0.15)";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
 
+type LandingPricingPlan = {
+  name: string;
+  price: string;
+  period: string;
+  orders: string;
+  priceSubline?: string;
+  cta: string;
+  featured: boolean;
+  badge?: string;
+  note?: string;
+};
+
+const LANDING_PRICING_PLANS: LandingPricingPlan[] = [
+  {
+    name: "Starter",
+    price: "Free",
+    period: "",
+    orders: "Up to 5,000 orders per month",
+    priceSubline: "During testing",
+    cta: "Try free today",
+    featured: true,
+    badge: "For initial testing",
+  },
+  {
+    name: "Growth",
+    price: "£26.99",
+    period: "month",
+    orders: "5,000 – 50,000 orders per month",
+    priceSubline: "Two weeks free, then",
+    cta: "Try free today",
+    featured: false,
+  },
+  {
+    name: "Pro",
+    price: "£44.99",
+    period: "month",
+    orders: "50,000+ orders per month",
+    priceSubline: "Two weeks free, then",
+    cta: "Try free today",
+    featured: false,
+  },
+];
+
 const navAuthFadeClass = "transition-opacity duration-400";
 
 let navAuthFadeDone = false;
@@ -2058,11 +2101,7 @@ export default function LandingPage() {
               to request the free sign up code.
             </p>
             <div className="mt-16 grid gap-8 md:grid-cols-3">
-              {[
-                { name: "Starter", price: "Free", period: "", orders: "Up to 5,000 orders per month", priceSubline: "During testing", cta: "Try free today", featured: true, badge: "For initial testing" },
-                { name: "Growth", price: "£26.99", period: "month", orders: "5,000 – 50,000 orders per month", priceSubline: "Two weeks free, then", cta: "Try free today", featured: false },
-                { name: "Pro", price: "£44.99", period: "month", orders: "50,000+ orders per month", priceSubline: "Two weeks free, then", cta: "Try free today", featured: false },
-              ].map((plan) => (
+              {LANDING_PRICING_PLANS.map((plan) => (
                 <div
                   key={plan.name}
                   className={`rounded-2xl border p-6 ${plan.featured
@@ -2073,21 +2112,21 @@ export default function LandingPage() {
                 >
                   {plan.featured && (
                     <span className="inline-block rounded-full px-3 py-0.5 text-xs font-medium text-black" style={{ backgroundColor: accentColor }}>
-                      {"badge" in plan && plan.badge ? plan.badge : "Most popular"}
+                      {plan.badge ?? "Most popular"}
                     </span>
                   )}
                   <h3 className="mt-4 text-xl font-semibold text-[var(--foreground)]">{plan.name}</h3>
-                  {"priceSubline" in plan && plan.priceSubline && (
+                  {plan.priceSubline ? (
                     <p className="mt-2 text-sm text-[var(--muted-foreground)]">{plan.priceSubline}</p>
-                  )}
+                  ) : null}
                   <p className="mt-1">
                     <span className="text-3xl font-bold text-[var(--foreground)]">{plan.price}</span>
                     {plan.period ? <span className="text-[var(--muted-foreground)]">/{plan.period}</span> : null}
                   </p>
                   <p className="mt-2 text-sm text-[var(--muted-foreground)]">{plan.orders}</p>
-                  {"note" in plan && plan.note && (
+                  {plan.note ? (
                     <p className="mt-1 text-xs text-[var(--muted-foreground)] italic">{plan.note}</p>
-                  )}
+                  ) : null}
                   {plan.name === "Starter" ? (
                     <>
                       <SignedOut>

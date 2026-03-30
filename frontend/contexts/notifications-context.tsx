@@ -372,7 +372,7 @@ export function NotificationsProvider({ children }: { children: React.ReactNode 
       ? "Syncing"
       : syncInProgress
         ? "Syncing Amazon data"
-        : "Fully synced";
+        : "Initial limited sync complete";
   const barIsIndeterminate = syncProgress === null && (noSyncDataYet || awaitingFirstPoll);
   const displayPhase =
     syncPhase != null && syncPhase.trim() !== ""
@@ -398,7 +398,7 @@ export function NotificationsProvider({ children }: { children: React.ReactNode 
       : awaitingFirstPoll || noSyncDataYet
         ? "Starting • …"
         : syncComplete
-          ? "Successfully fully synced — your catalog is up to date."
+          ? "First-pass requirements are met; Amazon data keeps refreshing on a schedule."
           : null;
   const showBackgroundSyncNote = !syncComplete && showSyncBox && syncStage === "core";
   const backgroundSyncTooltip =
