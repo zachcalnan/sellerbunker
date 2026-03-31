@@ -19,8 +19,41 @@ import {
   filterOrderRowsForDashboardPreset,
   type DashboardRangePreset,
 } from "@/lib/orders-period-metrics";
+import {
+  formatDateOnlyInTimeZone,
+  getMarketplaceIanaTimeZone,
+  parseYmdParts,
+  subtractCivilDays,
+} from "@/lib/marketplace-timezone";
 import { StripeCheckoutButton } from "@/components/stripe-checkout-button";
 import { getDevImpersonationHeaders } from "@/lib/impersonation";
+
+/** Calendar “today” / N-day starts in the selected marketplace timezone (Seller Central parity). */
+function marketplaceLocalDateAnchors(selectedMarketplaceId: string | null) {
+  const marketplaceTz = getMarketplaceIanaTimeZone(selectedMarketplaceId);
+  const nowMs = Date.now();
+  const defaultEnd = formatDateOnlyInTimeZone(nowMs, marketplaceTz);
+  const todayYmd = parseYmdParts(defaultEnd);
+  const pad2 = (n: number) => String(n).padStart(2, "0");
+  const fmtYmd = (y: { y: number; m: number; d: number }) =>
+    `${y.y}-${pad2(y.m)}-${pad2(y.d)}`;
+  return {
+    marketplaceTz,
+    defaultEnd,
+    defaultStart30: fmtYmd(
+      subtractCivilDays(todayYmd.y, todayYmd.m, todayYmd.d, 29),
+    ),
+    defaultStart14: fmtYmd(
+      subtractCivilDays(todayYmd.y, todayYmd.m, todayYmd.d, 13),
+    ),
+    defaultStart7: fmtYmd(
+      subtractCivilDays(todayYmd.y, todayYmd.m, todayYmd.d, 6),
+    ),
+    yesterday: fmtYmd(
+      subtractCivilDays(todayYmd.y, todayYmd.m, todayYmd.d, 1),
+    ),
+  };
+}
 
 type AccountSummary = {
   marketplace: string;
@@ -71,6 +104,7 @@ type RecentOrderRow = {
   totalStock: number | null;
   orderStatusLabel?: string | null;
   excludedFromSales?: boolean;
+  excludedFromOrderCount?: boolean;
 };
 
 const POST_CONNECT_REFRESH_PENDING_KEY =
@@ -244,25 +278,21 @@ function HomeInner() {
     router.replace(q ? `/dashboard?${q}` : "/dashboard");
   };
 
-  const toDateOnly = (d: Date) => d.toISOString().slice(0, 10);
-  const today = new Date();
-  const defaultEnd = toDateOnly(today);
-  const defaultStart30 = toDateOnly(
-    new Date(today.getTime() - 29 * 24 * 60 * 60 * 1000),
-  );
-  const defaultStart14 = toDateOnly(
-    new Date(today.getTime() - 13 * 24 * 60 * 60 * 1000),
-  );
-  const yesterday = toDateOnly(
-    new Date(today.getTime() - 24 * 60 * 60 * 1000),
-  );
+  const {
+    marketplaceTz,
+    defaultEnd,
+    defaultStart30,
+    defaultStart14,
+    defaultStart7,
+    yesterday,
+  } = marketplaceLocalDateAnchors(selectedMarketplaceId);
   const allTimeStart = "2020-01-01"; // fixed "all time" start
 
   const effectiveStart =
     rangePreset === "today"
       ? defaultEnd
       : rangePreset === "7d"
-        ? toDateOnly(new Date(today.getTime() - 6 * 24 * 60 * 60 * 1000))
+        ? defaultStart7
         : rangePreset === "14d"
           ? defaultStart14
           : rangePreset === "30d"
@@ -284,40 +314,11 @@ function HomeInner() {
           ? defaultEnd
           : (endParam ?? defaultEnd);
 
-  /** Orders tab "30 days" / "7 days" = rolling N×24h from now, not calendar UTC dates. Rings must use the same window. */
+  /** Calendar date ranges in marketplace local time (Seller Central parity), not rolling N×24h. */
   const hasCustomRangeInUrl = Boolean(startParam ?? endParam);
   const summaryRangeForApi = useMemo(() => {
-    if (hasCustomRangeInUrl) {
-      return { start: effectiveStart, end: effectiveEnd };
-    }
-    if (rangePreset === "30d") {
-      const ms = 30 * 24 * 60 * 60 * 1000;
-      return {
-        start: new Date(Date.now() - ms).toISOString(),
-        end: new Date().toISOString(),
-      };
-    }
-    if (rangePreset === "7d") {
-      const ms = 7 * 24 * 60 * 60 * 1000;
-      return {
-        start: new Date(Date.now() - ms).toISOString(),
-        end: new Date().toISOString(),
-      };
-    }
-    if (rangePreset === "14d") {
-      const ms = 14 * 24 * 60 * 60 * 1000;
-      return {
-        start: new Date(Date.now() - ms).toISOString(),
-        end: new Date().toISOString(),
-      };
-    }
     return { start: effectiveStart, end: effectiveEnd };
-  }, [
-    hasCustomRangeInUrl,
-    rangePreset,
-    effectiveStart,
-    effectiveEnd,
-  ]);
+  }, [effectiveStart, effectiveEnd]);
 
   /** Same period rules as `filterOrderRowsForDashboardPreset` + Orders tab rolling windows. */
   const dashboardRingFilterPreset = useMemo((): DashboardRangePreset => {
@@ -335,7 +336,7 @@ function HomeInner() {
     trendPreset === "today"
       ? defaultEnd
       : trendPreset === "7d"
-        ? toDateOnly(new Date(today.getTime() - 6 * 24 * 60 * 60 * 1000))
+        ? defaultStart7
         : trendPreset === "14d"
           ? defaultStart14
           : trendPreset === "30d"
@@ -365,27 +366,6 @@ function HomeInner() {
       return {
         start: trendCustomStart || defaultStart30,
         end: trendCustomEnd || defaultEnd,
-      };
-    }
-    if (trendPreset === "30d") {
-      const ms = 30 * 24 * 60 * 60 * 1000;
-      return {
-        start: new Date(Date.now() - ms).toISOString(),
-        end: new Date().toISOString(),
-      };
-    }
-    if (trendPreset === "7d") {
-      const ms = 7 * 24 * 60 * 60 * 1000;
-      return {
-        start: new Date(Date.now() - ms).toISOString(),
-        end: new Date().toISOString(),
-      };
-    }
-    if (trendPreset === "14d") {
-      const ms = 14 * 24 * 60 * 60 * 1000;
-      return {
-        start: new Date(Date.now() - ms).toISOString(),
-        end: new Date().toISOString(),
       };
     }
     return { start: trendStart, end: trendEnd };
@@ -436,10 +416,7 @@ function HomeInner() {
     const isSame = (a: string, b: string) => a === b;
     const endIsToday = isSame(end, defaultEnd);
     const startIsToday = isSame(start, defaultEnd);
-    const startIs7 = isSame(
-      start,
-      toDateOnly(new Date(today.getTime() - 6 * 24 * 60 * 60 * 1000)),
-    );
+    const startIs7 = isSame(start, defaultStart7);
     const startIs14 = isSame(start, defaultStart14);
     const startIs30 = isSame(start, defaultStart30);
 
@@ -657,6 +634,7 @@ function HomeInner() {
       orderRowsForRings,
       dashboardRingFilterPreset,
       dashboardRingFilterCustom,
+      { timeZone: marketplaceTz },
     );
     return aggregateOrderRows(filtered);
   }, [
@@ -664,6 +642,7 @@ function HomeInner() {
     orderRowsForRings,
     dashboardRingFilterPreset,
     dashboardRingFilterCustom,
+    marketplaceTz,
   ]);
 
   const displaySummary = useMemo(() => {
@@ -678,7 +657,7 @@ function HomeInner() {
       ...summary,
       revenue: rev,
       unitsSold: ringMetricsFromOrders.totalUnits,
-      totalOrders: ringMetricsFromOrders.orderCount,
+      totalOrders: summary.totalOrders,
       totalProfit: ringMetricsFromOrders.totalProfit,
       profitMargin: margin,
     };
@@ -909,11 +888,7 @@ function HomeInner() {
                           v === "today"
                             ? defaultEnd
                             : v === "7d"
-                              ? toDateOnly(
-                                  new Date(
-                                    today.getTime() - 6 * 24 * 60 * 60 * 1000,
-                                  ),
-                                )
+                              ? defaultStart7
                               : v === "14d"
                                 ? defaultStart14
                                 : v === "30d"
@@ -1069,11 +1044,7 @@ function HomeInner() {
                           v === "today"
                             ? defaultEnd
                             : v === "7d"
-                              ? toDateOnly(
-                                  new Date(
-                                    today.getTime() - 6 * 24 * 60 * 60 * 1000,
-                                  ),
-                                )
+                              ? defaultStart7
                               : v === "14d"
                                 ? defaultStart14
                                 : v === "30d"
@@ -1535,11 +1506,8 @@ function CostBreakdown({
   const [customStart, setCustomStart] = useState("");
   const [customEnd, setCustomEnd] = useState("");
 
-  const toDateOnly = (d: Date) => d.toISOString().slice(0, 10);
-  const today = new Date();
-  const defaultEnd = toDateOnly(today);
-  const defaultStart30 = toDateOnly(new Date(today.getTime() - 29 * 24 * 60 * 60 * 1000));
-  const yesterday = toDateOnly(new Date(today.getTime() - 24 * 60 * 60 * 1000));
+  const { defaultEnd, defaultStart30, defaultStart14, defaultStart7, yesterday } =
+    marketplaceLocalDateAnchors(selectedMarketplaceId);
   const allTimeStart = "2020-01-01";
 
   const effectiveStart =
@@ -1548,9 +1516,9 @@ function CostBreakdown({
       : periodPreset === "yesterday"
         ? yesterday
         : periodPreset === "7d"
-          ? toDateOnly(new Date(today.getTime() - 6 * 24 * 60 * 60 * 1000))
+          ? defaultStart7
           : periodPreset === "14d"
-            ? toDateOnly(new Date(today.getTime() - 13 * 24 * 60 * 60 * 1000))
+            ? defaultStart14
             : periodPreset === "30d"
               ? defaultStart30
               : periodPreset === "all"
@@ -1752,11 +1720,8 @@ function ProfitAndLoss({
   const [customStart, setCustomStart] = useState("");
   const [customEnd, setCustomEnd] = useState("");
 
-  const toDateOnly = (d: Date) => d.toISOString().slice(0, 10);
-  const today = new Date();
-  const defaultEnd = toDateOnly(today);
-  const defaultStart30 = toDateOnly(new Date(today.getTime() - 29 * 24 * 60 * 60 * 1000));
-  const yesterday = toDateOnly(new Date(today.getTime() - 24 * 60 * 60 * 1000));
+  const { defaultEnd, defaultStart30, defaultStart14, defaultStart7, yesterday } =
+    marketplaceLocalDateAnchors(selectedMarketplaceId);
   const allTimeStart = "2020-01-01";
 
   const effectiveStart =
@@ -1765,9 +1730,9 @@ function ProfitAndLoss({
       : periodPreset === "yesterday"
         ? yesterday
         : periodPreset === "7d"
-          ? toDateOnly(new Date(today.getTime() - 6 * 24 * 60 * 60 * 1000))
+          ? defaultStart7
           : periodPreset === "14d"
-            ? toDateOnly(new Date(today.getTime() - 13 * 24 * 60 * 60 * 1000))
+            ? defaultStart14
             : periodPreset === "30d"
               ? defaultStart30
               : periodPreset === "all"

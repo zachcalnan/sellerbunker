@@ -9,6 +9,8 @@ import {
   aggregateOrderRows,
   filterOrderRowsForOrdersTabPeriod,
 } from "@/lib/orders-period-metrics";
+import { getMarketplaceIanaTimeZone } from "@/lib/marketplace-timezone";
+import { accountSummaryDateRangeForOrdersTab } from "@/lib/account-summary-date-range";
 import { getDevImpersonationHeaders } from "@/lib/impersonation";
 
 type OrderRow = {
@@ -32,6 +34,7 @@ type OrderRow = {
   totalStock: number | null;
   orderStatusLabel?: string | null;
   excludedFromSales?: boolean;
+  excludedFromOrderCount?: boolean;
 };
 
 type PeriodKey = "today" | "7" | "14" | "30";
@@ -57,6 +60,7 @@ export default function OrdersPage() {
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
   const [period, setPeriod] = useState<PeriodKey>("today");
+  const [summaryTotalOrders, setSummaryTotalOrders] = useState<number | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -110,9 +114,14 @@ export default function OrdersPage() {
     [filtered, safePage],
   );
 
+  const marketplaceTz = getMarketplaceIanaTimeZone(selectedMarketplaceId);
+
   const rowsInPeriod = useMemo(
-    () => filterOrderRowsForOrdersTabPeriod(rows, period),
-    [rows, period],
+    () =>
+      filterOrderRowsForOrdersTabPeriod(rows, period, {
+        timeZone: marketplaceTz,
+      }),
+    [rows, period, marketplaceTz],
   );
 
   const periodSummary = useMemo(() => {
@@ -195,7 +204,9 @@ export default function OrdersPage() {
             <div className="flex flex-wrap gap-5 sm:gap-6">
               <div>
                 <span className="text-[10px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">Orders</span>
-                <div className="text-sm font-semibold tabular-nums text-[var(--foreground)]">{periodSummary.orderCount}</div>
+                <div className="text-sm font-semibold tabular-nums text-[var(--foreground)]">
+                  {summaryTotalOrders ?? periodSummary.orderCount}
+                </div>
               </div>
               <div>
                 <span className="text-[10px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">Sales</span>
