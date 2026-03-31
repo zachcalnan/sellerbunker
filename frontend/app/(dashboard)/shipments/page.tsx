@@ -2,8 +2,10 @@
 
 import { useAuth, SignedIn, SignedOut, SignInButton } from "@clerk/nextjs";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { useDisplaySettings } from "@/contexts/display-settings-context";
 import { useMarketplace } from "@/contexts/marketplace-context";
+import { getDevImpersonationHeaders } from "@/lib/impersonation";
 
 type ShipmentRow = {
   id: string;
@@ -41,6 +43,8 @@ export default function ShipmentsPage() {
   const baseUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
   const { isSignedIn, getToken } = useAuth();
   const { selectedMarketplaceId } = useMarketplace();
+  const searchParams = useSearchParams();
+  const devImpersonate = searchParams.get("impersonate");
 
   const [rows, setRows] = useState<ShipmentRow[]>([]);
   const [loading, setLoading] = useState(false);
@@ -58,9 +62,12 @@ export default function ShipmentsPage() {
     setError(null);
     try {
       const token = await getToken({ template: "backend" });
-      const res = await fetch(`${baseUrl}/api/amazon/shipments`, {
+      const url = new URL(`${baseUrl}/api/amazon/shipments`);
+      if (devImpersonate) url.searchParams.set("impersonate", devImpersonate);
+      const res = await fetch(url.toString(), {
         headers: {
           Authorization: `Bearer ${token}`,
+          ...getDevImpersonationHeaders(devImpersonate),
           ...(selectedMarketplaceId ? { "x-marketplace-id": selectedMarketplaceId } : {}),
         },
       });
@@ -72,7 +79,7 @@ export default function ShipmentsPage() {
     } finally {
       setLoading(false);
     }
-  }, [getToken, baseUrl, selectedMarketplaceId]);
+  }, [getToken, baseUrl, selectedMarketplaceId, devImpersonate]);
 
   useEffect(() => {
     if (!isSignedIn) {
@@ -89,10 +96,15 @@ export default function ShipmentsPage() {
     setManualCheckInError(null);
     try {
       const token = await getToken({ template: "backend" });
-      const res = await fetch(`${baseUrl}/api/amazon/shipments/${encodeURIComponent(manualCheckInModal.shipmentId)}/checked-in`, {
+      const url = new URL(
+        `${baseUrl}/api/amazon/shipments/${encodeURIComponent(manualCheckInModal.shipmentId)}/checked-in`,
+      );
+      if (devImpersonate) url.searchParams.set("impersonate", devImpersonate);
+      const res = await fetch(url.toString(), {
         method: "PATCH",
         headers: {
           Authorization: `Bearer ${token}`,
+          ...getDevImpersonationHeaders(devImpersonate),
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ checkedInDate: manualCheckInDate.trim() }),

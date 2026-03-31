@@ -94,6 +94,19 @@ export class AmazonSyncProcessor extends WorkerHost {
       const msg = shipErr instanceof Error ? shipErr.message : String(shipErr);
       this.logger.warn(`[post-initial-sync] shipments failed (non-fatal): ${msg}`);
     }
+    // Mini sync only pulled a handful of orders (capped). Pull full 30-day window here so Recent Orders
+    // isn’t empty until the next orders-batch-sync tick (~10 min). Idempotent with batch job.
+    try {
+      await this.amazonService.syncRecentOrdersToDb(userId, { days: 30 });
+      this.logger.log(
+        `[post-initial-sync] 30-day orders backfill done (userId=${userId.slice(0, 8)}…)`,
+      );
+    } catch (ordErr) {
+      const msg = ordErr instanceof Error ? ordErr.message : String(ordErr);
+      this.logger.warn(
+        `[post-initial-sync] orders sync failed (non-fatal); orders-batch-sync will retry: ${msg}`,
+      );
+    }
     await this.amazonSyncService.enqueueFeeSync(userId, orgId);
     this.logger.log(
       `[post-initial-sync] enqueued fee-sync for all products (userId=${userId}); background job may take a while for large catalogs`,

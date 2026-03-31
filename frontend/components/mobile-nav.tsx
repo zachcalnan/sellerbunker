@@ -9,13 +9,14 @@ import {
   useClerk,
 } from "@clerk/nextjs";
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { LanguageSelector } from "./language-selector";
 import { ThemeToggle } from "./theme-toggle";
 import { SettingsModal } from "./settings-modal";
 import { NotificationsDropdown } from "./notifications-dropdown";
 import { useFullscreen } from "@/contexts/fullscreen-context";
+import { withImpersonateParam } from "@/lib/impersonation";
 
 const BASE_URL =
   process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
@@ -256,6 +257,8 @@ function SettingsIcon({ className }: { className?: string }) {
 export function MobileNav() {
   const pathname = usePathname();
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const devImpersonate = searchParams.get("impersonate");
   const [open, setOpen] = useState(false);
   const [drawerSlideIn, setDrawerSlideIn] = useState(false);
   const drawerHasOpenedRef = useRef(false);
@@ -489,7 +492,7 @@ export function MobileNav() {
 
               <SignedIn>
                 <Link
-                  href="/dashboard"
+                  href={withImpersonateParam("/dashboard", devImpersonate)}
                   className={`flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium no-underline transition-colors ${
                     pathname === "/dashboard"
                       ? "bg-sb-accent text-black"
@@ -502,7 +505,7 @@ export function MobileNav() {
                 </Link>
 
                 <Link
-                  href="/cost-of-goods"
+                  href={withImpersonateParam("/cost-of-goods", devImpersonate)}
                   className={`flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium no-underline transition-colors ${
                     pathname === "/cost-of-goods"
                       ? "bg-sb-accent text-black"
@@ -515,7 +518,7 @@ export function MobileNav() {
                 </Link>
 
                 <Link
-                  href="/inventory"
+                  href={withImpersonateParam("/inventory", devImpersonate)}
                   className={`flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium no-underline transition-colors ${
                     pathname === "/inventory"
                       ? "bg-sb-accent text-black"
@@ -528,7 +531,7 @@ export function MobileNav() {
                 </Link>
 
                 <Link
-                  href="/orders"
+                  href={withImpersonateParam("/orders", devImpersonate)}
                   className={`flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium no-underline transition-colors ${
                     pathname === "/orders"
                       ? "bg-sb-accent text-black"
@@ -541,7 +544,7 @@ export function MobileNav() {
                 </Link>
 
                 <Link
-                  href="/shipments"
+                  href={withImpersonateParam("/shipments", devImpersonate)}
                   className={`flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium no-underline transition-colors ${
                     pathname === "/shipments"
                       ? "bg-sb-accent text-black"
@@ -554,7 +557,7 @@ export function MobileNav() {
                 </Link>
 
                 <Link
-                  href="/replenish"
+                  href={withImpersonateParam("/replenish", devImpersonate)}
                   className={`flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium no-underline transition-colors ${
                     pathname === "/replenish"
                       ? "bg-sb-accent text-black"

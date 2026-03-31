@@ -27,13 +27,41 @@ export class ClerkAuthGuard implements CanActivate {
       throw new UnauthorizedException('Missing token');
     }
 
-    const { clerkUserId, email } = await this.clerkService.verifyToken(token);
+    const verified = await this.clerkService.verifyToken(token);
+    const devImpersonateHeaderRaw =
+      (req.headers['x-impersonate-clerk-id'] as string | undefined) ??
+      (req.headers['x-impersonate-user-id'] as string | undefined);
+    const devImpersonateHeader = devImpersonateHeaderRaw?.trim();
+    const devImpersonateQuery =
+      typeof req.query?.impersonate === 'string' ? req.query.impersonate.trim() : undefined;
+    const devImpersonate = devImpersonateHeader || devImpersonateQuery;
+    // Many local Nest runs don't set NODE_ENV. Treat anything except explicit production as dev.
+    const isDev = process.env.NODE_ENV !== 'production';
+    const clerkUserId =
+      isDev && devImpersonate ? devImpersonate : verified.clerkUserId;
+    const tokenEmail = verified.email;
+
+    if (isDev && devImpersonate) {
+      // eslint-disable-next-line no-console
+      console.log('[DEV] impersonation header active', {
+        url: req.url,
+        tokenSub: verified.clerkUserId,
+        impersonateSub: devImpersonate,
+        source: devImpersonateHeader ? 'header' : 'query',
+      });
+    }
 
     let user = await this.usersService.findByClerkId(clerkUserId);
     if (!user) {
+      // In dev impersonation we expect the user to already exist in DB; do not create phantom users.
+      if (isDev && devImpersonate) {
+        throw new UnauthorizedException(
+          `Impersonated Clerk user (${clerkUserId}) not found in DB`,
+        );
+      }
       user = await this.usersService.createFromClerk({
         clerkId: clerkUserId,
-        email,
+        email: tokenEmail,
       });
     }
 

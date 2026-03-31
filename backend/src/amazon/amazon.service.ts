@@ -33,6 +33,18 @@ const DEFAULT_AMAZON_FEE_RATE_WHEN_UNKNOWN = 0.35;
  */
 const ORDER_MARKETPLACE_CANONICAL = 'amazon';
 
+/** Parent `orders.amazon_order_status` values we exclude from Prisma aggregates (exact SP-API spellings + variants). */
+const PRISMA_EXCLUDED_AMAZON_ORDER_STATUSES: string[] = [
+  'Canceled',
+  'Cancelled',
+  'Unfulfillable',
+  'Returned',
+  'Refunded',
+  'PendingReturn',
+];
+
+type OrderSalesExclusionKind = 'cancelled' | 'returned' | 'unfulfillable';
+
 @Injectable()
 export class AmazonService {
   private readonly logger = new Logger(AmazonService.name);
@@ -57,6 +69,66 @@ export class AmazonService {
 
   private resolveMarketplaceFilter(marketplaceId?: string) {
     return marketplaceId ? { in: [marketplaceId, 'amazon'] } : 'amazon';
+  }
+
+  /**
+   * Cancelled / returned / unfulfillable Amazon orders must not count toward revenue; still listed in UI with zero sale.
+   */
+  private getOrderSalesExclusionKind(
+    amazonOrderStatus: string | null | undefined,
+    rawOrder?: unknown,
+  ): OrderSalesExclusionKind | null {
+    const raw =
+      rawOrder && typeof rawOrder === 'object'
+        ? (rawOrder as Record<string, unknown>)
+        : null;
+    const fromApi =
+      typeof amazonOrderStatus === 'string' && amazonOrderStatus.trim()
+        ? amazonOrderStatus.trim()
+        : typeof raw?.OrderStatus === 'string'
+          ? String(raw.OrderStatus).trim()
+          : typeof raw?.orderStatus === 'string'
+            ? String(raw.orderStatus).trim()
+            : '';
+    if (!fromApi) return null;
+    const n = fromApi.toLowerCase();
+    if (n === 'unfulfillable') return 'unfulfillable';
+    if (n.includes('refund')) return 'returned';
+    if (n.includes('return')) return 'returned';
+    if (n === 'canceled' || n === 'cancelled') return 'cancelled';
+    return null;
+  }
+
+  private orderSalesExclusionDisplayLabel(
+    kind: OrderSalesExclusionKind,
+  ): 'Cancelled' | 'Returned' | 'Unfulfillable' {
+    if (kind === 'returned') return 'Returned';
+    if (kind === 'unfulfillable') return 'Unfulfillable';
+    return 'Cancelled';
+  }
+
+  private async buildOrderSalesExclusionMap(
+    orderDbIds: string[],
+  ): Promise<Map<string, OrderSalesExclusionKind>> {
+    const out = new Map<string, OrderSalesExclusionKind>();
+    const ids = [...new Set(orderDbIds.map((id) => String(id).trim()).filter(Boolean))];
+    if (ids.length === 0) return out;
+    try {
+      const rows = await this.prisma.order.findMany({
+        where: { id: { in: ids } },
+        select: { id: true, amazonOrderStatus: true, rawResponse: true },
+      });
+      for (const row of rows) {
+        const kind = this.getOrderSalesExclusionKind(
+          row.amazonOrderStatus,
+          row.rawResponse,
+        );
+        if (kind) out.set(String(row.id), kind);
+      }
+    } catch {
+      // non-fatal
+    }
+    return out;
   }
 
   /**
@@ -857,8 +929,14 @@ export class AmazonService {
     const { orderPriceByDbId, skuUnitPriceFallback } =
       await this.buildRevenueFallbackMapsForOrderItems(orderItems);
 
-    const revenue = orderItems.reduce(
-      (sum, it) =>
+    const exclusionByOrderDbId = await this.buildOrderSalesExclusionMap(
+      orderItems.map((it: any) => String(it.orderDbId ?? '')).filter(Boolean),
+    );
+
+    const revenue = orderItems.reduce((sum, it) => {
+      const oid = String((it as { orderDbId?: unknown }).orderDbId ?? '');
+      if (oid && exclusionByOrderDbId.has(oid)) return sum;
+      return (
         sum +
         this.resolveOrderLineRevenueTotal(
           it as {
@@ -869,21 +947,32 @@ export class AmazonService {
           },
           orderPriceByDbId,
           skuUnitPriceFallback,
-        ),
-      0,
-    );
-    const unitsSold = orderItems.reduce(
-      (sum, it) => sum + toNumber((it as { quantity?: unknown }).quantity ?? 0),
-      0,
-    );
+        )
+      );
+    }, 0);
+    const unitsSold = orderItems.reduce((sum, it) => {
+      const oid = String((it as { orderDbId?: unknown }).orderDbId ?? '');
+      if (oid && exclusionByOrderDbId.has(oid)) return sum;
+      return sum + toNumber((it as { quantity?: unknown }).quantity ?? 0);
+    }, 0);
     const totalOrders = new Set(
       orderItems
+        .filter((it) => {
+          const oid = String((it as { orderDbId?: unknown }).orderDbId ?? '');
+          return !oid || !exclusionByOrderDbId.has(oid);
+        })
         .map((it) => String((it as { orderId?: string }).orderId ?? ''))
         .filter(Boolean),
     ).size;
 
     const distinctOrderDbIds = new Set(
-      orderItems.map((it: any) => String(it.orderDbId ?? '')).filter(Boolean),
+      orderItems
+        .filter((it: any) => {
+          const oid = String(it.orderDbId ?? '');
+          return !oid || !exclusionByOrderDbId.has(oid);
+        })
+        .map((it: any) => String(it.orderDbId ?? ''))
+        .filter(Boolean),
     );
     const orderItemsOrdersCount = distinctOrderDbIds.size;
     const orderItemsCoveragePct = 1;
@@ -893,6 +982,9 @@ export class AmazonService {
     let totalCostOfGoods = 0;
     let hasProfitData = false;
     for (const it of orderItems) {
+      const oid = String((it as { orderDbId?: unknown }).orderDbId ?? '');
+      if (oid && exclusionByOrderDbId.has(oid)) continue;
+
       const revenueTotal = this.resolveOrderLineRevenueTotal(
         it as {
           revenueTotal?: unknown;
@@ -1114,6 +1206,10 @@ export class AmazonService {
     const { orderPriceByDbId, skuUnitPriceFallback } =
       await this.buildRevenueFallbackMapsForOrderItems(orderItems);
 
+    const exclusionByOrderDbId = await this.buildOrderSalesExclusionMap(
+      orderItems.map((it: any) => String(it.orderDbId ?? '')).filter(Boolean),
+    );
+
     const toNum = (v: unknown): number => {
       if (v == null) return 0;
       if (typeof v === 'number' && Number.isFinite(v)) return v;
@@ -1124,6 +1220,9 @@ export class AmazonService {
     type Agg = { sales: number; profit: number; cogs: number; units: number };
     const byCategory = new Map<string, Agg>();
     for (const it of orderItems) {
+      const oid = String((it as { orderDbId?: unknown }).orderDbId ?? '');
+      if (oid && exclusionByOrderDbId.has(oid)) continue;
+
       const cat = (it.product?.displayGroup ?? '').trim() || 'Uncategorized';
       const cur = byCategory.get(cat) ?? { sales: 0, profit: 0, cogs: 0, units: 0 };
       cur.sales += this.resolveOrderLineRevenueTotal(
@@ -1227,6 +1326,7 @@ export class AmazonService {
         id: true,
         orderId: true,
         orderItemId: true,
+        orderDbId: true,
         feesSource: true,
         updatedAt: true,
         cogsTotal: true,
@@ -1251,6 +1351,10 @@ export class AmazonService {
       rawCostItems,
     ) as typeof rawCostItems;
 
+    const costExclusionByOrderDbId = await this.buildOrderSalesExclusionMap(
+      orderItems.map((it: any) => String(it.orderDbId ?? '')).filter(Boolean),
+    );
+
     const toNum = (v: unknown): number => {
       if (v == null) return 0;
       if (typeof v === 'number' && Number.isFinite(v)) return v;
@@ -1267,6 +1371,9 @@ export class AmazonService {
     let totalAmazonFees = 0;
 
     for (const it of orderItems) {
+      const oid = String((it as { orderDbId?: unknown }).orderDbId ?? '');
+      if (oid && costExclusionByOrderDbId.has(oid)) continue;
+
       totalCogs += toNum(it.cogsTotal);
       const prep = toNum(it.prepIncVat) || toNum(it.prepExVat);
       prepFees += asCost(prep);
@@ -1399,7 +1506,13 @@ export class AmazonService {
       ) as typeof rawPnlItems;
       const { orderPriceByDbId: pnlOrderPrices, skuUnitPriceFallback: pnlSkuFallback } =
         await this.buildRevenueFallbackMapsForOrderItems(items);
+      const pnlExclusionByOrderDbId = await this.buildOrderSalesExclusionMap(
+        items.map((it: any) => String(it.orderDbId ?? '')).filter(Boolean),
+      );
       for (const it of items) {
+        const pnlOid = String((it as { orderDbId?: unknown }).orderDbId ?? '');
+        if (pnlOid && pnlExclusionByOrderDbId.has(pnlOid)) continue;
+
         const lineRev = this.resolveOrderLineRevenueTotal(
           it as {
             revenueTotal?: unknown;
@@ -1587,6 +1700,10 @@ export class AmazonService {
     const { orderPriceByDbId: tsOrderPrices, skuUnitPriceFallback: tsSkuFallback } =
       await this.buildRevenueFallbackMapsForOrderItems(tsItems);
 
+    const tsExclusionByOrderDbId = await this.buildOrderSalesExclusionMap(
+      tsItems.map((it: any) => String(it.orderDbId ?? '')).filter(Boolean),
+    );
+
     const toNumTs = (v: unknown): number => {
       if (v == null) return 0;
       if (typeof v === 'number' && Number.isFinite(v)) return v;
@@ -1603,6 +1720,9 @@ export class AmazonService {
     >();
 
     for (const it of tsItems) {
+      const tsOid = String((it as { orderDbId?: unknown }).orderDbId ?? '');
+      if (tsOid && tsExclusionByOrderDbId.has(tsOid)) continue;
+
       const d = it.orderDate as Date;
       const key = d.toISOString().slice(0, 10); // YYYY-MM-DD
 
@@ -2108,6 +2228,10 @@ export class AmazonService {
       const amazonOrderId = order.AmazonOrderId;
       if (!amazonOrderId) continue;
 
+      const apiOrderStatusRaw = (order as Record<string, unknown>).OrderStatus;
+      const apiOrderStatus =
+        typeof apiOrderStatusRaw === 'string' ? apiOrderStatusRaw.trim() : null;
+
       const rawTotal = parseFloat(order.OrderTotal?.Amount ?? '0');
       const totalAmount = Number.isNaN(rawTotal) ? 0 : rawTotal;
 
@@ -2585,6 +2709,7 @@ export class AmazonService {
         orderDate,
         asin: selectedAsin,
         marketplace: ORDER_MARKETPLACE_CANONICAL,
+        amazonOrderStatus: apiOrderStatus,
       };
       if (computedTotalProfit != null) {
         updateData.totalProfit = Number(computedTotalProfit.toFixed(2));
@@ -2602,6 +2727,7 @@ export class AmazonService {
         fees: feesJson,
         rawResponse: order,
         orderDate,
+        amazonOrderStatus: apiOrderStatus,
         totalProfit:
           computedTotalProfit != null
             ? Number(computedTotalProfit.toFixed(2))
@@ -3171,6 +3297,9 @@ export class AmazonService {
           gte: startDate,
           lte: nowSafe,
         },
+        NOT: {
+          amazonOrderStatus: { in: PRISMA_EXCLUDED_AMAZON_ORDER_STATUSES },
+        },
       },
       select: {
         orderDate: true,
@@ -3343,6 +3472,14 @@ export class AmazonService {
     const excludeProductIds =
       genericProductIds.length > 0 ? { notIn: genericProductIds } : undefined;
 
+    const notExcludedParentOrder = {
+      NOT: {
+        order: {
+          amazonOrderStatus: { in: PRISMA_EXCLUDED_AMAZON_ORDER_STATUSES },
+        },
+      },
+    };
+
     // 1) OrderItem: top by profit, then fill by units (exclude generic so real products + images show)
     const byProfit = await (this.prisma as any).orderItem.groupBy({
       by: ['productId'],
@@ -3351,6 +3488,7 @@ export class AmazonService {
         marketplace: 'amazon',
         ...dateFilter,
         profit: { not: null },
+        ...notExcludedParentOrder,
         ...(excludeProductIds ? { productId: excludeProductIds } : {}),
       },
       _sum: { revenueTotal: true, profit: true, quantity: true },
@@ -3371,6 +3509,7 @@ export class AmazonService {
           userId: { in: userIds },
           marketplace: marketplaceFilter,
           ...dateFilter,
+          ...notExcludedParentOrder,
           ...(excludeIds.length > 0 ? { productId: { notIn: excludeIds } } : {}),
         },
         _sum: { revenueTotal: true, profit: true, quantity: true },
@@ -3390,6 +3529,7 @@ export class AmazonService {
           marketplace: marketplaceFilter,
           ...dateFilter,
           profit: { not: null },
+          ...notExcludedParentOrder,
         },
         _sum: { revenueTotal: true, profit: true, quantity: true },
         _count: { _all: true },
@@ -3405,6 +3545,7 @@ export class AmazonService {
             userId: { in: userIds },
           marketplace: marketplaceFilter,
             ...dateFilter,
+            ...notExcludedParentOrder,
             ...(excludeIds.length > 0 ? { productId: { notIn: excludeIds } } : {}),
           },
           _sum: { revenueTotal: true, profit: true, quantity: true },
@@ -3421,6 +3562,9 @@ export class AmazonService {
             userId: { in: userIds },
             marketplace: marketplaceFilter,
             ...dateFilter,
+            NOT: {
+              amazonOrderStatus: { in: PRISMA_EXCLUDED_AMAZON_ORDER_STATUSES },
+            },
           },
           _sum: { quantity: true, totalProfit: true },
           _count: { _all: true },
@@ -4318,6 +4462,10 @@ export class AmazonService {
         // Non-fatal: keep existing revenueTotal path.
       }
     }
+    const orderSalesExclusionByDbId =
+      orderDbIds.length > 0
+        ? await this.buildOrderSalesExclusionMap(orderDbIds)
+        : new Map<string, OrderSalesExclusionKind>();
     for (const it of items) {
       const sku = String((it as any).sku ?? '').trim();
       if (!sku || skuUnitPriceFallback.has(sku)) continue;
@@ -4367,6 +4515,9 @@ export class AmazonService {
       const skuKey = String((it as any).sku ?? '').trim();
       const rawRevenueTotal = safeNum(it.revenueTotal);
       const orderDbId = (it as any).orderDbId != null ? String((it as any).orderDbId) : '';
+      const exclusionKind = orderDbId
+        ? orderSalesExclusionByDbId.get(orderDbId) ?? null
+        : null;
       const orderFallback = orderDbId ? orderPriceByDbId.get(orderDbId) : null;
       const revenueTotal =
         rawRevenueTotal > 0
@@ -4456,6 +4607,28 @@ export class AmazonService {
           ? (profit / cogsTotal) * 100
           : null;
       const orderDate = it.orderDate instanceof Date ? it.orderDate.toISOString() : String(it.orderDate ?? '');
+      const excludedFromSales = exclusionKind != null;
+      const orderStatusLabel = exclusionKind
+        ? this.orderSalesExclusionDisplayLabel(exclusionKind)
+        : null;
+      let outSalePrice = Math.round(salePrice * 100) / 100;
+      let outProfit = profit != null ? Math.round(profit * 100) / 100 : null;
+      let outRoi = roiPct != null ? Math.round(roiPct * 10) / 10 : null;
+      let outFees = Number.isFinite(finalFeesForDisplay)
+        ? Math.round(finalFeesForDisplay * 100) / 100
+        : 0;
+      let outRef = referralFeeTotal ?? null;
+      let outFba = fbaFeeTotal ?? null;
+      let outDig = digitalServiceFeeTotal ?? null;
+      if (excludedFromSales) {
+        outSalePrice = 0;
+        outProfit = null;
+        outRoi = null;
+        outFees = 0;
+        outRef = null;
+        outFba = null;
+        outDig = null;
+      }
       return {
         id: String(it.id),
         __productId: String(it.productId ?? ''),
@@ -4466,16 +4639,18 @@ export class AmazonService {
         title: product?.title != null ? String(product.title) : null,
         imageUrl: product?.imageUrl != null ? String(product.imageUrl) : null,
         quantity: Number(it.quantity) || 0,
-        salePrice: Math.round(salePrice * 100) / 100,
-        profit: profit != null ? Math.round(profit * 100) / 100 : null,
-        roiPct: roiPct != null ? Math.round(roiPct * 10) / 10 : null,
-        amazonFeesTotal: Number.isFinite(finalFeesForDisplay) ? Math.round(finalFeesForDisplay * 100) / 100 : 0,
-        referralFeeTotal: referralFeeTotal ?? null,
-        fbaFeeTotal: fbaFeeTotal ?? null,
-        digitalServiceFeeTotal: digitalServiceFeeTotal ?? null,
+        salePrice: outSalePrice,
+        profit: outProfit,
+        roiPct: outRoi,
+        amazonFeesTotal: outFees,
+        referralFeeTotal: outRef,
+        fbaFeeTotal: outFba,
+        digitalServiceFeeTotal: outDig,
         feesSource: feesSource != null ? String(feesSource) : null,
         availableStock: inv?.availableQty ?? null,
         totalStock: inv?.totalQty ?? null,
+        orderStatusLabel,
+        excludedFromSales,
       };
     });
       // Show a realistic stock progression across recent rows for the same product:
@@ -4484,6 +4659,7 @@ export class AmazonService {
       for (const row of mappedRows) {
         const pid = row.__productId;
         if (!pid) continue;
+        if ((row as { excludedFromSales?: boolean }).excludedFromSales) continue;
         const soldBefore = soldSoFarByProduct.get(pid) ?? 0;
         if (row.availableStock != null && Number.isFinite(row.availableStock)) {
           row.availableStock = Math.max(0, row.availableStock + soldBefore);

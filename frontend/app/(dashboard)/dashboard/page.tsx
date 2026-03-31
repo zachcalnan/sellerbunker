@@ -20,6 +20,7 @@ import {
   type DashboardRangePreset,
 } from "@/lib/orders-period-metrics";
 import { StripeCheckoutButton } from "@/components/stripe-checkout-button";
+import { getDevImpersonationHeaders } from "@/lib/impersonation";
 
 type AccountSummary = {
   marketplace: string;
@@ -68,6 +69,8 @@ type RecentOrderRow = {
   roiPct?: number | null;
   availableStock: number | null;
   totalStock: number | null;
+  orderStatusLabel?: string | null;
+  excludedFromSales?: boolean;
 };
 
 const POST_CONNECT_REFRESH_PENDING_KEY =
@@ -75,6 +78,12 @@ const POST_CONNECT_REFRESH_PENDING_KEY =
 const CHECKOUT_SYNC_MODAL_PENDING_KEY =
   "sellerbunker_show_sync_modal_after_checkout";
 const SYNC_RETRIGGERED_KEY = "sellerbunker_sync_retriggered_after_checkout";
+
+/** Timeframe & custom-range controls: high-contrast for readability */
+const FILTER_SELECT_CLASS =
+  "h-8 cursor-pointer rounded-lg border border-zinc-600 bg-black px-2.5 text-xs text-white outline-none focus:ring-2 focus:ring-sb-accent/40";
+const FILTER_DATE_CLASS =
+  "h-8 rounded-lg border border-zinc-600 bg-black px-2 text-xs text-white outline-none [color-scheme:dark]";
 
 function HomeInner() {
   const baseUrl =
@@ -85,14 +94,15 @@ function HomeInner() {
   const { backgroundClass, ringColor } = useDisplaySettings();
   const router = useRouter();
   const searchParams = useSearchParams();
+  const devImpersonate = searchParams.get("impersonate");
   const startParam = searchParams.get("start");
   const endParam = searchParams.get("end");
 
   const [rangePreset, setRangePreset] = useState<
-    "today" | "7d" | "30d" | "yesterday" | "all" | "custom"
+    "today" | "7d" | "14d" | "30d" | "yesterday" | "all" | "custom"
   >("30d");
   const [trendPreset, setTrendPreset] = useState<
-    "today" | "7d" | "30d" | "yesterday" | "all" | "custom"
+    "today" | "7d" | "14d" | "30d" | "yesterday" | "all" | "custom"
   >("30d");
   const [customStart, setCustomStart] = useState<string>("");
   const [customEnd, setCustomEnd] = useState<string>("");
@@ -203,9 +213,14 @@ function HomeInner() {
       try {
         const token = await getToken({ template: "backend" });
         if (!token) return;
-        await fetch(`${baseUrl}/api/amazon/sync`, {
+        const url = new URL(`${baseUrl}/api/amazon/sync`);
+        if (devImpersonate) url.searchParams.set("impersonate", devImpersonate);
+        await fetch(url.toString(), {
           method: "POST",
-          headers: { Authorization: `Bearer ${token}` },
+          headers: {
+            Authorization: `Bearer ${token}`,
+            ...getDevImpersonationHeaders(devImpersonate),
+          },
         });
         sessionStorage.setItem(SYNC_RETRIGGERED_KEY, "1");
       } catch {
@@ -235,6 +250,9 @@ function HomeInner() {
   const defaultStart30 = toDateOnly(
     new Date(today.getTime() - 29 * 24 * 60 * 60 * 1000),
   );
+  const defaultStart14 = toDateOnly(
+    new Date(today.getTime() - 13 * 24 * 60 * 60 * 1000),
+  );
   const yesterday = toDateOnly(
     new Date(today.getTime() - 24 * 60 * 60 * 1000),
   );
@@ -245,15 +263,20 @@ function HomeInner() {
       ? defaultEnd
       : rangePreset === "7d"
         ? toDateOnly(new Date(today.getTime() - 6 * 24 * 60 * 60 * 1000))
-        : rangePreset === "30d"
-          ? defaultStart30
-          : rangePreset === "yesterday"
-            ? yesterday
-            : rangePreset === "all"
-              ? allTimeStart
-              : (startParam ?? defaultStart30);
+        : rangePreset === "14d"
+          ? defaultStart14
+          : rangePreset === "30d"
+            ? defaultStart30
+            : rangePreset === "yesterday"
+              ? yesterday
+              : rangePreset === "all"
+                ? allTimeStart
+                : (startParam ?? defaultStart30);
   const effectiveEnd =
-    rangePreset === "today" || rangePreset === "7d" || rangePreset === "30d"
+    rangePreset === "today" ||
+    rangePreset === "7d" ||
+    rangePreset === "14d" ||
+    rangePreset === "30d"
       ? defaultEnd
       : rangePreset === "yesterday"
         ? yesterday
@@ -276,6 +299,13 @@ function HomeInner() {
     }
     if (rangePreset === "7d") {
       const ms = 7 * 24 * 60 * 60 * 1000;
+      return {
+        start: new Date(Date.now() - ms).toISOString(),
+        end: new Date().toISOString(),
+      };
+    }
+    if (rangePreset === "14d") {
+      const ms = 14 * 24 * 60 * 60 * 1000;
       return {
         start: new Date(Date.now() - ms).toISOString(),
         end: new Date().toISOString(),
@@ -306,25 +336,29 @@ function HomeInner() {
       ? defaultEnd
       : trendPreset === "7d"
         ? toDateOnly(new Date(today.getTime() - 6 * 24 * 60 * 60 * 1000))
-        : trendPreset === "30d"
-          ? defaultStart30
-          : trendPreset === "yesterday"
-            ? yesterday
-            : trendPreset === "all"
-              ? allTimeStart
-              : (trendCustomStart || defaultStart30);
+        : trendPreset === "14d"
+          ? defaultStart14
+          : trendPreset === "30d"
+            ? defaultStart30
+            : trendPreset === "yesterday"
+              ? yesterday
+              : trendPreset === "all"
+                ? allTimeStart
+                : (trendCustomStart || defaultStart30);
   const trendEnd =
     trendPreset === "today"
       ? defaultEnd
       : trendPreset === "7d"
         ? defaultEnd
-        : trendPreset === "30d"
+        : trendPreset === "14d"
           ? defaultEnd
-          : trendPreset === "yesterday"
-            ? yesterday
-            : trendPreset === "all"
-              ? defaultEnd
-              : (trendCustomEnd || defaultEnd);
+          : trendPreset === "30d"
+            ? defaultEnd
+            : trendPreset === "yesterday"
+              ? yesterday
+              : trendPreset === "all"
+                ? defaultEnd
+                : (trendCustomEnd || defaultEnd);
 
   const trendRangeForApi = useMemo(() => {
     if (trendPreset === "custom") {
@@ -342,6 +376,13 @@ function HomeInner() {
     }
     if (trendPreset === "7d") {
       const ms = 7 * 24 * 60 * 60 * 1000;
+      return {
+        start: new Date(Date.now() - ms).toISOString(),
+        end: new Date().toISOString(),
+      };
+    }
+    if (trendPreset === "14d") {
+      const ms = 14 * 24 * 60 * 60 * 1000;
       return {
         start: new Date(Date.now() - ms).toISOString(),
         end: new Date().toISOString(),
@@ -365,11 +406,13 @@ function HomeInner() {
         ? "Yesterday"
         : rangePreset === "7d"
           ? "7 days"
-          : rangePreset === "30d"
-            ? "30 days"
-            : rangePreset === "all"
-              ? "All time"
-              : "Custom";
+          : rangePreset === "14d"
+            ? "Two weeks"
+            : rangePreset === "30d"
+              ? "30 days"
+              : rangePreset === "all"
+                ? "All time"
+                : "Custom";
   const trendLabel =
     trendPreset === "today"
       ? "Today"
@@ -377,11 +420,13 @@ function HomeInner() {
         ? "Yesterday"
         : trendPreset === "7d"
           ? "7 days"
-          : trendPreset === "30d"
-            ? "30 days"
-            : trendPreset === "all"
-              ? "All time"
-              : "Custom";
+          : trendPreset === "14d"
+            ? "Two weeks"
+            : trendPreset === "30d"
+              ? "30 days"
+              : trendPreset === "all"
+                ? "All time"
+                : "Custom";
 
   useEffect(() => {
     // Initialize preset based on URL (or defaults)
@@ -395,6 +440,7 @@ function HomeInner() {
       start,
       toDateOnly(new Date(today.getTime() - 6 * 24 * 60 * 60 * 1000)),
     );
+    const startIs14 = isSame(start, defaultStart14);
     const startIs30 = isSame(start, defaultStart30);
 
     if (startParam || endParam) {
@@ -404,6 +450,7 @@ function HomeInner() {
       const endIsTodayForAll = isSame(end, defaultEnd);
       if (startIsToday && endIsToday) setRangePreset("today");
       else if (startIs7 && endIsToday) setRangePreset("7d");
+      else if (startIs14 && endIsToday) setRangePreset("14d");
       else if (startIs30 && endIsToday) setRangePreset("30d");
       else if (startIsYesterday && endIsYesterday)
         setRangePreset("yesterday");
@@ -481,9 +528,12 @@ function HomeInner() {
     if (!isSignedIn) return;
     try {
       const token = await getToken({ template: "backend" });
-      const res = await fetch(`${baseUrl}/api/amazon/orders`, {
+      const url = new URL(`${baseUrl}/api/amazon/orders`);
+      if (devImpersonate) url.searchParams.set("impersonate", devImpersonate);
+      const res = await fetch(url.toString(), {
         headers: {
           Authorization: `Bearer ${token}`,
+          ...getDevImpersonationHeaders(devImpersonate),
           ...(selectedMarketplaceId
             ? { "x-marketplace-id": selectedMarketplaceId }
             : {}),
@@ -526,8 +576,13 @@ function HomeInner() {
       try {
         const token = await getToken({ template: "backend" });
         if (!token) return;
-        const res = await fetch(`${baseUrl}/api/subscription/status`, {
-          headers: { Authorization: `Bearer ${token}` },
+        const url = new URL(`${baseUrl}/api/subscription/status`);
+        if (devImpersonate) url.searchParams.set("impersonate", devImpersonate);
+        const res = await fetch(url.toString(), {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            ...getDevImpersonationHeaders(devImpersonate),
+          },
         });
         if (!res.ok) return;
         const data = (await res.json()) as { hasAccess?: boolean };
@@ -789,9 +844,11 @@ function HomeInner() {
                     const returnOrigin = typeof window !== 'undefined' ? window.location.origin : '';
                     const params = new URLSearchParams({ region: 'EU' });
                     if (returnOrigin) params.set('returnOrigin', returnOrigin);
+                    if (devImpersonate) params.set("impersonate", devImpersonate);
                     const res = await fetch(`${baseUrl}/api/amazon/connect?${params}`, {
                       headers: {
                         Authorization: `Bearer ${token}`,
+                        ...getDevImpersonationHeaders(devImpersonate),
                         ...(selectedMarketplaceId ? { "x-marketplace-id": selectedMarketplaceId } : {}),
                       },
                     });
@@ -835,6 +892,7 @@ function HomeInner() {
                         const v = e.target.value as
                           | "today"
                           | "7d"
+                          | "14d"
                           | "30d"
                           | "yesterday"
                           | "all"
@@ -856,18 +914,21 @@ function HomeInner() {
                                     today.getTime() - 6 * 24 * 60 * 60 * 1000,
                                   ),
                                 )
-                              : v === "30d"
-                                ? defaultStart30
-                                : v === "yesterday"
-                                  ? yesterday
-                                  : allTimeStart;
+                              : v === "14d"
+                                ? defaultStart14
+                                : v === "30d"
+                                  ? defaultStart30
+                                  : v === "yesterday"
+                                    ? yesterday
+                                    : allTimeStart;
                         setRangeInUrl(start, end);
                       }}
-                      className="h-8 cursor-pointer rounded-lg border border-[var(--surface-border)] bg-black px-2.5 text-xs text-white outline-none focus:ring-2 focus:ring-sb-accent/40"
+                      className={FILTER_SELECT_CLASS}
                     >
                       <option className="bg-black text-white" value="today">Today</option>
                       <option className="bg-black text-white" value="yesterday">Yesterday</option>
                       <option className="bg-black text-white" value="7d">7 days</option>
+                      <option className="bg-black text-white" value="14d">Two weeks</option>
                       <option className="bg-black text-white" value="30d">30 days</option>
                       <option className="bg-black text-white" value="all">All time</option>
                       <option className="bg-black text-white" value="custom">Custom</option>
@@ -879,7 +940,7 @@ function HomeInner() {
                           value={customStart}
                           onChange={(e) =>
                             setCustomStart(e.target.value)}
-                          className="h-8 rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-2 text-xs text-[var(--foreground)] outline-none"
+                          className={FILTER_DATE_CLASS}
                         />
                         <span className="text-[var(--muted-foreground)]">→</span>
                         <input
@@ -887,7 +948,7 @@ function HomeInner() {
                           value={customEnd}
                           onChange={(e) =>
                             setCustomEnd(e.target.value)}
-                          className="h-8 rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-2 text-xs text-[var(--foreground)] outline-none"
+                          className={FILTER_DATE_CLASS}
                         />
                         <button
                           type="button"
@@ -991,6 +1052,7 @@ function HomeInner() {
                         const v = e.target.value as
                           | "today"
                           | "7d"
+                          | "14d"
                           | "30d"
                           | "yesterday"
                           | "all"
@@ -1012,19 +1074,22 @@ function HomeInner() {
                                     today.getTime() - 6 * 24 * 60 * 60 * 1000,
                                   ),
                                 )
-                              : v === "30d"
-                                ? defaultStart30
-                                : v === "yesterday"
-                                  ? yesterday
-                                  : allTimeStart;
+                              : v === "14d"
+                                ? defaultStart14
+                                : v === "30d"
+                                  ? defaultStart30
+                                  : v === "yesterday"
+                                    ? yesterday
+                                    : allTimeStart;
                         setTrendCustomStart(start);
                         setTrendCustomEnd(end);
                       }}
-                      className="h-8 cursor-pointer rounded-lg border border-[var(--surface-border)] bg-black px-2 text-xs text-white outline-none"
+                      className={FILTER_SELECT_CLASS}
                     >
                       <option className="bg-black text-white" value="today">Today</option>
                       <option className="bg-black text-white" value="yesterday">Yesterday</option>
                       <option className="bg-black text-white" value="7d">7 days</option>
+                      <option className="bg-black text-white" value="14d">Two weeks</option>
                       <option className="bg-black text-white" value="30d">30 days</option>
                       <option className="bg-black text-white" value="all">All time</option>
                       <option className="bg-black text-white" value="custom">Custom</option>
@@ -1036,15 +1101,15 @@ function HomeInner() {
                           value={trendCustomStart}
                           onChange={(e) =>
                             setTrendCustomStart(e.target.value)}
-                          className="h-8 rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-xs text-[var(--foreground)] outline-none"
+                          className={FILTER_DATE_CLASS}
                         />
-                        <span>→</span>
+                        <span className="text-[var(--muted-foreground)]">→</span>
                         <input
                           type="date"
                           value={trendCustomEnd}
                           onChange={(e) =>
                             setTrendCustomEnd(e.target.value)}
-                          className="h-8 rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-xs text-[var(--foreground)] outline-none"
+                          className={FILTER_DATE_CLASS}
                         />
                       </>
                     ) : null}
@@ -1116,6 +1181,8 @@ function RecentOrders({
   maxRows = 10,
 }: RecentOrdersProps) {
   const { selectedMarketplaceId } = useMarketplace();
+  const searchParams = useSearchParams();
+  const devImpersonate = searchParams.get("impersonate");
   const [orders, setOrders] = useState<RecentOrderRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1130,9 +1197,12 @@ function RecentOrders({
       setError(null);
       try {
         const token = await getToken({ template: "backend" });
-        const res = await fetch(`${baseUrl}/api/amazon/orders`, {
+        const url = new URL(`${baseUrl}/api/amazon/orders`);
+        if (devImpersonate) url.searchParams.set("impersonate", devImpersonate);
+        const res = await fetch(url.toString(), {
           headers: {
             Authorization: `Bearer ${token}`,
+            ...getDevImpersonationHeaders(devImpersonate),
             ...(selectedMarketplaceId ? { "x-marketplace-id": selectedMarketplaceId } : {}),
           },
         });
@@ -1147,7 +1217,7 @@ function RecentOrders({
       }
     };
     void fetchOrders();
-  }, [isSignedIn, getToken, baseUrl, selectedMarketplaceId, maxRows]);
+  }, [isSignedIn, getToken, baseUrl, selectedMarketplaceId, maxRows, devImpersonate]);
 
   const formatDate = (dateStr: string) => {
     const d = new Date(dateStr);
@@ -1191,14 +1261,22 @@ function RecentOrders({
             {orders.map((row) => {
               const revenue = row.salePrice * row.quantity;
               const title = row.title?.trim() || "—";
+              const excluded = Boolean(row.excludedFromSales);
               return (
                 <div
                   key={row.id}
                   className="flex w-full min-w-0 flex-col gap-0.5 border-b border-[var(--surface-border)] py-1.5 last:border-b-0 sm:flex-row sm:items-center sm:gap-2"
                 >
                   <div className="min-w-0 flex-1">
-                    <div className="truncate text-[10px] font-medium leading-tight text-[var(--foreground)]" title={row.title ?? undefined}>
-                      {title}
+                    <div className="flex min-w-0 items-baseline gap-2">
+                      <div className="truncate text-[10px] font-medium leading-tight text-[var(--foreground)]" title={row.title ?? undefined}>
+                        {title}
+                      </div>
+                      {row.orderStatusLabel ? (
+                        <span className="shrink-0 text-[9px] font-semibold uppercase tracking-wide text-red-600">
+                          {row.orderStatusLabel}
+                        </span>
+                      ) : null}
                     </div>
                     <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[9px] text-[var(--muted-foreground)]">
                       <div className="h-5 w-5 shrink-0 overflow-hidden rounded bg-[var(--surface)] ring-1 ring-[var(--surface-border)]">
@@ -1222,7 +1300,9 @@ function RecentOrders({
                     </div>
                   </div>
                   <div className="flex shrink-0 items-center justify-end gap-1 pl-2 text-[10px] tabular-nums font-medium text-white">
-                    <span className="w-16 text-center">
+                    <span
+                      className={`w-16 text-center ${excluded ? "font-semibold text-red-600" : ""}`}
+                    >
                       {revenue != null && Number.isFinite(revenue) ? formatCurrency(revenue, currency, 2) : "—"}
                     </span>
                     <span className="w-16 text-center">
@@ -1267,6 +1347,8 @@ function TopSellers({
   currency,
 }: TopSellersProps) {
   const { selectedMarketplaceId } = useMarketplace();
+  const searchParams = useSearchParams();
+  const devImpersonate = searchParams.get("impersonate");
   const [rows, setRows] = useState<TopSellerRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1283,11 +1365,16 @@ function TopSellers({
       setIsFallbackPeriod(false);
       try {
         const token = await getToken({ template: "backend" });
-        let res = await fetch(
+        const url1 = new URL(
           `${baseUrl}/api/amazon/products/top-profitable?limit=5&period=month`,
+        );
+        if (devImpersonate) url1.searchParams.set("impersonate", devImpersonate);
+        let res = await fetch(
+          url1.toString(),
           {
             headers: {
               Authorization: `Bearer ${token}`,
+              ...getDevImpersonationHeaders(devImpersonate),
               ...(selectedMarketplaceId ? { "x-marketplace-id": selectedMarketplaceId } : {}),
             },
           },
@@ -1295,11 +1382,16 @@ function TopSellers({
         if (!res.ok) throw new Error("Failed to load top sellers");
         let data = (await res.json()) as TopSellerRow[];
         if (Array.isArray(data) && data.length === 0) {
-          res = await fetch(
+          const url2 = new URL(
             `${baseUrl}/api/amazon/products/top-profitable?limit=5&period=30d`,
+          );
+          if (devImpersonate) url2.searchParams.set("impersonate", devImpersonate);
+          res = await fetch(
+            url2.toString(),
             {
               headers: {
                 Authorization: `Bearer ${token}`,
+                ...getDevImpersonationHeaders(devImpersonate),
                 ...(selectedMarketplaceId ? { "x-marketplace-id": selectedMarketplaceId } : {}),
               },
             },
@@ -1318,7 +1410,7 @@ function TopSellers({
       }
     };
     void fetchTop();
-  }, [isSignedIn, getToken, baseUrl, selectedMarketplaceId]);
+  }, [isSignedIn, getToken, baseUrl, selectedMarketplaceId, devImpersonate]);
 
   return (
     <div className="flex w-full flex-col rounded-xl bg-[var(--surface)] p-3 ring-1 ring-[var(--surface-border)]">
@@ -1435,6 +1527,8 @@ function CostBreakdown({
   currency,
 }: CostBreakdownProps) {
   const { selectedMarketplaceId } = useMarketplace();
+  const searchParams = useSearchParams();
+  const devImpersonate = searchParams.get("impersonate");
   const [data, setData] = useState<CostBreakdownData | null>(null);
   const [loading, setLoading] = useState(false);
   const [periodPreset, setPeriodPreset] = useState<CostBreakdownPreset>("30d");
@@ -1480,18 +1574,17 @@ function CostBreakdown({
       setLoading(true);
       try {
         const token = await getToken({ template: "backend" });
-        const res = await fetch(
-          `${baseUrl}/api/amazon/dashboard/cost-breakdown?${new URLSearchParams({
-            start: effectiveStart,
-            end: effectiveEnd,
-          }).toString()}`,
-          {
-            headers: {
-              Authorization: `Bearer ${token}`,
-              ...(selectedMarketplaceId ? { "x-marketplace-id": selectedMarketplaceId } : {}),
-            },
+        const url = new URL(`${baseUrl}/api/amazon/dashboard/cost-breakdown`);
+        url.searchParams.set("start", effectiveStart);
+        url.searchParams.set("end", effectiveEnd);
+        if (devImpersonate) url.searchParams.set("impersonate", devImpersonate);
+        const res = await fetch(url.toString(), {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            ...getDevImpersonationHeaders(devImpersonate),
+            ...(selectedMarketplaceId ? { "x-marketplace-id": selectedMarketplaceId } : {}),
           },
-        );
+        });
         if (!res.ok) throw new Error("Failed to load cost breakdown");
         const json = (await res.json()) as CostBreakdownData;
         setData(json);
@@ -1502,7 +1595,7 @@ function CostBreakdown({
       }
     };
     void fetchData();
-  }, [isSignedIn, getToken, baseUrl, effectiveStart, effectiveEnd, selectedMarketplaceId]);
+  }, [isSignedIn, getToken, baseUrl, effectiveStart, effectiveEnd, selectedMarketplaceId, devImpersonate]);
 
   const cur = data?.currency ?? currency;
   const fmt = (n: number) =>
@@ -1538,7 +1631,7 @@ function CostBreakdown({
           <select
             value={periodPreset}
             onChange={(e) => setPeriodPreset(e.target.value as CostBreakdownPreset)}
-            className="h-8 cursor-pointer rounded-lg border border-[var(--surface-border)] bg-black px-2 text-white outline-none"
+            className={FILTER_SELECT_CLASS}
           >
             <option className="bg-black text-white" value="yesterday">Yesterday</option>
             <option className="bg-black text-white" value="today">Today</option>
@@ -1554,14 +1647,14 @@ function CostBreakdown({
                 type="date"
                 value={customStart}
                 onChange={(e) => setCustomStart(e.target.value)}
-                className="h-8 rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-[var(--foreground)] outline-none"
+                className={FILTER_DATE_CLASS}
               />
-              <span>→</span>
+              <span className="text-[var(--muted-foreground)]">→</span>
               <input
                 type="date"
                 value={customEnd}
                 onChange={(e) => setCustomEnd(e.target.value)}
-                className="h-8 rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-[var(--foreground)] outline-none"
+                className={FILTER_DATE_CLASS}
               />
             </>
           )}
@@ -1651,6 +1744,8 @@ function ProfitAndLoss({
   currency,
 }: ProfitAndLossProps) {
   const { selectedMarketplaceId } = useMarketplace();
+  const searchParams = useSearchParams();
+  const devImpersonate = searchParams.get("impersonate");
   const [data, setData] = useState<ProfitAndLossData | null>(null);
   const [loading, setLoading] = useState(false);
   const [periodPreset, setPeriodPreset] = useState<CostBreakdownPreset>("30d");
@@ -1696,18 +1791,17 @@ function ProfitAndLoss({
       setLoading(true);
       try {
         const token = await getToken({ template: "backend" });
-        const res = await fetch(
-          `${baseUrl}/api/amazon/dashboard/profit-and-loss?${new URLSearchParams({
-            start: effectiveStart,
-            end: effectiveEnd,
-          }).toString()}`,
-          {
-            headers: {
-              Authorization: `Bearer ${token}`,
-              ...(selectedMarketplaceId ? { "x-marketplace-id": selectedMarketplaceId } : {}),
-            },
+        const url = new URL(`${baseUrl}/api/amazon/dashboard/profit-and-loss`);
+        url.searchParams.set("start", effectiveStart);
+        url.searchParams.set("end", effectiveEnd);
+        if (devImpersonate) url.searchParams.set("impersonate", devImpersonate);
+        const res = await fetch(url.toString(), {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            ...getDevImpersonationHeaders(devImpersonate),
+            ...(selectedMarketplaceId ? { "x-marketplace-id": selectedMarketplaceId } : {}),
           },
-        );
+        });
         if (!res.ok) throw new Error("Failed to load profit & loss");
         const json = (await res.json()) as ProfitAndLossData;
         setData(json);
@@ -1718,7 +1812,7 @@ function ProfitAndLoss({
       }
     };
     void fetchData();
-  }, [isSignedIn, getToken, baseUrl, effectiveStart, effectiveEnd, selectedMarketplaceId]);
+  }, [isSignedIn, getToken, baseUrl, effectiveStart, effectiveEnd, selectedMarketplaceId, devImpersonate]);
 
   const cur = data?.currency ?? currency;
   const fmt = (n: number) =>
@@ -1739,15 +1833,15 @@ function ProfitAndLoss({
           <select
             value={periodPreset}
             onChange={(e) => setPeriodPreset(e.target.value as CostBreakdownPreset)}
-            className="h-8 cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-[var(--foreground)] outline-none"
+            className={FILTER_SELECT_CLASS}
           >
-            <option value="yesterday">Yesterday</option>
-            <option value="today">Today</option>
-            <option value="7d">7 days</option>
-            <option value="14d">Two weeks</option>
-            <option value="30d">30 days</option>
-            <option value="all">All time</option>
-            <option value="custom">Custom</option>
+            <option className="bg-black text-white" value="yesterday">Yesterday</option>
+            <option className="bg-black text-white" value="today">Today</option>
+            <option className="bg-black text-white" value="7d">7 days</option>
+            <option className="bg-black text-white" value="14d">Two weeks</option>
+            <option className="bg-black text-white" value="30d">30 days</option>
+            <option className="bg-black text-white" value="all">All time</option>
+            <option className="bg-black text-white" value="custom">Custom</option>
           </select>
           {periodPreset === "custom" && (
             <>
@@ -1755,14 +1849,14 @@ function ProfitAndLoss({
                 type="date"
                 value={customStart}
                 onChange={(e) => setCustomStart(e.target.value)}
-                className="h-8 rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-[var(--foreground)] outline-none"
+                className={FILTER_DATE_CLASS}
               />
-              <span>→</span>
+              <span className="text-[var(--muted-foreground)]">→</span>
               <input
                 type="date"
                 value={customEnd}
                 onChange={(e) => setCustomEnd(e.target.value)}
-                className="h-8 rounded-lg border border-[var(--surface-border)] bg-transparent px-2 text-[var(--foreground)] outline-none"
+                className={FILTER_DATE_CLASS}
               />
             </>
           )}
@@ -1910,6 +2004,8 @@ function InventorySummary({
   currency,
 }: InventorySummaryProps) {
   const { selectedMarketplaceId } = useMarketplace();
+  const searchParams = useSearchParams();
+  const devImpersonate = searchParams.get("impersonate");
   const [rows, setRows] = useState<InventorySummaryRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1924,9 +2020,12 @@ function InventorySummary({
       setError(null);
       try {
         const token = await getToken({ template: "backend" });
-        const res = await fetch(`${baseUrl}/api/amazon/inventory`, {
+        const url = new URL(`${baseUrl}/api/amazon/inventory`);
+        if (devImpersonate) url.searchParams.set("impersonate", devImpersonate);
+        const res = await fetch(url.toString(), {
           headers: {
             Authorization: `Bearer ${token}`,
+            ...getDevImpersonationHeaders(devImpersonate),
             ...(selectedMarketplaceId ? { "x-marketplace-id": selectedMarketplaceId } : {}),
           },
         });
@@ -1941,7 +2040,7 @@ function InventorySummary({
       }
     };
     void fetchInventory();
-  }, [isSignedIn, getToken, baseUrl, selectedMarketplaceId]);
+  }, [isSignedIn, getToken, baseUrl, selectedMarketplaceId, devImpersonate]);
 
   const n = (v: number | null | undefined) => (v != null && Number.isFinite(v) ? v : 0);
   const total = rows.reduce((sum, r) => sum + n(r.totalQty), 0);

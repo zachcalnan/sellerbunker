@@ -2,8 +2,10 @@
 
 import { useAuth, SignedIn, SignedOut, SignInButton } from "@clerk/nextjs";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { useDisplaySettings } from "@/contexts/display-settings-context";
 import { useMarketplace } from "@/contexts/marketplace-context";
+import { getDevImpersonationHeaders } from "@/lib/impersonation";
 
 type ReplenishRow = {
   productId: string;
@@ -35,6 +37,8 @@ export default function ReplenishPage() {
   const baseUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
   const { isSignedIn, getToken } = useAuth();
   const { selectedMarketplaceId, selectedCurrency } = useMarketplace();
+  const searchParams = useSearchParams();
+  const devImpersonate = searchParams.get("impersonate");
 
   const [rows, setRows] = useState<ReplenishRow[]>([]);
   const [loading, setLoading] = useState(false);
@@ -47,9 +51,13 @@ export default function ReplenishPage() {
     setError(null);
     try {
       const token = await getToken({ template: "backend" });
-      const res = await fetch(`${baseUrl}/api/amazon/replenish?limit=10000`, {
+      const url = new URL(`${baseUrl}/api/amazon/replenish`);
+      url.searchParams.set("limit", "10000");
+      if (devImpersonate) url.searchParams.set("impersonate", devImpersonate);
+      const res = await fetch(url.toString(), {
         headers: {
           Authorization: `Bearer ${token}`,
+          ...getDevImpersonationHeaders(devImpersonate),
           ...(selectedMarketplaceId ? { "x-marketplace-id": selectedMarketplaceId } : {}),
         },
         credentials: "include",
@@ -66,7 +74,7 @@ export default function ReplenishPage() {
     } finally {
       setLoading(false);
     }
-  }, [getToken, baseUrl, selectedMarketplaceId]);
+  }, [getToken, baseUrl, selectedMarketplaceId, devImpersonate]);
 
   useEffect(() => {
     if (!isSignedIn) {

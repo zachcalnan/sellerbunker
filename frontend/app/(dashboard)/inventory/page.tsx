@@ -2,8 +2,10 @@
 
 import { useAuth, SignedIn, SignedOut, SignInButton } from "@clerk/nextjs";
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { useDisplaySettings } from "@/contexts/display-settings-context";
 import { useMarketplace } from "@/contexts/marketplace-context";
+import { getDevImpersonationHeaders } from "@/lib/impersonation";
 
 type InventoryRow = {
   productId: string;
@@ -47,6 +49,8 @@ export default function InventoryPage() {
   const baseUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
   const { isSignedIn, getToken } = useAuth();
   const { selectedMarketplaceId, selectedCurrency } = useMarketplace();
+  const searchParams = useSearchParams();
+  const devImpersonate = searchParams.get("impersonate");
 
   const [rows, setRows] = useState<InventoryRow[]>([]);
   const [loading, setLoading] = useState(false);
@@ -60,10 +64,13 @@ export default function InventoryPage() {
     setLoading(true);
     setError(null);
     try {
-      const token = await getToken();
-      const res = await fetch(`${baseUrl}/api/amazon/inventory`, {
+      const token = await getToken({ template: "backend" });
+      const url = new URL(`${baseUrl}/api/amazon/inventory`);
+      if (devImpersonate) url.searchParams.set("impersonate", devImpersonate);
+      const res = await fetch(url.toString(), {
         headers: {
           Authorization: `Bearer ${token}`,
+          ...getDevImpersonationHeaders(devImpersonate),
           ...(selectedMarketplaceId ? { "x-marketplace-id": selectedMarketplaceId } : {}),
         },
       });
@@ -75,7 +82,7 @@ export default function InventoryPage() {
     } finally {
       setLoading(false);
     }
-  }, [getToken, baseUrl, selectedMarketplaceId]);
+  }, [getToken, baseUrl, selectedMarketplaceId, devImpersonate]);
 
   useEffect(() => {
     if (!isSignedIn) {

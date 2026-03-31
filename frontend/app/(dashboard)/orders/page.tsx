@@ -2,12 +2,14 @@
 
 import { useAuth, SignedIn, SignedOut, SignInButton } from "@clerk/nextjs";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { useDisplaySettings } from "@/contexts/display-settings-context";
 import { useMarketplace } from "@/contexts/marketplace-context";
 import {
   aggregateOrderRows,
   filterOrderRowsForOrdersTabPeriod,
 } from "@/lib/orders-period-metrics";
+import { getDevImpersonationHeaders } from "@/lib/impersonation";
 
 type OrderRow = {
   id: string;
@@ -28,6 +30,8 @@ type OrderRow = {
   feesSource: string | null; // 'finances' = settled (exact); 'estimate' = from product estimate
   availableStock: number | null;
   totalStock: number | null;
+  orderStatusLabel?: string | null;
+  excludedFromSales?: boolean;
 };
 
 type PeriodKey = "today" | "7" | "14" | "30";
@@ -44,6 +48,8 @@ export default function OrdersPage() {
   const baseUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
   const { isSignedIn, getToken } = useAuth();
   const { selectedMarketplaceId, selectedCurrency } = useMarketplace();
+  const searchParams = useSearchParams();
+  const devImpersonate = searchParams.get("impersonate");
 
   const [rows, setRows] = useState<OrderRow[]>([]);
   const [loading, setLoading] = useState(false);
@@ -57,9 +63,12 @@ export default function OrdersPage() {
     setError(null);
     try {
       const token = await getToken({ template: "backend" });
-      const res = await fetch(`${baseUrl}/api/amazon/orders`, {
+      const url = new URL(`${baseUrl}/api/amazon/orders`);
+      if (devImpersonate) url.searchParams.set("impersonate", devImpersonate);
+      const res = await fetch(url.toString(), {
         headers: {
           Authorization: `Bearer ${token}`,
+          ...getDevImpersonationHeaders(devImpersonate),
           ...(selectedMarketplaceId ? { "x-marketplace-id": selectedMarketplaceId } : {}),
         },
       });
@@ -174,10 +183,10 @@ export default function OrdersPage() {
               <select
                 value={period}
                 onChange={(e) => setPeriod(e.target.value as PeriodKey)}
-                className="rounded-lg border border-[var(--surface-border)] bg-transparent px-2.5 py-1.5 text-xs text-[var(--foreground)] outline-none focus:ring-2 focus:ring-[var(--foreground)]/20"
+                className="h-8 cursor-pointer rounded-lg border border-zinc-600 bg-black px-2.5 text-xs text-white outline-none focus:ring-2 focus:ring-sb-accent/40"
               >
                 {PERIOD_OPTIONS.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
+                  <option key={opt.value} className="bg-black text-white" value={opt.value}>
                     {opt.label}
                   </option>
                 ))}
@@ -227,7 +236,9 @@ export default function OrdersPage() {
             ) : (
               <>
                 <div className="divide-y divide-[var(--surface-border)] bg-transparent">
-                  {paginated.map((r) => (
+                  {paginated.map((r) => {
+                    const excluded = Boolean(r.excludedFromSales);
+                    return (
                     <div
                       key={r.id}
                       className="grid grid-cols-[36px_1fr_0.55fr_0.45fr_0.8fr_0.52fr_0.35fr_0.45fr_0.45fr_0.35fr_0.35fr] items-center gap-1 px-2.5 py-2 min-w-0 text-[11px]"
@@ -245,8 +256,13 @@ export default function OrdersPage() {
                           <div className="h-8 w-8 rounded-md bg-[var(--surface)] ring-1 ring-[var(--surface-border)]" />
                         )}
                       </div>
-                      <div className="truncate text-[var(--foreground)]">
-                        {r.title ?? "—"}
+                      <div className="min-w-0 truncate text-[var(--foreground)]">
+                        <span>{r.title ?? "—"}</span>
+                        {r.orderStatusLabel ? (
+                          <span className="ml-1.5 text-[10px] font-semibold uppercase tracking-wide text-red-600">
+                            {r.orderStatusLabel}
+                          </span>
+                        ) : null}
                       </div>
                       <div className="truncate text-[var(--muted-foreground)]">
                         {r.sku}
@@ -260,8 +276,8 @@ export default function OrdersPage() {
                           {r.orderId}
                         </div>
                       </div>
-                      <div className="flex flex-col text-[var(--foreground)] tabular-nums min-w-0">
-                        {r.amazonFeesTotal != null && Number.isFinite(r.amazonFeesTotal) ? (
+                      <div className={`flex flex-col tabular-nums min-w-0 ${excluded ? "text-[var(--muted-foreground)]" : "text-[var(--foreground)]"}`}>
+                        {!excluded && r.amazonFeesTotal != null && Number.isFinite(r.amazonFeesTotal) ? (
                           <div className="space-y-0.5 text-left">
                             <div className="font-medium">
                               {formatCurrency(r.amazonFeesTotal)}
@@ -274,6 +290,8 @@ export default function OrdersPage() {
                               <div>Dig: {r.digitalServiceFeeTotal != null ? formatCurrency(r.digitalServiceFeeTotal) : "—"}</div>
                             </div>
                           </div>
+                        ) : excluded ? (
+                          <span className="text-[10px] text-[var(--muted-foreground)]">—</span>
                         ) : (
                           "—"
                         )}
@@ -281,8 +299,17 @@ export default function OrdersPage() {
                       <div className="text-center text-[var(--foreground)] tabular-nums">
                         {r.quantity}
                       </div>
-                      <div className="text-center text-[var(--foreground)] tabular-nums">
-                        {formatCurrency(r.salePrice)}
+                      <div
+                        className={`text-center tabular-nums ${excluded ? "font-semibold text-red-600" : "text-[var(--foreground)]"}`}
+                      >
+                        <div className="flex flex-col items-center leading-tight">
+                          <span>{formatCurrency(r.salePrice)}</span>
+                          {excluded && r.orderStatusLabel ? (
+                            <span className="mt-0.5 text-[10px] font-semibold text-red-600">
+                              {r.orderStatusLabel}
+                            </span>
+                          ) : null}
+                        </div>
                       </div>
                       <div className="text-center text-[var(--foreground)] tabular-nums">
                         {r.profit != null ? formatCurrency(r.profit) : "—"}
@@ -302,7 +329,8 @@ export default function OrdersPage() {
                         {r.availableStock != null ? String(r.availableStock) : "—"}
                       </div>
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
 
                 {totalPages > 1 ? (

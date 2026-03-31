@@ -8,12 +8,15 @@ export type OrderRowLike = {
   quantity: number;
   salePrice: number;
   profit: number | null;
+  /** When true, line is shown but excluded from sales / units / profit totals (cancelled/returned). */
+  excludedFromSales?: boolean;
 };
 
 export type DashboardRangePreset =
   | "today"
   | "yesterday"
   | "7d"
+  | "14d"
   | "30d"
   | "all"
   | "custom";
@@ -53,8 +56,8 @@ export function filterOrderRowsForDashboardPreset(
     });
   }
 
-  if (preset === "7d" || preset === "30d") {
-    const days = preset === "7d" ? 7 : 30;
+  if (preset === "7d" || preset === "14d" || preset === "30d") {
+    const days = preset === "7d" ? 7 : preset === "14d" ? 14 : 30;
     const startMs = now - days * oneDayMs;
     return rows.filter((r) => {
       const t = new Date(r.orderDate).getTime();
@@ -100,15 +103,16 @@ export function filterOrderRowsForOrdersTabPeriod(
 }
 
 export function aggregateOrderRows(rows: OrderRowLike[]) {
-  const orderCount = rows.length;
-  const totalSales = rows.reduce(
+  const counting = rows.filter((r) => !r.excludedFromSales);
+  const orderCount = counting.length;
+  const totalSales = counting.reduce(
     (sum, r) => sum + r.salePrice * r.quantity,
     0,
   );
-  const totalUnits = rows.reduce(
+  const totalUnits = counting.reduce(
     (sum, r) => sum + (Number.isFinite(r.quantity) ? r.quantity : 0),
     0,
   );
-  const totalProfit = rows.reduce((sum, r) => sum + (r.profit ?? 0), 0);
+  const totalProfit = counting.reduce((sum, r) => sum + (r.profit ?? 0), 0);
   return { orderCount, totalSales, totalUnits, totalProfit };
 }

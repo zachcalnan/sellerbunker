@@ -9,9 +9,10 @@ import {
   useClerk,
 } from "@clerk/nextjs";
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MarketplaceSelector } from "./marketplace-selector";
+import { getDevImpersonationHeaders, withImpersonateParam } from "@/lib/impersonation";
 
 function DashboardIcon({ className }: { className?: string }) {
   return (
@@ -215,6 +216,8 @@ export function Sidebar() {
   const { signOut } = useClerk();
   const pathname = usePathname();
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const devImpersonate = searchParams.get("impersonate");
   const [amazonConnected, setAmazonConnected] = useState<boolean | null>(null);
   const [connectingAmazon, setConnectingAmazon] = useState(false);
   const [disconnectingAmazon, setDisconnectingAmazon] = useState(false);
@@ -226,13 +229,13 @@ export function Sidebar() {
     try {
       const token = await getToken({ template: "backend" });
       const res = await fetch(`${BASE_URL}/api/amazon/account/summary`, {
-        headers: { Authorization: `Bearer ${token}` },
+        headers: { Authorization: `Bearer ${token}`, ...getDevImpersonationHeaders(devImpersonate) },
       });
       setAmazonConnected(res.ok);
     } catch {
       setAmazonConnected(false);
     }
-  }, [isSignedIn, getToken]);
+  }, [isSignedIn, getToken, devImpersonate]);
 
   useEffect(() => {
     if (!isSignedIn) {
@@ -244,7 +247,7 @@ export function Sidebar() {
 
   const connectAmazon = async () => {
     if (!isSignedIn) return;
-    router.push("/connect-amazon");
+    router.push(withImpersonateParam("/connect-amazon", devImpersonate));
   };
 
   const disconnectAmazon = async () => {
@@ -285,7 +288,7 @@ export function Sidebar() {
   return (
     <aside className="flex gap-4 h-screen w-full flex-col border-r border-[var(--surface-border)] bg-[var(--surface)]">
       <Link
-        href="/dashboard"
+        href={withImpersonateParam("/dashboard", devImpersonate)}
         prefetch
         title="Go to dashboard"
         className="inline-flex w-fit shrink-0 cursor-pointer rounded-lg no-underline outline-none transition-[opacity,box-shadow] hover:opacity-90 focus-visible:ring-2 focus-visible:ring-sb-accent focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--surface)]"
@@ -318,7 +321,7 @@ export function Sidebar() {
             return (
               <Link
                 key={href}
-                href={href}
+                href={withImpersonateParam(href, devImpersonate)}
                 className={`flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium no-underline transition-colors ${
                   isActive
                     ? "bg-sb-accent text-black"

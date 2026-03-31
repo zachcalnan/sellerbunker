@@ -48,6 +48,15 @@ async function bootstrap() {
   app.enableCors({
     origin: corsOrigins,
     credentials: true,
+    allowedHeaders: [
+      'authorization',
+      'content-type',
+      'x-org-id',
+      'x-organization-id',
+      'x-marketplace-id',
+      // Dev-only header used to test a specific Clerk user locally.
+      'x-impersonate-clerk-id',
+    ],
   });
 
   // Global validation pipe

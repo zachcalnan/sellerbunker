@@ -184,19 +184,21 @@ model Product {
 }
 
 model Order {
-  id          String      @id @default(uuid())
-  userId      String      @map("user_id")
-  productId   String      @map("product_id")
-  orderId     String      @map("order_id")
-  marketplace String
-  sku         String
-  asin        String?
-  quantity    Int         @default(1)
-  itemPrice   Decimal     @map("item_price") @db.Decimal(10, 2)
-  fees        Json
-  totalProfit Decimal?    @map("total_profit") @db.Decimal(10, 2)
-  rawResponse Json?       @map("raw_response")
-  orderDate   DateTime    @map("order_date")
+  id                  String      @id @default(uuid())
+  userId              String      @map("user_id")
+  productId           String      @map("product_id")
+  orderId             String      @map("order_id")
+  marketplace         String
+  sku                 String
+  asin                String?
+  quantity            Int         @default(1)
+  itemPrice           Decimal     @map("item_price") @db.Decimal(10, 2)
+  fees                Json
+  totalProfit         Decimal?    @map("total_profit") @db.Decimal(10, 2)
+  rawResponse         Json?       @map("raw_response")
+  /// SP-API Orders API OrderStatus (e.g. Canceled). Used to exclude non-sales from revenue totals.
+  amazonOrderStatus   String?     @map("amazon_order_status")
+  orderDate           DateTime    @map("order_date")
   createdAt   DateTime    @default(now()) @map("created_at")
   updatedAt   DateTime    @updatedAt @map("updated_at")
   orderItems  OrderItem[]

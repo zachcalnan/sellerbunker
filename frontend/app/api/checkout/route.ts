@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth } from "@clerk/nextjs/server";
 import { getStripe, STRIPE_BASIC_PLAN_PRODUCT_ID } from "@/lib/stripe";
+import { getCurrentUserId } from "@/lib/getCurrentUserId";
 
 /**
  * GET /api/checkout
@@ -47,7 +47,7 @@ export async function GET() {
  * Returns: { url: string } to redirect the user to Stripe Checkout.
  */
 export async function POST(request: NextRequest) {
-  const { userId } = await auth();
+  const userId = getCurrentUserId(request);
   if (!userId) {
     return NextResponse.json({ error: "Sign in required" }, { status: 401 });
   }

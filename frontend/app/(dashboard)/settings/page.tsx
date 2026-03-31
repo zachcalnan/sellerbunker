@@ -2,8 +2,10 @@
 
 import { useAuth, SignedIn, SignedOut, SignInButton } from "@clerk/nextjs";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { useDisplaySettings } from "@/contexts/display-settings-context";
+import { getDevImpersonationHeaders, withImpersonateParam } from "@/lib/impersonation";
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
 
@@ -23,6 +25,8 @@ type VatSettings = {
 
 export default function SettingsPage() {
   const { isSignedIn, getToken } = useAuth();
+  const searchParams = useSearchParams();
+  const devImpersonate = searchParams.get("impersonate");
   const [settings, setSettings] = useState<VatSettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -41,7 +45,10 @@ export default function SettingsPage() {
     try {
       const token = await getToken({ template: "backend" });
       const res = await fetch(`${BASE_URL}/api/orgs/vat-settings`, {
-        headers: { Authorization: `Bearer ${token}` },
+        headers: {
+          Authorization: `Bearer ${token}`,
+          ...getDevImpersonationHeaders(devImpersonate),
+        },
         credentials: "include",
       });
       if (!res.ok) throw new Error("Failed to load settings.");
@@ -57,7 +64,7 @@ export default function SettingsPage() {
     } finally {
       setLoading(false);
     }
-  }, [getToken]);
+  }, [getToken, devImpersonate]);
 
   useEffect(() => {
     if (isSignedIn) void load();
@@ -83,6 +90,7 @@ export default function SettingsPage() {
         method: "PATCH",
         headers: {
           Authorization: `Bearer ${token}`,
+          ...getDevImpersonationHeaders(devImpersonate),
           "Content-Type": "application/json",
         },
         credentials: "include",
@@ -121,7 +129,7 @@ export default function SettingsPage() {
       <SignedIn>
         <div className="flex items-center gap-4">
           <Link
-            href="/"
+            href={withImpersonateParam("/", devImpersonate)}
             className="text-sm text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
           >
             ← Back
@@ -159,10 +167,10 @@ export default function SettingsPage() {
                     vatRegistrationType: e.target.value as VatSettings["vatRegistrationType"],
                   }))
                 }
-                className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--foreground)] focus:outline-none focus:ring-2 focus:ring-sb-accent"
+                className="mt-1 w-full rounded-lg border border-zinc-600 bg-black px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-sb-accent"
               >
                 {VAT_TYPES.map((t) => (
-                  <option key={t.value} value={t.value}>
+                  <option key={t.value} className="bg-black text-white" value={t.value}>
                     {t.label}
                   </option>
                 ))}
@@ -180,7 +188,7 @@ export default function SettingsPage() {
                 type="date"
                 value={form.vatEffectiveDate}
                 onChange={(e) => setForm((prev) => ({ ...prev, vatEffectiveDate: e.target.value }))}
-                className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--foreground)] focus:outline-none focus:ring-2 focus:ring-sb-accent"
+                className="mt-1 w-full rounded-lg border border-zinc-600 bg-black px-3 py-2 text-sm text-white outline-none [color-scheme:dark] focus:ring-2 focus:ring-sb-accent"
               />
             </div>
 

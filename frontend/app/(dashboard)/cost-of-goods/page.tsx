@@ -5,6 +5,7 @@ import { useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { useDisplaySettings } from "@/contexts/display-settings-context";
 import { useMarketplace } from "@/contexts/marketplace-context";
+import { getDevImpersonationHeaders } from "@/lib/impersonation";
 
 type ProductRow = {
   id: string;
@@ -38,6 +39,7 @@ function CostOfGoodsInner() {
   const { isSignedIn, getToken } = useAuth();
   const { selectedMarketplaceId } = useMarketplace();
   const searchParams = useSearchParams();
+  const devImpersonate = searchParams.get("impersonate");
   const missingParamOn = searchParams.get("missing") === "1";
   const [cogsFilter, setCogsFilter] = useState<"missing" | "complete" | "all">(
     "missing",
@@ -172,6 +174,7 @@ function CostOfGoodsInner() {
       if (!token) throw new Error("Not authenticated.");
       const authHeaders = {
         Authorization: `Bearer ${token}`,
+        ...getDevImpersonationHeaders(devImpersonate),
         ...(selectedMarketplaceId ? { "x-marketplace-id": selectedMarketplaceId } : {}),
       };
 
