@@ -893,6 +893,27 @@ ping() {
   }
 
   /**
+   * Bulk COGS upload: body { rows: [{ asin, unitCostIncVat, ... }] } — one ledger entry per row.
+   * ASIN must match a product already in the account.
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Post('cost-of-goods/bulk-upload')
+  async bulkUploadCostOfGoods(
+    @Req() req: { user: { orgId: string; userId: string } },
+    @Body() body: { rows?: unknown[] },
+  ) {
+    const rows = body?.rows;
+    if (!Array.isArray(rows)) {
+      throw new BadRequestException('JSON body must include a "rows" array');
+    }
+    return this.amazonService.bulkUploadCostOfGoodsRows(
+      req.user.orgId,
+      req.user.userId,
+      rows,
+    );
+  }
+
+  /**
    * Cost of Goods: list inventory SKUs that have no cost entries in the DB
    * (no Purchase rows and no/zero Product.costOfGoods). Paginated with take/skip.
    *

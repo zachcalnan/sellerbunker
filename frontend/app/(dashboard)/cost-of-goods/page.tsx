@@ -6,6 +6,7 @@ import { Suspense, useEffect, useMemo, useState } from "react";
 import { useDisplaySettings } from "@/contexts/display-settings-context";
 import { useMarketplace } from "@/contexts/marketplace-context";
 import { getDevImpersonationHeaders } from "@/lib/impersonation";
+import { CogsBulkUpload } from "@/components/cogs-bulk-upload";
 
 type ProductRow = {
   id: string;
@@ -34,6 +35,27 @@ type CostEntryRow = {
   product: ProductRow;
 };
 
+/** SKU row in the main grid (Missing / Complete / All). Complete tab may include latest ledger snapshot from API. */
+type SkuCardItem = {
+  id: string;
+  sku: string;
+  asin: string | null;
+  title: string | null;
+  imageUrl: string | null;
+  revenue?: number;
+  units?: number;
+  latestCostEntry?: CostEntryRow | null;
+  productFallbackUnitCost?: number | null;
+};
+
+/** Response item from cost-of-goods SKU list (complete/all); extends product row with optional metrics and ledger snapshot. */
+type CogsSkuListApiItem = ProductRow & {
+  revenue?: number;
+  units?: number;
+  latestCostEntry?: CostEntryRow | null;
+  productFallbackUnitCost?: number | null;
+};
+
 function CostOfGoodsInner() {
   const baseUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
   const { isSignedIn, getToken } = useAuth();
@@ -59,8 +81,6 @@ function CostOfGoodsInner() {
       asin: string | null;
       title: string | null;
       imageUrl: string | null;
-      revenue: number;
-      units: number;
       lineItems: number;
     }[]
   >([]);
@@ -68,17 +88,7 @@ function CostOfGoodsInner() {
 
   const SKU_FETCH_SIZE = 500;
   const DISPLAY_PAGE_SIZE = 20;
-  const [skuItems, setSkuItems] = useState<
-    Array<{
-      id: string;
-      sku: string;
-      asin: string | null;
-      title: string | null;
-      imageUrl: string | null;
-      revenue?: number;
-      units?: number;
-    }>
-  >([]);
+  const [skuItems, setSkuItems] = useState<SkuCardItem[]>([]);
   const [skuTotal, setSkuTotal] = useState(0);
   const [skuPage, setSkuPage] = useState(1);
 
@@ -272,8 +282,6 @@ function CostOfGoodsInner() {
             asin: string | null;
             title: string | null;
             imageUrl: string | null;
-            revenue: number;
-            units: number;
           }>;
         };
         const items = Array.isArray(missingData.items) ? missingData.items : [];
@@ -284,21 +292,42 @@ function CostOfGoodsInner() {
             asin: m.asin,
             title: m.title,
             imageUrl: m.imageUrl,
-            revenue: m.revenue,
-            units: m.units,
           })),
         );
         setSkuTotal(typeof missingData.missingSkusCount === "number" ? missingData.missingSkusCount : 0);
         setMissingCount(typeof missingData.missingSkusCount === "number" ? missingData.missingSkusCount : null);
         setMissing(
           items.map((m) => ({
-            ...m,
+            productId: m.productId,
+            sku: m.sku,
+            asin: m.asin,
+            title: m.title,
+            imageUrl: m.imageUrl,
             lineItems: 0,
           })),
         );
       } else {
-        const allData = (await skuListRes.json()) as { total: number; items: ProductRow[] };
-        setSkuItems(Array.isArray(allData.items) ? allData.items : []);
+        const allData = (await skuListRes.json()) as {
+          total: number;
+          items: CogsSkuListApiItem[];
+        };
+        const raw = Array.isArray(allData.items) ? allData.items : [];
+        setSkuItems(
+          raw.map(
+            (it): SkuCardItem => ({
+              id: it.id,
+              sku: it.sku,
+              asin: it.asin,
+              title: it.title,
+              imageUrl: it.imageUrl,
+              revenue:
+                typeof it.revenue === "number" ? it.revenue : undefined,
+              units: typeof it.units === "number" ? it.units : undefined,
+              latestCostEntry: it.latestCostEntry ?? null,
+              productFallbackUnitCost: it.productFallbackUnitCost,
+            }),
+          ),
+        );
         setSkuTotal(typeof allData.total === "number" ? allData.total : 0);
       }
     } catch (e) {
@@ -381,7 +410,7 @@ function CostOfGoodsInner() {
 
     setForm({
       productId: editingEntry.product.id,
-      fulfilment: "FBA",
+      fulfilment: editingEntry.fulfilment?.trim() || "FBA",
       supplier: editingEntry.supplier ?? "",
       supplierLink: editingEntry.supplierLink ?? "",
       bundleSize: String(editingEntry.bundleSize ?? 1),
@@ -399,6 +428,7 @@ function CostOfGoodsInner() {
 
   useEffect(() => {
     if (!showForm || !vatSettings) return;
+    if (editingEntry) return;
     if (vatSettings.vatRegistrationType === "VAT_STANDARD") {
       const pct = vatSettings.vatRatePct ?? 20;
       setForm((prev) => ({ ...prev, vatRatePct: String(pct) }));
@@ -407,7 +437,13 @@ function CostOfGoodsInner() {
       setDeliveryVatMode(incl ? "inc" : "ex");
       setPrepVatMode(incl ? "inc" : "ex");
     }
-  }, [showForm, vatSettings?.vatRegistrationType, vatSettings?.vatRatePct, vatSettings?.vatCostsIncludeVat]);
+  }, [
+    showForm,
+    editingEntry,
+    vatSettings?.vatRegistrationType,
+    vatSettings?.vatRatePct,
+    vatSettings?.vatCostsIncludeVat,
+  ]);
 
   useEffect(() => {
     if (!showForm) return;
@@ -734,6 +770,32 @@ function CostOfGoodsInner() {
     }
   };
 
+  const bulkUploadCogsRows = async (rows: Record<string, unknown>[]) => {
+    const token = await getToken({ template: "backend" });
+    if (!token) throw new Error("Not authenticated.");
+    const authHeaders = {
+      Authorization: `Bearer ${token}`,
+      ...getDevImpersonationHeaders(devImpersonate),
+      ...(selectedMarketplaceId ? { "x-marketplace-id": selectedMarketplaceId } : {}),
+    };
+    const res = await fetch(`${baseUrl}/api/amazon/cost-of-goods/bulk-upload`, {
+      method: "POST",
+      headers: {
+        ...authHeaders,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ rows }),
+    });
+    if (!res.ok) {
+      const msg = await res.text();
+      throw new Error(msg || "Bulk upload failed.");
+    }
+    return (await res.json()) as {
+      created: number;
+      errors: Array<{ rowIndex: number; asin?: string; message: string }>;
+    };
+  };
+
   const saveFixedCosts = async () => {
     setFixedCostsSaving(true);
     setError(null);
@@ -926,29 +988,38 @@ function CostOfGoodsInner() {
             </div>
           </div>
         )}
-        <div className="mt-4 flex w-full flex-col gap-3 sm:flex-row sm:items-center">
+        <div className="mt-4 flex w-full flex-col gap-3 sm:flex-row sm:items-center sm:flex-wrap">
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search SKU / ASIN / title / shipment / supplier…"
             className="w-full rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--foreground)] outline-none sm:w-80"
           />
-          <button
-            type="button"
-            onClick={() => {
-              if (showForm) {
-                setShowForm(false);
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                if (showForm) {
+                  setShowForm(false);
+                  setEditingEntry(null);
+                  return;
+                }
                 setEditingEntry(null);
-                return;
-              }
-              setEditingEntry(null);
-              resetNewEntryForm();
-              setShowForm(true);
-            }}
-            className="cursor-pointer rounded-lg bg-sb-accent px-3 py-2 text-sm font-medium text-black"
-          >
-            {showForm ? "Close" : "Add entry"}
-          </button>
+                resetNewEntryForm();
+                setShowForm(true);
+              }}
+              className="cursor-pointer rounded-lg bg-sb-accent px-3 py-2 text-sm font-medium text-black"
+            >
+              {showForm ? "Close" : "New COGS entry"}
+            </button>
+            <CogsBulkUpload
+              onUpload={bulkUploadCogsRows}
+              onFinished={async () => {
+                setSkip(0);
+                await load();
+              }}
+            />
+          </div>
         </div>
         <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-2 text-xs text-[var(--muted-foreground)]">
@@ -1071,7 +1142,7 @@ function CostOfGoodsInner() {
                     </div>
                   ) : (
                     <div className="text-sm font-medium">
-                      {editingEntry ? "Edit cost entry" : "Add cost entry"}
+                      {editingEntry ? "View / edit cost entry" : "Add cost entry"}
                     </div>
                   )}
                 </div>
@@ -1539,7 +1610,7 @@ function CostOfGoodsInner() {
                         }}
                         className="cursor-pointer rounded-lg bg-sb-accent px-3 py-2 text-sm font-medium text-black"
                       >
-                        Add entry
+                        New COGS entry
                       </button>
                     </div>
                     {cogsFilter === "missing" ? (
@@ -1556,50 +1627,134 @@ function CostOfGoodsInner() {
                   </div>
                 ) : (
                   <div className="grid gap-3 p-4 sm:grid-cols-2">
-                    {paginatedSkuItems.map((p) => (
-                      <div
-                        key={p.id}
-                        className="flex items-start gap-3 rounded-lg border border-[var(--surface-border)] bg-[var(--surface)] p-3"
-                      >
-                        <div className="h-10 w-10 shrink-0 overflow-hidden rounded-md bg-[var(--surface)] ring-1 ring-[var(--surface-border)]">
-                          {p.imageUrl ? (
-                            // eslint-disable-next-line @next/next/no-img-element
-                            <img
-                              src={p.imageUrl}
-                              alt=""
-                              className="h-full w-full object-cover"
-                              loading="lazy"
-                              referrerPolicy="no-referrer"
-                            />
-                          ) : null}
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <div className="truncate text-sm font-medium text-[var(--foreground)]">
-                            {p.title ?? "—"}
+                    {paginatedSkuItems.map((p) => {
+                      const entry = p.latestCostEntry;
+                      const showCompleteCogs =
+                        cogsFilter === "complete" && entry != null;
+                      const showFallbackOnly =
+                        cogsFilter === "complete" &&
+                        entry == null &&
+                        p.productFallbackUnitCost != null &&
+                        p.productFallbackUnitCost > 0;
+
+                      return (
+                        <div
+                          key={p.id}
+                          className="flex items-start gap-3 rounded-lg border border-[var(--surface-border)] bg-[var(--surface)] p-3"
+                        >
+                          <div className="h-10 w-10 shrink-0 overflow-hidden rounded-md bg-[var(--surface)] ring-1 ring-[var(--surface-border)]">
+                            {p.imageUrl ? (
+                              // eslint-disable-next-line @next/next/no-img-element
+                              <img
+                                src={p.imageUrl}
+                                alt=""
+                                className="h-full w-full object-cover"
+                                loading="lazy"
+                                referrerPolicy="no-referrer"
+                              />
+                            ) : null}
                           </div>
-                          <div className="mt-0.5 font-mono text-xs text-[var(--muted-foreground)]">
-                            {p.sku}
-                            {p.asin ? ` · ${p.asin}` : ""}
-                          </div>
-                          {p.revenue != null && p.units != null ? (
-                            <div className="mt-1 text-xs text-[var(--muted-foreground)]">
-                              {p.units} units · £{p.revenue.toFixed(2)} revenue
+                          <div className="min-w-0 flex-1">
+                            <div className="truncate text-sm font-medium text-[var(--foreground)]">
+                              {p.title ?? "—"}
                             </div>
-                          ) : null}
-                          <button
-                            type="button"
-                            className="mt-2 cursor-pointer rounded-lg bg-sb-accent px-3 py-1.5 text-xs font-medium text-black"
-                            onClick={() => {
-                              setEditingEntry(null);
-                              setShowForm(true);
-                              resetNewEntryForm(p.id);
-                            }}
-                          >
-                            Add entry
-                          </button>
+                            <div className="mt-0.5 font-mono text-xs text-[var(--muted-foreground)]">
+                              {p.sku}
+                              {p.asin ? ` · ${p.asin}` : ""}
+                            </div>
+                            {cogsFilter !== "missing" &&
+                            p.revenue != null &&
+                            p.units != null ? (
+                              <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                                {p.units} units · £{p.revenue.toFixed(2)} revenue
+                              </div>
+                            ) : null}
+
+                            {showCompleteCogs ? (
+                              <div className="mt-2 space-y-1">
+                                <div className="text-sm text-[var(--foreground)]">
+                                  <span className="text-[var(--muted-foreground)]">
+                                    Unit (inc VAT):{" "}
+                                  </span>
+                                  {formatCurrency(
+                                    entry.unitCostIncVat,
+                                    entry.currency,
+                                  )}
+                                </div>
+                                <div className="text-xs text-[var(--muted-foreground)]">
+                                  {new Date(
+                                    entry.purchaseDate,
+                                  ).toLocaleDateString("en-GB", {
+                                    day: "numeric",
+                                    month: "short",
+                                    year: "numeric",
+                                  })}
+                                  {(entry.deliveryCostIncVat > 0 ||
+                                    entry.prepCostIncVat > 0) && (
+                                    <>
+                                      {" · "}
+                                      Line total inc VAT:{" "}
+                                      {formatCurrency(
+                                        entry.totalCostIncVat,
+                                        entry.currency,
+                                      )}
+                                    </>
+                                  )}
+                                </div>
+                                <button
+                                  type="button"
+                                  className="mt-1 cursor-pointer rounded-lg bg-sb-accent px-3 py-1.5 text-xs font-medium text-black"
+                                  onClick={() => beginEdit(entry)}
+                                >
+                                  View / edit COGS
+                                </button>
+                              </div>
+                            ) : showFallbackOnly ? (
+                              <div className="mt-2 space-y-1">
+                                <div className="text-sm text-[var(--foreground)]">
+                                  <span className="text-[var(--muted-foreground)]">
+                                    Unit COGS (SKU):{" "}
+                                  </span>
+                                  {formatCurrency(
+                                    p.productFallbackUnitCost!,
+                                    "GBP",
+                                  )}
+                                </div>
+                                <p className="text-xs text-[var(--muted-foreground)]">
+                                  No ledger row yet — add one for delivery, prep,
+                                  and history.
+                                </p>
+                                <button
+                                  type="button"
+                                  className="mt-1 cursor-pointer rounded-lg bg-sb-accent px-3 py-1.5 text-xs font-medium text-black"
+                                  onClick={() => {
+                                    setEditingEntry(null);
+                                    setShowForm(true);
+                                    resetNewEntryForm(p.id);
+                                  }}
+                                >
+                                  Add ledger entry
+                                </button>
+                              </div>
+                            ) : (
+                              <button
+                                type="button"
+                                className="mt-2 cursor-pointer rounded-lg bg-sb-accent px-3 py-1.5 text-xs font-medium text-black"
+                                onClick={() => {
+                                  setEditingEntry(null);
+                                  setShowForm(true);
+                                  resetNewEntryForm(p.id);
+                                }}
+                              >
+                                {cogsFilter === "complete"
+                                  ? "Add COGS entry"
+                                  : "Add entry"}
+                              </button>
+                            )}
+                          </div>
                         </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </>

@@ -44,6 +44,73 @@ export class AffiliateService {
   }
 
   /**
+   * Share of each qualifying payment for this referred user (1st / 2nd / 3+ invoice).
+   * Env overrides; defaults: 100% / 50% / 25%.
+   */
+  commissionRateForPaymentNumber(paymentNumber: number): number {
+    const parseRate = (key: string, fallback: number): number => {
+      const raw = this.config.get<string>(key);
+      if (raw === undefined || raw === '') return fallback;
+      const n = parseFloat(raw);
+      return Number.isFinite(n) && n >= 0 ? n : fallback;
+    };
+    if (paymentNumber <= 1) {
+      return parseRate('AFFILIATE_COMMISSION_RATE_PAYMENT_1', 1);
+    }
+    if (paymentNumber === 2) {
+      return parseRate('AFFILIATE_COMMISSION_RATE_PAYMENT_2', 0.5);
+    }
+    return parseRate('AFFILIATE_COMMISSION_RATE_PAYMENT_3_PLUS', 0.25);
+  }
+
+  async getAffiliateStats(affiliateId: string) {
+    const affiliate = await this.prisma.affiliate.findUnique({
+      where: { id: affiliateId },
+      select: { id: true, referralCode: true, name: true, email: true, active: true },
+    });
+    if (!affiliate) return null;
+
+    const [referredSignups, paidUserIds, commissionAgg, pendingAgg, paidAgg] =
+      await Promise.all([
+        this.prisma.user.count({ where: { referredAffiliateId: affiliateId } }),
+        this.prisma.affiliateCommission.groupBy({
+          by: ['userId'],
+          where: { affiliateId },
+        }),
+        this.prisma.affiliateCommission.aggregate({
+          where: { affiliateId },
+          _count: true,
+          _sum: { amount: true },
+        }),
+        this.prisma.affiliateCommission.aggregate({
+          where: { affiliateId, status: 'pending' },
+          _sum: { amount: true },
+        }),
+        this.prisma.affiliateCommission.aggregate({
+          where: { affiliateId, status: 'paid' },
+          _sum: { amount: true },
+        }),
+      ]);
+
+    const referredUsersWhoPaid = paidUserIds.length; // distinct referred users with ≥1 commission row
+
+    return {
+      affiliate,
+      referredSignups,
+      referredUsersWhoPaid,
+      commissionRows: commissionAgg._count,
+      totalCommissionAmount: commissionAgg._sum.amount?.toString() ?? '0',
+      pendingCommissionAmount: pendingAgg._sum.amount?.toString() ?? '0',
+      paidOutCommissionAmount: paidAgg._sum.amount?.toString() ?? '0',
+      tierRates: {
+        payment1: this.commissionRateForPaymentNumber(1),
+        payment2: this.commissionRateForPaymentNumber(2),
+        payment3Plus: this.commissionRateForPaymentNumber(3),
+      },
+    };
+  }
+
+  /**
    * Create a pending commission when a referred user pays (invoice or checkout with amount).
    * Idempotent on stripeEventId.
    */
@@ -92,7 +159,7 @@ export class AffiliateService {
     }
 
     const grossMajor = amountPaidMinorUnits / 100;
-    const rate = Number(affiliate.commissionRate);
+    const rate = this.commissionRateForPaymentNumber(paymentNumber);
     const amount = Math.round(grossMajor * rate * 100) / 100;
     if (amount <= 0) return;
 
@@ -110,7 +177,7 @@ export class AffiliateService {
         },
       });
       this.logger.log(
-        `Commission pending: £${amount} (${currency}) user=${userId} affiliate=${affiliateId} payment#${paymentNumber} event=${stripeEventId}`,
+        `Commission pending: ${amount} (${currency}) user=${userId} affiliate=${affiliateId} payment#${paymentNumber} rate=${rate} event=${stripeEventId}`,
       );
     } catch (e: unknown) {
       const code = (e as { code?: string })?.code;
@@ -232,7 +299,8 @@ export class AffiliateService {
     if (!referralCode) {
       throw new Error('referralCode is required');
     }
-    const rate = data.commissionRate ?? 0.15;
+    // Stored for reference; payout % uses env tiered rates (1st / 2nd / 3+ payment).
+    const rate = data.commissionRate ?? 1;
     return this.prisma.affiliate.create({
       data: {
         referralCode,

@@ -3,6 +3,7 @@ import {
   Controller,
   Get,
   Headers,
+  NotFoundException,
   Param,
   Patch,
   Post,
@@ -63,6 +64,19 @@ export class AffiliateAdminController {
   async listAffiliates(@Headers('x-affiliate-admin-secret') secret: string | undefined) {
     this.assertAdminSecret(secret);
     return this.affiliateService.listAffiliates();
+  }
+
+  @Get('affiliates/:id/stats')
+  async affiliateStats(
+    @Headers('x-affiliate-admin-secret') secret: string | undefined,
+    @Param('id') id: string,
+  ) {
+    this.assertAdminSecret(secret);
+    const stats = await this.affiliateService.getAffiliateStats(id.trim());
+    if (!stats) {
+      throw new NotFoundException('Affiliate not found');
+    }
+    return stats;
   }
 
   @Get('commissions')

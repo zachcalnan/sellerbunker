@@ -4143,13 +4143,49 @@ export class AmazonService {
 
   /**
    * List inventory SKUs that have at least one cost entry (Purchase row or Product.costOfGoods > 0).
-   * Paginated for the "Complete" tab.
+   * Paginated for the "Complete" tab. Includes latest purchase row per SKU when present (for UI).
    */
   async listProductsWithCostFromInventory(
     orgId: string,
     opts?: { take?: number; skip?: number },
     marketplaceId?: string,
-  ): Promise<{ total: number; items: Array<{ id: string; sku: string; asin: string | null; title: string | null; imageUrl: string | null }> }> {
+  ): Promise<{
+    total: number;
+    items: Array<{
+      id: string;
+      sku: string;
+      asin: string | null;
+      title: string | null;
+      imageUrl: string | null;
+      latestCostEntry: {
+        id: string;
+        fulfilment: string;
+        supplier: string | null;
+        supplierLink: string | null;
+        bundleSize: number;
+        purchaseDate: string;
+        orderNumber: string | null;
+        shipmentId: string | null;
+        qtyPurchased: number;
+        qtyDelivered: number;
+        currency: string;
+        vatRatePct: number;
+        unitCostIncVat: number;
+        deliveryCostIncVat: number;
+        prepCostIncVat: number;
+        totalCostIncVat: number;
+        product: {
+          id: string;
+          sku: string;
+          asin: string | null;
+          title: string | null;
+          imageUrl: string | null;
+        };
+      } | null;
+      /** When there is no purchase row but Product.costOfGoods is set */
+      productFallbackUnitCost: number | null;
+    }>;
+  }> {
     const userIds = await this.getOrgMemberUserIds(orgId);
     const take = Math.max(1, Math.min(100, opts?.take ?? 10));
     const skip = Math.max(0, opts?.skip ?? 0);
@@ -4214,10 +4250,123 @@ export class AmazonService {
       select: { id: true, sku: true, asin: true, title: true, imageUrl: true },
     });
     const byId = new Map(products.map((p) => [p.id, p]));
+
+    const cogsByProductId = new Map<string, number>();
+    for (const row of productsWithCogs) {
+      if (pageIds.includes(row.id)) {
+        cogsByProductId.set(row.id, toNum(row.costOfGoods));
+      }
+    }
+
+    type LatestPurRow = {
+      id: string;
+      product_id: string;
+      fulfilment: string;
+      supplier: string | null;
+      supplier_link: string | null;
+      bundle_size: number;
+      purchase_date: Date;
+      order_number: string | null;
+      shipment_id: string | null;
+      qty_purchased: number;
+      qty_delivered: number;
+      currency: string;
+      vat_rate_pct: unknown;
+      unit_cost_inc_vat: unknown;
+      delivery_cost_inc_vat: unknown;
+      prep_cost_inc_vat: unknown;
+      total_cost_inc_vat: unknown;
+    };
+
+    const latestRows =
+      pageIds.length > 0 && userIds.length > 0
+        ? await this.prisma.$queryRaw<LatestPurRow[]>(Prisma.sql`
+            SELECT DISTINCT ON (p.product_id)
+              p.id,
+              p.product_id,
+              p.fulfilment,
+              p.supplier,
+              p.supplier_link,
+              p.bundle_size,
+              p.purchase_date,
+              p.order_number,
+              p.shipment_id,
+              p.qty_purchased,
+              p.qty_delivered,
+              p.currency,
+              p.vat_rate_pct,
+              p.unit_cost_inc_vat,
+              p.delivery_cost_inc_vat,
+              p.prep_cost_inc_vat,
+              p.total_cost_inc_vat
+            FROM purchases p
+            WHERE p.product_id IN (${Prisma.join(pageIds)})
+              AND p.user_id IN (${Prisma.join(userIds)})
+            ORDER BY p.product_id, p.purchase_date DESC, p.updated_at DESC
+          `)
+        : [];
+
+    const latestByProduct = new Map<string, LatestPurRow>();
+    for (const r of latestRows) {
+      latestByProduct.set(r.product_id, r);
+    }
+
     const items = pageIds.map((id) => {
       const p = byId.get(id);
-      if (p) return p;
-      return { id, sku: id, asin: null as string | null, title: null as string | null, imageUrl: null as string | null };
+      const base = p ?? {
+        id,
+        sku: id,
+        asin: null as string | null,
+        title: null as string | null,
+        imageUrl: null as string | null,
+      };
+      const row = latestByProduct.get(id);
+      if (row) {
+        return {
+          id: base.id,
+          sku: base.sku,
+          asin: base.asin,
+          title: base.title,
+          imageUrl: base.imageUrl,
+          latestCostEntry: {
+            id: row.id,
+            fulfilment: row.fulfilment,
+            supplier: row.supplier,
+            supplierLink: row.supplier_link,
+            bundleSize: row.bundle_size,
+            purchaseDate: row.purchase_date.toISOString(),
+            orderNumber: row.order_number,
+            shipmentId: row.shipment_id,
+            qtyPurchased: row.qty_purchased,
+            qtyDelivered: row.qty_delivered,
+            currency: row.currency,
+            vatRatePct: toNum(row.vat_rate_pct),
+            unitCostIncVat: toNum(row.unit_cost_inc_vat),
+            deliveryCostIncVat: toNum(row.delivery_cost_inc_vat),
+            prepCostIncVat: toNum(row.prep_cost_inc_vat),
+            totalCostIncVat: toNum(row.total_cost_inc_vat),
+            product: {
+              id: base.id,
+              sku: base.sku,
+              asin: base.asin,
+              title: base.title,
+              imageUrl: base.imageUrl,
+            },
+          },
+          productFallbackUnitCost: null as number | null,
+        };
+      }
+      const fb = cogsByProductId.get(id);
+      return {
+        id: base.id,
+        sku: base.sku,
+        asin: base.asin,
+        title: base.title,
+        imageUrl: base.imageUrl,
+        latestCostEntry: null,
+        productFallbackUnitCost:
+          fb != null && fb > 0 ? Number(fb.toFixed(2)) : null,
+      };
     });
     return { total, items };
   }
@@ -8692,6 +8841,202 @@ try {
     };
   }
 
+  /**
+   * Bulk-create COGS ledger rows from client-parsed spreadsheet rows (ASIN → product lookup).
+   * Each row becomes one Purchase; partial success returns per-row errors.
+   */
+  async bulkUploadCostOfGoodsRows(
+    orgId: string,
+    userId: string,
+    rows: unknown[],
+  ): Promise<{
+    created: number;
+    errors: Array<{ rowIndex: number; asin?: string; message: string }>;
+  }> {
+    const MAX = 2000;
+    if (!Array.isArray(rows)) {
+      throw new BadRequestException('rows must be an array');
+    }
+    if (rows.length === 0) {
+      throw new BadRequestException('rows is empty');
+    }
+    if (rows.length > MAX) {
+      throw new BadRequestException(`At most ${MAX} rows per upload`);
+    }
+
+    const userIds = await this.getOrgMemberUserIds(orgId);
+    const errors: Array<{ rowIndex: number; asin?: string; message: string }> =
+      [];
+    let created = 0;
+
+    const num = (v: unknown, def?: number): number | undefined => {
+      if (v === null || v === undefined || v === '') return def;
+      if (typeof v === 'number') {
+        return Number.isFinite(v) ? v : def;
+      }
+      const cleaned = String(v).replace(/[£$€\s]/g, '').replace(/,/g, '');
+      const n = parseFloat(cleaned);
+      if (!Number.isFinite(n)) return def;
+      return n;
+    };
+
+    const str = (v: unknown): string | undefined => {
+      if (v === null || v === undefined) return undefined;
+      const s = String(v).trim();
+      return s === '' ? undefined : s;
+    };
+
+    const parseUkStyleNumericDate = (s: string): Date | undefined => {
+      const m = s
+        .trim()
+        .match(/^(\d{1,2})[/.-](\d{1,2})[/.-](\d{4}|\d{2})$/);
+      if (!m) return undefined;
+      const a = parseInt(m[1], 10);
+      const b = parseInt(m[2], 10);
+      let y = parseInt(m[3], 10);
+      if (y < 100) y += 2000;
+      let day: number;
+      let month: number;
+      if (a > 12) {
+        day = a;
+        month = b;
+      } else if (b > 12) {
+        month = a;
+        day = b;
+      } else {
+        // Both ≤12: assume day/month/year (UK-style), e.g. 4/2/2026 → 4 Feb 2026
+        day = a;
+        month = b;
+      }
+      const d = new Date(y, month - 1, day);
+      if (
+        Number.isNaN(d.getTime()) ||
+        d.getFullYear() !== y ||
+        d.getMonth() !== month - 1 ||
+        d.getDate() !== day
+      ) {
+        return undefined;
+      }
+      return d;
+    };
+
+    const parseDate = (v: unknown): string | undefined => {
+      if (v === null || v === undefined || v === '') return undefined;
+      if (v instanceof Date && !Number.isNaN(v.getTime())) {
+        return v.toISOString();
+      }
+      if (typeof v === 'number' && Number.isFinite(v)) {
+        const excelEpoch = new Date(Date.UTC(1899, 11, 30));
+        const d = new Date(excelEpoch.getTime() + v * 86400000);
+        if (!Number.isNaN(d.getTime())) return d.toISOString();
+      }
+      const s = String(v).trim();
+      const uk = parseUkStyleNumericDate(s);
+      if (uk) return uk.toISOString();
+      const d = new Date(s);
+      if (!Number.isNaN(d.getTime())) return d.toISOString();
+      return undefined;
+    };
+
+    const normalizeAsin = (raw: string): string =>
+      raw.replace(/\s/g, '').toUpperCase();
+
+    for (let i = 0; i < rows.length; i++) {
+      const rowIndex = i + 1;
+      const row = rows[i];
+      if (!row || typeof row !== 'object') {
+        errors.push({ rowIndex, message: 'Row is not an object' });
+        continue;
+      }
+      const o = row as Record<string, unknown>;
+      const asinRaw = str(o.asin);
+      if (!asinRaw) {
+        errors.push({ rowIndex, message: 'Missing ASIN' });
+        continue;
+      }
+      const asin = normalizeAsin(asinRaw);
+      if (!asin) {
+        errors.push({ rowIndex, message: 'Invalid ASIN' });
+        continue;
+      }
+
+      const unitCostIncVat = num(o.unitCostIncVat);
+      if (unitCostIncVat === undefined || unitCostIncVat <= 0) {
+        errors.push({
+          rowIndex,
+          asin,
+          message: 'unitCostIncVat must be a positive number',
+        });
+        continue;
+      }
+
+      const product = await this.prisma.product.findFirst({
+        where: {
+          userId: { in: userIds },
+          asin: { equals: asin, mode: 'insensitive' },
+        },
+        select: { id: true, userId: true },
+      });
+
+      if (!product) {
+        errors.push({
+          rowIndex,
+          asin,
+          message: 'No product with this ASIN in your account',
+        });
+        continue;
+      }
+
+      let purchaseDateIso: string;
+      const pd = parseDate(o.purchaseDate);
+      if (pd) {
+        purchaseDateIso = pd;
+      } else {
+        purchaseDateIso = new Date().toISOString();
+      }
+
+      const qtyPurchased = Math.max(0, num(o.qtyPurchased, 1) ?? 1);
+      const qtyDelivered = Math.max(0, num(o.qtyDelivered, 1) ?? 1);
+      const deliveryCostIncVat = Math.max(
+        0,
+        num(o.deliveryCostIncVat, 0) ?? 0,
+      );
+      const prepCostIncVat = Math.max(0, num(o.prepCostIncVat, 0) ?? 0);
+      const vatRatePct = Math.max(0, num(o.vatRatePct, 0) ?? 0);
+
+      try {
+        await this.createPurchase(orgId, product.userId, {
+          productId: product.id,
+          fulfilment: str(o.fulfilment) ?? 'FBA',
+          supplier: str(o.supplier),
+          supplierLink: str(o.supplierLink),
+          bundleSize: Math.max(1, Math.floor(num(o.bundleSize, 1) ?? 1)),
+          purchaseDate: purchaseDateIso,
+          orderNumber: str(o.orderNumber),
+          shipmentId: str(o.shipmentId),
+          qtyPurchased,
+          qtyDelivered,
+          currency: (str(o.currency) ?? 'GBP').toUpperCase(),
+          vatRatePct,
+          unitCostIncVat,
+          deliveryCostIncVat,
+          prepCostIncVat,
+        });
+        created += 1;
+      } catch (e: unknown) {
+        const msg =
+          e instanceof Error
+            ? e.message
+            : typeof e === 'string'
+              ? e
+              : 'Failed to create entry';
+        errors.push({ rowIndex, asin, message: msg });
+      }
+    }
+
+    return { created, errors };
+  }
+
   async seedCostOfGoodsEntriesFromProducts(orgId: string) {
     const userIds = await this.getOrgMemberUserIds(orgId);
 
@@ -8855,8 +9200,6 @@ try {
           asin: p.asin,
           title: p.title,
           imageUrl: p.imageUrl,
-          revenue: 0,
-          units: 0,
         };
       }
       return {
@@ -8865,8 +9208,6 @@ try {
         asin: null as string | null,
         title: null as string | null,
         imageUrl: null as string | null,
-        revenue: 0,
-        units: 0,
       };
     });
 
