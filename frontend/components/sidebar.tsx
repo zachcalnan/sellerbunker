@@ -13,6 +13,7 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MarketplaceSelector } from "./marketplace-selector";
 import { getDevImpersonationHeaders, withImpersonateParam } from "@/lib/impersonation";
+import { useRefCookie } from "@/hooks/use-ref-cookie";
 
 function DashboardIcon({ className }: { className?: string }) {
   return (
@@ -214,6 +215,7 @@ const BASE_URL =
 export function Sidebar() {
   const { isSignedIn, getToken } = useAuth();
   const { signOut } = useClerk();
+  const refFromCookie = useRefCookie();
   const pathname = usePathname();
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -410,7 +412,11 @@ export function Sidebar() {
                 Sign in
               </button>
             </SignInButton>
-            <SignUpButton>
+            <SignUpButton
+              unsafeMetadata={
+                refFromCookie ? { ref: refFromCookie } : undefined
+              }
+            >
               <button className="w-full cursor-pointer rounded-lg bg-indigo-600 px-3 py-2 text-center text-sm font-medium text-white hover:bg-indigo-500">
                 Sign up
               </button>

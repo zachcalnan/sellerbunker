@@ -1,6 +1,6 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { verifyToken } from '@clerk/backend';
+import { createClerkClient, verifyToken } from '@clerk/backend';
 
 interface ClerkTokenPayload {
   sub: string;
@@ -49,5 +49,22 @@ export class ClerkService {
       console.error('Clerk verifyToken error:', err);
       throw new UnauthorizedException('Invalid Clerk token');
     }
+  }
+
+  /**
+   * Referral code from SignUp unsafeMetadata (set from ?ref= cookie on the client).
+   */
+  async getReferralCodeFromClerkUser(clerkUserId: string): Promise<string | null> {
+    if (!clerkUserId) return null;
+    try {
+      const client = createClerkClient({ secretKey: this.secretKey });
+      const u = await client.users.getUser(clerkUserId);
+      const meta = u.unsafeMetadata as Record<string, unknown> | undefined;
+      const v = meta?.ref ?? meta?.referralCode;
+      if (typeof v === 'string' && v.trim()) return v.trim();
+    } catch (err) {
+      console.warn('[ClerkService] getUser for referral metadata failed', err);
+    }
+    return null;
   }
 }

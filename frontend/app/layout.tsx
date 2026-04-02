@@ -2,6 +2,8 @@ import type { Metadata } from "next";
 import { ClerkProvider } from "@clerk/nextjs";
 import { shadcn } from "@clerk/themes";
 import { Manrope } from "next/font/google";
+import { Suspense } from "react";
+import { RefAttribution } from "@/components/ref-attribution";
 import "./globals.css";
 
 const landingFont = Manrope({
@@ -73,6 +75,9 @@ export default function RootLayout({
           />
         </head>
         <body className={`${landingFont.variable} antialiased`}>
+          <Suspense fallback={null}>
+            <RefAttribution />
+          </Suspense>
           {children}
         </body>
       </html>

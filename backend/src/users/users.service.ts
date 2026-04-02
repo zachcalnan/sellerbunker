@@ -1,10 +1,16 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { User } from '@prisma/client';
+import { ClerkService } from '../clerk/clerk.service';
+import { AffiliateService } from '../affiliate/affiliate.service';
 
 @Injectable()
 export class UsersService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly clerkService: ClerkService,
+    private readonly affiliateService: AffiliateService,
+  ) {}
 
   async findByEmail(email: string): Promise<User | null> {
     return this.prisma.user.findUnique({
@@ -39,6 +45,20 @@ export class UsersService {
     });
   }
 
+  private async resolveReferralFromClerk(clerkId: string): Promise<{
+    referredBy: string | null;
+    referredAffiliateId: string | null;
+  }> {
+    const refRaw = await this.clerkService.getReferralCodeFromClerkUser(clerkId);
+    if (!refRaw) return { referredBy: null, referredAffiliateId: null };
+    const affiliate = await this.affiliateService.getAffiliateByCode(refRaw);
+    const normalized = this.affiliateService.normalizeReferralCode(refRaw);
+    if (!affiliate) {
+      return { referredBy: normalized || null, referredAffiliateId: null };
+    }
+    return { referredBy: affiliate.referralCode, referredAffiliateId: affiliate.id };
+  }
+
   async createFromClerk(params: {
     clerkId: string;
     email?: string;
@@ -57,14 +77,25 @@ export class UsersService {
     });
     if (byClerk) return byClerk;
 
+    const referral = await this.resolveReferralFromClerk(clerkId);
+
     // 2) A user with this email already exists (e.g. from earlier sign-up) -> link clerkId and return
     const byEmail = await this.prisma.user.findUnique({
       where: { email: emailToUse },
     });
     if (byEmail) {
+      const patch: {
+        clerkId: string;
+        referredBy?: string | null;
+        referredAffiliateId?: string | null;
+      } = { clerkId };
+      if (!byEmail.referredAffiliateId && referral.referredAffiliateId) {
+        patch.referredBy = referral.referredBy;
+        patch.referredAffiliateId = referral.referredAffiliateId;
+      }
       const updated = await this.prisma.user.update({
         where: { id: byEmail.id },
-        data: { clerkId },
+        data: patch,
       });
       return updated;
     }
@@ -75,6 +106,8 @@ export class UsersService {
         clerkId,
         email: emailToUse,
         passwordHash: '',
+        referredBy: referral.referredBy,
+        referredAffiliateId: referral.referredAffiliateId,
       },
     });
   }

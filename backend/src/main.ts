@@ -54,6 +54,7 @@ async function bootstrap() {
       'x-org-id',
       'x-organization-id',
       'x-marketplace-id',
+      'x-affiliate-admin-secret',
       // Dev-only header used to test a specific Clerk user locally.
       'x-impersonate-clerk-id',
     ],

@@ -3,8 +3,11 @@
 import { SignUp } from "@clerk/nextjs";
 import Link from "next/link";
 import { useEffect } from "react";
+import { useRefCookie } from "@/hooks/use-ref-cookie";
 
 export default function SignUpPage() {
+  const refFromCookie = useRefCookie();
+
   useEffect(() => {
     window.scrollTo(0, 0);
   }, []);
@@ -18,7 +21,11 @@ export default function SignUpPage() {
         ← Back
       </Link>
       <div className="relative z-10 flex w-full max-w-[calc(100vw-2rem)] justify-center">
-        <SignUp />
+        <SignUp
+          unsafeMetadata={
+            refFromCookie ? { ref: refFromCookie } : undefined
+          }
+        />
       </div>
     </div>
   );

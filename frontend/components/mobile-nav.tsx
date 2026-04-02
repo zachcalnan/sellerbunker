@@ -17,6 +17,7 @@ import { SettingsModal } from "./settings-modal";
 import { NotificationsDropdown } from "./notifications-dropdown";
 import { useFullscreen } from "@/contexts/fullscreen-context";
 import { withImpersonateParam } from "@/lib/impersonation";
+import { useRefCookie } from "@/hooks/use-ref-cookie";
 
 const BASE_URL =
   process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
@@ -257,6 +258,7 @@ function SettingsIcon({ className }: { className?: string }) {
 export function MobileNav() {
   const pathname = usePathname();
   const router = useRouter();
+  const refFromCookie = useRefCookie();
   const searchParams = useSearchParams();
   const devImpersonate = searchParams.get("impersonate");
   const [open, setOpen] = useState(false);
@@ -662,7 +664,11 @@ export function MobileNav() {
                         Sign in
                       </button>
                     </SignInButton>
-                    <SignUpButton>
+                    <SignUpButton
+                      unsafeMetadata={
+                        refFromCookie ? { ref: refFromCookie } : undefined
+                      }
+                    >
                       <button
                         onClick={closeDrawer}
                         className="w-full cursor-pointer rounded-lg bg-indigo-600 px-3 py-2.5 text-center text-sm font-medium text-white hover:bg-indigo-500"

@@ -14,6 +14,7 @@ import { OrgsModule } from './orgs/orgs.module';
 import { SubscriptionModule } from './subscription/subscription.module';
 import { StripeModule } from './stripe/stripe.module';
 import { MarketplaceModule } from './marketplace/marketplace.module';
+import { AffiliateModule } from './affiliate/affiliate.module';
 
 @Module({
   imports: [
@@ -47,6 +48,7 @@ import { MarketplaceModule } from './marketplace/marketplace.module';
     SubscriptionModule,
     StripeModule,
     MarketplaceModule,
+    AffiliateModule,
   ],
   controllers: [AppController],
   providers: [AppService],

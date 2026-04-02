@@ -2,6 +2,7 @@ import { Body, Controller, Headers, Post, RawBodyRequest, Req } from '@nestjs/co
 import { ConfigService } from '@nestjs/config';
 import Stripe from 'stripe';
 import { SubscriptionService } from '../subscription/subscription.service';
+import { AffiliateService } from '../affiliate/affiliate.service';
 
 @Controller('stripe')
 export class StripeWebhookController {
@@ -10,6 +11,7 @@ export class StripeWebhookController {
   constructor(
     private readonly configService: ConfigService,
     private readonly subscriptionService: SubscriptionService,
+    private readonly affiliateService: AffiliateService,
   ) {
     const secret = this.configService.get<string>('STRIPE_SECRET_KEY');
     if (secret) {
@@ -70,6 +72,24 @@ export class StripeWebhookController {
           status: 'trialing',
           trialEndAt,
         });
+      }
+      try {
+        await this.affiliateService.handleCheckoutSessionCompleted(
+          event.id,
+          event.data.object as Stripe.Checkout.Session,
+        );
+      } catch {
+        // non-fatal
+      }
+    }
+    if (event.type === 'invoice.paid') {
+      try {
+        await this.affiliateService.handleInvoicePaid(
+          event.id,
+          event.data.object as Stripe.Invoice,
+        );
+      } catch {
+        // non-fatal
       }
     }
     if (event.type === 'customer.subscription.updated' || event.type === 'customer.subscription.deleted') {

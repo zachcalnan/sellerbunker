@@ -16,6 +16,11 @@ model User {
   updatedAt      DateTime                 @updatedAt @map("updated_at")
   clerkId        String?                  @unique
   activeOrgId    String?                  @map("active_org_id")
+  /// Referral code from ?ref= (audit trail; normalized lowercase)
+  referredBy              String?                  @map("referred_by")
+  referredAffiliateId     String?                  @map("referred_affiliate_id")
+  referredAffiliate       Affiliate?               @relation("UserReferredByAffiliate", fields: [referredAffiliateId], references: [id], onDelete: SetNull)
+  affiliateCommissions    AffiliateCommission[]
   inventoryByMarketplace InventoryByMarketplace[]
   inventory      Inventory[]
   orderItems     OrderItem[]
@@ -31,6 +36,49 @@ model User {
   activeOrg      Organization?            @relation("ActiveOrg", fields: [activeOrgId], references: [id])
 
   @@map("users")
+}
+
+model Affiliate {
+  id               String                  @id @default(uuid())
+  referralCode     String                  @unique @map("referral_code")
+  name             String?
+  email            String?
+  /// e.g. 0.15 = 15% of qualifying payment
+  commissionRate   Decimal                 @default(0.15) @map("commission_rate") @db.Decimal(7, 4)
+  active           Boolean                 @default(true)
+  createdAt        DateTime                @default(now()) @map("created_at")
+  updatedAt        DateTime                @updatedAt @map("updated_at")
+  commissions      AffiliateCommission[]
+  referredUsers    User[]                  @relation("UserReferredByAffiliate")
+
+  @@map("affiliates")
+}
+
+enum AffiliateCommissionStatus {
+  pending
+  paid
+}
+
+model AffiliateCommission {
+  id              String                    @id @default(uuid())
+  userId          String                    @map("user_id")
+  affiliateId     String                    @map("affiliate_id")
+  amount          Decimal                   @db.Decimal(14, 2)
+  currency        String                    @default("gbp")
+  status          AffiliateCommissionStatus @default(pending)
+  stripeEventId   String                    @unique @map("stripe_event_id")
+  stripeInvoiceId String?                   @map("stripe_invoice_id")
+  /// 1 = first qualifying paid invoice for this referred user, etc.
+  paymentNumber   Int                       @default(1) @map("payment_number")
+  createdAt       DateTime                  @default(now()) @map("created_at")
+  paidAt          DateTime?                 @map("paid_at")
+  user            User                      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  affiliate       Affiliate                 @relation(fields: [affiliateId], references: [id], onDelete: Restrict)
+
+  @@index([affiliateId])
+  @@index([userId])
+  @@index([status])
+  @@map("affiliate_commissions")
 }
 
 enum MarketplaceRegion {
