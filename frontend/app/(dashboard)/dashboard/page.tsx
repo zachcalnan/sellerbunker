@@ -26,6 +26,7 @@ import {
   subtractCivilDays,
 } from "@/lib/marketplace-timezone";
 import { StripeCheckoutButton } from "@/components/stripe-checkout-button";
+import { DISCORD_INVITE_URL } from "@/lib/discord-invite";
 import { getDevImpersonationHeaders } from "@/lib/impersonation";
 
 /** Calendar “today” / N-day starts in the selected marketplace timezone (Seller Central parity). */
@@ -785,7 +786,7 @@ function HomeInner() {
               You can request the free sign up code:
             </p>
             <div className="mt-2 flex flex-wrap items-center gap-3 text-xs">
-              <a href="https://discord.gg/sbDwPbV9" target="_blank" rel="noopener noreferrer" className="underline">Discord</a>
+              <a href={DISCORD_INVITE_URL} target="_blank" rel="noopener noreferrer" className="underline">Discord</a>
               <a href="https://www.instagram.com/sellerbunker" target="_blank" rel="noopener noreferrer" className="underline">Instagram</a>
               <a href="https://www.tiktok.com/@sellerbunker" target="_blank" rel="noopener noreferrer" className="underline">TikTok</a>
               <a href="mailto:support@sellerbunker.com" className="underline">Email</a>

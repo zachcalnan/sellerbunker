@@ -12,6 +12,7 @@ import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MarketplaceSelector } from "./marketplace-selector";
+import { DISCORD_INVITE_URL } from "@/lib/discord-invite";
 import { getDevImpersonationHeaders, withImpersonateParam } from "@/lib/impersonation";
 import { useRefCookie } from "@/hooks/use-ref-cookie";
 
@@ -342,7 +343,7 @@ export function Sidebar() {
         <div className="flex flex-col gap-2">
           <div className="flex items-center justify-center gap-3 py-1">
             <a
-              href="https://discord.gg/sellerbunker"
+              href={DISCORD_INVITE_URL}
               target="_blank"
               rel="noopener noreferrer"
               className="text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors"

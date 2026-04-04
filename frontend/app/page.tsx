@@ -5,12 +5,10 @@ import Link from "next/link";
 import Image from "next/image";
 import { useState, useRef, useEffect, useId, type ComponentType } from "react";
 import { FlagIcon } from "@/components/flags";
+import { DISCORD_INVITE_URL } from "@/lib/discord-invite";
 
 const accentColor = "rgb(96, 165, 250)";
 const accentMuted = "rgba(96, 165, 250, 0.15)";
-
-/** Private beta / community — same invite as hero + footer Discord icon */
-const DISCORD_INVITE_URL = "https://discord.gg/sbDwPbV9";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
 
