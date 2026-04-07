@@ -40,6 +40,8 @@ export default function RootLayout({
         layout: {
           logoImageUrl: "/sellerbunker-logo.png",
           logoLinkUrl: "/",
+          // Hide "Development mode" / staging UI on Clerk dev instances (preview production-looking auth).
+          unsafe_disableDevelopmentModeWarnings: true,
         },
         elements: {
           socialButtonsBlockButton__oauth_google: "!hidden",
@@ -50,8 +52,8 @@ export default function RootLayout({
       signInUrl="/sign-in"
       signUpUrl="/sign-up"
       signInFallbackRedirectUrl="/dashboard"
-      signUpFallbackRedirectUrl="/dashboard"
-      signUpForceRedirectUrl="/dashboard"
+      signUpFallbackRedirectUrl="/dashboard?welcome=1"
+      signUpForceRedirectUrl="/dashboard?welcome=1"
     >
       <html lang="en" suppressHydrationWarning>
         <head>

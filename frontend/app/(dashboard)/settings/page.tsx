@@ -1,9 +1,10 @@
 "use client";
 
-import { useAuth, SignedIn, SignedOut, SignInButton } from "@clerk/nextjs";
+import { useAuth, SignedIn, SignedOut } from "@clerk/nextjs";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
+import { SignInButtonWithReturn } from "@/components/sign-in-button-with-return";
 import { useDisplaySettings } from "@/contexts/display-settings-context";
 import { getDevImpersonationHeaders, withImpersonateParam } from "@/lib/impersonation";
 
@@ -118,11 +119,11 @@ export default function SettingsPage() {
       <SignedOut>
         <div className="flex flex-col items-center justify-center gap-4 py-12">
           <p className="text-[var(--muted-foreground)]">Sign in to change settings.</p>
-          <SignInButton>
+          <SignInButtonWithReturn>
             <button className="rounded-lg bg-sb-accent px-4 py-2 text-sm font-medium text-black">
               Sign in
             </button>
-          </SignInButton>
+          </SignInButtonWithReturn>
         </div>
       </SignedOut>
 

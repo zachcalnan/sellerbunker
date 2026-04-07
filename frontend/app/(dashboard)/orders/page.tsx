@@ -1,6 +1,6 @@
 "use client";
 
-import { useAuth, SignedIn, SignedOut, SignInButton } from "@clerk/nextjs";
+import { useAuth, SignedIn, SignedOut } from "@clerk/nextjs";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { useDisplaySettings } from "@/contexts/display-settings-context";
@@ -11,6 +11,7 @@ import {
 } from "@/lib/orders-period-metrics";
 import { getMarketplaceIanaTimeZone } from "@/lib/marketplace-timezone";
 import { accountSummaryDateRangeForOrdersTab } from "@/lib/account-summary-date-range";
+import { SignInButtonWithReturn } from "@/components/sign-in-button-with-return";
 import { getDevImpersonationHeaders } from "@/lib/impersonation";
 
 type OrderRow = {
@@ -170,11 +171,11 @@ export default function OrdersPage() {
       <SignedOut>
         <div className="rounded-xl border border-[var(--surface-border)] bg-[var(--surface)] p-4 text-sm text-[var(--muted-foreground)]">
           <div className="mb-3">Sign in to view Orders.</div>
-          <SignInButton>
+          <SignInButtonWithReturn>
             <button className="cursor-pointer rounded-lg bg-sb-accent px-3 py-2 text-sm font-medium text-black">
               Sign in
             </button>
-          </SignInButton>
+          </SignInButtonWithReturn>
         </div>
       </SignedOut>
 

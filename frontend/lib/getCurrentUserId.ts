@@ -4,8 +4,10 @@ import { auth } from "@clerk/nextjs/server";
  * DEV-ONLY override:
  * - In development, allow `?impersonate=user_xxx` to override Clerk `userId`
  * - In production, always uses Clerk `auth()`
+ *
+ * `auth()` is async in @clerk/nextjs v6 — must be awaited or userId is always missing.
  */
-export function getCurrentUserId(req?: Request) {
+export async function getCurrentUserId(req?: Request) {
   if (process.env.NODE_ENV === "development") {
     try {
       const url = new URL(req?.url || "http://localhost");
@@ -16,8 +18,7 @@ export function getCurrentUserId(req?: Request) {
     }
   }
 
-  // In Next.js App Router, `auth()` is sync server-side.
-  const a = auth() as unknown as { userId?: string | null };
+  const a = await auth();
   return a.userId ?? null;
 }
 

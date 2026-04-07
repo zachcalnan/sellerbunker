@@ -1,10 +1,11 @@
 "use client";
 
-import { useAuth, SignedIn, SignedOut, SignInButton } from "@clerk/nextjs";
+import { useAuth, SignedIn, SignedOut } from "@clerk/nextjs";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { useDisplaySettings } from "@/contexts/display-settings-context";
 import { useMarketplace } from "@/contexts/marketplace-context";
+import { SignInButtonWithReturn } from "@/components/sign-in-button-with-return";
 import { getDevImpersonationHeaders } from "@/lib/impersonation";
 
 type ShipmentRow = {
@@ -160,11 +161,11 @@ export default function ShipmentsPage() {
       <SignedOut>
         <div className="flex flex-col items-center justify-center gap-4 py-12">
           <p className="text-[var(--muted-foreground)]">Sign in to view FBA shipments.</p>
-          <SignInButton>
+          <SignInButtonWithReturn>
             <button className="rounded-lg bg-sb-accent px-4 py-2 text-sm font-medium text-black">
               Sign in
             </button>
-          </SignInButton>
+          </SignInButtonWithReturn>
         </div>
       </SignedOut>
 

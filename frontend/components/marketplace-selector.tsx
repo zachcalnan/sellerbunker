@@ -1,7 +1,10 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMarketplace } from "@/contexts/marketplace-context";
+
+/** Dispatched when the user should pick a base marketplace via this control (see marketplace-onboarding-modal). */
+export const SB_OPEN_MARKETPLACE_SELECTOR_EVENT = "sellerbunker-open-marketplace-selector";
 const VIEW_LABELS: Record<string, string> = {
   gb: "UK marketplace view",
   de: "German marketplace view",
@@ -17,6 +20,22 @@ const REGION_LABELS: Record<string, string> = {
 export function MarketplaceSelector() {
   const { marketplaces, selectedMarketplaceId, selectMarketplace } = useMarketplace();
   const [open, setOpen] = useState(false);
+  const [needBaseCue, setNeedBaseCue] = useState(false);
+
+  useEffect(() => {
+    const onOpen = () => {
+      setOpen(true);
+      setNeedBaseCue(true);
+    };
+    window.addEventListener(SB_OPEN_MARKETPLACE_SELECTOR_EVENT, onOpen);
+    return () => window.removeEventListener(SB_OPEN_MARKETPLACE_SELECTOR_EVENT, onOpen);
+  }, []);
+
+  useEffect(() => {
+    if (marketplaces.some((m) => m.isBase)) {
+      setNeedBaseCue(false);
+    }
+  }, [marketplaces]);
 
   const selected = useMemo(
     () => marketplaces.find((m) => m.marketplaceId === selectedMarketplaceId) ?? marketplaces[0],
@@ -65,7 +84,7 @@ export function MarketplaceSelector() {
       {open ? (
         <div className="absolute right-0 top-full z-20 mt-1 min-w-44 rounded-lg border border-[var(--surface-border)] bg-[var(--surface)] p-1 shadow-lg">
           <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
-            Marketplace selected
+            {needBaseCue ? "Set your default marketplace" : "Marketplace selected"}
           </div>
           <div className="mb-1 rounded-md border border-[var(--surface-border)] px-2 py-1.5 text-sm">
             <span className="inline-flex items-center gap-2">
@@ -84,6 +103,7 @@ export function MarketplaceSelector() {
                   type="button"
                   onClick={() => {
                     void selectMarketplace(marketplace.marketplaceId);
+                    setNeedBaseCue(false);
                     setOpen(false);
                   }}
                   className="flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-sm hover:bg-[var(--foreground)]/5"

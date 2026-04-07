@@ -1,10 +1,11 @@
 "use client";
 
-import { useAuth, SignedIn, SignedOut, SignInButton } from "@clerk/nextjs";
+import { useAuth, SignedIn, SignedOut } from "@clerk/nextjs";
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { useDisplaySettings } from "@/contexts/display-settings-context";
 import { useMarketplace } from "@/contexts/marketplace-context";
+import { SignInButtonWithReturn } from "@/components/sign-in-button-with-return";
 import { getDevImpersonationHeaders } from "@/lib/impersonation";
 
 type InventoryRow = {
@@ -161,11 +162,11 @@ export default function InventoryPage() {
       <SignedOut>
         <div className="rounded-xl border border-[var(--surface-border)] bg-[var(--surface)] p-4 text-sm text-[var(--muted-foreground)]">
           <div className="mb-3">Sign in to view Inventory.</div>
-          <SignInButton>
+          <SignInButtonWithReturn>
             <button className="cursor-pointer rounded-lg bg-sb-accent px-3 py-2 text-sm font-medium text-black">
               Sign in
             </button>
-          </SignInButton>
+          </SignInButtonWithReturn>
         </div>
       </SignedOut>
 

@@ -10,7 +10,7 @@ import {
 } from "@clerk/nextjs";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { MarketplaceSelector } from "./marketplace-selector";
 import { DISCORD_INVITE_URL } from "@/lib/discord-invite";
 import { getDevImpersonationHeaders, withImpersonateParam } from "@/lib/impersonation";
@@ -221,6 +221,12 @@ export function Sidebar() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const devImpersonate = searchParams.get("impersonate");
+  const afterSignInUrl = useMemo(() => {
+    if (!pathname) return "/dashboard";
+    if (pathname.startsWith("/sign-in") || pathname.startsWith("/sign-up")) return "/dashboard";
+    const q = searchParams.toString();
+    return q ? `${pathname}?${q}` : pathname;
+  }, [pathname, searchParams]);
   const [amazonConnected, setAmazonConnected] = useState<boolean | null>(null);
   const [connectingAmazon, setConnectingAmazon] = useState(false);
   const [disconnectingAmazon, setDisconnectingAmazon] = useState(false);
@@ -408,12 +414,13 @@ export function Sidebar() {
             </div>
           </div>
           <SignedOut>
-            <SignInButton>
+            <SignInButton forceRedirectUrl={afterSignInUrl}>
               <button className="w-full cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-left text-sm font-medium text-[var(--foreground)]">
                 Sign in
               </button>
             </SignInButton>
             <SignUpButton
+              forceRedirectUrl="/dashboard?welcome=1"
               unsafeMetadata={
                 refFromCookie ? { ref: refFromCookie } : undefined
               }

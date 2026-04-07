@@ -16,6 +16,7 @@ import { MarketplaceOnboardingModal } from "@/components/marketplace-onboarding-
 import { CogsPromptModal } from "@/components/cogs-prompt-modal";
 import { MarketplaceProvider } from "@/contexts/marketplace-context";
 import { StripeCheckoutButton } from "@/components/stripe-checkout-button";
+import { PostSignupWelcomeBanner } from "@/components/post-signup-welcome-banner";
 import { useState } from "react";
 
 function DashboardLayoutInner({
@@ -90,6 +91,7 @@ function DashboardLayoutInner({
           <div className="hidden md:block">
             <Topbar />
           </div>
+          <PostSignupWelcomeBanner />
           <SyncProgressBar />
           <div className="relative min-h-0 flex-1">
             <div className={isLockedModule ? "pointer-events-none select-none opacity-70 blur-[3px]" : ""}>

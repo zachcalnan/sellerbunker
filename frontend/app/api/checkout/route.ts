@@ -47,7 +47,7 @@ export async function GET() {
  * Returns: { url: string } to redirect the user to Stripe Checkout.
  */
 export async function POST(request: NextRequest) {
-  const userId = getCurrentUserId(request);
+  const userId = await getCurrentUserId(request);
   if (!userId) {
     return NextResponse.json({ error: "Sign in required" }, { status: 401 });
   }

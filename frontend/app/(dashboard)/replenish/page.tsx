@@ -1,10 +1,11 @@
 "use client";
 
-import { useAuth, SignedIn, SignedOut, SignInButton } from "@clerk/nextjs";
+import { useAuth, SignedIn, SignedOut } from "@clerk/nextjs";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { useDisplaySettings } from "@/contexts/display-settings-context";
 import { useMarketplace } from "@/contexts/marketplace-context";
+import { SignInButtonWithReturn } from "@/components/sign-in-button-with-return";
 import { getDevImpersonationHeaders } from "@/lib/impersonation";
 
 type ReplenishRow = {
@@ -116,11 +117,11 @@ export default function ReplenishPage() {
           <p className="text-[var(--muted-foreground)]">
             Sign in to view replenishment suggestions.
           </p>
-          <SignInButton>
+          <SignInButtonWithReturn>
             <button className="rounded-lg bg-sb-accent px-4 py-2 text-sm font-medium text-black">
               Sign in
             </button>
-          </SignInButton>
+          </SignInButtonWithReturn>
         </div>
       </SignedOut>
 

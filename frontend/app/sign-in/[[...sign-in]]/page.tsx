@@ -1,8 +1,9 @@
 "use client";
 
-import { SignIn, SignOutButton, useAuth } from "@clerk/nextjs";
+import { SignOutButton, useAuth } from "@clerk/nextjs";
 import Link from "next/link";
 import { useEffect } from "react";
+import { EmailPasswordSignIn } from "@/components/email-password-sign-in";
 
 export default function SignInPage() {
   const { isSignedIn, isLoaded } = useAuth();
@@ -14,7 +15,7 @@ export default function SignInPage() {
   // Only gate on loaded+signed-in. Waiting on isLoaded alone can hang forever (bad keys, adblock, slow Clerk).
   if (isLoaded && isSignedIn) {
     return (
-      <div className="fixed inset-0 z-[100] flex flex-col items-center justify-center bg-[var(--background)]/95 backdrop-blur-md px-4">
+      <div className="clerk-auth-shell fixed inset-0 z-[100] flex flex-col items-center justify-center backdrop-blur-md px-4">
         <div className="absolute left-4 top-4 z-10">
           <Link
             href="/"
@@ -63,15 +64,15 @@ export default function SignInPage() {
   }
 
   return (
-    <div className="clerk-auth-shell fixed inset-0 z-[100] flex items-center justify-center bg-[var(--background)]/95 backdrop-blur-md p-4">
+    <div className="clerk-auth-shell fixed inset-0 z-[100] flex items-center justify-center backdrop-blur-md p-4">
       <Link
         href="/"
         className="fixed left-4 top-4 z-[10000] rounded-lg border border-[var(--surface-border)] bg-[var(--surface)] px-4 py-2 text-sm font-medium text-[var(--foreground)] no-underline shadow-lg transition hover:bg-[var(--foreground)]/5"
       >
         ← Back
       </Link>
-      <div className="relative z-10 flex w-full max-w-[calc(100vw-2rem)] justify-center">
-        <SignIn fallbackRedirectUrl="/start-trial" />
+      <div className="relative z-10 flex w-full max-w-[calc(100vw-2rem)] flex-col items-center justify-center">
+        <EmailPasswordSignIn defaultRedirect="/dashboard" />
       </div>
     </div>
   );

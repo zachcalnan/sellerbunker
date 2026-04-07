@@ -10,7 +10,7 @@ import {
 } from "@clerk/nextjs";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { LanguageSelector } from "./language-selector";
 import { ThemeToggle } from "./theme-toggle";
 import { SettingsModal } from "./settings-modal";
@@ -261,6 +261,12 @@ export function MobileNav() {
   const refFromCookie = useRefCookie();
   const searchParams = useSearchParams();
   const devImpersonate = searchParams.get("impersonate");
+  const afterSignInUrl = useMemo(() => {
+    if (!pathname) return "/dashboard";
+    if (pathname.startsWith("/sign-in") || pathname.startsWith("/sign-up")) return "/dashboard";
+    const q = searchParams.toString();
+    return q ? `${pathname}?${q}` : pathname;
+  }, [pathname, searchParams]);
   const [open, setOpen] = useState(false);
   const [drawerSlideIn, setDrawerSlideIn] = useState(false);
   const drawerHasOpenedRef = useRef(false);
@@ -656,7 +662,7 @@ export function MobileNav() {
 
                 <SignedOut>
                   <div className="flex flex-col gap-2">
-                    <SignInButton>
+                    <SignInButton forceRedirectUrl={afterSignInUrl}>
                       <button
                         onClick={closeDrawer}
                         className="w-full cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2.5 text-left text-sm font-medium text-[var(--foreground)]"
@@ -665,6 +671,7 @@ export function MobileNav() {
                       </button>
                     </SignInButton>
                     <SignUpButton
+                      forceRedirectUrl="/dashboard?welcome=1"
                       unsafeMetadata={
                         refFromCookie ? { ref: refFromCookie } : undefined
                       }

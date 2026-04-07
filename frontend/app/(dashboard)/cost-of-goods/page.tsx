@@ -1,12 +1,13 @@
 "use client";
 
-import { RedirectToSignIn, SignedIn, SignedOut, useAuth } from "@clerk/nextjs";
+import { SignedIn, SignedOut, useAuth } from "@clerk/nextjs";
 import { useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { useDisplaySettings } from "@/contexts/display-settings-context";
 import { useMarketplace } from "@/contexts/marketplace-context";
 import { getDevImpersonationHeaders } from "@/lib/impersonation";
 import { CogsBulkUpload } from "@/components/cogs-bulk-upload";
+import { RedirectToSignInWithReturn } from "@/components/redirect-to-sign-in-with-return";
 
 type ProductRow = {
   id: string;
@@ -1084,7 +1085,7 @@ function CostOfGoodsInner() {
       </div>
 
       <SignedOut>
-        <RedirectToSignIn />
+        <RedirectToSignInWithReturn fallback="/cost-of-goods" />
       </SignedOut>
 
       <SignedIn>

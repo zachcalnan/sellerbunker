@@ -146,6 +146,11 @@ body {
   display: flex !important;
   align-items: center !important;
   justify-content: center !important;
+  /* Slightly lifted from page bg so the auth area reads as its own “card zone” */
+  background: color-mix(in srgb, var(--background) 82%, #94a3b8 18%) !important;
+}
+[data-theme="light"] .clerk-auth-shell {
+  background: color-mix(in srgb, var(--background) 94%, #64748b 6%) !important;
 }
 /* Dark theme: asset is dark; invert for visibility */
 [data-theme="dark"] .cl-rootBox img[src*="sellerbunker-logo"] {
