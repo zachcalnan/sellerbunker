@@ -354,6 +354,444 @@ export class AmazonService {
     return rawRevenueTotal;
   }
 
+  /**
+   * SP-API order line includes `FulfillmentChannel`: **AFN** = Amazon fulfilled (FBA), **MFN** = merchant fulfilled (FBM).
+   * Not persisted separately; read from `OrderItem.rawResponse` when present.
+   */
+  private parseOrderLineFulfillmentLabel(raw: unknown): 'FBA' | 'FBM' | null {
+    if (raw == null || typeof raw !== 'object') return null;
+    const r = raw as Record<string, unknown>;
+    const ch = (r.FulfillmentChannel ?? r.fulfillmentChannel) as string | undefined;
+    if (typeof ch !== 'string') return null;
+    const u = ch.trim().toUpperCase();
+    if (u === 'AFN') return 'FBA';
+    if (u === 'MFN') return 'FBM';
+    return null;
+  }
+
+  private canonicalOrderItemMs(it: {
+    orderDate?: Date | string;
+    order?: { orderDate?: Date | string | null } | null;
+  }): number {
+    const p = it.order?.orderDate;
+    if (p instanceof Date) return p.getTime();
+    if (p != null && p !== '') return new Date(p as string | number).getTime();
+    const d = it.orderDate instanceof Date ? it.orderDate : new Date(it.orderDate as string);
+    return Number.isNaN(d.getTime()) ? 0 : d.getTime();
+  }
+
+  /** Nullable money on order lines (Finances components); null when unset. */
+  private orderMoneyNullable(v: unknown): number | null {
+    if (v == null) return null;
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
+    if (typeof v === 'string') {
+      const n = parseFloat(v);
+      return Number.isFinite(n) ? n : null;
+    }
+    const o = v as { toNumber?: () => number; toString?: () => string; value?: unknown };
+    if (o?.toNumber && typeof o.toNumber === 'function') {
+      const n = o.toNumber();
+      return Number.isFinite(n) ? n : null;
+    }
+    if (o?.toString && typeof o.toString === 'function') {
+      const n = parseFloat(o.toString());
+      return Number.isFinite(n) ? n : null;
+    }
+    if (o?.value != null) return this.orderMoneyNullable(o.value);
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  private normStoredAmazonFeeComponentForOrderLine(n: number | null): number | null {
+    if (n == null || !Number.isFinite(n)) return null;
+    if (n === 0) return 0;
+    return n > 0 ? -Math.abs(n) : n;
+  }
+
+  /** Legacy placeholder: equal ref/FBA each half of total with no digital. */
+  private isLikelyLegacyEqualReferralFbaSplit(
+    ref: number | null,
+    fba: number | null,
+    digital: number | null,
+    settledTotal: number,
+  ): boolean {
+    if (ref == null || fba == null) return false;
+    if (digital != null && digital !== 0) return false;
+    const ar = Math.abs(ref);
+    const af = Math.abs(fba);
+    const at = Math.abs(settledTotal);
+    return (
+      ar > 0.009 &&
+      Math.abs(ar - af) < 0.02 &&
+      at > 0.009 &&
+      Math.abs(ar + af - at) < 0.07
+    );
+  }
+
+  private resolveSpApiMarketplaceIdForProductFees(
+    credentialsRegion: string | undefined,
+    requestMarketplaceId?: string,
+  ): string {
+    if (requestMarketplaceId && MARKETPLACE_MAP.has(requestMarketplaceId)) {
+      return requestMarketplaceId;
+    }
+    const r = credentialsRegion === 'na' || credentialsRegion === 'fe' ? credentialsRegion : 'eu';
+    const d: Record<string, string> = {
+      eu: 'A1F83G8C2ARO7P',
+      na: 'ATVPDKIKX0DER',
+      fe: 'A1VC38T7YXB528',
+    };
+    return d[r] ?? d.eu;
+  }
+
+  /** Scale signed fee components so r+f+d equals `targetTotal` (all typically ≤ 0). */
+  private scaleSignedFeeTripToTarget(
+    r: number,
+    f: number,
+    d: number,
+    targetTotal: number,
+  ): { r: number; f: number; d: number } | null {
+    const sumAbs = Math.abs(r) + Math.abs(f) + Math.abs(d);
+    if (sumAbs < 1e-6) return null;
+    const scale = Math.abs(targetTotal) / sumAbs;
+    let rr = Math.round(r * scale * 100) / 100;
+    let ff = Math.round(f * scale * 100) / 100;
+    let dd = Math.round(d * scale * 100) / 100;
+    const sum = rr + ff + dd;
+    const diff = Math.round((targetTotal - sum) * 100) / 100;
+    if (Math.abs(diff) >= 0.01) {
+      if (Math.abs(rr) >= Math.abs(ff) && Math.abs(rr) >= Math.abs(dd)) {
+        rr = Math.round((rr + diff) * 100) / 100;
+      } else if (Math.abs(ff) >= Math.abs(dd)) {
+        ff = Math.round((ff + diff) * 100) / 100;
+      } else {
+        dd = Math.round((dd + diff) * 100) / 100;
+      }
+    }
+    return { r: rr, f: ff, d: dd };
+  }
+
+  private static readonly LIST_ORDERS_MAX_AT_PRICE_FEE_JOBS = 40;
+  /** Above this fee/revenue on a settled line, re-shape fees using a prior plausible same-ASIN/SKU sale. */
+  private static readonly LIST_ORDERS_MAX_FEE_TO_REVENUE_RATIO = 0.5;
+
+  private buildListOrdersFeeShapeReferenceByAsinAndSku(args: {
+    items: ReadonlyArray<any>;
+    orderPriceByDbId: Map<
+      string,
+      { itemPrice: number; quantity: number; orderTotalAmount: number }
+    >;
+    skuUnitPriceFallback: Map<string, number>;
+    orderLineQtySumByOrderDbId: Map<string, number>;
+    orderSalesExclusionByDbId: Map<string, OrderSalesExclusionKind>;
+  }): {
+    byAsin: Map<
+      string,
+      {
+        ref: number;
+        fba: number;
+        dig: number;
+        qty: number;
+        revenue: number;
+        unitPrice: number;
+        feeSumMag: number;
+      }
+    >;
+    bySku: Map<
+      string,
+      {
+        ref: number;
+        fba: number;
+        dig: number;
+        qty: number;
+        revenue: number;
+        unitPrice: number;
+        feeSumMag: number;
+      }
+    >;
+  } {
+    type Row = {
+      ref: number;
+      fba: number;
+      dig: number;
+      qty: number;
+      revenue: number;
+      unitPrice: number;
+      feeSumMag: number;
+    };
+    const byAsin = new Map<string, Row>();
+    const bySku = new Map<string, Row>();
+    const sorted = [...args.items].sort(
+      (a, b) => this.canonicalOrderItemMs(a as any) - this.canonicalOrderItemMs(b as any),
+    );
+    const toNum = (v: unknown) => this.orderMoneyNullable(v);
+    for (const it of sorted) {
+      const orderDbId = it.orderDbId != null ? String(it.orderDbId) : '';
+      if (orderDbId && args.orderSalesExclusionByDbId.get(orderDbId)) continue;
+      if (String(it.feesSource ?? '') !== 'finances') continue;
+      let settledTotal = this.safeNumOrderMoney(it.amazonFeesTotal);
+      if (settledTotal > 0) settledTotal = -Math.abs(settledTotal);
+      const normC = (n: number | null) => this.normStoredAmazonFeeComponentForOrderLine(n);
+      const sr = normC(toNum(it.settledReferralFeeTotal));
+      const sf = normC(toNum(it.settledFbaFeeTotal));
+      const sd = normC(toNum(it.settledDigitalServiceFeeTotal));
+      if (sr == null && sf == null && sd == null) continue;
+      if (this.isLikelyLegacyEqualReferralFbaSplit(sr, sf, sd, settledTotal)) continue;
+      const ref = sr ?? 0;
+      const fba = sf ?? 0;
+      const dig = sd ?? 0;
+      const feeSumMag = Math.abs(ref) + Math.abs(fba) + Math.abs(dig);
+      if (feeSumMag < 1e-6) continue;
+      const qty = this.safeNumOrderMoney(it.quantity) || 1;
+      let revenue = this.resolveOrderLineRevenueTotal(
+        it as {
+          revenueTotal?: unknown;
+          quantity?: unknown;
+          orderDbId?: unknown;
+          sku?: unknown;
+          rawResponse?: unknown;
+        },
+        args.orderPriceByDbId,
+        args.skuUnitPriceFallback,
+        args.orderLineQtySumByOrderDbId,
+      );
+      if (revenue <= 0) {
+        const prod = it.product as { currentListedPrice?: unknown } | undefined;
+        const lp = this.safeNumOrderMoney(prod?.currentListedPrice);
+        if (lp > 0) revenue = lp * qty;
+      }
+      if (revenue <= 0.01) continue;
+      const ratio = feeSumMag / revenue;
+      if (ratio > AmazonService.LIST_ORDERS_MAX_FEE_TO_REVENUE_RATIO + 0.03) continue;
+      const unitPrice = revenue / qty;
+      const row: Row = { ref, fba, dig, qty, revenue, unitPrice, feeSumMag };
+      const sku = String(it.sku ?? '').trim();
+      if (sku) bySku.set(sku, row);
+      const asin = it.asin != null ? String(it.asin).trim() : '';
+      if (asin) byAsin.set(asin, row);
+    }
+    return { byAsin, bySku };
+  }
+
+  private collectListOrdersAtPriceFeeJobs(args: {
+    items: ReadonlyArray<any>;
+    orderPriceByDbId: Map<
+      string,
+      { itemPrice: number; quantity: number; orderTotalAmount: number }
+    >;
+    skuUnitPriceFallback: Map<string, number>;
+    orderLineQtySumByOrderDbId: Map<string, number>;
+    orderSalesExclusionByDbId: Map<string, OrderSalesExclusionKind>;
+    productFeesById: Map<
+      string,
+      {
+        referralPerUnit: number | null;
+        fbaPerUnit: number | null;
+        digitalServicePerUnit: number | null;
+        amazonFeePerUnit: number | null;
+      }
+    >;
+    marketplaceRequestId?: string;
+  }): Map<
+    string,
+    {
+      userId: string;
+      sku: string;
+      asinTrim: string | null;
+      unitPrice: number;
+      isFba: boolean;
+      spMarketplaceId: string;
+      currency: string;
+      lines: Array<{ itemId: string; qty: number; targetTotal: number }>;
+    }
+  > {
+    const jobs = new Map<
+      string,
+      {
+        userId: string;
+        sku: string;
+        asinTrim: string | null;
+        unitPrice: number;
+        isFba: boolean;
+        spMarketplaceId: string;
+        currency: string;
+        lines: Array<{ itemId: string; qty: number; targetTotal: number }>;
+      }
+    >();
+    const toNum = (v: unknown): number | null => this.orderMoneyNullable(v);
+
+    for (const it of args.items) {
+      const orderDbId = it.orderDbId != null ? String(it.orderDbId) : '';
+      if (orderDbId && args.orderSalesExclusionByDbId.get(orderDbId)) continue;
+
+      const userId = String(it.userId ?? '').trim();
+      if (!userId) continue;
+
+      const feesSource = String(it.feesSource ?? '');
+      let settledFees = this.safeNumOrderMoney(it.amazonFeesTotal);
+      if ((feesSource === 'finances' || feesSource === 'estimate') && settledFees > 0) {
+        settledFees = -Math.abs(settledFees);
+      }
+
+      const normC = (n: number | null) => this.normStoredAmazonFeeComponentForOrderLine(n);
+      const sr = normC(toNum(it.settledReferralFeeTotal));
+      const sf = normC(toNum(it.settledFbaFeeTotal));
+      const sd = normC(toNum(it.settledDigitalServiceFeeTotal));
+      const hasStoredComponents =
+        feesSource === 'finances' && (sr != null || sf != null || sd != null);
+      const looksFake =
+        hasStoredComponents &&
+        this.isLikelyLegacyEqualReferralFbaSplit(sr, sf, sd, settledFees);
+      if (feesSource === 'finances' && hasStoredComponents && !looksFake) continue;
+
+      const qty = this.safeNumOrderMoney(it.quantity) || 1;
+      let revenueTotal = this.resolveOrderLineRevenueTotal(
+        it as {
+          revenueTotal?: unknown;
+          quantity?: unknown;
+          orderDbId?: unknown;
+          sku?: unknown;
+          rawResponse?: unknown;
+        },
+        args.orderPriceByDbId,
+        args.skuUnitPriceFallback,
+        args.orderLineQtySumByOrderDbId,
+      );
+      const product = it.product as { currentListedPrice?: unknown } | null | undefined;
+      if (revenueTotal <= 0 && product?.currentListedPrice != null) {
+        const listPx = this.safeNumOrderMoney(product.currentListedPrice);
+        if (listPx > 0) revenueTotal = listPx * qty;
+      }
+      const unitPrice = qty > 0 ? revenueTotal / qty : 0;
+      if (!Number.isFinite(unitPrice) || unitPrice <= 0) continue;
+
+      const fees = args.productFeesById.get(it.productId) ?? null;
+      const estPerUnit =
+        fees?.amazonFeePerUnit ??
+        toNum((it.product as any)?.estimatedAmazonFeePerUnit) ??
+        null;
+      const feesForDisplay =
+        settledFees !== 0
+          ? settledFees
+          : estPerUnit != null && Number.isFinite(estPerUnit)
+            ? -Math.abs(estPerUnit * qty)
+            : revenueTotal > 0
+              ? -Math.abs(revenueTotal * DEFAULT_AMAZON_FEE_RATE_WHEN_UNKNOWN)
+              : 0;
+      if (Math.abs(feesForDisplay) < 1e-4) continue;
+
+      const sku = String(it.sku ?? '').trim();
+      const asinTrim = it.asin != null ? String(it.asin).trim() : '';
+      if (!sku && !asinTrim) continue;
+
+      const fulfil = this.parseOrderLineFulfillmentLabel(it.rawResponse);
+      const isFba = fulfil !== 'FBM';
+
+      const spMarketplaceId = this.resolveSpApiMarketplaceIdForProductFees(
+        undefined,
+        args.marketplaceRequestId,
+      );
+      const currency = this.resolveCurrencyFromMarketplace('GBP', args.marketplaceRequestId);
+
+      const key = `${userId}|${spMarketplaceId}|${sku}|${asinTrim}|${unitPrice.toFixed(2)}|${
+        isFba ? 'A' : 'M'
+      }`;
+      const line = { itemId: String(it.id), qty, targetTotal: feesForDisplay };
+      const existing = jobs.get(key);
+      if (existing) {
+        existing.lines.push(line);
+        continue;
+      }
+      if (jobs.size >= AmazonService.LIST_ORDERS_MAX_AT_PRICE_FEE_JOBS) continue;
+      jobs.set(key, {
+        userId,
+        sku,
+        asinTrim: asinTrim || null,
+        unitPrice,
+        isFba,
+        spMarketplaceId,
+        currency,
+        lines: [line],
+      });
+    }
+    return jobs;
+  }
+
+  private async fetchListOrdersPriceBasedFeeBreakdowns(
+    jobs: Map<
+      string,
+      {
+        userId: string;
+        sku: string;
+        asinTrim: string | null;
+        unitPrice: number;
+        isFba: boolean;
+        spMarketplaceId: string;
+        currency: string;
+        lines: Array<{ itemId: string; qty: number; targetTotal: number }>;
+      }
+    >,
+  ): Promise<Map<string, { r: number; f: number; d: number }>> {
+    const out = new Map<string, { r: number; f: number; d: number }>();
+    for (const job of jobs.values()) {
+      let credentials: SpApiCredentials;
+      try {
+        credentials = await this.getAmazonCredentialsForUser(job.userId);
+      } catch {
+        continue;
+      }
+      const mpId = this.resolveSpApiMarketplaceIdForProductFees(
+        credentials.region,
+        job.spMarketplaceId,
+      );
+      const params = {
+        marketplaceId: mpId,
+        isAmazonFulfilled: job.isFba,
+        listingPriceAmount: job.unitPrice,
+        listingPriceCurrency: job.currency,
+        identifier: `list-orders-${job.sku}-${job.unitPrice}-${Date.now()}`,
+      };
+      let res: unknown;
+      try {
+        res =
+          job.asinTrim && job.asinTrim.length > 0
+            ? await this.spApiClient.getMyFeesEstimateForASIN(
+                credentials,
+                job.asinTrim,
+                params,
+              )
+            : await this.spApiClient.getMyFeesEstimateForSKU(credentials, job.sku, params);
+      } catch (err) {
+        this.logger.debug(
+          `[listOrders] at-price fee estimate failed userId=${job.userId} sku=${job.sku}`,
+          (err as Error)?.message,
+        );
+        continue;
+      }
+      const b = this.parseFeesEstimateBreakdown(res as any);
+      const refPu = b.referralFee ?? 0;
+      const fbaPu = b.fbaFee ?? 0;
+      let digPu = b.digitalServiceFee ?? 0;
+      if (
+        digPu === 0 &&
+        (refPu !== 0 || fbaPu !== 0) &&
+        (credentials.region ?? 'eu') === 'eu'
+      ) {
+        digPu = Math.round((refPu + fbaPu) * 0.02 * 100) / 100;
+      }
+      for (const ln of job.lines) {
+        const r = -Math.abs(refPu * ln.qty);
+        const f = -Math.abs(fbaPu * ln.qty);
+        const d = -Math.abs(digPu * ln.qty);
+        const scaled = this.scaleSignedFeeTripToTarget(r, f, d, ln.targetTotal);
+        if (scaled) {
+          out.set(ln.itemId, { r: scaled.r, f: scaled.f, d: scaled.d });
+        }
+      }
+    }
+    return out;
+  }
+
   /** In-memory qty sum for orders in this batch (fallback when DB groupBy fails or returns 0). */
   private buildOrderLineQtySumFromOrderItemsBatch(
     orderItems: Array<{ orderDbId?: unknown; quantity?: unknown }>,
@@ -1283,7 +1721,7 @@ export class AmazonService {
         orderLineQtySumByOrderDbId,
       );
       const taxChargedTotal = toNumber(it.taxChargedTotal ?? 0);
-      const amazonFeesTotal = toNumber(it.amazonFeesTotal ?? 0);
+      const amazonFeesTotalRaw = toNumber(it.amazonFeesTotal ?? 0);
       const qty = toNumber(it.quantity ?? 0);
       const storedCogsTotal = it.cogsTotal != null ? toNumber(it.cogsTotal) : null;
       const cogsPerUnit =
@@ -1306,8 +1744,20 @@ export class AmazonService {
         const n = toNumber(v);
         return Number.isFinite(n) ? n : null;
       };
+      const normStoredAmazonFeeComponent = (n: number | null): number | null => {
+        if (n == null || !Number.isFinite(n)) return null;
+        if (n === 0) return 0;
+        return n > 0 ? -Math.abs(n) : n;
+      };
+      const feesSource = (it as any).feesSource ?? null;
+      let settledFees = amazonFeesTotalRaw;
+      if (
+        (feesSource === 'finances' || feesSource === 'estimate') &&
+        settledFees > 0
+      ) {
+        settledFees = -Math.abs(settledFees);
+      }
       // Use order item's stored fees when present (settled or previously saved estimate); otherwise use product's saved estimate so we always pick up fee data from DB.
-      const settledFees = amazonFeesTotal;
       const estPerUnit =
         it.product?.estimatedAmazonFeePerUnit != null
           ? toNumOpt(it.product.estimatedAmazonFeePerUnit)
@@ -1332,13 +1782,16 @@ export class AmazonService {
             : revenueTotal > 0
               ? -Math.abs(revenueTotal * DEFAULT_AMAZON_FEE_RATE_WHEN_UNKNOWN)
               : 0;
-      const feesSource = (it as any).feesSource ?? null;
       let referralFeeTotal: number | null = null;
       let fbaFeeTotal: number | null = null;
       let digitalServiceFeeTotal: number | null = null;
-      const settledReferral = toNumOpt((it as any).settledReferralFeeTotal);
-      const settledFba = toNumOpt((it as any).settledFbaFeeTotal);
-      const settledDigital = toNumOpt((it as any).settledDigitalServiceFeeTotal);
+      const settledReferral = normStoredAmazonFeeComponent(
+        toNumOpt((it as any).settledReferralFeeTotal),
+      );
+      const settledFba = normStoredAmazonFeeComponent(toNumOpt((it as any).settledFbaFeeTotal));
+      const settledDigital = normStoredAmazonFeeComponent(
+        toNumOpt((it as any).settledDigitalServiceFeeTotal),
+      );
       const hasSettledBreakdown =
         feesSource === 'finances' &&
         (settledReferral != null || settledFba != null || settledDigital != null);
@@ -1358,16 +1811,6 @@ export class AmazonService {
           digitalServiceFeeTotal = Math.round(-Math.abs(estDigital * qty) * 100) / 100;
         }
         if (
-          Number.isFinite(feesForDisplay) &&
-          feesForDisplay !== 0 &&
-          referralFeeTotal == null &&
-          fbaFeeTotal == null &&
-          digitalServiceFeeTotal == null
-        ) {
-          referralFeeTotal = Math.round((feesForDisplay / 2) * 100) / 100;
-          fbaFeeTotal = Math.round((feesForDisplay - referralFeeTotal) * 100) / 100;
-        }
-        if (
           digitalServiceFeeTotal == null &&
           (referralFeeTotal != null || fbaFeeTotal != null)
         ) {
@@ -1375,6 +1818,26 @@ export class AmazonService {
           if (sum > 0) {
             digitalServiceFeeTotal = Math.round(-sum * 0.02 * 100) / 100;
           }
+        }
+      }
+      if (
+        feesSource === 'finances' &&
+        referralFeeTotal != null &&
+        fbaFeeTotal != null &&
+        (digitalServiceFeeTotal == null || digitalServiceFeeTotal === 0)
+      ) {
+        const ar = Math.abs(referralFeeTotal);
+        const af = Math.abs(fbaFeeTotal);
+        const at = Math.abs(settledFees);
+        if (
+          ar > 0.009 &&
+          Math.abs(ar - af) < 0.02 &&
+          at > 0.009 &&
+          Math.abs(ar + af - at) < 0.07
+        ) {
+          referralFeeTotal = null;
+          fbaFeeTotal = null;
+          digitalServiceFeeTotal = null;
         }
       }
       const totalFromBreakdown =
@@ -3135,7 +3598,9 @@ export class AmazonService {
               ? Number(productWithEst.estimatedAmazonFeePerUnit)
               : null;
             if (estPerUnit != null && !Number.isNaN(estPerUnit)) {
-              itemFees = estPerUnit * quantityOrdered;
+              // Product table stores fee **magnitudes** as positive; profit math expects the same sign
+              // convention as Finances (fees negative) so `revenue + itemFees` subtracts them.
+              itemFees = -Math.abs(estPerUnit * quantityOrdered);
             }
           }
 
@@ -3215,7 +3680,7 @@ export class AmazonService {
                     estimatedAmazonFeeUpdatedAt: new Date(),
                   },
                 });
-                itemFees = breakdown.total * quantityOrdered;
+                itemFees = -Math.abs(breakdown.total * quantityOrdered);
               }
             } catch (err) {
               this.logger.warn(
@@ -3236,6 +3701,16 @@ export class AmazonService {
           const cogsTotal =
             cogsPerUnit != null ? cogsPerUnit * quantityOrdered : null;
           const taxChargedNum = Number.isNaN(taxCharged) ? 0 : taxCharged;
+          const feesFromFinances =
+            (orderItemId && feeByOrderItemId.has(orderItemId)) ||
+            (sku && feeBySku.has(sku)) ||
+            usedSameAsinSettled ||
+            usedOrderLevelFinances;
+          // Product fee estimates are positive magnitudes; Finances totals are negative. Profit math always
+          // expects fees ≤ 0 (`revenue - tax - cogs + fees`). Coerce any stray positive estimate before VAT.
+          if (!feesFromFinances && itemFees > 0) {
+            itemFees = -Math.abs(itemFees);
+          }
           let vatResult = this.computeOrderItemVatAndProfit(
             revenueTotal,
             cogsTotal,
@@ -3245,11 +3720,6 @@ export class AmazonService {
             taxChargedNum,
             vatSettings,
           );
-          const feesFromFinances =
-            (orderItemId && feeByOrderItemId.has(orderItemId)) ||
-            (sku && feeBySku.has(sku)) ||
-            usedSameAsinSettled ||
-            usedOrderLevelFinances;
           const settledBreakdown =
             (orderItemId && breakdownByOrderItemId.get(orderItemId)) ??
             (sku && breakdownBySku.get(sku)) ??
@@ -3273,6 +3743,9 @@ export class AmazonService {
             (existingItem.feesSource as string) === 'estimate'
           ) {
             finalFees = Number(existingItem.amazonFeesTotal);
+            if ((existingItem.feesSource as string) === 'estimate' && finalFees > 0) {
+              finalFees = -Math.abs(finalFees);
+            }
             vatResult = this.computeOrderItemVatAndProfit(
               revenueTotal,
               cogsTotal,
@@ -3308,21 +3781,18 @@ export class AmazonService {
           const hasBreakdown = settledBreakdown && breakdownSum !== 0;
           const totalFeeAbs = Math.abs(finalFees);
           const settledFeeFields =
-            feesFromFinances && hasBreakdown
+            feesFromFinances && hasBreakdown && Math.abs(breakdownSum) > 1e-9
               ? {
                   settledReferralFeeTotal: Number(settledBreakdown!.referral.toFixed(2)),
                   settledFbaFeeTotal: Number(settledBreakdown!.fba.toFixed(2)),
                   settledDigitalServiceFeeTotal: Number(settledBreakdown!.digital.toFixed(2)),
                 }
-              : feesFromFinances && totalFeeAbs > 0
-                ? (() => {
-                    const half = Number((totalFeeAbs / 2).toFixed(2));
-                    return {
-                      settledReferralFeeTotal: half,
-                      settledFbaFeeTotal: half,
-                      settledDigitalServiceFeeTotal: 0,
-                    };
-                  })()
+              : feesFromFinances
+                ? {
+                    settledReferralFeeTotal: null,
+                    settledFbaFeeTotal: null,
+                    settledDigitalServiceFeeTotal: null,
+                  }
                 : {};
           const updatePayload = {
             userId,
@@ -4426,6 +4896,7 @@ export class AmazonService {
           revenueTotal: true,
           taxChargedTotal: true,
           amazonFeesTotal: true,
+          feesSource: true,
           orderDate: true,
         },
       });
@@ -4441,7 +4912,12 @@ export class AmazonService {
 
         const revenueTotal = Number(it.revenueTotal ?? 0);
         const taxChargedTotal = Number(it.taxChargedTotal ?? 0);
-        const amazonFeesTotal = Number(it.amazonFeesTotal ?? 0);
+        let amazonFeesTotal = Number(it.amazonFeesTotal ?? 0);
+        let correctedEstimateFees: number | undefined;
+        if ((it.feesSource as string) === 'estimate' && amazonFeesTotal > 0) {
+          amazonFeesTotal = -Math.abs(amazonFeesTotal);
+          correctedEstimateFees = amazonFeesTotal;
+        }
 
         const cogsTotal =
           cogsPerUnit == null || Number.isNaN(cogsPerUnit)
@@ -4483,6 +4959,9 @@ export class AmazonService {
           data: {
             cogsTotal: cogsTotal == null ? null : Number(cogsTotal.toFixed(2)),
             profit,
+            ...(correctedEstimateFees != null
+              ? { amazonFeesTotal: correctedEstimateFees }
+              : {}),
             ...vatData,
           },
         });
@@ -4753,8 +5232,13 @@ export class AmazonService {
   }
 
   /**
-   * List order items for the org (most recent first). Each row uses stored amazonFeesTotal and profit:
-   * when Finances API has settled (feesSource='finances') those are exact concluded values for past sales.
+   * List order items for the org (most recent first). Fee totals use stored `amazonFeesTotal` (Finances
+   * convention: negative = cost). Referral/FBA/digital: Finances breakdown when present; otherwise batched
+   * Product Fees API estimates at **the line’s sold unit price** (not last listing / last order); capped
+   * unique price/SKU jobs per request; falls back to stored product estimates if the API batch fails.
+   * Settled lines whose fee/revenue is implausible vs a **prior same-ASIN/SKU** sale with sane Finances data
+   * get Ref/FBA/Dig (and the shown fee total) re-shaped using that sale’s fee % of revenue, scaled by
+   * current unit price vs the reference (same price → qty-only scale).
    */
   async listOrders(orgId: string, marketplaceId?: string) {
     const marketplaceFilter = this.resolveMarketplaceFilter(marketplaceId);
@@ -4796,6 +5280,7 @@ export class AmazonService {
             profit: true;
             cogsTotal: true;
             productId: true;
+            userId: true;
             product: {
               select: {
                 title: true;
@@ -4837,6 +5322,7 @@ export class AmazonService {
             profit: true,
             cogsTotal: true,
             productId: true,
+            userId: true,
             product: {
               select: {
                 title: true,
@@ -4869,18 +5355,8 @@ export class AmazonService {
       }>,
     ) as typeof items;
 
-    const canonicalOrderMs = (it: {
-      orderDate?: Date | string;
-      order?: { orderDate?: Date | string | null } | null;
-    }): number => {
-      const p = it.order?.orderDate;
-      if (p instanceof Date) return p.getTime();
-      if (p != null && p !== '') return new Date(p as string | number).getTime();
-      const d = it.orderDate instanceof Date ? it.orderDate : new Date(it.orderDate as string);
-      return Number.isNaN(d.getTime()) ? 0 : d.getTime();
-    };
     items = [...items].sort(
-      (a, b) => canonicalOrderMs(b as any) - canonicalOrderMs(a as any),
+      (a, b) => this.canonicalOrderItemMs(b as any) - this.canonicalOrderItemMs(a as any),
     ) as typeof items;
 
     this.logger.log(`[listOrders] orgId=${orgId} orderItemCount=${items.length}`);
@@ -4950,7 +5426,7 @@ export class AmazonService {
           });
         }
       } catch {
-        // Raw query or product columns may fail; table still shows with totals and 50/50 fallback
+        // Raw query or product columns may fail; order rows still show fee totals from order line / product total
       }
     }
     const { orderPriceByDbId, skuUnitPriceFallback, orderLineQtySumByOrderDbId } =
@@ -4959,6 +5435,31 @@ export class AmazonService {
       orderDbIds.length > 0
         ? await this.buildOrderSalesExclusionMap(orderDbIds)
         : new Map<string, OrderSalesExclusionKind>();
+
+    let atPriceBreakdownByItemId = new Map<string, { r: number; f: number; d: number }>();
+    try {
+      const feeJobs = this.collectListOrdersAtPriceFeeJobs({
+        items: items as any,
+        orderPriceByDbId,
+        skuUnitPriceFallback,
+        orderLineQtySumByOrderDbId,
+        orderSalesExclusionByDbId,
+        productFeesById,
+        marketplaceRequestId: marketplaceId,
+      });
+      atPriceBreakdownByItemId = await this.fetchListOrdersPriceBasedFeeBreakdowns(feeJobs);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`[listOrders] at-price Product Fees batch failed: ${msg}`);
+    }
+
+    const feeShapeRefs = this.buildListOrdersFeeShapeReferenceByAsinAndSku({
+      items: items as any,
+      orderPriceByDbId,
+      skuUnitPriceFallback,
+      orderLineQtySumByOrderDbId,
+      orderSalesExclusionByDbId,
+    });
 
     const toNum = (v: unknown): number | null => {
       if (v == null) return null;
@@ -5025,14 +5526,28 @@ export class AmazonService {
         if (listPx > 0) revenueTotal = listPx * qty;
       }
       const taxChargedTotal = safeNum(it.taxChargedTotal);
-      const settledFees = safeNum(it.amazonFeesTotal);
+      const feesSource = (it as any).feesSource ?? null;
+      let settledFees = safeNum(it.amazonFeesTotal);
+      // Line totals and Finances breakdown components are stored ≤ 0. Legacy rows (and bad estimate writes)
+      // sometimes have positive magnitudes; using them as-is makes `revenue - tax - cogs + fees` ADD fees → impossible profit.
+      if (
+        (feesSource === 'finances' || feesSource === 'estimate') &&
+        settledFees > 0
+      ) {
+        settledFees = -Math.abs(settledFees);
+      }
+      const normStoredAmazonFeeComponent = (n: number | null): number | null => {
+        if (n == null || !Number.isFinite(n)) return null;
+        if (n === 0) return 0;
+        return n > 0 ? -Math.abs(n) : n;
+      };
       // Use order item stored fees when present; else product's saved estimate (so we always pick up estimates from DB).
       const estPerUnit = fees?.amazonFeePerUnit ?? toNum(product?.estimatedAmazonFeePerUnit) ?? null;
       const estReferral = fees?.referralPerUnit ?? toNum(product?.estimatedReferralFeePerUnit) ?? null;
       const estFba = fees?.fbaPerUnit ?? toNum(product?.estimatedFbaFeePerUnit) ?? null;
       const estDigital = fees?.digitalServicePerUnit ?? toNum(product?.estimatedDigitalServiceFeePerUnit) ?? null;
       // Use settled total when we have it (finances); otherwise use estimated total (estimated per unit × qty); else conservative fallback so ROI isn't overstated.
-      const feesForDisplay =
+      let feesForDisplay =
         settledFees !== 0
           ? settledFees
           : estPerUnit != null && Number.isFinite(estPerUnit)
@@ -5040,14 +5555,17 @@ export class AmazonService {
             : revenueTotal > 0
               ? -Math.abs(revenueTotal * DEFAULT_AMAZON_FEE_RATE_WHEN_UNKNOWN)
               : 0;
-      const feesSource = (it as any).feesSource ?? null;
       let referralFeeTotal: number | null = null;
       let fbaFeeTotal: number | null = null;
       let digitalServiceFeeTotal: number | null = null;
       // Use settled breakdown from Finances API when available (orders that have settled).
-      const settledReferral = toNum((it as any).settledReferralFeeTotal);
-      const settledFba = toNum((it as any).settledFbaFeeTotal);
-      const settledDigital = toNum((it as any).settledDigitalServiceFeeTotal);
+      const settledReferral = normStoredAmazonFeeComponent(
+        toNum((it as any).settledReferralFeeTotal),
+      );
+      const settledFba = normStoredAmazonFeeComponent(toNum((it as any).settledFbaFeeTotal));
+      const settledDigital = normStoredAmazonFeeComponent(
+        toNum((it as any).settledDigitalServiceFeeTotal),
+      );
       const hasSettledBreakdown =
         feesSource === 'finances' &&
         (settledReferral != null || settledFba != null || settledDigital != null);
@@ -5056,12 +5574,31 @@ export class AmazonService {
         fbaFeeTotal = settledFba;
         digitalServiceFeeTotal = settledDigital;
       }
-      // For finances orders, only use stored breakdown from DB — never recalculate.
-      // For estimate orders: always use full referral and FBA from estimates; 2% digital is added on top, never taken from referral/FBA.
-      const hasAllThree = estReferral != null && Number.isFinite(estReferral) && estFba != null && Number.isFinite(estFba) && estDigital != null && Number.isFinite(estDigital);
-      const hasRefAndFba = estReferral != null && Number.isFinite(estReferral) && estFba != null && Number.isFinite(estFba);
-      if (!hasSettledBreakdown && feesSource !== 'finances') {
-        // Use full estimate values for referral and FBA (never reduce them by a proportion).
+      if (
+        feesSource === 'finances' &&
+        referralFeeTotal != null &&
+        fbaFeeTotal != null &&
+        (digitalServiceFeeTotal == null || digitalServiceFeeTotal === 0)
+      ) {
+        if (
+          this.isLikelyLegacyEqualReferralFbaSplit(
+            referralFeeTotal,
+            fbaFeeTotal,
+            digitalServiceFeeTotal,
+            settledFees,
+          )
+        ) {
+          referralFeeTotal = null;
+          fbaFeeTotal = null;
+          digitalServiceFeeTotal = null;
+        }
+      }
+      const atBd = atPriceBreakdownByItemId.get(String(it.id));
+      if (atBd) {
+        referralFeeTotal = atBd.r !== 0 ? atBd.r : null;
+        fbaFeeTotal = atBd.f !== 0 ? atBd.f : null;
+        digitalServiceFeeTotal = atBd.d !== 0 ? atBd.d : null;
+      } else if (!hasSettledBreakdown && feesSource !== 'finances') {
         if (estReferral != null && Number.isFinite(estReferral)) {
           referralFeeTotal = Math.round(-Math.abs(estReferral * qty) * 100) / 100;
         }
@@ -5071,15 +5608,84 @@ export class AmazonService {
         if (estDigital != null && Number.isFinite(estDigital)) {
           digitalServiceFeeTotal = Math.round(-Math.abs(estDigital * qty) * 100) / 100;
         }
-        // Only use 50/50 split when we have no estimated breakdown at all (no ref, no fba, no digital).
-        if (Number.isFinite(feesForDisplay) && feesForDisplay !== 0 && referralFeeTotal == null && fbaFeeTotal == null && digitalServiceFeeTotal == null) {
-          referralFeeTotal = Math.round((feesForDisplay / 2) * 100) / 100;
-          fbaFeeTotal = Math.round((feesForDisplay - referralFeeTotal) * 100) / 100;
-        }
-        // UK fallback: 2% is added on top of (referral + FBA), not taken from them — does not change referral or FBA.
         if (digitalServiceFeeTotal == null && (referralFeeTotal != null || fbaFeeTotal != null)) {
           const sum = Math.abs(referralFeeTotal ?? 0) + Math.abs(fbaFeeTotal ?? 0);
           if (sum > 0) digitalServiceFeeTotal = Math.round(-sum * 0.02 * 100) / 100;
+        }
+      } else if (
+        feesSource === 'finances' &&
+        referralFeeTotal == null &&
+        fbaFeeTotal == null &&
+        digitalServiceFeeTotal == null &&
+        Math.abs(feesForDisplay) > 0.0005
+      ) {
+        let r =
+          estReferral != null && Number.isFinite(estReferral)
+            ? -Math.abs(estReferral * qty)
+            : 0;
+        let f =
+          estFba != null && Number.isFinite(estFba) ? -Math.abs(estFba * qty) : 0;
+        let d =
+          estDigital != null && Number.isFinite(estDigital)
+            ? -Math.abs(estDigital * qty)
+            : 0;
+        if (d === 0 && (r !== 0 || f !== 0)) {
+          const sumRf = Math.abs(r) + Math.abs(f);
+          if (sumRf > 0) {
+            d = Math.round(-sumRf * 0.02 * 100) / 100;
+          }
+        }
+        const scaled = this.scaleSignedFeeTripToTarget(r, f, d, feesForDisplay);
+        if (scaled) {
+          referralFeeTotal = scaled.r !== 0 ? scaled.r : null;
+          fbaFeeTotal = scaled.f !== 0 ? scaled.f : null;
+          digitalServiceFeeTotal = scaled.d !== 0 ? scaled.d : null;
+        }
+      }
+      // Implausible fee/revenue on a settled line (e.g. components scaled to a wrong total): re-shape from a
+      // prior **same ASIN/SKU** sale with sane fee %, scaling by sold unit price (and qty) vs that reference.
+      if (
+        feesSource === 'finances' &&
+        revenueTotal > 0.01 &&
+        !exclusionKind
+      ) {
+        const sumMag =
+          Math.abs(referralFeeTotal ?? 0) +
+          Math.abs(fbaFeeTotal ?? 0) +
+          Math.abs(digitalServiceFeeTotal ?? 0);
+        const ratio =
+          sumMag > 1e-4
+            ? sumMag / revenueTotal
+            : Math.abs(settledFees) / revenueTotal;
+        if (ratio > AmazonService.LIST_ORDERS_MAX_FEE_TO_REVENUE_RATIO) {
+          const skuK = String(it.sku ?? '').trim();
+          const asinK = it.asin != null ? String(it.asin).trim() : '';
+          const peer =
+            (asinK && feeShapeRefs.byAsin.get(asinK)) ??
+            (skuK && feeShapeRefs.bySku.get(skuK)) ??
+            null;
+          if (peer && peer.revenue > 0.01 && peer.feeSumMag > 1e-6) {
+            const pCur = revenueTotal / qty;
+            const priceScale =
+              Math.abs(pCur - peer.unitPrice) < 0.015 ? 1 : pCur / peer.unitPrice;
+            const qtyScale = qty / peer.qty;
+            const r0 = peer.ref * priceScale * qtyScale;
+            const f0 = peer.fba * priceScale * qtyScale;
+            const d0 = peer.dig * priceScale * qtyScale;
+            const feeRevPeer = peer.feeSumMag / peer.revenue;
+            const targetCap = -Math.min(
+              feeRevPeer * revenueTotal,
+              revenueTotal * AmazonService.LIST_ORDERS_MAX_FEE_TO_REVENUE_RATIO,
+            );
+            const scaled = this.scaleSignedFeeTripToTarget(r0, f0, d0, targetCap);
+            if (scaled) {
+              referralFeeTotal = scaled.r !== 0 ? scaled.r : null;
+              fbaFeeTotal = scaled.f !== 0 ? scaled.f : null;
+              digitalServiceFeeTotal = scaled.d !== 0 ? scaled.d : null;
+              settledFees = targetCap;
+              feesForDisplay = settledFees;
+            }
+          }
         }
       }
       // Total Amazon fee must include referral + FBA + digital; when we have a breakdown, use that sum.
@@ -5134,6 +5740,9 @@ export class AmazonService {
         outFba = null;
         outDig = null;
       }
+      const fulfillmentType = excludedFromSales
+        ? null
+        : this.parseOrderLineFulfillmentLabel((it as { rawResponse?: unknown }).rawResponse);
       return {
         id: String(it.id),
         __productId: String(it.productId ?? ''),
@@ -5152,6 +5761,8 @@ export class AmazonService {
         fbaFeeTotal: outFba,
         digitalServiceFeeTotal: outDig,
         feesSource: feesSource != null ? String(feesSource) : null,
+        /** AFN → FBA, MFN → FBM from SP-API line payload when present. */
+        fulfillmentType,
         availableStock: inv?.availableQty ?? null,
         totalStock: inv?.totalQty ?? null,
         orderStatusLabel,
@@ -5312,10 +5923,84 @@ export class AmazonService {
       return a;
     };
 
-    const bySku = new Map<string, InventoryProductRow>();
+    const numOrNaN = (v: unknown): number => {
+      if (v == null) return NaN;
+      if (typeof v === 'number') return Number.isFinite(v) ? v : NaN;
+      if (typeof v === 'object' && v !== null && 'toNumber' in v && typeof (v as { toNumber: () => number }).toNumber === 'function') {
+        const n = (v as { toNumber: () => number }).toNumber();
+        return Number.isFinite(n) ? n : NaN;
+      }
+      const n = Number(v);
+      return Number.isFinite(n) ? n : NaN;
+    };
+
+    /** Same SKU can exist on multiple org members' Product rows; canonical pick may have inventory but no COGS. */
+    const mergeSiblingSkuFields = (
+      canonical: InventoryProductRow,
+      group: InventoryProductRow[],
+    ): InventoryProductRow => {
+      const sorted = [...group].sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
+      const cCanon = numOrNaN((canonical as any).costOfGoods);
+      if (!Number.isFinite(cCanon) || cCanon <= 0) {
+        for (const row of sorted) {
+          const n = numOrNaN((row as any).costOfGoods);
+          if (Number.isFinite(n) && n > 0) {
+            (canonical as any).costOfGoods = n;
+            break;
+          }
+        }
+      }
+      const pCanon = numOrNaN((canonical as any).currentListedPrice);
+      if (!Number.isFinite(pCanon) || pCanon <= 0) {
+        for (const row of sorted) {
+          const n = numOrNaN((row as any).currentListedPrice);
+          if (Number.isFinite(n) && n > 0) {
+            (canonical as any).currentListedPrice = n;
+            break;
+          }
+        }
+      }
+      if (!(canonical as any).estimatedAmazonFeeUpdatedAt) {
+        for (const row of sorted) {
+          if ((row as any).estimatedAmazonFeeUpdatedAt) {
+            (canonical as any).estimatedAmazonFeePerUnit = (row as any).estimatedAmazonFeePerUnit;
+            (canonical as any).estimatedReferralFeePerUnit = (row as any).estimatedReferralFeePerUnit;
+            (canonical as any).estimatedFbaFeePerUnit = (row as any).estimatedFbaFeePerUnit;
+            (canonical as any).estimatedAmazonFeeUpdatedAt = (row as any).estimatedAmazonFeeUpdatedAt;
+            (canonical as any).feeEstimateRawJson = (row as any).feeEstimateRawJson;
+            break;
+          }
+        }
+      }
+      if ((canonical as any).estimatedReferralFeePerUnit == null) {
+        for (const row of sorted) {
+          if ((row as any).estimatedReferralFeePerUnit != null) {
+            (canonical as any).estimatedReferralFeePerUnit = (row as any).estimatedReferralFeePerUnit;
+            break;
+          }
+        }
+      }
+      if ((canonical as any).estimatedFbaFeePerUnit == null) {
+        for (const row of sorted) {
+          if ((row as any).estimatedFbaFeePerUnit != null) {
+            (canonical as any).estimatedFbaFeePerUnit = (row as any).estimatedFbaFeePerUnit;
+            break;
+          }
+        }
+      }
+      return canonical;
+    };
+
+    const rowsGroupedBySku = new Map<string, InventoryProductRow[]>();
     for (const p of rows) {
-      const existing = bySku.get(p.sku);
-      bySku.set(p.sku, existing ? pickCanonicalForSku(existing, p) : p);
+      const arr = rowsGroupedBySku.get(p.sku) ?? [];
+      arr.push(p);
+      rowsGroupedBySku.set(p.sku, arr);
+    }
+    const bySku = new Map<string, InventoryProductRow>();
+    for (const [, group] of rowsGroupedBySku) {
+      const canonical = group.reduce((a, b) => pickCanonicalForSku(a, b));
+      bySku.set(canonical.sku, mergeSiblingSkuFields(canonical, group));
     }
     const uniqueRows = Array.from(bySku.values()).sort(
       (a, b) => b.updatedAt.getTime() - a.updatedAt.getTime(),
@@ -7037,32 +7722,71 @@ try {
     if (Array.isArray(list) && list.length > 0) {
       let sum = 0;
       let fbaFromNested = 0;
+      let referralSum = 0;
+      let fbaSum = 0;
+      let digitalSum = 0;
+      let sawReferral = false;
+      let sawFba = false;
+      let sawDigital = false;
+
+      const normType = (t: unknown) => String(t ?? '').replace(/\s+/g, '').toUpperCase();
+      const isReferralType = (t: string) => t === 'REFERRALFEE' || t.endsWith('REFERRALFEE');
+      const isFbaTopType = (t: string) => t === 'FBAFEES' || t.startsWith('FBA');
+      const isDigitalType = (t: string) =>
+        t === 'VARIABLECLOSINGFEE' || t === 'DIGITALSERVICEFEE' || t.includes('DIGITALSERVICE');
+
       for (const item of list) {
-        const feeType = (item.FeeType ?? item.feeType ?? '') as string;
+        const feeTypeRaw = item.FeeType ?? item.feeType ?? '';
+        const feeType = normType(feeTypeRaw);
         // Prefer FeeAmount over FinalFee: when there's a promotion, FinalFee can be 0 but FeeAmount has the actual fee (e.g. FBA 3.14).
         const amount = moneyToNum(item.FeeAmount ?? item.feeAmount ?? item.FinalFee ?? item.finalFee);
         if (Number.isFinite(amount)) sum += amount;
-        if (feeType === 'ReferralFee') referralFee = amount;
-        else if (feeType === 'FBAFees') fbaFee = amount;
-        else if (feeType === 'VariableClosingFee' || feeType === 'DigitalServiceFee') digitalServiceFee = amount;
+        if (isReferralType(feeType)) {
+          referralSum += amount;
+          sawReferral = true;
+        } else if (isFbaTopType(feeType)) {
+          fbaSum += amount;
+          sawFba = true;
+        } else if (isDigitalType(feeType)) {
+          digitalSum += amount;
+          sawDigital = true;
+        }
         // Some responses put FBA only under IncludedFeeDetailList (e.g. FBAPickAndPack); use it when top-level FBAFees is missing.
         const included = item.IncludedFeeDetailList ?? item.includedFeeDetailList;
         if (Array.isArray(included)) {
           for (const sub of included) {
-            const subType = (sub.FeeType ?? sub.feeType ?? '') as string;
+            const subType = normType(sub.FeeType ?? sub.feeType ?? '');
             const subAmt = moneyToNum(sub.FeeAmount ?? sub.feeAmount ?? sub.FinalFee ?? sub.finalFee);
             if (Number.isFinite(subAmt) && subType.startsWith('FBA')) fbaFromNested += subAmt;
           }
         }
       }
       total = sum;
-      if (fbaFee == null && fbaFromNested !== 0) fbaFee = fbaFromNested;
+      if (sawReferral) referralFee = referralSum;
+      if (sawFba) fbaFee = fbaSum;
+      else if (fbaFromNested !== 0) fbaFee = fbaFromNested;
+      if (sawDigital) digitalServiceFee = digitalSum;
     } else {
       const totalEst = fees.TotalFeesEstimate ?? fees.totalFeesEstimate;
       if (totalEst != null) total = moneyToNum(totalEst);
     }
 
-    return { total: total != null && Number.isFinite(total) ? total : null, referralFee, fbaFee, digitalServiceFee };
+    // Product Fees API / FeeDetailList can return amounts with mixed signs; `total` must be a positive
+    // magnitude for storage as `estimatedAmazonFeePerUnit`. (Inventory UI does price - fee - cogs; if fee
+    // were negative, profit would exceed price.)
+    const totalMag =
+      total != null && Number.isFinite(total) ? Math.abs(total) : null;
+
+    return {
+      total: totalMag,
+      referralFee:
+        referralFee != null && Number.isFinite(referralFee) ? Math.abs(referralFee) : referralFee,
+      fbaFee: fbaFee != null && Number.isFinite(fbaFee) ? Math.abs(fbaFee) : fbaFee,
+      digitalServiceFee:
+        digitalServiceFee != null && Number.isFinite(digitalServiceFee)
+          ? Math.abs(digitalServiceFee)
+          : digitalServiceFee,
+    };
   }
 
   /** Parse current listing price from Listings Items API getListingsItem response (for pre-sale fee estimate). */
@@ -7450,7 +8174,7 @@ try {
             ? Number(productWithEst.estimatedAmazonFeePerUnit)
             : null;
           if (estPerUnit != null && !Number.isNaN(estPerUnit)) {
-            itemFees = estPerUnit * quantityOrdered;
+            itemFees = -Math.abs(estPerUnit * quantityOrdered);
           }
         }
 
@@ -7486,14 +8210,18 @@ try {
           : null;
         const cogsTotal =
           cogsPerUnit != null ? cogsPerUnit * quantityOrdered : null;
-        const profit =
-          cogsTotal != null
-            ? revenueTotal - taxCharged - cogsTotal + itemFees
-            : null;
         const feesFromFinances =
           (orderItemId && feeByOrderItemId.has(orderItemId)) ||
           (sku && feeBySku.has(sku)) ||
           usedSameAsinSettled;
+        // Same convention as sync: Finances fees are negative; estimates must not be positive here.
+        if (!feesFromFinances && itemFees > 0) {
+          itemFees = -Math.abs(itemFees);
+        }
+        const profit =
+          cogsTotal != null
+            ? revenueTotal - taxCharged - cogsTotal + itemFees
+            : null;
         const settledBreakdown =
           (orderItemId && breakdownByOrderItemId.get(orderItemId)) ??
           (sku && breakdownBySku.get(sku)) ??
@@ -7514,7 +8242,11 @@ try {
           Number(existingItem.amazonFeesTotal) !== 0 &&
           (existingItem.feesSource as string) === 'estimate'
         ) {
-          finalFees = Number(existingItem.amazonFeesTotal);
+          let reused = Number(existingItem.amazonFeesTotal);
+          if ((existingItem.feesSource as string) === 'estimate' && reused > 0) {
+            reused = -Math.abs(reused);
+          }
+          finalFees = reused;
           finalProfit =
             cogsTotal != null
               ? Number((revenueTotal - taxCharged - cogsTotal + finalFees).toFixed(2))

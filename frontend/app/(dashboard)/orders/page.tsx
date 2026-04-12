@@ -31,6 +31,8 @@ type OrderRow = {
   fbaFeeTotal: number | null;
   digitalServiceFeeTotal: number | null;
   feesSource: string | null; // 'finances' = settled (exact); 'estimate' = from product estimate
+  /** SP-API line FulfillmentChannel: AFN→FBA, MFN→FBM */
+  fulfillmentType?: "FBA" | "FBM" | null;
   availableStock: number | null;
   totalStock: number | null;
   orderStatusLabel?: string | null;
@@ -283,7 +285,14 @@ export default function OrdersPage() {
                         {r.asin ?? "—"}
                       </div>
                       <div className="min-w-0">
-                        <div className="text-[var(--foreground)]">{formatDate(r.orderDate)}</div>
+                        <div className="flex flex-wrap items-center gap-x-1.5 text-[var(--foreground)]">
+                          <span>{formatDate(r.orderDate)}</span>
+                          {r.fulfillmentType ? (
+                            <span className="rounded border border-[var(--surface-border)] bg-[var(--background)] px-1 py-0 text-[9px] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
+                              {r.fulfillmentType}
+                            </span>
+                          ) : null}
+                        </div>
                         <div className="truncate font-mono text-[10px] text-[var(--muted-foreground)]" title={r.orderId}>
                           {r.orderId}
                         </div>
@@ -292,14 +301,14 @@ export default function OrdersPage() {
                         {!excluded && r.amazonFeesTotal != null && Number.isFinite(r.amazonFeesTotal) ? (
                           <div className="space-y-0.5 text-left">
                             <div className="font-medium">
-                              {formatCurrency(r.amazonFeesTotal)}
+                              {formatCurrency(Math.abs(r.amazonFeesTotal))}
                               {r.feesSource === "finances" && <span className="text-[9px] text-[var(--muted-foreground)] font-normal ml-0.5">Settled</span>}
                               {r.feesSource === "estimate" && <span className="text-[9px] text-[var(--muted-foreground)] font-normal ml-0.5">Est.</span>}
                             </div>
                             <div className="text-[9px] text-[var(--muted-foreground)] space-y-0.5">
-                              <div>Ref: {r.referralFeeTotal != null ? formatCurrency(r.referralFeeTotal) : "—"}</div>
-                              <div>FBA: {r.fbaFeeTotal != null ? formatCurrency(r.fbaFeeTotal) : "—"}</div>
-                              <div>Dig: {r.digitalServiceFeeTotal != null ? formatCurrency(r.digitalServiceFeeTotal) : "—"}</div>
+                              <div>Ref: {r.referralFeeTotal != null ? formatCurrency(Math.abs(r.referralFeeTotal)) : "—"}</div>
+                              <div>FBA: {r.fbaFeeTotal != null ? formatCurrency(Math.abs(r.fbaFeeTotal)) : "—"}</div>
+                              <div>Dig: {r.digitalServiceFeeTotal != null ? formatCurrency(Math.abs(r.digitalServiceFeeTotal)) : "—"}</div>
                             </div>
                           </div>
                         ) : excluded ? (

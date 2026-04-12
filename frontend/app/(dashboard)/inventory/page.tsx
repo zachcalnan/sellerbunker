@@ -245,10 +245,16 @@ export default function InventoryPage() {
                 const isSystem = SYSTEM_SKUS.has(r.sku);
                 const num = (n: number | null) => (n == null ? "—" : String(n));
                 const price = r.currentListedPrice != null ? Number(r.currentListedPrice) : null;
-                const cogs = r.costOfGoods != null ? Number(r.costOfGoods) : 0;
-                const amazonFee = r.estimatedAmazonFeePerUnit != null ? Number(r.estimatedAmazonFeePerUnit) : 0;
+                const cogsRaw = r.costOfGoods != null ? Number(r.costOfGoods) : null;
+                const cogs = cogsRaw != null && Number.isFinite(cogsRaw) && cogsRaw > 0 ? cogsRaw : null;
+                // DB may legacy-store negative totals from Product Fees breakdown; fee is always a cost magnitude here.
+                const amazonFee =
+                  r.estimatedAmazonFeePerUnit != null
+                    ? Math.abs(Number(r.estimatedAmazonFeePerUnit))
+                    : 0;
+                // Without COGS, "est profit" would equal price − fees and look like full margin — show — instead.
                 const estProfit =
-                  price != null
+                  price != null && cogs != null
                     ? Math.round((price - amazonFee - cogs) * 100) / 100
                     : null;
                 const marketplaceLine =
