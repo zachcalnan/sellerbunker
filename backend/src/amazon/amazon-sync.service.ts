@@ -117,7 +117,7 @@ export class AmazonSyncService implements OnModuleInit {
       },
     );
 
-    // Fee estimate refresh: once per day (default 6 AM) to avoid rate limits
+    // Fee estimate refresh: once per day (default 6 AM) to avoid Product Fees API rate limits
     const feeEstimateCron =
       process.env.FEE_ESTIMATE_REFRESH_CRON ?? '0 6 * * *';
     await this.queue.add(
@@ -128,6 +128,20 @@ export class AmazonSyncService implements OnModuleInit {
           pattern: feeEstimateCron,
         },
         jobId: 'fee-estimate-refresh',
+      },
+    );
+
+    // Listed price only: Listings API (no Product Fees); default every 30 minutes
+    const listingPriceEveryMs =
+      Number(process.env.LISTING_PRICE_REFRESH_EVERY_MS) || 30 * 60 * 1000;
+    await this.queue.add(
+      'listing-price-refresh',
+      {},
+      {
+        repeat: {
+          every: listingPriceEveryMs,
+        },
+        jobId: 'listing-price-refresh',
       },
     );
 
@@ -143,7 +157,7 @@ export class AmazonSyncService implements OnModuleInit {
     );
 
     this.logger.log(
-      `Scheduled Amazon sync jobs (orders=${ordersEveryMs}ms, inventory=${inventoryEveryMs}ms, shipments=${shipmentsEveryMs}ms, feeCron=${feeEstimateCron}, titlesBackfill=${titlesBackfillEveryMs}ms)`,
+      `Scheduled Amazon sync jobs (orders=${ordersEveryMs}ms, inventory=${inventoryEveryMs}ms, shipments=${shipmentsEveryMs}ms, feeCron=${feeEstimateCron}, listingPrice=${listingPriceEveryMs}ms, titlesBackfill=${titlesBackfillEveryMs}ms)`,
     );
   }
 

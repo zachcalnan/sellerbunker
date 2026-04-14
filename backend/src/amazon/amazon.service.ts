@@ -7647,6 +7647,140 @@ try {
     return { updatedCount, errorCount, skippedCount, total: totalProductCount, processed: totalProcessed };
   }
 
+  /**
+   * Refresh Product.currentListedPrice from the Listings API only (no Product Fees calls).
+   * Intended for a frequent scheduler so sellers see price changes within ~30 minutes; full fee
+   * estimates stay on the daily fee-estimate-refresh job.
+   */
+  async refreshListedPricesForOrg(
+    orgId: string,
+    options?: {
+      onProgress?: (progress: { processed: number; total: number }) => void | Promise<void>;
+    },
+  ): Promise<{
+    skipped?: boolean;
+    reason?: string;
+    updatedCount: number;
+    errorCount: number;
+    total: number;
+    processed: number;
+  }> {
+    const credentials = await this.getAmazonCredentialsForOrg(orgId);
+    const userIds = await this.getOrgMemberUserIds(orgId);
+    const regionMarketplaceIds: Record<string, string[]> = {
+      eu: ['A1F83G8C2ARO7P', 'A1PA6795UKMFR9', 'A13V1IB3VIYZZH'],
+      na: ['ATVPDKIKX0DER'],
+      fe: ['A1VC38T7YXB528'],
+    };
+    const marketplaceId =
+      (regionMarketplaceIds[credentials.region ?? 'na'] ?? regionMarketplaceIds.na)[0] ?? 'ATVPDKIKX0DER';
+
+    const account = await this.prisma.sellerAccount.findFirst({
+      where: { userId: { in: userIds }, marketplace: 'amazon' },
+      orderBy: { updatedAt: 'desc' },
+      select: { sellerId: true },
+    });
+    const sellerId = account?.sellerId ?? null;
+    if (!sellerId) {
+      return {
+        skipped: true,
+        reason: 'no_seller_id',
+        updatedCount: 0,
+        errorCount: 0,
+        total: 0,
+        processed: 0,
+      };
+    }
+
+    const batchSize = 50;
+    const delayMs = Math.max(
+      100,
+      Number(this.configService.get<string>('LISTING_PRICE_REFRESH_DELAY_MS')) || 300,
+    );
+    const retryWaitMs = 60000;
+
+    const totalProductCount = await this.prisma.product.count({
+      where: { userId: { in: userIds }, sku: { not: '' } },
+    });
+    if (totalProductCount === 0) {
+      return { updatedCount: 0, errorCount: 0, total: 0, processed: 0 };
+    }
+
+    await options?.onProgress?.({ processed: 0, total: totalProductCount });
+
+    let updatedCount = 0;
+    let errorCount = 0;
+    let processed = 0;
+    let cursorId: string | undefined;
+
+    while (true) {
+      const products = await this.prisma.product.findMany({
+        where: { userId: { in: userIds }, sku: { not: '' } },
+        orderBy: { id: 'asc' },
+        take: batchSize,
+        ...(cursorId ? { cursor: { id: cursorId }, skip: 1 } : {}),
+        select: { id: true, sku: true },
+      });
+      if (products.length === 0) break;
+
+      for (const product of products) {
+        await new Promise((r) => setTimeout(r, delayMs));
+        const run = async (): Promise<boolean> => {
+          const listingRes = await this.spApiClient.getListingsItem(
+            credentials,
+            sellerId,
+            product.sku,
+            [marketplaceId],
+            ['summaries', 'offers', 'attributes'],
+          );
+          const parsed = this.parseListingsItemPrice(listingRes as any);
+          if (parsed != null && parsed > 0) {
+            await this.prisma.product.update({
+              where: { id: product.id },
+              data: { currentListedPrice: parsed },
+            });
+            return true;
+          }
+          return false;
+        };
+
+        try {
+          const ok = await run();
+          if (ok) updatedCount += 1;
+        } catch (e) {
+          const msg = (e as Error).message ?? '';
+          const is429 = msg.includes('(429)') || msg.includes('QuotaExceeded');
+          if (is429) {
+            this.logger.warn(
+              `[refreshListedPricesForOrg] SKU ${product.sku} rate limited (429); waiting ${retryWaitMs / 1000}s…`,
+            );
+            await new Promise((r) => setTimeout(r, retryWaitMs));
+            try {
+              const ok = await run();
+              if (ok) updatedCount += 1;
+            } catch (retryErr) {
+              this.logger.warn(
+                `[refreshListedPricesForOrg] SKU ${product.sku} failed after retry: ${(retryErr as Error).message}`,
+              );
+              errorCount += 1;
+            }
+          } else {
+            this.logger.warn(`[refreshListedPricesForOrg] SKU ${product.sku} failed: ${msg}`);
+            errorCount += 1;
+          }
+        }
+
+        processed += 1;
+        await options?.onProgress?.({ processed, total: totalProductCount });
+      }
+
+      cursorId = products[products.length - 1].id;
+      if (products.length < batchSize) break;
+    }
+
+    return { updatedCount, errorCount, total: totalProductCount, processed };
+  }
+
   /** Parse total fee amount from Product Fees API (referral + FBA + all components).
    * Prefer summing FeeDetailList so we include every component (referral, FBA, etc.);
    * use TotalFeesEstimate only when FeeDetailList is empty (some responses may only have the total).

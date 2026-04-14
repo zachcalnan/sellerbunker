@@ -523,6 +523,57 @@ export class AmazonSyncProcessor extends WorkerHost {
       }
     }
 
+    if (job.name === 'listing-price-refresh') {
+      this.logger.log(
+        '[AmazonSync] Running listing price refresh (Listings API only) for orgs with Amazon linked',
+      );
+
+      const orgs = await this.prisma.organization.findMany({
+        where: {
+          members: {
+            some: {
+              user: {
+                sellerAccounts: {
+                  some: { marketplace: 'amazon' },
+                },
+              },
+            },
+          },
+        },
+        select: { id: true },
+      });
+
+      const errors: Array<{ orgId: string; error: string }> = [];
+      for (const org of orgs) {
+        if (await this.shouldSkipOrgForBatch(org.id)) {
+          this.logger.log(
+            `[AmazonSync] Skipping listing-price-refresh for org ${org.id} – initial sync not yet complete`,
+          );
+          continue;
+        }
+        try {
+          await this.amazonService.refreshListedPricesForOrg(org.id);
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          const isNotLinked = /amazon account not linked|link your amazon account/i.test(msg);
+          if (isNotLinked) {
+            // skip
+          } else {
+            errors.push({ orgId: org.id, error: msg });
+            this.logger.error(
+              `[AmazonSync] Listing price refresh failed for org ${org.id}: ${msg}`,
+            );
+          }
+        }
+      }
+
+      if (errors.length) {
+        throw new Error(
+          `[AmazonSync] listing-price-refresh completed with ${errors.length} errors`,
+        );
+      }
+    }
+
     if (job.name === 'titles-backfill') {
       const { orgId, userId, limit } = job.data as { orgId?: string; userId?: string; limit?: number };
       if (!orgId) {
