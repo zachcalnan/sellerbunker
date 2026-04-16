@@ -52,8 +52,11 @@ export class OrgsController {
   ) {
     return this.usersService.updateOrgFixedCosts(req.user.orgId, req.user.userId, {
       softwareCosts: dto.softwareCosts,
+      softwareCostItems: (dto as any).softwareCostItems,
       otherSubscriptions: dto.otherSubscriptions,
+      otherSubscriptionItems: (dto as any).otherSubscriptionItems,
       otherFixedCosts: dto.otherFixedCosts,
+      otherFixedCostItems: (dto as any).otherFixedCostItems,
     });
   }
 

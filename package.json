@@ -1,4 +1,8 @@
 {
+  "scripts": {
+    "docker:redis": "docker compose up -d redis",
+    "docker:stack": "docker compose up -d redis postgres"
+  },
   "dependencies": {
     "@stripe/stripe-js": "^8.9.0",
     "stripe": "^20.4.0"

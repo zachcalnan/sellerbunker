@@ -64,6 +64,12 @@ export class AmazonSpApiClient {
         return ['ATVPDKIKX0DER'];
     }
   }
+
+  /** Marketplace IDs for Listings Items GET (listed price refresh). Uses the full region set so SKUs resolve in any marketplace in that region. */
+  marketplaceIdsForListingPriceRefresh(region: SpApiRegion): string[] {
+    return this.defaultMarketplaceIdsForRegion(region);
+  }
+
   /**
    * Example wrapper for the Sellers API: getMarketplaceParticipations.
    */
@@ -291,6 +297,9 @@ export class AmazonSpApiClient {
    * Listings Items API v2021-08-01: getListingsItem
    * GET /listings/2021-08-01/items/{sellerId}/{sku}
    * Returns this seller's own listing (their SKU, their listed price). Not other sellers' or buy box price.
+   *
+   * Amazon allows **at most one** `marketplaceIds` value per request. Pass a single-id array, or call
+   * once per marketplace until one succeeds.
    */
   async getListingsItem(
     credentials: SpApiCredentials,
@@ -305,6 +314,59 @@ export class AmazonSpApiClient {
       query: {
         marketplaceIds: marketplaceIds.join(','),
         includedData: includedData.join(','),
+      },
+    });
+  }
+
+  /**
+   * Listings Items API v2021-08-01: patchListingsItem
+   * PATCH /listings/2021-08-01/items/{sellerId}/{sku}
+   * `marketplaceIds` query must contain exactly one marketplace (Amazon limit).
+   */
+  async patchListingsItem(
+    credentials: SpApiCredentials,
+    sellerId: string,
+    sku: string,
+    marketplaceId: string,
+    body: { productType: string; patches: Array<{ op: string; path: string; value: unknown }> },
+    opts?: { issueLocale?: string; includedData?: string },
+  ) {
+    const query: Record<string, unknown> = {
+      marketplaceIds: marketplaceId,
+      includedData: opts?.includedData ?? 'issues',
+    };
+    if (opts?.issueLocale) query.issueLocale = opts.issueLocale;
+    return this.signedSpApiRequest(credentials, {
+      method: 'PATCH',
+      path: `/listings/2021-08-01/items/${encodeURIComponent(sellerId)}/${encodeURIComponent(sku)}`,
+      query,
+      body: JSON.stringify(body),
+    });
+  }
+
+  /**
+   * Product Pricing API v0: getCompetitivePricing
+   * GET /products/pricing/v0/competitivePrice
+   *
+   * Returns competitive pricing data including Buy Box prices (when available).
+   */
+  async getCompetitivePricingForASINs(
+    credentials: SpApiCredentials,
+    params: {
+      marketplaceId: string;
+      asins: string[];
+      customerType?: 'Consumer';
+    },
+  ) {
+    const asins = (params.asins ?? []).map((a) => String(a).trim()).filter(Boolean).slice(0, 20);
+    return this.signedSpApiRequest(credentials, {
+      method: 'GET',
+      path: `/products/pricing/v0/competitivePrice`,
+      query: {
+        MarketplaceId: params.marketplaceId,
+        ItemType: 'Asin',
+        Asins: asins.join(','),
+        ...(params.customerType ? { CustomerType: params.customerType } : {}),
       },
     });
   }
@@ -494,7 +556,7 @@ export class AmazonSpApiClient {
   private async signedSpApiRequest(
     credentials: SpApiCredentials,
     options: {
-      method: 'GET' | 'POST' | 'PUT' | 'DELETE';
+      method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
       path: string;
       query?: Record<string, unknown>;
       body?: string;

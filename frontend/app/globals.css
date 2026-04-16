@@ -175,3 +175,26 @@ body {
   background-color: #ffffff !important;
   color: #111827 !important;
 }
+
+/* Native selects: readable text + options (dashboard / repricer) */
+select.sb-select {
+  background-color: var(--surface);
+  color: var(--foreground);
+  border-color: var(--surface-border);
+}
+select.sb-select option,
+select.sb-select optgroup {
+  background-color: var(--surface);
+  color: var(--foreground);
+}
+
+/* Dashboard <main>: native selects inherit theme (avoids white text on white in dark areas) */
+main select:not([class*="cl-"]) {
+  background-color: var(--surface);
+  color: var(--foreground);
+}
+main select:not([class*="cl-"]) option,
+main select:not([class*="cl-"]) optgroup {
+  background-color: var(--surface);
+  color: var(--foreground);
+}

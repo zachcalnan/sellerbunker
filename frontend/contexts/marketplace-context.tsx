@@ -129,7 +129,9 @@ export function MarketplaceProvider({ children }: { children: ReactNode }) {
 
   const selectedCurrency = useMemo(() => {
     const selected = marketplaces.find((m) => m.marketplaceId === selectedMarketplaceId);
-    return selected?.currencyCode ?? "USD";
+    if (selected?.currencyCode) return selected.currencyCode;
+    const gb = marketplaces.find((m) => m.countryCode === "GB");
+    return gb?.currencyCode ?? marketplaces[0]?.currencyCode ?? "GBP";
   }, [marketplaces, selectedMarketplaceId]);
 
   const value = useMemo(
@@ -152,7 +154,7 @@ export function useMarketplace() {
     return {
       marketplaces: [],
       selectedMarketplaceId: null,
-      selectedCurrency: "USD",
+      selectedCurrency: "GBP",
       selectMarketplace: async () => {},
       refreshMarketplaces: async () => {},
     };

@@ -135,7 +135,7 @@ function HomeInner() {
 
   const [rangePreset, setRangePreset] = useState<
     "today" | "7d" | "14d" | "30d" | "yesterday" | "all" | "custom"
-  >("30d");
+  >("today");
   const [trendPreset, setTrendPreset] = useState<
     "today" | "7d" | "14d" | "30d" | "yesterday" | "all" | "custom"
   >("30d");
@@ -321,6 +321,28 @@ function HomeInner() {
     return { start: effectiveStart, end: effectiveEnd };
   }, [effectiveStart, effectiveEnd]);
 
+  const prevSummaryRangeForApi = useMemo(() => {
+    // Compare to the immediately preceding period of the same inclusive day length.
+    // Skip for "all" (not meaningful).
+    if (rangePreset === "all") return null;
+    const start = summaryRangeForApi.start;
+    const end = summaryRangeForApi.end;
+    if (!start || !end) return null;
+    const startY = parseYmdParts(start);
+    const endY = parseYmdParts(end);
+    if (!startY || !endY) return null;
+    const startMs = Date.UTC(startY.y, startY.m - 1, startY.d);
+    const endMs = Date.UTC(endY.y, endY.m - 1, endY.d);
+    if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return null;
+    const days = Math.max(1, Math.round((endMs - startMs) / 86400000) + 1);
+    const prevEndY = subtractCivilDays(startY.y, startY.m, startY.d, 1);
+    const prevStartY = subtractCivilDays(startY.y, startY.m, startY.d, days);
+    const pad2 = (n: number) => String(n).padStart(2, "0");
+    const fmt = (d: { y: number; m: number; d: number }) =>
+      `${d.y}-${pad2(d.m)}-${pad2(d.d)}`;
+    return { start: fmt(prevStartY), end: fmt(prevEndY), days };
+  }, [rangePreset, summaryRangeForApi.start, summaryRangeForApi.end]);
+
   /** Same period rules as `filterOrderRowsForDashboardPreset` + Orders tab rolling windows. */
   const dashboardRingFilterPreset = useMemo((): DashboardRangePreset => {
     if (hasCustomRangeInUrl || rangePreset === "custom") return "custom";
@@ -435,7 +457,7 @@ function HomeInner() {
       else if (startIsAll && endIsTodayForAll) setRangePreset("all");
       else setRangePreset("custom");
     } else {
-      setRangePreset("30d");
+      setRangePreset("today");
     }
 
     setCustomStart(start);
@@ -502,6 +524,39 @@ function HomeInner() {
     ],
   );
 
+  const [prevSummary, setPrevSummary] = useState<AccountSummary | null>(null);
+  const fetchPrevSummary = useCallback(async () => {
+    if (!isSignedIn) return;
+    if (!prevSummaryRangeForApi) {
+      setPrevSummary(null);
+      return;
+    }
+    try {
+      const token = await getToken({ template: "backend" });
+      const res = await fetch(
+        `${baseUrl}/api/amazon/account/summary?` +
+          new URLSearchParams({
+            start: prevSummaryRangeForApi.start,
+            end: prevSummaryRangeForApi.end,
+          }).toString(),
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            ...(selectedMarketplaceId ? { "x-marketplace-id": selectedMarketplaceId } : {}),
+          },
+        },
+      );
+      if (!res.ok) {
+        setPrevSummary(null);
+        return;
+      }
+      const data = (await res.json()) as AccountSummary;
+      setPrevSummary(data);
+    } catch {
+      setPrevSummary(null);
+    }
+  }, [isSignedIn, getToken, baseUrl, prevSummaryRangeForApi, selectedMarketplaceId]);
+
   const fetchOrdersForRings = useCallback(async () => {
     if (!isSignedIn) return;
     try {
@@ -538,6 +593,14 @@ function HomeInner() {
     }
     fetchSummary();
   }, [isSignedIn, fetchSummary]);
+
+  useEffect(() => {
+    if (!isSignedIn) {
+      setPrevSummary(null);
+      return;
+    }
+    void fetchPrevSummary();
+  }, [isSignedIn, fetchPrevSummary]);
 
   useEffect(() => {
     if (!isSignedIn) {
@@ -664,6 +727,54 @@ function HomeInner() {
     };
   }, [summary, ringMetricsFromOrders]);
 
+  const prevDisplaySummary = useMemo(() => {
+    if (!ordersLoadedForRings) return null;
+    if (!prevSummaryRangeForApi) return null;
+    const filteredPrev = filterOrderRowsForDashboardPreset(
+      orderRowsForRings,
+      "custom",
+      { start: prevSummaryRangeForApi.start, end: prevSummaryRangeForApi.end },
+      { timeZone: marketplaceTz },
+    );
+    const agg = aggregateOrderRows(filteredPrev);
+    return {
+      revenue: agg.totalSales,
+      unitsSold: agg.totalUnits,
+      totalProfit: agg.totalProfit,
+      profitMargin:
+        agg.totalSales > 0 ? Math.max(0, Math.min(1, agg.totalProfit / agg.totalSales)) : 0,
+    };
+  }, [ordersLoadedForRings, orderRowsForRings, prevSummaryRangeForApi, marketplaceTz]);
+
+  const ratioPct = useCallback((current: number, prev: number) => {
+    if (!Number.isFinite(current) || !Number.isFinite(prev) || prev <= 0) return null;
+    return Math.round((current / prev) * 100);
+  }, []);
+
+  const deltaPct = useCallback((current: number, prev: number) => {
+    if (!Number.isFinite(current) || !Number.isFinite(prev) || prev === 0) return null;
+    const d = ((current - prev) / Math.abs(prev)) * 100;
+    if (!Number.isFinite(d)) return null;
+    return Math.round(d);
+  }, []);
+
+  const salesVsPrevPct = useMemo(() => {
+    if (!displaySummary || !prevDisplaySummary) return null;
+    return ratioPct(displaySummary.revenue, prevDisplaySummary.revenue);
+  }, [displaySummary, prevDisplaySummary, ratioPct]);
+
+  const unitsVsPrevPct = useMemo(() => {
+    if (!displaySummary || !prevDisplaySummary) return null;
+    return ratioPct(displaySummary.unitsSold, prevDisplaySummary.unitsSold);
+  }, [displaySummary, prevDisplaySummary, ratioPct]);
+
+  const roiVsPrevPct = useMemo(() => {
+    const cur = summary?.roiPct != null ? Number(summary.roiPct) : null;
+    const prev = prevSummary?.roiPct != null ? Number(prevSummary.roiPct) : null;
+    if (cur == null || prev == null) return null;
+    return deltaPct(cur, prev);
+  }, [summary?.roiPct, prevSummary?.roiPct, deltaPct]);
+
   const effectiveCurrency = summary?.currency ?? "USD";
 
   const hasCostData = summary?.hasCostData ?? false;
@@ -681,6 +792,24 @@ function HomeInner() {
     summary != null && hasCostData && summary.roiPct != null && Number.isFinite(summary.roiPct)
       ? summary.roiPct
       : 0;
+
+  const compareWindowLabel = useMemo(() => {
+    const d = prevSummaryRangeForApi?.days;
+    if (d == null || !Number.isFinite(d) || d <= 0) return "prev";
+    return `~${d} day${d === 1 ? "" : "s"}`;
+  }, [prevSummaryRangeForApi?.days]);
+
+  const salesComparePctLabel =
+    salesVsPrevPct != null ? `${salesVsPrevPct}%` : null;
+  const unitsComparePctLabel =
+    unitsVsPrevPct != null ? `${unitsVsPrevPct}%` : null;
+  const roiComparePctLabel =
+    roiVsPrevPct != null ? `${roiVsPrevPct > 0 ? "+" : ""}${roiVsPrevPct}%` : null;
+  const compareWindowLine =
+    (salesVsPrevPct != null || unitsVsPrevPct != null || roiVsPrevPct != null)
+      ? `vs ${compareWindowLabel}`
+      : null;
+
   const cards = displaySummary
     ? [
         {
@@ -690,8 +819,9 @@ function HomeInner() {
           color: "#22C55E",
           fullRing: true,
           centerLine1: showProfitNumbers ? formatCurrency(profit, effectiveCurrency, 2) : "—",
-          centerLine2: "",
-          centerLine3: showProfitNumbers ? `${(displaySummary.profitMargin * 100).toFixed(1)}%` : "—",
+          centerLine2: showProfitNumbers ? `${(displaySummary.profitMargin * 100).toFixed(1)}%` : "—",
+          centerLine3: "",
+          centerCompareLine: showProfitNumbers ? "of sales" : undefined,
         },
         {
           label: "Sales",
@@ -700,6 +830,10 @@ function HomeInner() {
           color: "#60A5FA",
           fullRing: true,
           hidePercentage: true,
+          centerLine1: formatCurrency(displaySummary.revenue, effectiveCurrency, 2),
+          centerLine2: salesComparePctLabel ?? "",
+          centerLine3: "",
+          centerCompareLine: compareWindowLine ?? undefined,
         },
         {
           label: "Units",
@@ -708,6 +842,10 @@ function HomeInner() {
           color: "#F59E0B",
           fullRing: true,
           hidePercentage: true,
+          centerLine1: displaySummary.unitsSold.toLocaleString(),
+          centerLine2: unitsComparePctLabel ?? "",
+          centerLine3: "",
+          centerCompareLine: compareWindowLine ?? undefined,
         },
         {
           label: "ROI",
@@ -717,8 +855,9 @@ function HomeInner() {
           fullRing: true,
           hidePercentage: !hasCostData,
           centerLine1: hasCostData ? `${Math.round(roiPct)}%` : "—",
-          centerLine2: "",
-          centerLine3: "ROI",
+          centerLine2: hasCostData ? (roiComparePctLabel ?? "") : "",
+          centerLine3: "",
+          centerCompareLine: hasCostData ? (compareWindowLine ?? undefined) : undefined,
         },
       ]
     : [];
@@ -1679,6 +1818,10 @@ function CostBreakdown({
 
 type ProfitAndLossData = {
   revenue: number;
+  promotionalAdjustments: number;
+  reimbursementAdjustments: number;
+  otherAdjustments: number;
+  totalAdjustments: number;
   totalSellingCosts: number;
   totalCogs: number;
   prepFees: number;
@@ -1884,9 +2027,42 @@ function ProfitAndLoss({
                 <td className="py-0.5 pr-2 pl-2 text-[var(--foreground)]">Other subscriptions</td>
                 <td className="py-0.5 pl-2 text-right tabular-nums text-[var(--foreground)]">{fmt(data.otherSubsTotal)}</td>
               </tr>
+              <tr className="border-b border-[var(--surface-border)]">
+                <td className="py-0.5 pr-2 pl-2 text-[var(--foreground)]">Other fixed costs</td>
+                <td className="py-0.5 pl-2 text-right tabular-nums text-[var(--foreground)]">
+                  {fmt((data as any).otherFixedCostsTotal ?? 0)}
+                </td>
+              </tr>
               <tr className="border-b border-[var(--surface-border)] font-medium">
                 <td className="py-1 pr-2 pl-2 text-[var(--foreground)]">Total fixed costs</td>
                 <td className="py-1 pl-2 text-right tabular-nums text-[var(--foreground)]">{fmt(data.totalFixedCosts)}</td>
+              </tr>
+              <tr className="text-[10px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
+                <td colSpan={2} className="pt-2 pb-0.5">Adjustments</td>
+              </tr>
+              <tr className="border-b border-[var(--surface-border)]">
+                <td className="py-0.5 pr-2 pl-2 text-[var(--foreground)]">Promotional adjustments</td>
+                <td className="py-0.5 pl-2 text-right tabular-nums text-[var(--foreground)]">
+                  {fmt(data.promotionalAdjustments)}
+                </td>
+              </tr>
+              <tr className="border-b border-[var(--surface-border)]">
+                <td className="py-0.5 pr-2 pl-2 text-[var(--foreground)]">Reimbursement adjustments</td>
+                <td className="py-0.5 pl-2 text-right tabular-nums text-[var(--foreground)]">
+                  {fmt(data.reimbursementAdjustments)}
+                </td>
+              </tr>
+              <tr className="border-b border-[var(--surface-border)]">
+                <td className="py-0.5 pr-2 pl-2 text-[var(--foreground)]">Other adjustments</td>
+                <td className="py-0.5 pl-2 text-right tabular-nums text-[var(--foreground)]">
+                  {fmt(data.otherAdjustments)}
+                </td>
+              </tr>
+              <tr className="border-b border-[var(--surface-border)] font-medium">
+                <td className="py-1 pr-2 pl-2 text-[var(--foreground)]">Total adjustments</td>
+                <td className="py-1 pl-2 text-right tabular-nums text-[var(--foreground)]">
+                  {fmt(data.totalAdjustments)}
+                </td>
               </tr>
               <tr className="border-t-2 border-[var(--surface-border)] bg-[var(--surface)]/50 font-semibold">
                 <td className="py-1.5 pr-2 text-[var(--foreground)]">Total profit</td>
@@ -2180,8 +2356,8 @@ function InventorySummary({
               <tr className="border-b border-[var(--surface-border)] text-[8px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
                 <th className="py-0.5 pr-1 text-left">Status</th>
                 <th className="py-0.5 px-0.5 text-center">Qty</th>
-                <th className="py-0.5 px-1 text-center">Stock value</th>
                 <th className="py-0.5 px-1 text-center">Stock cost</th>
+                <th className="py-0.5 px-1 text-center">Resale value</th>
                 <th className="py-0.5 px-1 text-center">Potential profit</th>
                 <th className="py-0.5 pl-1 text-center">Potential ROI</th>
               </tr>
@@ -2190,8 +2366,8 @@ function InventorySummary({
               <tr className="border-b border-[var(--surface-border)] bg-[var(--surface)]/50 font-semibold">
                 <td className="py-0.5 pr-1 text-[var(--foreground)]">Total</td>
                 <td className="py-0.5 px-0.5 text-center tabular-nums text-[var(--foreground)]">{total.toLocaleString()}</td>
-                <td className="py-0.5 px-1 text-center tabular-nums text-[var(--foreground)]">{formatCurrency(totalValue, currency, 2)}</td>
                 <td className="py-0.5 px-1 text-center tabular-nums text-[var(--foreground)]">{formatCurrency(totalCost, currency, 2)}</td>
+                <td className="py-0.5 px-1 text-center tabular-nums text-[var(--foreground)]">{formatCurrency(totalValue, currency, 2)}</td>
                 <td className="py-0.5 px-1 text-center tabular-nums text-[var(--foreground)]">{formatCurrency(totalProfit, currency, 2)}</td>
                 <td className="py-0.5 pl-1 text-center tabular-nums text-[var(--foreground)]">{totalRoiPct != null ? `${totalRoiPct.toFixed(1)}%` : "—"}</td>
               </tr>
@@ -2199,8 +2375,8 @@ function InventorySummary({
                 <tr key={label} className="border-b border-[var(--surface-border)] last:border-b-0">
                   <td className="py-0.5 pr-1 text-[var(--muted-foreground)]">{label}</td>
                   <td className="py-0.5 px-0.5 text-center font-medium tabular-nums text-[var(--foreground)]">{value.toLocaleString()}</td>
-                  <td className="py-0.5 px-1 text-center tabular-nums text-[var(--foreground)]">{formatCurrency(stockValue, currency, 2)}</td>
                   <td className="py-0.5 px-1 text-center tabular-nums text-[var(--foreground)]">{formatCurrency(unitCost, currency, 2)}</td>
+                  <td className="py-0.5 px-1 text-center tabular-nums text-[var(--foreground)]">{formatCurrency(stockValue, currency, 2)}</td>
                   <td className="py-0.5 px-1 text-center tabular-nums text-[var(--foreground)]">{formatCurrency(profit, currency, 2)}</td>
                   <td className="py-0.5 pl-1 text-center tabular-nums text-[var(--foreground)]">{roiPct != null ? `${roiPct.toFixed(1)}%` : "—"}</td>
                 </tr>
@@ -2224,6 +2400,8 @@ type DonutCardProps = {
   centerLine1?: string;
   centerLine2?: string;
   centerLine3?: string;
+  /** Optional tiny comparison line inside center, e.g. "120% vs prev" */
+  centerCompareLine?: string;
   /** Optional helper note shown under the label (e.g. when a metric requires setup). */
   note?: ReactNode;
   /** When true, show only value (no %); ring stays empty. Use for metrics without a meaningful %. */
@@ -2802,6 +2980,7 @@ function DonutCard({
   centerLine1,
   centerLine2,
   centerLine3,
+  centerCompareLine,
   note,
   hidePercentage,
   fullRing,
@@ -2865,9 +3044,18 @@ function DonutCard({
                   {centerLine2}
                 </span>
               ) : null}
-              <span className="mt-1.5 inline-flex items-center rounded-full bg-[var(--surface)] px-2 py-0.5 text-[9px] font-medium uppercase tracking-normal text-[var(--muted-foreground)]">
-                {centerLine3}
-              </span>
+              {centerCompareLine ? (
+                <span
+                  className={`${centerLine2 ? "mt-0.5" : "mt-1"} text-[8px] font-medium uppercase tracking-wide text-[var(--muted-foreground)]`}
+                >
+                  {centerCompareLine}
+                </span>
+              ) : null}
+              {centerLine3 ? (
+                <span className="mt-1.5 inline-flex items-center rounded-full bg-[var(--surface)] px-2 py-0.5 text-[9px] font-medium uppercase tracking-normal text-[var(--muted-foreground)]">
+                  {centerLine3}
+                </span>
+              ) : null}
             </>
           ) : (
             <>

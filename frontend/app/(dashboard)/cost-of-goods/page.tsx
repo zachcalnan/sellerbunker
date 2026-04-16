@@ -43,6 +43,10 @@ type SkuCardItem = {
   asin: string | null;
   title: string | null;
   imageUrl: string | null;
+  /** Total stock on hand (from inventory). Used to prioritize missing-COGS SKUs. */
+  totalQty?: number | null;
+  /** True when backend marks this SKU as missing COGS (no ledger entries and no fallback cost). */
+  missingCogs?: boolean;
   revenue?: number;
   units?: number;
   latestCostEntry?: CostEntryRow | null;
@@ -65,7 +69,7 @@ function CostOfGoodsInner() {
   const devImpersonate = searchParams.get("impersonate");
   const missingParamOn = searchParams.get("missing") === "1";
   const [cogsFilter, setCogsFilter] = useState<"missing" | "complete" | "all">(
-    "missing",
+    "all",
   );
   const startParam = searchParams.get("start");
   const endParam = searchParams.get("end");
@@ -92,6 +96,13 @@ function CostOfGoodsInner() {
   const [skuItems, setSkuItems] = useState<SkuCardItem[]>([]);
   const [skuTotal, setSkuTotal] = useState(0);
   const [skuPage, setSkuPage] = useState(1);
+  const fmtQty = (n: number | null | undefined) => {
+    const v =
+      n != null && Number.isFinite(Number(n))
+        ? Math.max(0, Math.round(Number(n)))
+        : 0;
+    return new Intl.NumberFormat("en-GB").format(v);
+  };
 
   type VatSettings = {
     vatRegistrationType: string;
@@ -102,25 +113,43 @@ function CostOfGoodsInner() {
   };
   const [vatSettings, setVatSettings] = useState<VatSettings | null>(null);
 
+  type FixedCostLineItem = { name: string; monthlyCost: number };
   type FixedCosts = {
     softwareCosts: number | null;
+    softwareCostItems?: FixedCostLineItem[];
     otherSubscriptions: number | null;
+    otherSubscriptionItems?: FixedCostLineItem[];
     otherFixedCosts: number | null;
+    otherFixedCostItems?: FixedCostLineItem[];
+    totals?: {
+      softwareCosts?: number;
+      otherSubscriptions?: number;
+      otherFixedCosts?: number;
+      totalFixedCosts?: number;
+    };
   };
   const [fixedCosts, setFixedCosts] = useState<FixedCosts | null>(null);
   const [fixedCostsFormOpen, setFixedCostsFormOpen] = useState(false);
   const [fixedCostsSaving, setFixedCostsSaving] = useState(false);
   type FixedCostsPeriod = "monthly" | "annual";
-  const [fixedCostsPeriod, setFixedCostsPeriod] = useState<{
-    softwareCosts: FixedCostsPeriod;
-    otherSubscriptions: FixedCostsPeriod;
-    otherFixedCosts: FixedCostsPeriod;
-  }>({ softwareCosts: "monthly", otherSubscriptions: "monthly", otherFixedCosts: "monthly" });
-  const [fixedCostsForm, setFixedCostsForm] = useState({
-    softwareCosts: "",
-    otherSubscriptions: "",
-    otherFixedCosts: "",
+  type FixedCostsItemForm = {
+    id: string;
+    name: string;
+    amount: string;
+    period: FixedCostsPeriod;
+  };
+  const newFixedCostItem = (partial?: Partial<FixedCostsItemForm>): FixedCostsItemForm => ({
+    id: `${Date.now()}_${Math.random().toString(16).slice(2)}`,
+    name: "",
+    amount: "",
+    period: "monthly",
+    ...partial,
   });
+  const [fixedCostsItemsForm, setFixedCostsItemsForm] = useState<{
+    software: FixedCostsItemForm[];
+    otherSubs: FixedCostsItemForm[];
+    otherFixed: FixedCostsItemForm[];
+  }>({ software: [], otherSubs: [], otherFixed: [] });
 
   const [loading, setLoading] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -186,7 +215,42 @@ function CostOfGoodsInner() {
       const authHeaders = {
         Authorization: `Bearer ${token}`,
         ...getDevImpersonationHeaders(devImpersonate),
-        ...(selectedMarketplaceId ? { "x-marketplace-id": selectedMarketplaceId } : {}),
+        ...(selectedMarketplaceId
+          ? { "x-marketplace-id": selectedMarketplaceId }
+          : {}),
+      };
+      // For "in stock" grouping in the COGS All tab we want TOTAL stock across all marketplaces.
+      // The inventory endpoint scopes `totalQty` to the selected marketplace when this header is present,
+      // which makes everything look out-of-stock when a marketplace filter is selected.
+      const inventoryHeaders = {
+        Authorization: `Bearer ${token}`,
+        ...getDevImpersonationHeaders(devImpersonate),
+      };
+
+      const fetchAllPages = async <TItem,>(
+        firstUrl: string,
+        parseTotal: (json: any) => number,
+        parseItems: (json: any) => TItem[],
+      ): Promise<{ total: number; items: TItem[] }> => {
+        const all: TItem[] = [];
+        let total = 0;
+        let page = 0;
+        let url = new URL(firstUrl);
+        const takeN =
+          Number(url.searchParams.get("take") ?? SKU_FETCH_SIZE) ||
+          SKU_FETCH_SIZE;
+        while (page < 50) {
+          const res = await fetch(url.toString(), { headers: authHeaders });
+          if (!res.ok) throw new Error("Failed to load SKU list.");
+          const j = await res.json().catch(() => ({}));
+          const items = parseItems(j);
+          total = parseTotal(j);
+          all.push(...items);
+          if (all.length >= total || items.length === 0) break;
+          page += 1;
+          url.searchParams.set("skip", String(page * takeN));
+        }
+        return { total, items: all };
       };
 
       const missingQs = new URLSearchParams();
@@ -196,45 +260,22 @@ function CostOfGoodsInner() {
       missingQs.set("skip", "0");
 
       const allFetches: Promise<Response>[] = [
-        fetch(`${baseUrl}/api/amazon/cost-of-goods/entries?` +
-          new URLSearchParams({ take: "50", skip: "0" }).toString(),
+        fetch(
+          `${baseUrl}/api/amazon/cost-of-goods/entries?` +
+            new URLSearchParams({ take: "50", skip: "0" }).toString(),
           { headers: authHeaders },
         ),
         fetch(`${baseUrl}/api/amazon/products`, { headers: authHeaders }),
-        fetch(`${baseUrl}/api/amazon/inventory`, { headers: authHeaders }),
+        fetch(`${baseUrl}/api/amazon/inventory`, { headers: inventoryHeaders }),
         fetch(`${baseUrl}/api/orgs/vat-settings`, { headers: authHeaders }),
       ];
 
-      if (cogsFilter === "missing") {
-        allFetches.push(
-          fetch(`${baseUrl}/api/amazon/cost-of-goods/missing?${missingQs.toString()}`, {
-            headers: authHeaders,
-          }),
-        );
-      } else if (cogsFilter === "complete") {
-        allFetches.push(
-          fetch(
-            `${baseUrl}/api/amazon/cost-of-goods/complete?` +
-            new URLSearchParams({ take: String(SKU_FETCH_SIZE), skip: "0" }).toString(),
-            { headers: authHeaders },
-          ),
-        );
-      } else {
-        allFetches.push(
-          fetch(
-            `${baseUrl}/api/amazon/cost-of-goods/products?` +
-            new URLSearchParams({ take: String(SKU_FETCH_SIZE), skip: "0" }).toString(),
-            { headers: authHeaders },
-          ),
-        );
-      }
-
-      const [entriesRes, productsRes, inventoryRes, vatRes, skuListRes] = await Promise.all(allFetches);
+      const [entriesRes, productsRes, inventoryRes, vatRes] =
+        await Promise.all(allFetches);
 
       if (!entriesRes.ok) throw new Error("Failed to load cost entries.");
       if (!productsRes.ok) throw new Error("Failed to load products.");
       if (!inventoryRes.ok) throw new Error("Failed to load inventory.");
-      if (!skuListRes.ok) throw new Error("Failed to load SKU list.");
       if (vatRes.ok) {
         const vatData = (await vatRes.json()) as VatSettings;
         setVatSettings(vatData);
@@ -246,10 +287,16 @@ function CostOfGoodsInner() {
       const productsData = (await productsRes.json()) as ProductRow[];
       const inventoryData = (await inventoryRes.json()) as Array<{
         productId: string;
+        id?: string;
         sku: string;
         asin: string | null;
         title: string | null;
         imageUrl: string | null;
+        // /api/amazon/inventory returns quantities nested under inventory (and optionally per-marketplace).
+        inventory?: { totalQty?: number | null } | null;
+        inventoryByMarketplace?: Array<{ currentQty?: number | null }> | null;
+        // Legacy/alternative shapes: tolerate top-level totalQty when present.
+        totalQty?: number | null;
       }>;
 
       if (Array.isArray(entriesData)) {
@@ -262,30 +309,70 @@ function CostOfGoodsInner() {
 
       const inventoryAsProducts: ProductRow[] = Array.isArray(inventoryData)
         ? inventoryData.map((r) => ({
-            id: r.productId,
+            id: String((r as any).productId ?? (r as any).id ?? r.sku),
             sku: r.sku,
             asin: r.asin,
             title: r.title,
             imageUrl: r.imageUrl,
           }))
         : [];
+      // IMPORTANT: inventory endpoint canonicalizes one productId per SKU; COGS endpoints may return
+      // a different productId for the same SKU (multiple users in org). Key stock by SKU to avoid mismatches.
+      const inventoryQtyBySku = new Map<string, number>();
+      for (const r of inventoryData ?? []) {
+        const skuKey = String((r as any)?.sku ?? "")
+          .trim()
+          .toLowerCase();
+        if (!skuKey) continue;
+        const top = r?.totalQty != null ? Number(r.totalQty) : null;
+        const nested =
+          r?.inventory?.totalQty != null ? Number(r.inventory.totalQty) : null;
+        const summed = Array.isArray(r?.inventoryByMarketplace)
+          ? r.inventoryByMarketplace.reduce((s, m) => {
+              const q = m?.currentQty != null ? Number(m.currentQty) : 0;
+              return s + (Number.isFinite(q) ? q : 0);
+            }, 0)
+          : null;
+        const nRaw = top ?? nested ?? summed ?? 0;
+        const n = Number.isFinite(Number(nRaw)) ? Number(nRaw) : 0;
+        const prev = inventoryQtyBySku.get(skuKey) ?? 0;
+        inventoryQtyBySku.set(skuKey, Math.max(prev, n));
+      }
+      if (
+        typeof window !== "undefined" &&
+        process.env.NODE_ENV === "development"
+      ) {
+        // Quick sanity check when debugging stock buckets in the All tab.
+        // eslint-disable-next-line no-console
+        console.warn(
+          "[cogs] inventory rows:",
+          Array.isArray(inventoryData) ? inventoryData.length : "not-array",
+        );
+        // eslint-disable-next-line no-console
+        console.warn("[cogs] inventoryQtyBySku.size:", inventoryQtyBySku.size);
+        // eslint-disable-next-line no-console
+        console.warn("[cogs] inventory sample:", (inventoryData as any)?.[0]);
+      }
       const byId = new Map<string, ProductRow>();
       for (const p of inventoryAsProducts) byId.set(p.id, p);
       for (const p of productsData) if (!byId.has(p.id)) byId.set(p.id, p);
       setProducts(Array.from(byId.values()));
 
       if (cogsFilter === "missing") {
-        const missingData = (await skuListRes.json()) as {
-          missingSkusCount?: number;
-          items?: Array<{
-            productId: string;
-            sku: string;
-            asin: string | null;
-            title: string | null;
-            imageUrl: string | null;
-          }>;
-        };
-        const items = Array.isArray(missingData.items) ? missingData.items : [];
+        const firstUrl = `${baseUrl}/api/amazon/cost-of-goods/missing?${missingQs.toString()}`;
+        const missingData = await fetchAllPages(
+          firstUrl,
+          (j) =>
+            typeof j?.missingSkusCount === "number" ? j.missingSkusCount : 0,
+          (j) => (Array.isArray(j?.items) ? j.items : []),
+        );
+        const items = missingData.items as Array<{
+          productId: string;
+          sku: string;
+          asin: string | null;
+          title: string | null;
+          imageUrl: string | null;
+        }>;
         setSkuItems(
           items.map((m) => ({
             id: m.productId,
@@ -293,10 +380,17 @@ function CostOfGoodsInner() {
             asin: m.asin,
             title: m.title,
             imageUrl: m.imageUrl,
+            totalQty:
+              inventoryQtyBySku.get(
+                String(m.sku ?? "")
+                  .trim()
+                  .toLowerCase(),
+              ) ?? 0,
+            missingCogs: true,
           })),
         );
-        setSkuTotal(typeof missingData.missingSkusCount === "number" ? missingData.missingSkusCount : 0);
-        setMissingCount(typeof missingData.missingSkusCount === "number" ? missingData.missingSkusCount : null);
+        setSkuTotal(missingData.total);
+        setMissingCount(missingData.total);
         setMissing(
           items.map((m) => ({
             productId: m.productId,
@@ -308,11 +402,45 @@ function CostOfGoodsInner() {
           })),
         );
       } else {
-        const allData = (await skuListRes.json()) as {
-          total: number;
-          items: CogsSkuListApiItem[];
-        };
-        const raw = Array.isArray(allData.items) ? allData.items : [];
+        const endpoint = cogsFilter === "complete" ? "complete" : "products";
+
+        // All tab must show all listings (complete + missing). To avoid ambiguity,
+        // explicitly fetch the missing list as well and tag each SKU.
+        const [allData, missingDataForAll] = await Promise.all([
+          fetchAllPages<CogsSkuListApiItem>(
+            `${baseUrl}/api/amazon/cost-of-goods/${endpoint}?` +
+              new URLSearchParams({
+                take: String(SKU_FETCH_SIZE),
+                skip: "0",
+              }).toString(),
+            (j) => (typeof j?.total === "number" ? j.total : 0),
+            (j) => (Array.isArray(j?.items) ? j.items : []),
+          ),
+          cogsFilter === "all"
+            ? fetchAllPages<{ productId: string }>(
+                `${baseUrl}/api/amazon/cost-of-goods/missing?${missingQs.toString()}`,
+                (j) =>
+                  typeof j?.missingSkusCount === "number"
+                    ? j.missingSkusCount
+                    : 0,
+                (j) => (Array.isArray(j?.items) ? j.items : []),
+              )
+            : Promise.resolve({
+                total: 0,
+                items: [] as Array<{ productId: string }>,
+              }),
+        ]);
+
+        const missingSet =
+          cogsFilter === "all"
+            ? new Set<string>(
+                (missingDataForAll.items as Array<{ productId: string }>).map(
+                  (m) => String(m.productId),
+                ),
+              )
+            : null;
+
+        const raw = allData.items;
         setSkuItems(
           raw.map(
             (it): SkuCardItem => ({
@@ -321,15 +449,26 @@ function CostOfGoodsInner() {
               asin: it.asin,
               title: it.title,
               imageUrl: it.imageUrl,
-              revenue:
-                typeof it.revenue === "number" ? it.revenue : undefined,
+              totalQty:
+                inventoryQtyBySku.get(
+                  String(it.sku ?? "")
+                    .trim()
+                    .toLowerCase(),
+                ) ?? 0,
+              revenue: typeof it.revenue === "number" ? it.revenue : undefined,
               units: typeof it.units === "number" ? it.units : undefined,
               latestCostEntry: it.latestCostEntry ?? null,
               productFallbackUnitCost: it.productFallbackUnitCost,
+              missingCogs: missingSet
+                ? missingSet.has(String(it.id))
+                : undefined,
             }),
           ),
         );
-        setSkuTotal(typeof allData.total === "number" ? allData.total : 0);
+        setSkuTotal(allData.total);
+        if (cogsFilter === "all") {
+          setMissingCount(missingDataForAll.total);
+        }
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Error");
@@ -347,7 +486,8 @@ function CostOfGoodsInner() {
   const vatMult = 1 + vatPct / 100;
   const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
   const incFromEx = (ex: number) => round2(ex * vatMult);
-  const exFromInc = (inc: number) => (vatMult === 0 ? round2(inc) : round2(inc / vatMult));
+  const exFromInc = (inc: number) =>
+    vatMult === 0 ? round2(inc) : round2(inc / vatMult);
 
   const selectedProduct = useMemo(() => {
     const id = form.productId;
@@ -375,16 +515,65 @@ function CostOfGoodsInner() {
   // Client-side filter by SKU, ASIN, title (like inventory page) – instant search
   const filteredSkuItems = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return skuItems;
-    return skuItems.filter((p) => {
-      const sku = (p.sku ?? "").toLowerCase();
-      const asin = (p.asin ?? "").toLowerCase();
-      const title = (p.title ?? "").toLowerCase();
-      return sku.includes(q) || asin.includes(q) || title.includes(q);
-    });
-  }, [skuItems, query]);
+    const base = !q
+      ? skuItems
+      : skuItems.filter((p) => {
+          const sku = (p.sku ?? "").toLowerCase();
+          const asin = (p.asin ?? "").toLowerCase();
+          const title = (p.title ?? "").toLowerCase();
+          return sku.includes(q) || asin.includes(q) || title.includes(q);
+        });
+    const hasLedger = (p: SkuCardItem) => p.latestCostEntry != null;
+    const hasFallback = (p: SkuCardItem) =>
+      p.productFallbackUnitCost != null &&
+      Number(p.productFallbackUnitCost) > 0;
+    const isMissingCogs = (p: SkuCardItem) =>
+      cogsFilter === "all"
+        ? Boolean(p.missingCogs)
+        : !hasLedger(p) && !hasFallback(p);
 
-  const totalSkuPages = Math.max(1, Math.ceil(filteredSkuItems.length / DISPLAY_PAGE_SIZE));
+    const list = [...base];
+    list.sort((a, b) => {
+      const aStock = Number(a.totalQty ?? 0) || 0;
+      const bStock = Number(b.totalQty ?? 0) || 0;
+      const aInStock = aStock > 0;
+      const bInStock = bStock > 0;
+
+      // All tab: missing COGS must always come first:
+      // 1) missing + in stock, 2) missing + out of stock, 3) filled + in stock, 4) filled + out of stock.
+      if (cogsFilter === "all") {
+        const aMissing = isMissingCogs(a);
+        const bMissing = isMissingCogs(b);
+        const aRank =
+          aMissing && aInStock
+            ? 0
+            : aMissing && !aInStock
+              ? 1
+              : !aMissing && aInStock
+                ? 2
+                : 3;
+        const bRank =
+          bMissing && bInStock
+            ? 0
+            : bMissing && !bInStock
+              ? 1
+              : !bMissing && bInStock
+                ? 2
+                : 3;
+        if (aRank !== bRank) return aRank - bRank;
+      }
+      // Within each group: highest stock first.
+      const dq = bStock - aStock;
+      if (dq !== 0) return dq;
+      return String(a.sku ?? "").localeCompare(String(b.sku ?? ""));
+    });
+    return list;
+  }, [skuItems, query, cogsFilter]);
+
+  const totalSkuPages = Math.max(
+    1,
+    Math.ceil(filteredSkuItems.length / DISPLAY_PAGE_SIZE),
+  );
   const safeSkuPage = Math.min(skuPage, totalSkuPages);
   const paginatedSkuItems = useMemo(
     () =>
@@ -415,7 +604,9 @@ function CostOfGoodsInner() {
       supplier: editingEntry.supplier ?? "",
       supplierLink: editingEntry.supplierLink ?? "",
       bundleSize: String(editingEntry.bundleSize ?? 1),
-      purchaseDate: new Date(editingEntry.purchaseDate).toISOString().slice(0, 10),
+      purchaseDate: new Date(editingEntry.purchaseDate)
+        .toISOString()
+        .slice(0, 10),
       shipmentId: editingEntry.shipmentId ?? "",
       qtyPurchased: String(editingEntry.qtyPurchased ?? 0),
       qtyDelivered: String(editingEntry.qtyDelivered ?? 0),
@@ -503,7 +694,15 @@ function CostOfGoodsInner() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isSignedIn, getToken, baseUrl, startParam, endParam, cogsFilter, selectedMarketplaceId]);
+  }, [
+    isSignedIn,
+    getToken,
+    baseUrl,
+    startParam,
+    endParam,
+    cogsFilter,
+    selectedMarketplaceId,
+  ]);
 
   // Reset to first page when search query or tab changes (client-side filter)
   useEffect(() => {
@@ -530,7 +729,9 @@ function CostOfGoodsInner() {
         if (!cancelled) setFixedCosts(null);
       }
     })();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [isSignedIn, getToken, baseUrl]);
 
   useEffect(() => {
@@ -563,7 +764,6 @@ function CostOfGoodsInner() {
   const prevSkuPage = () => setSkuPage((p) => Math.max(1, p - 1));
   const nextSkuPage = () => setSkuPage((p) => Math.min(totalSkuPages, p + 1));
 
-
   const createEntry = async () => {
     setCreating(true);
     setError(null);
@@ -589,8 +789,11 @@ function CostOfGoodsInner() {
         prepCostIncVat: round2(Number(form.prepCostIncVat ?? 0) || 0),
       };
 
-      if (!payload.productId) throw new Error('Pick a SKU.');
-      if (!Number.isFinite(payload.unitCostIncVat) || payload.unitCostIncVat <= 0) {
+      if (!payload.productId) throw new Error("Pick a SKU.");
+      if (
+        !Number.isFinite(payload.unitCostIncVat) ||
+        payload.unitCostIncVat <= 0
+      ) {
         throw new Error("Enter a unit cost (inc VAT).");
       }
 
@@ -676,7 +879,10 @@ function CostOfGoodsInner() {
         prepCostIncVat: round2(Number(form.prepCostIncVat ?? 0) || 0),
       };
 
-      if (!Number.isFinite(payload.unitCostIncVat) || payload.unitCostIncVat <= 0) {
+      if (
+        !Number.isFinite(payload.unitCostIncVat) ||
+        payload.unitCostIncVat <= 0
+      ) {
         throw new Error("Enter a unit cost (inc VAT).");
       }
 
@@ -758,14 +964,16 @@ function CostOfGoodsInner() {
       };
       setNotice(
         `Imported ${Number(result.seeded ?? 0)} entries` +
-        (result.skippedExisting
-          ? ` (skipped ${Number(result.skippedExisting)} existing)`
-          : "") +
-        ".",
+          (result.skippedExisting
+            ? ` (skipped ${Number(result.skippedExisting)} existing)`
+            : "") +
+          ".",
       );
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to import existing COGS.");
+      setError(
+        e instanceof Error ? e.message : "Failed to import existing COGS.",
+      );
     } finally {
       setSeeding(false);
     }
@@ -777,7 +985,9 @@ function CostOfGoodsInner() {
     const authHeaders = {
       Authorization: `Bearer ${token}`,
       ...getDevImpersonationHeaders(devImpersonate),
-      ...(selectedMarketplaceId ? { "x-marketplace-id": selectedMarketplaceId } : {}),
+      ...(selectedMarketplaceId
+        ? { "x-marketplace-id": selectedMarketplaceId }
+        : {}),
     };
     const res = await fetch(`${baseUrl}/api/amazon/cost-of-goods/bulk-upload`, {
       method: "POST",
@@ -800,12 +1010,20 @@ function CostOfGoodsInner() {
   const saveFixedCosts = async () => {
     setFixedCostsSaving(true);
     setError(null);
-    const toMonthly = (v: number, period: FixedCostsPeriod) => (period === "annual" ? v / 12 : v);
-    const num = (s: string, period: FixedCostsPeriod) => {
-      if (s.trim() === "") return undefined;
-      const v = toMonthly(Number(s), period);
-      return Number.isFinite(v) ? v : undefined;
-    };
+    const toMonthly = (v: number, period: FixedCostsPeriod) =>
+      period === "annual" ? v / 12 : v;
+    const toLineItems = (items: FixedCostsItemForm[]) =>
+      items
+        .map((it) => {
+          const name = it.name.trim();
+          if (!name) return null;
+          const raw = it.amount.trim();
+          if (!raw) return null;
+          const n = toMonthly(Number(raw), it.period);
+          if (!Number.isFinite(n) || n < 0) return null;
+          return { name, monthlyCost: Math.round(n * 100) / 100 };
+        })
+        .filter(Boolean) as Array<{ name: string; monthlyCost: number }>;
     try {
       const token = await getToken({ template: "backend" });
       if (!token) throw new Error("Not authenticated.");
@@ -816,9 +1034,9 @@ function CostOfGoodsInner() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          softwareCosts: num(fixedCostsForm.softwareCosts, fixedCostsPeriod.softwareCosts),
-          otherSubscriptions: num(fixedCostsForm.otherSubscriptions, fixedCostsPeriod.otherSubscriptions),
-          otherFixedCosts: num(fixedCostsForm.otherFixedCosts, fixedCostsPeriod.otherFixedCosts),
+          softwareCostItems: toLineItems(fixedCostsItemsForm.software),
+          otherSubscriptionItems: toLineItems(fixedCostsItemsForm.otherSubs),
+          otherFixedCostItems: toLineItems(fixedCostsItemsForm.otherFixed),
         }),
       });
       if (!res.ok) throw new Error("Failed to save fixed costs.");
@@ -833,10 +1051,36 @@ function CostOfGoodsInner() {
   };
 
   const openFixedCostsForm = () => {
-    setFixedCostsForm({
-      softwareCosts: fixedCosts?.softwareCosts != null ? String(fixedCosts.softwareCosts) : "",
-      otherSubscriptions: fixedCosts?.otherSubscriptions != null ? String(fixedCosts.otherSubscriptions) : "",
-      otherFixedCosts: fixedCosts?.otherFixedCosts != null ? String(fixedCosts.otherFixedCosts) : "",
+    const fromApi = (items: FixedCostLineItem[] | undefined, fallbackName: string, fallbackTotal: number | null) => {
+      if (Array.isArray(items) && items.length > 0) {
+        return items.map((it) =>
+          newFixedCostItem({
+            name: String(it.name ?? "").trim(),
+            amount:
+              it.monthlyCost != null && Number.isFinite(Number(it.monthlyCost))
+                ? String(Number(it.monthlyCost))
+                : "",
+            period: "monthly",
+          }),
+        );
+      }
+      if (fallbackTotal != null && Number.isFinite(fallbackTotal) && fallbackTotal > 0) {
+        return [newFixedCostItem({ name: fallbackName, amount: String(fallbackTotal), period: "monthly" })];
+      }
+      return [newFixedCostItem({ name: fallbackName })];
+    };
+    setFixedCostsItemsForm({
+      software: fromApi(fixedCosts?.softwareCostItems, "Software", fixedCosts?.softwareCosts ?? null),
+      otherSubs: fromApi(
+        fixedCosts?.otherSubscriptionItems,
+        "Subscription",
+        fixedCosts?.otherSubscriptions ?? null,
+      ),
+      otherFixed: fromApi(
+        fixedCosts?.otherFixedCostItems,
+        "Fixed cost",
+        fixedCosts?.otherFixedCosts ?? null,
+      ),
     });
     setFixedCostsFormOpen(true);
   };
@@ -852,7 +1096,8 @@ function CostOfGoodsInner() {
               Cost of Goods
             </h1>
             <p className="mt-1 text-sm text-[var(--muted-foreground)]">
-              Log inbound cost entries per SKU (unit, delivery, prep, VAT). Profit uses the latest entry per SKU.
+              Log inbound cost entries per SKU (unit, delivery, prep, VAT).
+              Profit uses the latest entry per SKU.
             </p>
           </div>
           <div className="flex shrink-0 flex-col items-end sm:ml-auto">
@@ -874,101 +1119,139 @@ function CostOfGoodsInner() {
         </div>
         {fixedCostsFormOpen && (
           <div className="mt-4 flex flex-col gap-2 rounded-lg border border-[var(--surface-border)] bg-[var(--background)]/50 p-3">
-            <span className="text-sm font-medium text-[var(--foreground)]">Fixed monthly cost</span>
+            <span className="text-sm font-medium text-[var(--foreground)]">
+              Fixed monthly cost
+            </span>
             <p className="text-[10px] text-[var(--muted-foreground)]">
-              Choose monthly or annual per line. Stored as monthly for reporting.
+              Choose monthly or annual per line. Stored as monthly for
+              reporting.
             </p>
-            <div className="grid gap-3 sm:grid-cols-1">
-              <div className="flex flex-col gap-1">
-                <label className="text-xs text-[var(--muted-foreground)]">Software costs</label>
-                <div className="flex flex-wrap items-center gap-2">
-                  <input
-                    type="number"
-                    min={0}
-                    step="0.01"
-                    value={fixedCostsForm.softwareCosts}
-                    onChange={(e) => setFixedCostsForm((f) => ({ ...f, softwareCosts: e.target.value }))}
-                    className="w-24 rounded border border-[var(--surface-border)] bg-[var(--background)] px-2 py-1.5 text-sm text-[var(--foreground)]"
-                    placeholder="0"
-                  />
-                  <div className="inline-flex h-7 items-stretch overflow-hidden rounded-md border border-[var(--surface-border)]">
+            <div className="grid gap-4 sm:grid-cols-1">
+              {(
+                [
+                  {
+                    key: "software",
+                    title: "Software subscriptions",
+                    value: fixedCostsItemsForm.software,
+                  },
+                  {
+                    key: "otherSubs",
+                    title: "Other subscriptions",
+                    value: fixedCostsItemsForm.otherSubs,
+                  },
+                  {
+                    key: "otherFixed",
+                    title: "Other fixed costs",
+                    value: fixedCostsItemsForm.otherFixed,
+                  },
+                ] as const
+              ).map((section) => (
+                <div key={section.key} className="flex flex-col gap-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <label className="text-xs font-medium text-[var(--muted-foreground)]">
+                      {section.title}
+                    </label>
                     <button
                       type="button"
-                      onClick={() => setFixedCostsPeriod((p) => ({ ...p, softwareCosts: "monthly" }))}
-                      className={`cursor-pointer px-2 text-xs focus:outline-none focus:ring-1 focus:ring-inset focus:ring-[var(--nav-active-border)] ${fixedCostsPeriod.softwareCosts === "monthly" ? "bg-sb-accent text-black" : "bg-transparent text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5"}`}
+                      onClick={() =>
+                        setFixedCostsItemsForm((s) => ({
+                          ...s,
+                          [section.key]: [...s[section.key], newFixedCostItem()],
+                        }))
+                      }
+                      className="rounded-md border border-[var(--surface-border)] bg-transparent px-2 py-1 text-xs font-semibold text-[var(--foreground)] hover:bg-[var(--foreground)]/5"
+                      title="Add another line"
                     >
-                      Monthly
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setFixedCostsPeriod((p) => ({ ...p, softwareCosts: "annual" }))}
-                      className={`cursor-pointer border-l border-[var(--surface-border)] px-2 text-xs focus:outline-none focus:ring-1 focus:ring-inset focus:ring-[var(--nav-active-border)] ${fixedCostsPeriod.softwareCosts === "annual" ? "bg-sb-accent text-black" : "bg-transparent text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5"}`}
-                    >
-                      Annual
-                    </button>
-                  </div>
-                </div>
-              </div>
-              <div className="flex flex-col gap-1">
-                <label className="text-xs text-[var(--muted-foreground)]">Other subscriptions</label>
-                <div className="flex flex-wrap items-center gap-2">
-                  <input
-                    type="number"
-                    min={0}
-                    step="0.01"
-                    value={fixedCostsForm.otherSubscriptions}
-                    onChange={(e) => setFixedCostsForm((f) => ({ ...f, otherSubscriptions: e.target.value }))}
-                    className="w-24 rounded border border-[var(--surface-border)] bg-[var(--background)] px-2 py-1.5 text-sm text-[var(--foreground)]"
-                    placeholder="0"
-                  />
-                  <div className="inline-flex h-7 items-stretch overflow-hidden rounded-md border border-[var(--surface-border)]">
-                    <button
-                      type="button"
-                      onClick={() => setFixedCostsPeriod((p) => ({ ...p, otherSubscriptions: "monthly" }))}
-                      className={`cursor-pointer px-2 text-xs focus:outline-none focus:ring-1 focus:ring-inset focus:ring-[var(--nav-active-border)] ${fixedCostsPeriod.otherSubscriptions === "monthly" ? "bg-sb-accent text-black" : "bg-transparent text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5"}`}
-                    >
-                      Monthly
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setFixedCostsPeriod((p) => ({ ...p, otherSubscriptions: "annual" }))}
-                      className={`cursor-pointer border-l border-[var(--surface-border)] px-2 text-xs focus:outline-none focus:ring-1 focus:ring-inset focus:ring-[var(--nav-active-border)] ${fixedCostsPeriod.otherSubscriptions === "annual" ? "bg-sb-accent text-black" : "bg-transparent text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5"}`}
-                    >
-                      Annual
+                      + Add
                     </button>
                   </div>
-                </div>
-              </div>
-              <div className="flex flex-col gap-1">
-                <label className="text-xs text-[var(--muted-foreground)]">Other fixed costs</label>
-                <div className="flex flex-wrap items-center gap-2">
-                  <input
-                    type="number"
-                    min={0}
-                    step="0.01"
-                    value={fixedCostsForm.otherFixedCosts}
-                    onChange={(e) => setFixedCostsForm((f) => ({ ...f, otherFixedCosts: e.target.value }))}
-                    className="w-24 rounded border border-[var(--surface-border)] bg-[var(--background)] px-2 py-1.5 text-sm text-[var(--foreground)]"
-                    placeholder="0"
-                  />
-                  <div className="inline-flex h-7 items-stretch overflow-hidden rounded-md border border-[var(--surface-border)]">
-                    <button
-                      type="button"
-                      onClick={() => setFixedCostsPeriod((p) => ({ ...p, otherFixedCosts: "monthly" }))}
-                      className={`cursor-pointer px-2 text-xs focus:outline-none focus:ring-1 focus:ring-inset focus:ring-[var(--nav-active-border)] ${fixedCostsPeriod.otherFixedCosts === "monthly" ? "bg-sb-accent text-black" : "bg-transparent text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5"}`}
-                    >
-                      Monthly
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setFixedCostsPeriod((p) => ({ ...p, otherFixedCosts: "annual" }))}
-                      className={`cursor-pointer border-l border-[var(--surface-border)] px-2 text-xs focus:outline-none focus:ring-1 focus:ring-inset focus:ring-[var(--nav-active-border)] ${fixedCostsPeriod.otherFixedCosts === "annual" ? "bg-sb-accent text-black" : "bg-transparent text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5"}`}
-                    >
-                      Annual
-                    </button>
+                  <div className="flex flex-col gap-2">
+                    {section.value.map((it, idx) => (
+                      <div
+                        key={it.id}
+                        className="flex flex-wrap items-center gap-2 rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-2 py-2"
+                      >
+                        <input
+                          value={it.name}
+                          onChange={(e) =>
+                            setFixedCostsItemsForm((s) => {
+                              const copy = [...s[section.key]];
+                              copy[idx] = { ...copy[idx], name: e.target.value };
+                              return { ...s, [section.key]: copy };
+                            })
+                          }
+                          placeholder="Name (e.g. SellerAmp)"
+                          className="min-w-[10rem] flex-1 rounded border border-[var(--surface-border)] bg-[var(--background)] px-2 py-1.5 text-sm text-[var(--foreground)]"
+                        />
+                        <input
+                          type="number"
+                          min={0}
+                          step="0.01"
+                          value={it.amount}
+                          onChange={(e) =>
+                            setFixedCostsItemsForm((s) => {
+                              const copy = [...s[section.key]];
+                              copy[idx] = { ...copy[idx], amount: e.target.value };
+                              return { ...s, [section.key]: copy };
+                            })
+                          }
+                          placeholder="0"
+                          className="w-28 rounded border border-[var(--surface-border)] bg-[var(--background)] px-2 py-1.5 text-sm text-[var(--foreground)]"
+                        />
+                        <div className="inline-flex h-8 items-stretch overflow-hidden rounded-md border border-[var(--surface-border)]">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setFixedCostsItemsForm((s) => {
+                                const copy = [...s[section.key]];
+                                copy[idx] = { ...copy[idx], period: "monthly" };
+                                return { ...s, [section.key]: copy };
+                              })
+                            }
+                            className={`cursor-pointer px-2 text-xs focus:outline-none focus:ring-1 focus:ring-inset focus:ring-[var(--nav-active-border)] ${
+                              it.period === "monthly"
+                                ? "bg-sb-accent text-black"
+                                : "bg-transparent text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5"
+                            }`}
+                          >
+                            Monthly
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setFixedCostsItemsForm((s) => {
+                                const copy = [...s[section.key]];
+                                copy[idx] = { ...copy[idx], period: "annual" };
+                                return { ...s, [section.key]: copy };
+                              })
+                            }
+                            className={`cursor-pointer border-l border-[var(--surface-border)] px-2 text-xs focus:outline-none focus:ring-1 focus:ring-inset focus:ring-[var(--nav-active-border)] ${
+                              it.period === "annual"
+                                ? "bg-sb-accent text-black"
+                                : "bg-transparent text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5"
+                            }`}
+                          >
+                            Annual
+                          </button>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setFixedCostsItemsForm((s) => ({
+                              ...s,
+                              [section.key]: s[section.key].filter((x) => x.id !== it.id),
+                            }))
+                          }
+                          className="rounded-md border border-[var(--surface-border)] px-2 py-1 text-xs text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5"
+                          title="Remove line"
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    ))}
                   </div>
                 </div>
-              </div>
+              ))}
             </div>
             <div className="flex gap-2">
               <button
@@ -1029,11 +1312,26 @@ function CostOfGoodsInner() {
               <button
                 type="button"
                 onClick={() => {
-                  setCogsFilter("missing");
+                  setCogsFilter("all");
                   setSkuPage(1);
                 }}
                 className={[
                   "cursor-pointer h-8 px-3 text-xs",
+                  cogsFilter === "all"
+                    ? "bg-sb-accent text-black"
+                    : "bg-transparent text-[var(--foreground)]",
+                ].join(" ")}
+              >
+                All
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setCogsFilter("missing");
+                  setSkuPage(1);
+                }}
+                className={[
+                  "cursor-pointer h-8 px-3 text-xs border-l border-[var(--surface-border)]",
                   cogsFilter === "missing"
                     ? "bg-sb-accent text-black"
                     : "bg-transparent text-[var(--foreground)]",
@@ -1056,21 +1354,6 @@ function CostOfGoodsInner() {
               >
                 Complete
               </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setCogsFilter("all");
-                  setSkuPage(1);
-                }}
-                className={[
-                  "cursor-pointer h-8 px-3 text-xs border-l border-[var(--surface-border)]",
-                  cogsFilter === "all"
-                    ? "bg-sb-accent text-black"
-                    : "bg-transparent text-[var(--foreground)]",
-                ].join(" ")}
-              >
-                All
-              </button>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-3 text-xs text-[var(--muted-foreground)]">
@@ -1079,7 +1362,9 @@ function CostOfGoodsInner() {
                 ? `${pagingStart} - ${pagingEnd} of ${pagingTotal}`
                 : "0 - 0 of 0"}
             </span>
-            <span className="text-[var(--muted-foreground)]">{DISPLAY_PAGE_SIZE} per page</span>
+            <span className="text-[var(--muted-foreground)]">
+              {DISPLAY_PAGE_SIZE} per page
+            </span>
           </div>
         </div>
       </div>
@@ -1137,13 +1422,17 @@ function CostOfGoodsInner() {
                           <span className="font-mono">
                             SKU: {selectedProduct.sku}
                           </span>
-                          {selectedProduct.asin ? ` · ASIN: ${selectedProduct.asin}` : ""}
+                          {selectedProduct.asin
+                            ? ` · ASIN: ${selectedProduct.asin}`
+                            : ""}
                         </div>
                       </div>
                     </div>
                   ) : (
                     <div className="text-sm font-medium">
-                      {editingEntry ? "View / edit cost entry" : "Add cost entry"}
+                      {editingEntry
+                        ? "View / edit cost entry"
+                        : "Add cost entry"}
                     </div>
                   )}
                 </div>
@@ -1191,7 +1480,9 @@ function CostOfGoodsInner() {
                       <div className="mt-1 rounded-lg border border-[var(--surface-border)] bg-transparent p-3">
                         <input
                           value={productPickerQuery}
-                          onChange={(e) => setProductPickerQuery(e.target.value)}
+                          onChange={(e) =>
+                            setProductPickerQuery(e.target.value)
+                          }
                           placeholder="Search SKU / ASIN / title…"
                           className="w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
                         />
@@ -1206,7 +1497,12 @@ function CostOfGoodsInner() {
                                 key={p.id}
                                 type="button"
                                 className="flex w-full cursor-pointer items-center gap-3 px-3 py-2 text-left hover:bg-[var(--foreground)]/5"
-                                onClick={() => setForm((prev) => ({ ...prev, productId: p.id }))}
+                                onClick={() =>
+                                  setForm((prev) => ({
+                                    ...prev,
+                                    productId: p.id,
+                                  }))
+                                }
                               >
                                 <div className="aspect-square h-8 w-8 shrink-0 overflow-hidden rounded-md bg-[var(--surface)] ring-1 ring-[var(--surface-border)]">
                                   {p.imageUrl ? (
@@ -1225,7 +1521,9 @@ function CostOfGoodsInner() {
                                     {p.title ?? p.sku}
                                   </div>
                                   <div className="truncate text-xs text-[var(--muted-foreground)]">
-                                    <span className="font-mono">SKU: {p.sku}</span>
+                                    <span className="font-mono">
+                                      SKU: {p.sku}
+                                    </span>
                                     {p.asin ? ` · ASIN: ${p.asin}` : ""}
                                   </div>
                                 </div>
@@ -1249,7 +1547,10 @@ function CostOfGoodsInner() {
                         type="date"
                         value={form.purchaseDate}
                         onChange={(e) =>
-                          setForm((prev) => ({ ...prev, purchaseDate: e.target.value }))
+                          setForm((prev) => ({
+                            ...prev,
+                            purchaseDate: e.target.value,
+                          }))
                         }
                         className="mt-1.5 w-full max-w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none box-border"
                       />
@@ -1265,7 +1566,10 @@ function CostOfGoodsInner() {
                         inputMode="numeric"
                         value={form.qtyPurchased}
                         onChange={(e) =>
-                          setForm((prev) => ({ ...prev, qtyPurchased: e.target.value }))
+                          setForm((prev) => ({
+                            ...prev,
+                            qtyPurchased: e.target.value,
+                          }))
                         }
                         className="mt-1.5 w-full max-w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none box-border"
                       />
@@ -1279,9 +1583,12 @@ function CostOfGoodsInner() {
                         <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
                           Unit cost
                         </label>
-                        {vatSettings?.vatRegistrationType === "VAT_STANDARD" && (
+                        {vatSettings?.vatRegistrationType ===
+                          "VAT_STANDARD" && (
                           <span className="inline-flex items-center gap-1.5">
-                            <span className="text-[9px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">VAT</span>
+                            <span className="text-[9px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
+                              VAT
+                            </span>
                             <div className="inline-flex overflow-hidden rounded-md ring-1 ring-[var(--surface-border)]">
                               <button
                                 type="button"
@@ -1308,8 +1615,11 @@ function CostOfGoodsInner() {
                                 ].join(" ")}
                                 onClick={() => {
                                   setUnitVatMode("ex");
-                                  const inc = Number(form.unitCostIncVat ?? 0) || 0;
-                                  setUnitCostExVat(inc > 0 ? String(exFromInc(inc)) : "");
+                                  const inc =
+                                    Number(form.unitCostIncVat ?? 0) || 0;
+                                  setUnitCostExVat(
+                                    inc > 0 ? String(exFromInc(inc)) : "",
+                                  );
                                 }}
                               >
                                 Ex
@@ -1319,21 +1629,45 @@ function CostOfGoodsInner() {
                         )}
                       </div>
                       <div className="mt-1 flex items-center rounded-lg border border-[var(--surface-border)] bg-transparent overflow-hidden">
-                        <span className="pl-2.5 text-sm text-[var(--muted-foreground)]">£</span>
+                        <span className="pl-2.5 text-sm text-[var(--muted-foreground)]">
+                          £
+                        </span>
                         <input
                           inputMode="decimal"
-                          value={vatSettings?.vatRegistrationType === "VAT_STANDARD" ? (unitVatMode === "inc" ? form.unitCostIncVat : unitCostExVat) : form.unitCostIncVat}
+                          value={
+                            vatSettings?.vatRegistrationType === "VAT_STANDARD"
+                              ? unitVatMode === "inc"
+                                ? form.unitCostIncVat
+                                : unitCostExVat
+                              : form.unitCostIncVat
+                          }
                           onChange={(e) => {
                             const v = e.target.value;
-                            if (vatSettings?.vatRegistrationType !== "VAT_STANDARD" || unitVatMode === "inc") {
-                              setForm((prev) => ({ ...prev, unitCostIncVat: v }));
+                            if (
+                              vatSettings?.vatRegistrationType !==
+                                "VAT_STANDARD" ||
+                              unitVatMode === "inc"
+                            ) {
+                              setForm((prev) => ({
+                                ...prev,
+                                unitCostIncVat: v,
+                              }));
                               return;
                             }
                             setUnitCostExVat(v);
                             const ex = Number(v ?? 0) || 0;
-                            setForm((prev) => ({ ...prev, unitCostIncVat: ex > 0 ? String(incFromEx(ex)) : "" }));
+                            setForm((prev) => ({
+                              ...prev,
+                              unitCostIncVat:
+                                ex > 0 ? String(incFromEx(ex)) : "",
+                            }));
                           }}
-                          placeholder={vatSettings?.vatRegistrationType === "VAT_STANDARD" && unitVatMode === "ex" ? "e.g. 10.28" : "e.g. 12.34"}
+                          placeholder={
+                            vatSettings?.vatRegistrationType ===
+                              "VAT_STANDARD" && unitVatMode === "ex"
+                              ? "e.g. 10.28"
+                              : "e.g. 12.34"
+                          }
                           className="w-full min-w-0 border-0 bg-transparent px-2 py-1.5 text-sm text-[var(--foreground)] outline-none"
                         />
                       </div>
@@ -1351,9 +1685,12 @@ function CostOfGoodsInner() {
                             i
                           </span>
                         </span>
-                        {vatSettings?.vatRegistrationType === "VAT_STANDARD" && (
+                        {vatSettings?.vatRegistrationType ===
+                          "VAT_STANDARD" && (
                           <span className="inline-flex items-center gap-1.5">
-                            <span className="text-[9px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">VAT</span>
+                            <span className="text-[9px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
+                              VAT
+                            </span>
                             <div className="inline-flex overflow-hidden rounded-md ring-1 ring-[var(--surface-border)]">
                               <button
                                 type="button"
@@ -1380,8 +1717,11 @@ function CostOfGoodsInner() {
                                 ].join(" ")}
                                 onClick={() => {
                                   setDeliveryVatMode("ex");
-                                  const inc = Number(form.deliveryCostIncVat ?? 0) || 0;
-                                  setDeliveryCostExVat(inc > 0 ? String(exFromInc(inc)) : "");
+                                  const inc =
+                                    Number(form.deliveryCostIncVat ?? 0) || 0;
+                                  setDeliveryCostExVat(
+                                    inc > 0 ? String(exFromInc(inc)) : "",
+                                  );
                                 }}
                               >
                                 Ex
@@ -1391,7 +1731,9 @@ function CostOfGoodsInner() {
                         )}
                       </div>
                       <div className="mt-1 flex items-center rounded-lg border border-[var(--surface-border)] bg-transparent overflow-hidden">
-                        <span className="pl-2.5 text-sm text-[var(--muted-foreground)]">£</span>
+                        <span className="pl-2.5 text-sm text-[var(--muted-foreground)]">
+                          £
+                        </span>
                         <input
                           inputMode="decimal"
                           value={
@@ -1404,15 +1746,23 @@ function CostOfGoodsInner() {
                           placeholder="0"
                           onChange={(e) => {
                             const v = e.target.value;
-                            if (vatSettings?.vatRegistrationType !== "VAT_STANDARD" || deliveryVatMode === "inc") {
-                              setForm((prev) => ({ ...prev, deliveryCostIncVat: v }));
+                            if (
+                              vatSettings?.vatRegistrationType !==
+                                "VAT_STANDARD" ||
+                              deliveryVatMode === "inc"
+                            ) {
+                              setForm((prev) => ({
+                                ...prev,
+                                deliveryCostIncVat: v,
+                              }));
                               return;
                             }
                             setDeliveryCostExVat(v);
                             const ex = Number(v ?? 0) || 0;
                             setForm((prev) => ({
                               ...prev,
-                              deliveryCostIncVat: ex > 0 ? String(incFromEx(ex)) : "0",
+                              deliveryCostIncVat:
+                                ex > 0 ? String(incFromEx(ex)) : "0",
                             }));
                           }}
                           className="w-full min-w-0 border-0 bg-transparent px-2 py-1.5 text-sm text-[var(--foreground)] outline-none"
@@ -1424,9 +1774,12 @@ function CostOfGoodsInner() {
                         <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
                           Prep
                         </label>
-                        {vatSettings?.vatRegistrationType === "VAT_STANDARD" && (
+                        {vatSettings?.vatRegistrationType ===
+                          "VAT_STANDARD" && (
                           <span className="inline-flex items-center gap-1.5">
-                            <span className="text-[9px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">VAT</span>
+                            <span className="text-[9px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
+                              VAT
+                            </span>
                             <div className="inline-flex overflow-hidden rounded-md ring-1 ring-[var(--surface-border)]">
                               <button
                                 type="button"
@@ -1453,8 +1806,11 @@ function CostOfGoodsInner() {
                                 ].join(" ")}
                                 onClick={() => {
                                   setPrepVatMode("ex");
-                                  const inc = Number(form.prepCostIncVat ?? 0) || 0;
-                                  setPrepCostExVat(inc > 0 ? String(exFromInc(inc)) : "");
+                                  const inc =
+                                    Number(form.prepCostIncVat ?? 0) || 0;
+                                  setPrepCostExVat(
+                                    inc > 0 ? String(exFromInc(inc)) : "",
+                                  );
                                 }}
                               >
                                 Ex
@@ -1464,7 +1820,9 @@ function CostOfGoodsInner() {
                         )}
                       </div>
                       <div className="mt-1 flex items-center rounded-lg border border-[var(--surface-border)] bg-transparent overflow-hidden">
-                        <span className="pl-2.5 text-sm text-[var(--muted-foreground)]">£</span>
+                        <span className="pl-2.5 text-sm text-[var(--muted-foreground)]">
+                          £
+                        </span>
                         <input
                           inputMode="decimal"
                           value={
@@ -1477,13 +1835,24 @@ function CostOfGoodsInner() {
                           placeholder="0"
                           onChange={(e) => {
                             const v = e.target.value;
-                            if (vatSettings?.vatRegistrationType !== "VAT_STANDARD" || prepVatMode === "inc") {
-                              setForm((prev) => ({ ...prev, prepCostIncVat: v }));
+                            if (
+                              vatSettings?.vatRegistrationType !==
+                                "VAT_STANDARD" ||
+                              prepVatMode === "inc"
+                            ) {
+                              setForm((prev) => ({
+                                ...prev,
+                                prepCostIncVat: v,
+                              }));
                               return;
                             }
                             setPrepCostExVat(v);
                             const ex = Number(v ?? 0) || 0;
-                            setForm((prev) => ({ ...prev, prepCostIncVat: ex > 0 ? String(incFromEx(ex)) : "0" }));
+                            setForm((prev) => ({
+                              ...prev,
+                              prepCostIncVat:
+                                ex > 0 ? String(incFromEx(ex)) : "0",
+                            }));
                           }}
                           className="w-full min-w-0 border-0 bg-transparent px-2 py-1.5 text-sm text-[var(--foreground)] outline-none"
                         />
@@ -1502,7 +1871,10 @@ function CostOfGoodsInner() {
                           inputMode="decimal"
                           value={form.vatRatePct}
                           onChange={(e) =>
-                            setForm((prev) => ({ ...prev, vatRatePct: e.target.value }))
+                            setForm((prev) => ({
+                              ...prev,
+                              vatRatePct: e.target.value,
+                            }))
                           }
                           className="w-16 rounded-lg border border-[var(--surface-border)] bg-transparent px-2 py-1 text-sm text-[var(--foreground)] outline-none text-right"
                         />
@@ -1517,7 +1889,10 @@ function CostOfGoodsInner() {
                     <input
                       value={form.supplier}
                       onChange={(e) =>
-                        setForm((prev) => ({ ...prev, supplier: e.target.value }))
+                        setForm((prev) => ({
+                          ...prev,
+                          supplier: e.target.value,
+                        }))
                       }
                       placeholder="Optional"
                       className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
@@ -1531,7 +1906,10 @@ function CostOfGoodsInner() {
                     <input
                       value={form.supplierLink}
                       onChange={(e) =>
-                        setForm((prev) => ({ ...prev, supplierLink: e.target.value }))
+                        setForm((prev) => ({
+                          ...prev,
+                          supplierLink: e.target.value,
+                        }))
                       }
                       placeholder="https://… (optional)"
                       className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none"
@@ -1546,7 +1924,11 @@ function CostOfGoodsInner() {
                     disabled={creating}
                     className="cursor-pointer rounded-lg bg-sb-accent px-4 py-2 text-sm font-medium text-black disabled:cursor-not-allowed disabled:opacity-60"
                   >
-                    {creating ? "Saving…" : editingEntry ? "Save changes" : "Save"}
+                    {creating
+                      ? "Saving…"
+                      : editingEntry
+                        ? "Save changes"
+                        : "Save"}
                   </button>
                 </div>
               </div>
@@ -1555,134 +1937,149 @@ function CostOfGoodsInner() {
         ) : null}
 
         <div className="overflow-hidden rounded-xl bg-[var(--surface)] ring-1 ring-[var(--surface-border)]">
-            {loading ? (
-              <div className="px-4 py-6 text-sm text-[var(--muted-foreground)]">
-                Loading…
-              </div>
-            ) : (
-              <>
-                <div className="flex flex-wrap items-center justify-between gap-3 bg-[var(--surface)] px-4 py-3 text-xs text-[var(--muted-foreground)]">
-                  <span>
-                    {pagingTotal > 0
-                      ? `${pagingStart} - ${pagingEnd} of ${pagingTotal}`
-                      : "0 - 0 of 0"}
-                  </span>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={prevSkuPage}
-                      disabled={!canPrevSku}
-                      className="cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-1.5 text-xs font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/5 disabled:cursor-not-allowed disabled:opacity-60"
-                    >
-                      Prev
-                    </button>
-                    <button
-                      type="button"
-                      onClick={nextSkuPage}
-                      disabled={!canNextSku}
-                      className="cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-1.5 text-xs font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/5 disabled:cursor-not-allowed disabled:opacity-60"
-                    >
-                      Next
-                    </button>
-                  </div>
+          {loading ? (
+            <div className="px-4 py-6 text-sm text-[var(--muted-foreground)]">
+              Loading…
+            </div>
+          ) : (
+            <>
+              <div className="flex flex-wrap items-center justify-between gap-3 bg-[var(--surface)] px-4 py-3 text-xs text-[var(--muted-foreground)]">
+                <span>
+                  {pagingTotal > 0
+                    ? `${pagingStart} - ${pagingEnd} of ${pagingTotal}`
+                    : "0 - 0 of 0"}
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={prevSkuPage}
+                    disabled={!canPrevSku}
+                    className="cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-1.5 text-xs font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/5 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    Prev
+                  </button>
+                  <button
+                    type="button"
+                    onClick={nextSkuPage}
+                    disabled={!canNextSku}
+                    className="cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-1.5 text-xs font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/5 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    Next
+                  </button>
                 </div>
+              </div>
 
-                {paginatedSkuItems.length === 0 ? (
-                  <div className="px-4 py-6 text-sm text-[var(--muted-foreground)]">
-                    {query.trim() ? (
-                      <div>No SKUs match &quot;{query.trim()}&quot;. Try a different search or clear the search.</div>
-                    ) : cogsFilter === "missing" ? (
-                      <>
-                        <div>No SKUs missing COGS in this period.</div>
-                        <p className="mt-2 text-xs">
-                          Switch to &quot;All&quot; to see all inventory SKUs, or run inventory sync if you have no SKUs yet.
-                        </p>
-                      </>
-                    ) : (
-                      <div>No inventory SKUs yet. Run inventory sync on the Inventory page, then refresh.</div>
-                    )}
-                    <div className="mt-3">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setEditingEntry(null);
-                          resetNewEntryForm();
-                          setShowForm(true);
-                        }}
-                        className="cursor-pointer rounded-lg bg-sb-accent px-3 py-2 text-sm font-medium text-black"
-                      >
-                        New COGS entry
-                      </button>
+              {paginatedSkuItems.length === 0 ? (
+                <div className="px-4 py-6 text-sm text-[var(--muted-foreground)]">
+                  {query.trim() ? (
+                    <div>
+                      No SKUs match &quot;{query.trim()}&quot;. Try a different
+                      search or clear the search.
                     </div>
-                    {cogsFilter === "missing" ? (
-                      <button
-                        type="button"
-                        onClick={seedFromExisting}
-                        disabled={seeding}
-                        className="ml-2 cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/5 disabled:cursor-not-allowed disabled:opacity-60"
-                        title="Create ledger entries from existing per-SKU COGS values"
-                      >
-                        {seeding ? "Importing…" : "Import existing COGS"}
-                      </button>
-                    ) : null}
+                  ) : cogsFilter === "missing" ? (
+                    <>
+                      <div>No SKUs missing COGS in this period.</div>
+                      <p className="mt-2 text-xs">
+                        Switch to &quot;All&quot; to see all inventory SKUs, or
+                        run inventory sync if you have no SKUs yet.
+                      </p>
+                    </>
+                  ) : (
+                    <div>
+                      No inventory SKUs yet. Run inventory sync on the Inventory
+                      page, then refresh.
+                    </div>
+                  )}
+                  <div className="mt-3">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingEntry(null);
+                        resetNewEntryForm();
+                        setShowForm(true);
+                      }}
+                      className="cursor-pointer rounded-lg bg-sb-accent px-3 py-2 text-sm font-medium text-black"
+                    >
+                      New COGS entry
+                    </button>
                   </div>
-                ) : (
-                  <div className="grid gap-3 p-4 sm:grid-cols-2">
-                    {paginatedSkuItems.map((p) => {
-                      const entry = p.latestCostEntry;
-                      const showCompleteCogs =
-                        cogsFilter === "complete" && entry != null;
-                      const showFallbackOnly =
-                        cogsFilter === "complete" &&
-                        entry == null &&
-                        p.productFallbackUnitCost != null &&
-                        p.productFallbackUnitCost > 0;
+                  {cogsFilter === "missing" ? (
+                    <button
+                      type="button"
+                      onClick={seedFromExisting}
+                      disabled={seeding}
+                      className="ml-2 cursor-pointer rounded-lg border border-[var(--surface-border)] bg-transparent px-3 py-2 text-sm font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/5 disabled:cursor-not-allowed disabled:opacity-60"
+                      title="Create ledger entries from existing per-SKU COGS values"
+                    >
+                      {seeding ? "Importing…" : "Import existing COGS"}
+                    </button>
+                  ) : null}
+                </div>
+              ) : (
+                <div className="grid gap-3 p-4 sm:grid-cols-2">
+                  {paginatedSkuItems.map((p) => {
+                    const entry = p.latestCostEntry;
+                    const showCompleteCogs =
+                      cogsFilter !== "missing" && entry != null;
+                    const showFallbackOnly =
+                      cogsFilter !== "missing" &&
+                      entry == null &&
+                      p.productFallbackUnitCost != null &&
+                      p.productFallbackUnitCost > 0;
 
-                      return (
-                        <div
-                          key={p.id}
-                          className="flex items-start gap-3 rounded-lg border border-[var(--surface-border)] bg-[var(--surface)] p-3"
-                        >
-                          <div className="h-10 w-10 shrink-0 overflow-hidden rounded-md bg-[var(--surface)] ring-1 ring-[var(--surface-border)]">
-                            {p.imageUrl ? (
-                              // eslint-disable-next-line @next/next/no-img-element
-                              <img
-                                src={p.imageUrl}
-                                alt=""
-                                className="h-full w-full object-cover"
-                                loading="lazy"
-                                referrerPolicy="no-referrer"
-                              />
-                            ) : null}
+                    return (
+                      <div
+                        key={p.id}
+                        className="flex items-start gap-3 rounded-lg border border-[var(--surface-border)] bg-[var(--surface)] p-3"
+                      >
+                        <div className="h-10 w-10 shrink-0 overflow-hidden rounded-md bg-[var(--surface)] ring-1 ring-[var(--surface-border)]">
+                          {p.imageUrl ? (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img
+                              src={p.imageUrl}
+                              alt=""
+                              className="h-full w-full object-cover"
+                              loading="lazy"
+                              referrerPolicy="no-referrer"
+                            />
+                          ) : null}
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-sm font-medium text-[var(--foreground)]">
+                            {p.title ?? "—"}
                           </div>
-                          <div className="min-w-0 flex-1">
-                            <div className="truncate text-sm font-medium text-[var(--foreground)]">
-                              {p.title ?? "—"}
+                          <div className="mt-0.5 font-mono text-xs text-[var(--muted-foreground)]">
+                            {p.sku}
+                            {p.asin ? ` · ${p.asin}` : ""}
+                          </div>
+                          <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                            <span className="font-medium text-[var(--foreground)]">
+                              Stock {fmtQty(p.totalQty)}
+                            </span>{" "}
+                            units
+                          </div>
+                          {cogsFilter !== "missing" &&
+                          p.revenue != null &&
+                          p.units != null ? (
+                            <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                              {p.units} units · £{p.revenue.toFixed(2)} revenue
                             </div>
-                            <div className="mt-0.5 font-mono text-xs text-[var(--muted-foreground)]">
-                              {p.sku}
-                              {p.asin ? ` · ${p.asin}` : ""}
-                            </div>
-                            {cogsFilter !== "missing" &&
-                            p.revenue != null &&
-                            p.units != null ? (
-                              <div className="mt-1 text-xs text-[var(--muted-foreground)]">
-                                {p.units} units · £{p.revenue.toFixed(2)} revenue
-                              </div>
-                            ) : null}
+                          ) : null}
 
-                            {showCompleteCogs ? (
-                              <div className="mt-2 space-y-1">
-                                <div className="text-sm text-[var(--foreground)]">
-                                  <span className="text-[var(--muted-foreground)]">
-                                    Unit (inc VAT):{" "}
-                                  </span>
+                          {showCompleteCogs ? (
+                            <div className="mt-2">
+                              <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-sm">
+                                <span className="font-medium text-[var(--foreground)] tabular-nums">
                                   {formatCurrency(
                                     entry.unitCostIncVat,
                                     entry.currency,
                                   )}
-                                </div>
-                                <div className="text-xs text-[var(--muted-foreground)]">
+                                </span>
+                                <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
+                                  inc VAT
+                                </span>
+                                <span className="text-xs text-[var(--muted-foreground)]">
+                                  ·{" "}
                                   {new Date(
                                     entry.purchaseDate,
                                   ).toLocaleDateString("en-GB", {
@@ -1690,77 +2087,79 @@ function CostOfGoodsInner() {
                                     month: "short",
                                     year: "numeric",
                                   })}
-                                  {(entry.deliveryCostIncVat > 0 ||
-                                    entry.prepCostIncVat > 0) && (
-                                    <>
-                                      {" · "}
-                                      Line total inc VAT:{" "}
+                                </span>
+                                {(entry.deliveryCostIncVat > 0 ||
+                                  entry.prepCostIncVat > 0) && (
+                                  <span className="text-xs text-[var(--muted-foreground)]">
+                                    · Line total{" "}
+                                    <span className="tabular-nums">
                                       {formatCurrency(
                                         entry.totalCostIncVat,
                                         entry.currency,
                                       )}
-                                    </>
-                                  )}
-                                </div>
-                                <button
-                                  type="button"
-                                  className="mt-1 cursor-pointer rounded-lg bg-sb-accent px-3 py-1.5 text-xs font-medium text-black"
-                                  onClick={() => beginEdit(entry)}
-                                >
-                                  View / edit COGS
-                                </button>
-                              </div>
-                            ) : showFallbackOnly ? (
-                              <div className="mt-2 space-y-1">
-                                <div className="text-sm text-[var(--foreground)]">
-                                  <span className="text-[var(--muted-foreground)]">
-                                    Unit COGS (SKU):{" "}
+                                    </span>
                                   </span>
-                                  {formatCurrency(
-                                    p.productFallbackUnitCost!,
-                                    "GBP",
-                                  )}
-                                </div>
-                                <p className="text-xs text-[var(--muted-foreground)]">
-                                  No ledger row yet — add one for delivery, prep,
-                                  and history.
-                                </p>
-                                <button
-                                  type="button"
-                                  className="mt-1 cursor-pointer rounded-lg bg-sb-accent px-3 py-1.5 text-xs font-medium text-black"
-                                  onClick={() => {
-                                    setEditingEntry(null);
-                                    setShowForm(true);
-                                    resetNewEntryForm(p.id);
-                                  }}
-                                >
-                                  Add ledger entry
-                                </button>
+                                )}
                               </div>
-                            ) : (
                               <button
                                 type="button"
-                                className="mt-2 cursor-pointer rounded-lg bg-sb-accent px-3 py-1.5 text-xs font-medium text-black"
+                                className="mt-1 cursor-pointer rounded-lg bg-sb-accent px-3 py-1.5 text-xs font-medium text-black"
+                                onClick={() => beginEdit(entry)}
+                              >
+                                View / edit COGS
+                              </button>
+                            </div>
+                          ) : showFallbackOnly ? (
+                            <div className="mt-2 space-y-1">
+                              <div className="text-sm text-[var(--foreground)]">
+                                <span className="text-[var(--muted-foreground)]">
+                                  Unit COGS (SKU):{" "}
+                                </span>
+                                {formatCurrency(
+                                  p.productFallbackUnitCost!,
+                                  "GBP",
+                                )}
+                              </div>
+                              <p className="text-xs text-[var(--muted-foreground)]">
+                                No ledger row yet — add one for delivery, prep,
+                                and history.
+                              </p>
+                              <button
+                                type="button"
+                                className="mt-1 cursor-pointer rounded-lg bg-sb-accent px-3 py-1.5 text-xs font-medium text-black"
                                 onClick={() => {
                                   setEditingEntry(null);
                                   setShowForm(true);
                                   resetNewEntryForm(p.id);
                                 }}
                               >
-                                {cogsFilter === "complete"
-                                  ? "Add COGS entry"
-                                  : "Add entry"}
+                                Add ledger entry
                               </button>
-                            )}
-                          </div>
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              className="mt-2 cursor-pointer rounded-lg bg-sb-accent px-3 py-1.5 text-xs font-medium text-black"
+                              onClick={() => {
+                                setEditingEntry(null);
+                                setShowForm(true);
+                                resetNewEntryForm(p.id);
+                              }}
+                            >
+                              {cogsFilter === "complete"
+                                ? "Add COGS entry"
+                                : "Add entry"}
+                            </button>
+                          )}
                         </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </>
-            )}
-          </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </>
+          )}
+        </div>
       </SignedIn>
     </div>
   );
@@ -1792,4 +2191,3 @@ function formatCurrency(amount: number, currency: string) {
     return `£${amount.toFixed(2)}`;
   }
 }
-

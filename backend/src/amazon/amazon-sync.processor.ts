@@ -523,9 +523,9 @@ export class AmazonSyncProcessor extends WorkerHost {
       }
     }
 
-    if (job.name === 'listing-price-refresh') {
+    if (job.name === 'listing-price-refresh-hot') {
       this.logger.log(
-        '[AmazonSync] Running listing price refresh (Listings API only) for orgs with Amazon linked',
+        '[AmazonSync] Running HOT listing price refresh (Listings API only) for orgs with Amazon linked',
       );
 
       const orgs = await this.prisma.organization.findMany({
@@ -552,7 +552,7 @@ export class AmazonSyncProcessor extends WorkerHost {
           continue;
         }
         try {
-          await this.amazonService.refreshListedPricesForOrg(org.id);
+          await this.amazonService.refreshListedPricesForOrg(org.id, { mode: 'hot' });
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e);
           const isNotLinked = /amazon account not linked|link your amazon account/i.test(msg);
@@ -569,7 +569,58 @@ export class AmazonSyncProcessor extends WorkerHost {
 
       if (errors.length) {
         throw new Error(
-          `[AmazonSync] listing-price-refresh completed with ${errors.length} errors`,
+          `[AmazonSync] listing-price-refresh-hot completed with ${errors.length} errors`,
+        );
+      }
+    }
+
+    if (job.name === 'listing-price-refresh-cold') {
+      this.logger.log(
+        '[AmazonSync] Running COLD listing price refresh (Listings API only) for orgs with Amazon linked',
+      );
+
+      const orgs = await this.prisma.organization.findMany({
+        where: {
+          members: {
+            some: {
+              user: {
+                sellerAccounts: {
+                  some: { marketplace: 'amazon' },
+                },
+              },
+            },
+          },
+        },
+        select: { id: true },
+      });
+
+      const errors: Array<{ orgId: string; error: string }> = [];
+      for (const org of orgs) {
+        if (await this.shouldSkipOrgForBatch(org.id)) {
+          this.logger.log(
+            `[AmazonSync] Skipping listing-price-refresh-cold for org ${org.id} – initial sync not yet complete`,
+          );
+          continue;
+        }
+        try {
+          await this.amazonService.refreshListedPricesForOrg(org.id, { mode: 'cold' });
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          const isNotLinked = /amazon account not linked|link your amazon account/i.test(msg);
+          if (isNotLinked) {
+            // skip
+          } else {
+            errors.push({ orgId: org.id, error: msg });
+            this.logger.error(
+              `[AmazonSync] Listing price refresh (cold) failed for org ${org.id}: ${msg}`,
+            );
+          }
+        }
+      }
+
+      if (errors.length) {
+        throw new Error(
+          `[AmazonSync] listing-price-refresh-cold completed with ${errors.length} errors`,
         );
       }
     }

@@ -790,7 +790,8 @@ ping() {
     const skipN = Number(skip ?? 0);
     const safeTake = Number.isFinite(takeN) ? Math.max(1, Math.min(500, takeN)) : 10;
     const safeSkip = Number.isFinite(skipN) ? Math.max(0, skipN) : 0;
-    return this.amazonService.listProductsFromInventory(req.user.orgId, {
+    // All tab: return every inventory SKU, enriched with latest cost entry (if any) and fallback COGS (if any).
+    return this.amazonService.listProductsWithCostInfoFromInventory(req.user.orgId, {
       take: safeTake,
       skip: safeSkip,
     }, req.user.marketplaceId);

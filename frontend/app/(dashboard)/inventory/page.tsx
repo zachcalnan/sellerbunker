@@ -22,6 +22,7 @@ type InventoryRow = {
   estimatedFbaFeePerUnit: number | null;
   estimatedAmazonFeeUpdatedAt: string | null;
   currentListedPrice: number | null;
+  currentListedPriceUpdatedAt?: string | null;
   costOfGoods: number | null;
   feeEstimateRawJson: unknown;
   availableQty: number | null;
@@ -46,6 +47,49 @@ type InventoryRow = {
 const SYSTEM_SKUS = new Set(["AMAZON_GENERIC", "AMAZON_MULTI"]);
 const PAGE_SIZE = 20;
 
+function formatInventoryMoney(amount: number | null | undefined, currency: string) {
+  if (amount == null || !Number.isFinite(amount)) return "—";
+  return new Intl.NumberFormat(undefined, { style: "currency", currency }).format(amount);
+}
+
+/** Per-unit potential profit (same logic as table): needs list price + COGS; Amazon fee is total estimate. */
+function inventoryProfitContext(r: InventoryRow) {
+  const price = r.currentListedPrice != null ? Number(r.currentListedPrice) : null;
+  const cogsRaw = r.costOfGoods != null ? Number(r.costOfGoods) : null;
+  const cogs = cogsRaw != null && Number.isFinite(cogsRaw) && cogsRaw > 0 ? cogsRaw : null;
+  const amazonTotal =
+    r.estimatedAmazonFeePerUnit != null ? Math.abs(Number(r.estimatedAmazonFeePerUnit)) : null;
+  const referral =
+    r.estimatedReferralFeePerUnit != null ? Math.abs(Number(r.estimatedReferralFeePerUnit)) : null;
+  const fba = r.estimatedFbaFeePerUnit != null ? Math.abs(Number(r.estimatedFbaFeePerUnit)) : null;
+  const amazonFeeForCalc = amazonTotal ?? 0;
+  const potentialPerUnit =
+    price != null && cogs != null
+      ? Math.round((price - amazonFeeForCalc - cogs) * 100) / 100
+      : null;
+  const potentialRoiPct =
+    potentialPerUnit != null && cogs != null && cogs > 0
+      ? Math.round((potentialPerUnit / cogs) * 1000) / 10
+      : null;
+  const available = Math.max(0, r.availableQty ?? 0);
+  const potentialOnAvailable =
+    potentialPerUnit != null && available > 0
+      ? Math.round(potentialPerUnit * available * 100) / 100
+      : null;
+  return {
+    price,
+    cogs,
+    referral,
+    fba,
+    amazonTotal,
+    potentialPerUnit,
+    potentialRoiPct,
+    potentialOnAvailable,
+    available,
+    hasCogs: cogs != null,
+  };
+}
+
 export default function InventoryPage() {
   const baseUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
   const { isSignedIn, getToken } = useAuth();
@@ -58,6 +102,19 @@ export default function InventoryPage() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [query, setQuery] = useState("");
+
+  const fmtRelative = useCallback((iso?: string | null) => {
+    if (!iso) return null;
+    const t = Date.parse(iso);
+    if (!Number.isFinite(t)) return null;
+    const mins = Math.max(0, Math.round((Date.now() - t) / 60000));
+    if (mins < 1) return "just now";
+    if (mins < 60) return `${mins}m ago`;
+    const hours = Math.round(mins / 60);
+    if (hours < 48) return `${hours}h ago`;
+    const days = Math.round(hours / 24);
+    return `${days}d ago`;
+  }, []);
   const [page, setPage] = useState(1);
   const [detailRow, setDetailRow] = useState<InventoryRow | null>(null);
 
@@ -140,23 +197,22 @@ export default function InventoryPage() {
 
   return (
     <div className={`min-h-screen w-full ${backgroundClass} px-4 py-6`}>
-      <div className="mb-4 rounded-xl border border-[var(--surface-border)] bg-[var(--surface)] px-4 py-3">
-        <div className="flex flex-wrap items-end justify-between gap-4">
-          <div>
-            <h1 className="text-2xl font-semibold text-[var(--foreground)]">
-              Inventory
-            </h1>
-          </div>
-          <div className="flex w-full flex-col gap-3 sm:w-auto sm:flex-row sm:items-center">
-            <input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search SKU / ASIN / title…"
-              className="w-full rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--foreground)] outline-none sm:w-72"
-            />
-
-          </div>
-        </div>
+      <div className="mb-4 rounded-xl border border-[var(--surface-border)] bg-[var(--surface)] px-4 py-4">
+        <h1 className="text-2xl font-semibold text-[var(--foreground)]">Inventory</h1>
+        <SignedIn>
+          <label className="mt-3 block text-xs font-medium text-[var(--muted-foreground)]" htmlFor="inventory-search">
+            Search
+          </label>
+          <input
+            id="inventory-search"
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search by SKU, ASIN, or title…"
+            autoComplete="off"
+            className="mt-1.5 w-full rounded-lg border border-neutral-200 bg-white px-3 py-2.5 text-sm text-neutral-900 shadow-sm outline-none placeholder:text-neutral-500 focus:border-neutral-300 focus:ring-2 focus:ring-neutral-400/30"
+          />
+        </SignedIn>
       </div>
 
       <SignedOut>
@@ -221,7 +277,7 @@ export default function InventoryPage() {
             </div>
           ) : (
             <>
-            <div className="hidden md:grid grid-cols-[40px_1.6fr_0.9fr_0.7fr_0.65fr_0.5fr_0.5fr_0.5fr_0.5fr_0.5fr_0.5fr_0.5fr_0.5fr_32px] gap-2 bg-[var(--surface)] px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
+            <div className="hidden md:grid grid-cols-[40px_1.6fr_0.9fr_0.7fr_0.65fr_0.5fr_0.5fr_0.5fr_0.5fr_0.5fr_0.5fr_0.5fr_0.5fr_0.45fr_32px] gap-2 bg-[var(--surface)] px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
               <div />
               <div className="text-left">Title</div>
               <div className="text-left">SKU</div>
@@ -236,7 +292,14 @@ export default function InventoryPage() {
                 <div>List</div>
                 <div>price</div>
               </div>
-              <div className="text-right">Profit</div>
+              <div className="text-right leading-tight">
+                <div>Potential</div>
+                <div>profit</div>
+              </div>
+              <div className="text-right leading-tight">
+                <div>Potential</div>
+                <div>ROI</div>
+              </div>
               <div />
             </div>
 
@@ -244,40 +307,13 @@ export default function InventoryPage() {
               {paginated.map((r) => {
                 const isSystem = SYSTEM_SKUS.has(r.sku);
                 const num = (n: number | null) => (n == null ? "—" : String(n));
-                const price = r.currentListedPrice != null ? Number(r.currentListedPrice) : null;
-                const cogsRaw = r.costOfGoods != null ? Number(r.costOfGoods) : null;
-                const cogs = cogsRaw != null && Number.isFinite(cogsRaw) && cogsRaw > 0 ? cogsRaw : null;
-                // DB may legacy-store negative totals from Product Fees breakdown; fee is always a cost magnitude here.
-                const amazonFee =
-                  r.estimatedAmazonFeePerUnit != null
-                    ? Math.abs(Number(r.estimatedAmazonFeePerUnit))
-                    : 0;
-                // Without COGS, "est profit" would equal price − fees and look like full margin — show — instead.
-                const estProfit =
-                  price != null && cogs != null
-                    ? Math.round((price - amazonFee - cogs) * 100) / 100
-                    : null;
+                const profitCtx = inventoryProfitContext(r);
+                const estProfit = profitCtx.potentialPerUnit;
                 const marketplaceLine =
                   r.byMarketplace && r.byMarketplace.length > 0
                     ? r.byMarketplace
                         .filter((m) => (m.fulfillableQty ?? 0) > 0)
-                        .map((m) => {
-                          const short =
-                            m.marketplaceId === "A1F83G8C2ARO7P"
-                              ? "UK"
-                              : m.marketplaceId === "A1PA6795UKMFR9"
-                                ? "DE"
-                                : m.marketplaceId === "A13V1IB3VIYZZH"
-                                  ? "FR"
-                                  : m.marketplaceId === "APJ6JRA9NG5V4"
-                                    ? "IT"
-                                    : m.marketplaceId === "A1RKKUPIHCS9HS"
-                                      ? "ES"
-                                      : m.marketplaceId === "ATVPDKIKX0DER"
-                                        ? "US"
-                                        : m.marketplaceId;
-                          return `${short} ${m.fulfillableQty}`;
-                        })
+                        .map((m) => `${marketplaceShortLabel(m.marketplaceId)} ${m.fulfillableQty}`)
                         .join(" · ")
                     : null;
 
@@ -321,8 +357,31 @@ export default function InventoryPage() {
                             <span>Reserved {num(r.reservedQty)}</span>
                             <span>Inbound {num(r.inboundQty)}</span>
                             <span>Issue {num(r.issueQty)}</span>
-                            {r.currentListedPrice != null && <span>Price: {new Intl.NumberFormat(undefined, { style: "currency", currency: selectedCurrency }).format(Number(r.currentListedPrice))}</span>}
-                            {estProfit != null && <span>Est profit: {new Intl.NumberFormat(undefined, { style: "currency", currency: selectedCurrency }).format(estProfit)}</span>}
+                            {r.currentListedPrice != null && (
+                              <span>
+                                Price:{" "}
+                                {new Intl.NumberFormat(undefined, { style: "currency", currency: selectedCurrency }).format(Number(r.currentListedPrice))}
+                                {fmtRelative(r.currentListedPriceUpdatedAt) ? (
+                                  <span className="ml-1 text-[10px] text-[var(--muted-foreground)]">
+                                    (refreshed {fmtRelative(r.currentListedPriceUpdatedAt)})
+                                  </span>
+                                ) : null}
+                              </span>
+                            )}
+                            {estProfit != null && (
+                              <span>
+                                Potential profit:{" "}
+                                {new Intl.NumberFormat(undefined, { style: "currency", currency: selectedCurrency }).format(estProfit)}
+                              </span>
+                            )}
+                            {profitCtx.potentialRoiPct != null && (
+                              <span>
+                                Potential ROI:{" "}
+                                <span className="font-medium text-[var(--foreground)] tabular-nums">
+                                  {profitCtx.potentialRoiPct.toFixed(1)}%
+                                </span>
+                              </span>
+                            )}
                           </div>
                         </div>
                         <svg className="h-5 w-5 shrink-0 text-[var(--muted-foreground)]" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
@@ -338,7 +397,7 @@ export default function InventoryPage() {
                       tabIndex={0}
                       onClick={() => setDetailRow(r)}
                       onKeyDown={(e) => e.key === "Enter" && setDetailRow(r)}
-                      className="hidden md:grid grid-cols-[40px_1.6fr_0.9fr_0.7fr_0.65fr_0.5fr_0.5fr_0.5fr_0.5fr_0.5fr_0.5fr_0.5fr_0.5fr_32px] items-center gap-2 px-3 py-2 cursor-pointer hover:bg-[var(--foreground)]/5 transition-colors"
+                      className="hidden md:grid grid-cols-[40px_1.6fr_0.9fr_0.7fr_0.65fr_0.5fr_0.5fr_0.5fr_0.5fr_0.5fr_0.5fr_0.5fr_0.5fr_0.45fr_32px] items-center gap-2 px-3 py-2 cursor-pointer hover:bg-[var(--foreground)]/5 transition-colors"
                     >
                       <div className="flex items-center justify-center">
                         {r.imageUrl ? (
@@ -376,11 +435,23 @@ export default function InventoryPage() {
                       <div className="text-center text-[11px] text-[var(--foreground)] tabular-nums">
                         {num(r.issueQty)}
                       </div>
-                      <div className="text-left text-[11px] text-[var(--foreground)] tabular-nums min-w-0 pl-2">
-                        {r.currentListedPrice != null ? new Intl.NumberFormat(undefined, { style: "currency", currency: selectedCurrency }).format(Number(r.currentListedPrice)) : "—"}
+                      <div className="text-left min-w-0 pl-2">
+                        <div className="text-[11px] text-[var(--foreground)] tabular-nums">
+                          {r.currentListedPrice != null
+                            ? new Intl.NumberFormat(undefined, { style: "currency", currency: selectedCurrency }).format(Number(r.currentListedPrice))
+                            : "—"}
+                        </div>
+                        {fmtRelative(r.currentListedPriceUpdatedAt) ? (
+                          <div className="mt-0.5 truncate text-[9px] text-[var(--muted-foreground)]">
+                            refreshed {fmtRelative(r.currentListedPriceUpdatedAt)}
+                          </div>
+                        ) : null}
                       </div>
                       <div className="text-right text-[11px] text-[var(--foreground)] tabular-nums min-w-0">
                         {estProfit != null ? new Intl.NumberFormat(undefined, { style: "currency", currency: selectedCurrency }).format(estProfit) : "—"}
+                      </div>
+                      <div className="text-right text-[11px] text-[var(--foreground)] tabular-nums min-w-0">
+                        {profitCtx.potentialRoiPct != null ? `${profitCtx.potentialRoiPct.toFixed(1)}%` : "—"}
                       </div>
                       <div className="flex items-center justify-center">
                         <svg className="h-4 w-4 text-[var(--muted-foreground)]" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
@@ -431,155 +502,273 @@ export default function InventoryPage() {
           )}
         </div>
 
-        {/* Inventory detail modal — drilldown from rawJson */}
+        {/* Inventory detail modal */}
         {detailRow ? (
-          <div
-            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
-            onClick={() => setDetailRow(null)}
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="inventory-detail-title"
-          >
-            <div
-              className="bg-[var(--background)] rounded-xl shadow-xl max-w-lg w-full max-h-[85vh] overflow-hidden flex flex-col border border-[var(--surface-border)]"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className="flex items-center justify-between gap-4 px-4 py-3 border-b border-[var(--surface-border)]">
-                <div className="min-w-0 flex-1">
-                  <h2 id="inventory-detail-title" className="text-lg font-semibold text-[var(--foreground)] truncate">
-                    {detailRow.title ?? detailRow.sku}
-                  </h2>
-                  <p className="text-sm text-[var(--muted-foreground)]">
-                    SKU {detailRow.sku} {detailRow.asin ? `· ASIN ${detailRow.asin}` : ""}
-                  </p>
-                  {(detailRow.productType ?? detailRow.displayGroup) ? (
-                    <p className="text-xs text-[var(--muted-foreground)] mt-0.5">
-                      {[detailRow.productType, detailRow.displayGroup].filter(Boolean).join(" · ")}
-                    </p>
-                  ) : null}
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setDetailRow(null)}
-                  className="shrink-0 rounded-lg p-2 text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/10 hover:text-[var(--foreground)]"
-                  aria-label="Close"
-                >
-                  <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                </button>
-              </div>
-              <div className="flex-1 overflow-y-auto px-4 py-3 text-sm">
-                <InventoryDetailDrilldown rawJson={detailRow.rawJson} />
-              </div>
-            </div>
-          </div>
+          <InventoryDetailModal
+            row={detailRow}
+            currency={selectedCurrency}
+            fmtRelative={fmtRelative}
+            onClose={() => setDetailRow(null)}
+          />
         ) : null}
       </SignedIn>
     </div>
   );
 }
 
-/** Parses SP-API rawJson (array of summary payloads) into the drilldown tree for the modal. */
-function InventoryDetailDrilldown({ rawJson }: { rawJson: unknown }) {
-  const payloads = Array.isArray(rawJson) ? rawJson : rawJson != null ? [rawJson] : [];
-  if (payloads.length === 0) {
-    return (
-      <p className="text-[var(--muted-foreground)]">No inventory detail data yet.</p>
-    );
-  }
+function marketplaceShortLabel(marketplaceId: string): string {
+  if (marketplaceId === "A1F83G8C2ARO7P") return "UK";
+  if (marketplaceId === "A1PA6795UKMFR9") return "DE";
+  if (marketplaceId === "A13V1IB3VIYZZH") return "FR";
+  if (marketplaceId === "APJ6JRA9NG5V4") return "IT";
+  if (marketplaceId === "A1RKKUPIHCS9HS") return "ES";
+  if (marketplaceId === "ATVPDKIKX0DER") return "US";
+  return marketplaceId;
+}
 
-  // Aggregate details across marketplaces
-  let fulfillable = 0;
-  let reservedTotal = 0;
-  let fcProcessing = 0;
-  let customerOrders = 0;
-  let transshipment = 0;
-  let inboundWorking = 0;
-  let inboundShipped = 0;
-  let inboundReceiving = 0;
-  let unfulfillable = 0;
-  let researching = 0;
-  let lost = 0;
-  let aged = 0;
+type MpSlice = NonNullable<InventoryRow["byMarketplace"]>[number];
 
-  for (const p of payloads) {
-    const d = (p as any)?.inventoryDetails ?? (p as any)?.InventoryDetails ?? {};
-    const r = d?.reservedQuantity ?? d?.ReservedQuantity ?? {};
-    const res = d?.researchingQuantity ?? d?.ResearchingQuantity ?? {};
-    const u = d?.unfulfillableQuantity ?? d?.UnfulfillableQuantity ?? {};
-    fulfillable += Number(d?.afnFulfillableQuantity ?? d?.fulfillableQuantity ?? 0);
-    reservedTotal += Number(r?.totalReservedQuantity ?? r?.total ?? 0);
-    fcProcessing += Number(r?.fcProcessingQuantity ?? r?.fcProcessing ?? 0);
-    customerOrders += Number(r?.customerOrderQuantity ?? r?.customerOrder ?? 0);
-    transshipment += Number(r?.transshipmentQuantity ?? r?.transshipment ?? 0);
-    inboundWorking += Number(d?.afnInboundWorkingQuantity ?? 0);
-    inboundShipped += Number(d?.afnInboundShippedQuantity ?? 0);
-    inboundReceiving += Number(d?.afnInboundReceivingQuantity ?? 0);
-    unfulfillable += Number(u?.totalUnfulfillableQuantity ?? u?.total ?? 0);
-    researching += Number(res?.totalResearchingQuantity ?? res?.total ?? 0);
-    lost += Number(u?.lostQuantity ?? u?.lost ?? 0);
-    aged += Number(u?.agedQuantity ?? u?.aged ?? 0);
-  }
+const MP_METRIC_FIELDS: Array<{ key: keyof Pick<MpSlice, "fulfillableQty" | "inboundQty" | "reservedQty" | "researchingQty" | "unfulfillableQty" | "currentQty">; label: string }> = [
+  { key: "fulfillableQty", label: "Fulfillable" },
+  { key: "inboundQty", label: "Inbound" },
+  { key: "reservedQty", label: "Reserved" },
+  { key: "researchingQty", label: "Researching" },
+  { key: "unfulfillableQty", label: "Unfulfillable" },
+  { key: "currentQty", label: "Current" },
+];
 
-  const total =
-    fulfillable + reservedTotal + inboundWorking + inboundShipped + inboundReceiving + unfulfillable + researching;
-  const issueTotal = unfulfillable + researching + lost + aged;
-  const inboundTotal = inboundWorking + inboundShipped + inboundReceiving;
-
-  const line = (label: string, qty: number, prefix: string) => (
-    <div
-      key={label}
-      className={prefix ? "flex justify-between gap-4 pl-6 py-0.5 text-[var(--muted-foreground)]" : "flex justify-between gap-4 py-1"}
-    >
-      <span className={prefix ? "text-[var(--muted-foreground)]" : ""}>
-        {prefix}{label}
-      </span>
-      <span className="font-medium tabular-nums text-[var(--foreground)]">{qty}</span>
-    </div>
+/** Only columns where at least one marketplace has a non-zero value; only rows with activity in those columns. */
+function activeMarketplaceTable(rows: NonNullable<InventoryRow["byMarketplace"]>) {
+  const fields = MP_METRIC_FIELDS.filter((f) =>
+    rows.some((m) => Number(m[f.key] ?? 0) !== 0),
   );
-  const branch = (label: string, qty: number, children: React.ReactNode) => (
-    <div key={label} className="border-b border-[var(--surface-border)]/50 pb-2 mb-2 last:border-0 last:mb-0">
-      <div className="flex justify-between gap-4 py-1 font-medium">
-        <span>{label}</span>
-        <span className="tabular-nums text-[var(--foreground)]">{qty}</span>
+  const activeRows = rows.filter((m) =>
+    fields.some((f) => Number(m[f.key] ?? 0) !== 0),
+  );
+  return { fields, activeRows };
+}
+
+function InventoryDetailModal({
+  row,
+  currency,
+  fmtRelative,
+  onClose,
+}: {
+  row: InventoryRow;
+  currency: string;
+  fmtRelative: (iso?: string | null) => string | null;
+  onClose: () => void;
+}) {
+  const p = inventoryProfitContext(row);
+  const num = (n: number | null) => (n == null ? "—" : String(n));
+
+  const profitRow = (label: string, value: string, sub?: string) => (
+    <div className="flex justify-between gap-4 border-b border-[var(--surface-border)]/60 py-2 last:border-0">
+      <div>
+        <span className="text-[var(--foreground)]">{label}</span>
+        {sub ? <p className="mt-0.5 text-[10px] text-[var(--muted-foreground)]">{sub}</p> : null}
       </div>
-      {children}
+      <span className="shrink-0 font-medium tabular-nums text-[var(--foreground)]">{value}</span>
     </div>
   );
 
   return (
-    <div className="space-y-1 font-mono text-sm">
-      {branch("Available", fulfillable, line("Fulfillable", fulfillable, "└ "))}
-      {branch("Reserved", reservedTotal, (
-        <>
-          {line("FC Processing", fcProcessing, "├ ")}
-          {line("Customer Orders", customerOrders, "├ ")}
-          {line("Transshipment", transshipment, "└ ")}
-        </>
-      ))}
-      {branch("Inbound", inboundTotal, (
-        <>
-          {line("Working", inboundWorking, "├ ")}
-          {line("Shipped", inboundShipped, "├ ")}
-          {line("Receiving", inboundReceiving, "└ ")}
-        </>
-      ))}
-      {branch("Issue", issueTotal, (
-        <>
-          {line("Unfulfillable", unfulfillable, "├ ")}
-          {line("Researching", researching, "├ ")}
-          {line("Lost", lost, "├ ")}
-          {line("Aged", aged, "└ ")}
-        </>
-      ))}
-      {total === 0 ? (
-        <div className="flex justify-between gap-4 py-2 font-medium text-[var(--muted-foreground)]">
-          <span>Out of Stock</span>
-          <span>—</span>
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="inventory-detail-title"
+    >
+      <div
+        className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-[var(--surface-border)] bg-[var(--background)] shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-start justify-between gap-4 border-b border-[var(--surface-border)] px-4 py-3">
+          <div className="flex min-w-0 flex-1 gap-3">
+            <div className="h-14 w-14 shrink-0 overflow-hidden rounded-lg ring-1 ring-[var(--surface-border)]">
+              {row.imageUrl ? (
+                <img
+                  src={row.imageUrl}
+                  alt={row.title ?? row.sku}
+                  className="h-full w-full object-cover"
+                  loading="lazy"
+                  referrerPolicy="no-referrer"
+                />
+              ) : (
+                <div className="h-full w-full bg-[var(--surface)]" />
+              )}
+            </div>
+            <div className="min-w-0 flex-1">
+              <h2 id="inventory-detail-title" className="text-lg font-semibold leading-snug text-[var(--foreground)]">
+                {row.title ?? row.sku}
+              </h2>
+              <p className="mt-1 text-sm text-[var(--muted-foreground)]">
+                SKU {row.sku}
+                {row.asin ? ` · ASIN ${row.asin}` : ""}
+              </p>
+              {(row.productType ?? row.displayGroup) ? (
+                <p className="mt-0.5 text-xs text-[var(--muted-foreground)]">
+                  {[row.productType, row.displayGroup].filter(Boolean).join(" · ")}
+                </p>
+              ) : null}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="shrink-0 rounded-lg p-2 text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/10 hover:text-[var(--foreground)]"
+            aria-label="Close"
+          >
+            <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
         </div>
-      ) : null}
+
+        <div className="min-h-0 flex-1 space-y-6 overflow-y-auto px-4 py-4 text-sm">
+          <section>
+            <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
+              Inventory status
+            </h3>
+            <div className="grid grid-cols-2 gap-3 rounded-lg border border-[var(--surface-border)] bg-[var(--surface)]/40 p-3 sm:grid-cols-5">
+              <div>
+                <div className="text-[10px] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">Total</div>
+                <div className="mt-0.5 text-lg font-semibold tabular-nums text-[var(--foreground)]">{num(row.totalQty)}</div>
+              </div>
+              <div>
+                <div className="text-[10px] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">Available</div>
+                <div className="mt-0.5 text-lg font-semibold tabular-nums text-[var(--foreground)]">{num(row.availableQty)}</div>
+              </div>
+              <div>
+                <div className="text-[10px] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">Reserved</div>
+                <div className="mt-0.5 text-lg font-semibold tabular-nums text-[var(--foreground)]">{num(row.reservedQty)}</div>
+              </div>
+              <div>
+                <div className="text-[10px] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">Inbound</div>
+                <div className="mt-0.5 text-lg font-semibold tabular-nums text-[var(--foreground)]">{num(row.inboundQty)}</div>
+              </div>
+              <div>
+                <div className="text-[10px] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">Issue</div>
+                <div className="mt-0.5 text-lg font-semibold tabular-nums text-[var(--foreground)]">{num(row.issueQty)}</div>
+              </div>
+            </div>
+            {row.inventoryUpdatedAt ? (
+              <p className="mt-2 text-xs text-[var(--muted-foreground)]">
+                Inventory figures updated {fmtRelative(row.inventoryUpdatedAt) ?? row.inventoryUpdatedAt}
+              </p>
+            ) : null}
+          </section>
+
+          <section>
+            <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
+              Potential profit breakdown (per unit)
+            </h3>
+            <p className="mb-3 text-xs text-[var(--muted-foreground)]">
+              Uses your listed price, estimated Amazon fees (referral + FBA when split out, or combined total), and cost of goods from your ledger. Without COGS, potential profit is not shown on the grid.
+            </p>
+            <div className="rounded-lg border border-[var(--surface-border)] bg-[var(--surface)]/40 px-3 py-1">
+              {profitRow(
+                "Listed price",
+                formatInventoryMoney(p.price, currency),
+                row.currentListedPriceUpdatedAt
+                  ? `Refreshed ${fmtRelative(row.currentListedPriceUpdatedAt) ?? ""}`.trim()
+                  : undefined,
+              )}
+              {profitRow(
+                "Est. referral fee (per unit)",
+                p.referral != null ? formatInventoryMoney(p.referral, currency) : "—",
+                "From product fee estimates",
+              )}
+              {profitRow(
+                "Est. FBA fee (per unit)",
+                p.fba != null ? formatInventoryMoney(p.fba, currency) : "—",
+                "From product fee estimates",
+              )}
+              {profitRow(
+                "Total est. Amazon fees (per unit)",
+                p.amazonTotal != null ? formatInventoryMoney(p.amazonTotal, currency) : "—",
+                row.estimatedAmazonFeeUpdatedAt
+                  ? `Updated ${fmtRelative(row.estimatedAmazonFeeUpdatedAt) ?? ""}`.trim()
+                  : undefined,
+              )}
+              {profitRow(
+                "Cost of goods (per unit)",
+                p.cogs != null ? formatInventoryMoney(p.cogs, currency) : "—",
+                p.hasCogs ? undefined : "Add COGS in Cost of goods to see potential profit",
+              )}
+              {profitRow(
+                "Potential profit (per unit)",
+                p.potentialPerUnit != null ? formatInventoryMoney(p.potentialPerUnit, currency) : "—",
+                "Listed price − Amazon fees − COGS",
+              )}
+              {profitRow(
+                "Potential ROI (per unit)",
+                p.potentialRoiPct != null ? `${p.potentialRoiPct.toFixed(1)}%` : "—",
+                "Potential profit ÷ COGS",
+              )}
+            </div>
+            {p.potentialPerUnit != null && p.available > 0 ? (
+              <div className="mt-3 rounded-lg border border-[var(--surface-border)] bg-[var(--foreground)]/5 px-3 py-2">
+                <div className="flex justify-between gap-4">
+                  <span className="font-medium text-[var(--foreground)]">
+                    On {p.available.toLocaleString()} available unit{p.available === 1 ? "" : "s"}
+                  </span>
+                  <span className="font-semibold tabular-nums text-[var(--foreground)]">
+                    {formatInventoryMoney(p.potentialOnAvailable, currency)}
+                  </span>
+                </div>
+                <p className="mt-1 text-[10px] text-[var(--muted-foreground)]">
+                  Potential profit per unit × fulfillable quantity (same marketplace view as the table).
+                </p>
+              </div>
+            ) : null}
+          </section>
+
+          {row.byMarketplace && row.byMarketplace.length > 0 ? (() => {
+            const { fields, activeRows } = activeMarketplaceTable(row.byMarketplace);
+            if (fields.length === 0 || activeRows.length === 0) return null;
+            return (
+              <section>
+                <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
+                  By marketplace
+                </h3>
+                <div className="overflow-x-auto rounded-lg border border-[var(--surface-border)]">
+                  <table className="w-full min-w-0 text-left text-xs">
+                    <thead>
+                      <tr className="border-b border-[var(--surface-border)] bg-[var(--surface)]/50 text-[var(--muted-foreground)]">
+                        <th className="px-3 py-2 font-semibold">Marketplace</th>
+                        {fields.map((f) => (
+                          <th key={f.key} className="px-3 py-2 text-right font-semibold">
+                            {f.label}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {activeRows.map((m) => (
+                        <tr key={m.marketplaceId} className="border-b border-[var(--surface-border)]/60 last:border-0">
+                          <td className="px-3 py-2 font-medium text-[var(--foreground)]">
+                            {marketplaceShortLabel(m.marketplaceId)}
+                          </td>
+                          {fields.map((f) => (
+                            <td
+                              key={f.key}
+                              className={`px-3 py-2 text-right tabular-nums text-[var(--foreground)]${f.key === "currentQty" ? " font-medium" : ""}`}
+                            >
+                              {Number(m[f.key] ?? 0)}
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            );
+          })() : null}
+        </div>
+      </div>
     </div>
   );
 }
-

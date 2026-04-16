@@ -205,8 +205,8 @@ const NAV_ITEMS: {
   { label: "Orders", href: "/orders", icon: OrdersIcon },
   { label: "FBA Shipments", href: "/shipments", icon: ShipmentsIcon },
   { label: "Replenish", href: "/replenish", icon: ReplenishIcon },
+  { label: "Repricer", href: "/repricer", icon: RepricerIcon, tooltip: "Password protected (testing)" },
   { label: "FBM Orders", href: "#", icon: FbmOrdersIcon, disabled: true, tooltip: "Coming soon" },
-  { label: "Repricer", href: "#", icon: RepricerIcon, disabled: true, tooltip: "In development" },
   { label: "PPC", href: "#", icon: PpcIcon, disabled: true, tooltip: "Coming soon" },
 ];
 

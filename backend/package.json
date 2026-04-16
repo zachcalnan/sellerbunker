@@ -6,6 +6,7 @@
   "private": true,
   "license": "UNLICENSED",
   "scripts": {
+    "redis:up": "docker compose -f ../docker-compose.yml up -d redis",
     "build": "prisma generate && nest build",
     "db:deploy": "prisma migrate deploy",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",

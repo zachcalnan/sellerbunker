@@ -151,6 +151,8 @@ model Organization {
   updatedAt              DateTime                 @updatedAt @map("updated_at")
   lastFbaInventorySyncAt DateTime?
   lastFeesEstimateAt     DateTime?                @map("last_fees_estimate_at")
+  /// Set when the repricer engine finishes a pass for this org (including no-op price decisions).
+  repricerLastEngineAt   DateTime?                @map("repricer_last_engine_at")
   // VAT: NON_VAT_REGISTERED | VAT_STANDARD | VAT_FLAT_RATE
   vatRegistrationType    String?                  @map("vat_registration_type")
   vatEffectiveDate       DateTime?                @map("vat_effective_date") // when to start applying VAT logic
@@ -160,6 +162,10 @@ model Organization {
   fixedCostsSoftware     Decimal?                 @map("fixed_costs_software") @db.Decimal(14, 2)
   fixedCostsOtherSubs    Decimal?                 @map("fixed_costs_other_subs") @db.Decimal(14, 2)
   fixedCostsOther        Decimal?                @map("fixed_costs_other") @db.Decimal(14, 2)
+  /// Optional per-line breakdown for fixed costs (stored monthly).
+  fixedCostsSoftwareItems Json?                  @map("fixed_costs_software_items")
+  fixedCostsOtherSubsItems Json?                 @map("fixed_costs_other_subs_items")
+  fixedCostsOtherItems   Json?                   @map("fixed_costs_other_items")
   members                OrganizationMembership[]
   usersWithActiveOrg     User[]                   @relation("ActiveOrg")
 
@@ -215,6 +221,7 @@ model Product {
   estimatedDigitalServiceFeePerUnit Decimal? @map("estimated_digital_service_fee_per_unit") @db.Decimal(10, 2)
   estimatedAmazonFeeUpdatedAt DateTime?  @map("estimated_amazon_fee_updated_at")
   currentListedPrice         Decimal?    @map("current_listed_price") @db.Decimal(10, 2)
+  currentListedPriceUpdatedAt DateTime?  @map("current_listed_price_updated_at")
   feeEstimateRawJson         Json?       @map("fee_estimate_raw_json")
   createdAt                  DateTime    @default(now()) @map("created_at")
   updatedAt                  DateTime    @updatedAt @map("updated_at")
@@ -222,6 +229,8 @@ model Product {
   inventoryByMarketplace InventoryByMarketplace[]
   orderItems  OrderItem[]
   orders      Order[]
+  repricerSelectedSkus RepricerSelectedSku[]
+  repricerLogs RepricerLog[]
   user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
   purchases   Purchase[]
 
@@ -473,4 +482,117 @@ model AggDailyKpiSummary {
   @@unique([userId, marketplace, fulfilmentChannel, date])
   @@index([userId])
   @@map("agg_daily_kpi_summary")
+}
+
+model RepricerSelectedSku {
+  id        String   @id @default(uuid())
+  orgId     String   @map("org_id")
+  productId String   @map("product_id")
+  /// Which saved pricing preset applies to this SKU (repricer engine uses this rule set).
+  ruleSetId String?  @map("rule_set_id")
+  enabled   Boolean  @default(true)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  product   Product          @relation(fields: [productId], references: [id], onDelete: Cascade)
+  ruleSet   RepricerRuleSet? @relation(fields: [ruleSetId], references: [id], onDelete: SetNull)
+
+  @@unique([orgId, productId])
+  @@index([orgId])
+  @@index([productId])
+  @@index([ruleSetId])
+  @@map("repricer_selected_skus")
+}
+
+model RepricerRuleSet {
+  id        String   @id @default(uuid())
+  orgId     String   @map("org_id")
+  name      String   @default("Default")
+  isActive  Boolean  @default(true) @map("is_active")
+
+  // Rule 1
+  rule1Label    String? @map("rule1_label")
+  /// buy_box: buy box price from competitive pricing; best_offer: lowest listing/landed among CompetitivePrices
+  rule1PriceReference String @default("buy_box") @map("rule1_price_reference")
+  rule1MinProfit Decimal?  @map("rule1_min_profit") @db.Decimal(14, 2)
+  rule1MaxProfit Decimal?  @map("rule1_max_profit") @db.Decimal(14, 2)
+  /// Listing currency: hard floor (optional). Tightened with profit/ROI bounds — highest floor wins.
+  rule1MinListPrice Decimal? @map("rule1_min_list_price") @db.Decimal(14, 2)
+  /// Listing currency: hard ceiling (optional). Tightened with profit/ROI bounds — lowest ceiling wins.
+  rule1MaxListPrice Decimal? @map("rule1_max_list_price") @db.Decimal(14, 2)
+  rule1MinRoiPct Decimal?  @map("rule1_min_roi_pct") @db.Decimal(7, 4)
+  rule1MaxRoiPct Decimal?  @map("rule1_max_roi_pct") @db.Decimal(7, 4)
+  rule1EndsAt    DateTime? @map("rule1_ends_at")
+  rule1Strategy  String?   @map("rule1_strategy") // match_buy_box | beat_buy_box | stay_above_buy_box
+  rule1BeatType  String?   @map("rule1_beat_type") // amount | percent
+  rule1BeatValue Decimal?  @map("rule1_beat_value") @db.Decimal(14, 4)
+  rule1OnlyWhenBuyBoxFba Boolean @default(false) @map("rule1_only_when_buy_box_fba")
+  rule1IgnoreAmazon Boolean @default(true) @map("rule1_ignore_amazon")
+  rule1IgnoreFbm Boolean @default(false) @map("rule1_ignore_fbm")
+  rule1IgnoreSellerViewsEnabled Boolean @default(false) @map("rule1_ignore_seller_views_enabled")
+  rule1IgnoreSellerViewsBelow Int? @map("rule1_ignore_seller_views_below")
+  rule1IgnoreSellerIds Json? @map("rule1_ignore_seller_ids")
+  rule1MinSellerFeedbackPct Decimal? @map("rule1_min_seller_feedback_pct") @db.Decimal(7, 4)
+  rule1CooldownMinutes Int? @map("rule1_cooldown_minutes")
+  rule1SmartDelayEnabled Boolean @default(true) @map("rule1_smart_delay_enabled")
+
+  // Rule 2
+  rule2Label    String? @map("rule2_label")
+  rule2PriceReference String @default("buy_box") @map("rule2_price_reference")
+  rule2MinProfit Decimal?  @map("rule2_min_profit") @db.Decimal(14, 2)
+  rule2MaxProfit Decimal?  @map("rule2_max_profit") @db.Decimal(14, 2)
+  rule2MinListPrice Decimal? @map("rule2_min_list_price") @db.Decimal(14, 2)
+  rule2MaxListPrice Decimal? @map("rule2_max_list_price") @db.Decimal(14, 2)
+  rule2MinRoiPct Decimal?  @map("rule2_min_roi_pct") @db.Decimal(7, 4)
+  rule2MaxRoiPct Decimal?  @map("rule2_max_roi_pct") @db.Decimal(7, 4)
+  rule2EndsAt    DateTime? @map("rule2_ends_at")
+  rule2Strategy  String?   @map("rule2_strategy") // match_buy_box | beat_buy_box | stay_above_buy_box
+  rule2BeatType  String?   @map("rule2_beat_type") // amount | percent
+  rule2BeatValue Decimal?  @map("rule2_beat_value") @db.Decimal(14, 4)
+  rule2OnlyWhenBuyBoxFba Boolean @default(false) @map("rule2_only_when_buy_box_fba")
+  rule2IgnoreAmazon Boolean @default(true) @map("rule2_ignore_amazon")
+  rule2IgnoreFbm Boolean @default(false) @map("rule2_ignore_fbm")
+  rule2IgnoreSellerViewsEnabled Boolean @default(false) @map("rule2_ignore_seller_views_enabled")
+  rule2IgnoreSellerViewsBelow Int? @map("rule2_ignore_seller_views_below")
+  rule2IgnoreSellerIds Json? @map("rule2_ignore_seller_ids")
+  rule2MinSellerFeedbackPct Decimal? @map("rule2_min_seller_feedback_pct") @db.Decimal(7, 4)
+  rule2CooldownMinutes Int? @map("rule2_cooldown_minutes")
+  rule2SmartDelayEnabled Boolean @default(true) @map("rule2_smart_delay_enabled")
+
+  /// After this many days from rule start, switch to followUpRuleSet (optional).
+  chainAfterDays Int? @map("chain_after_days")
+  followUpRuleSetId String? @map("follow_up_rule_set_id")
+  followUpRuleSet RepricerRuleSet? @relation("RepricerRuleChain", fields: [followUpRuleSetId], references: [id], onDelete: SetNull)
+  chainedFrom RepricerRuleSet[] @relation("RepricerRuleChain")
+  assignedSkus RepricerSelectedSku[]
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([orgId])
+  @@index([followUpRuleSetId])
+  @@map("repricer_rule_sets")
+}
+
+model RepricerLog {
+  id        String   @id @default(uuid())
+  orgId     String   @map("org_id")
+  productId String   @map("product_id")
+  sku       String
+  kind      String   @default("decision") // decision | applied | error
+  message   String
+  prevPrice Decimal? @map("prev_price") @db.Decimal(10, 2)
+  nextPrice Decimal? @map("next_price") @db.Decimal(10, 2)
+  context   Json?    @map("context")
+  createdAt DateTime @default(now()) @map("created_at")
+  /// Bumped when the same SKU logs "listing unchanged" again (one anchored row per product).
+  lastCheckedAt DateTime? @map("last_checked_at")
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([orgId])
+  @@index([productId])
+  @@index([orgId, createdAt])
+  @@index([orgId, productId])
+  @@map("repricer_logs")
 }

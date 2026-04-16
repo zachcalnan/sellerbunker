@@ -330,13 +330,66 @@ export class UsersService {
         fixedCostsSoftware: true,
         fixedCostsOtherSubs: true,
         fixedCostsOther: true,
+        fixedCostsSoftwareItems: true,
+        fixedCostsOtherSubsItems: true,
+        fixedCostsOtherItems: true,
       },
     });
     if (!org) throw new NotFoundException('Organization not found');
+    const normItems = (v: unknown): Array<{ name: string; monthlyCost: number }> => {
+      const arr = Array.isArray(v) ? v : [];
+      const out: Array<{ name: string; monthlyCost: number }> = [];
+      for (const it of arr) {
+        if (!it || typeof it !== 'object') continue;
+        const name = String((it as any).name ?? '').trim();
+        const mc = Number((it as any).monthlyCost);
+        if (!name) continue;
+        if (!Number.isFinite(mc) || mc < 0) continue;
+        out.push({ name: name.slice(0, 80), monthlyCost: Math.round(mc * 100) / 100 });
+      }
+      return out;
+    };
+    const softwareCostItems = normItems(org.fixedCostsSoftwareItems);
+    const otherSubscriptionItems = normItems(org.fixedCostsOtherSubsItems);
+    const otherFixedCostItems = normItems(org.fixedCostsOtherItems);
+
+    const sum = (items: Array<{ monthlyCost: number }>) =>
+      Math.round(items.reduce((a, b) => a + (Number(b.monthlyCost) || 0), 0) * 100) / 100;
+
+    const fallbackItem = (label: string, total: unknown) => {
+      const n = total != null ? Number(total) : null;
+      if (n == null || !Number.isFinite(n) || n <= 0) return [];
+      return [{ name: label, monthlyCost: Math.round(n * 100) / 100 }];
+    };
+
+    const softwareTotal = org.fixedCostsSoftware != null ? Number(org.fixedCostsSoftware) : null;
+    const otherSubsTotal = org.fixedCostsOtherSubs != null ? Number(org.fixedCostsOtherSubs) : null;
+    const otherFixedTotal = org.fixedCostsOther != null ? Number(org.fixedCostsOther) : null;
+
+    const softwareItemsOut =
+      softwareCostItems.length > 0 ? softwareCostItems : fallbackItem('Software', softwareTotal);
+    const otherSubsItemsOut =
+      otherSubscriptionItems.length > 0
+        ? otherSubscriptionItems
+        : fallbackItem('Subscription', otherSubsTotal);
+    const otherFixedItemsOut =
+      otherFixedCostItems.length > 0 ? otherFixedCostItems : fallbackItem('Fixed cost', otherFixedTotal);
+
     return {
-      softwareCosts: org.fixedCostsSoftware != null ? Number(org.fixedCostsSoftware) : null,
-      otherSubscriptions: org.fixedCostsOtherSubs != null ? Number(org.fixedCostsOtherSubs) : null,
-      otherFixedCosts: org.fixedCostsOther != null ? Number(org.fixedCostsOther) : null,
+      softwareCosts: softwareTotal,
+      softwareCostItems: softwareItemsOut,
+      otherSubscriptions: otherSubsTotal,
+      otherSubscriptionItems: otherSubsItemsOut,
+      otherFixedCosts: otherFixedTotal,
+      otherFixedCostItems: otherFixedItemsOut,
+      totals: {
+        softwareCosts: sum(softwareItemsOut),
+        otherSubscriptions: sum(otherSubsItemsOut),
+        otherFixedCosts: sum(otherFixedItemsOut),
+        totalFixedCosts:
+          Math.round((sum(softwareItemsOut) + sum(otherSubsItemsOut) + sum(otherFixedItemsOut)) * 100) /
+          100,
+      },
     };
   }
 
@@ -348,16 +401,52 @@ export class UsersService {
     userId: string,
     data: {
       softwareCosts?: number;
+      softwareCostItems?: Array<{ name: string; monthlyCost: number }>;
       otherSubscriptions?: number;
+      otherSubscriptionItems?: Array<{ name: string; monthlyCost: number }>;
       otherFixedCosts?: number;
+      otherFixedCostItems?: Array<{ name: string; monthlyCost: number }>;
     },
   ) {
     const isMember = await this.isOrgMember(userId, orgId);
     if (!isMember) throw new NotFoundException('Not a member of this org');
     const payload: Record<string, unknown> = {};
+    const normItems = (v: unknown): Array<{ name: string; monthlyCost: number }> => {
+      const arr = Array.isArray(v) ? v : [];
+      const out: Array<{ name: string; monthlyCost: number }> = [];
+      for (const it of arr) {
+        if (!it || typeof it !== 'object') continue;
+        const name = String((it as any).name ?? '').trim();
+        const mc = Number((it as any).monthlyCost);
+        if (!name) continue;
+        if (!Number.isFinite(mc) || mc < 0) continue;
+        out.push({ name: name.slice(0, 80), monthlyCost: Math.round(mc * 100) / 100 });
+      }
+      return out;
+    };
+    const sum = (items: Array<{ monthlyCost: number }>) =>
+      Math.round(items.reduce((a, b) => a + (Number(b.monthlyCost) || 0), 0) * 100) / 100;
+
+    const softwareItems = normItems(data.softwareCostItems);
+    const otherSubsItems = normItems(data.otherSubscriptionItems);
+    const otherFixedItems = normItems(data.otherFixedCostItems);
+
     if (data.softwareCosts !== undefined) payload.fixedCostsSoftware = data.softwareCosts;
     if (data.otherSubscriptions !== undefined) payload.fixedCostsOtherSubs = data.otherSubscriptions;
     if (data.otherFixedCosts !== undefined) payload.fixedCostsOther = data.otherFixedCosts;
+
+    if (data.softwareCostItems !== undefined) {
+      payload.fixedCostsSoftwareItems = softwareItems;
+      payload.fixedCostsSoftware = sum(softwareItems);
+    }
+    if (data.otherSubscriptionItems !== undefined) {
+      payload.fixedCostsOtherSubsItems = otherSubsItems;
+      payload.fixedCostsOtherSubs = sum(otherSubsItems);
+    }
+    if (data.otherFixedCostItems !== undefined) {
+      payload.fixedCostsOtherItems = otherFixedItems;
+      payload.fixedCostsOther = sum(otherFixedItems);
+    }
     await (this.prisma as any).organization.update({
       where: { id: orgId },
       data: payload,

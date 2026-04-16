@@ -586,14 +586,19 @@ export function MobileNav() {
                   FBM Orders
                 </div>
 
-                <div
-                  title="In development"
-                  className="flex cursor-not-allowed items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium text-[var(--muted-foreground)] opacity-70 blur-[0.5px] transition-all hover:opacity-90 hover:blur-0"
-                  aria-disabled="true"
+                <Link
+                  href={withImpersonateParam("/repricer", devImpersonate)}
+                  className={`flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium no-underline transition-colors ${
+                    pathname === "/repricer"
+                      ? "bg-sb-accent text-black"
+                      : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
+                  }`}
+                  onClick={closeDrawer}
+                  title="Password protected (testing)"
                 >
                   <RepricerIcon className="h-4 w-4 shrink-0" />
                   Repricer
-                </div>
+                </Link>
               </SignedIn>
 
               <div className="my-2 h-px bg-[var(--surface-border)]" />

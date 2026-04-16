@@ -131,17 +131,27 @@ export class AmazonSyncService implements OnModuleInit {
       },
     );
 
-    // Listed price only: Listings API (no Product Fees); default every 30 minutes
-    const listingPriceEveryMs =
-      Number(process.env.LISTING_PRICE_REFRESH_EVERY_MS) || 30 * 60 * 1000;
+    // Listed price only: Listings API (no Product Fees)
+    // - Hot SKUs (in-stock or recently sold): every 5 minutes
+    // - Cold SKUs: every 60 minutes
+    const listingPriceHotEveryMs =
+      Number(process.env.LISTING_PRICE_REFRESH_HOT_EVERY_MS) || 5 * 60 * 1000;
+    const listingPriceColdEveryMs =
+      Number(process.env.LISTING_PRICE_REFRESH_COLD_EVERY_MS) || 60 * 60 * 1000;
     await this.queue.add(
-      'listing-price-refresh',
+      'listing-price-refresh-hot',
       {},
       {
-        repeat: {
-          every: listingPriceEveryMs,
-        },
-        jobId: 'listing-price-refresh',
+        repeat: { every: listingPriceHotEveryMs },
+        jobId: 'listing-price-refresh-hot',
+      },
+    );
+    await this.queue.add(
+      'listing-price-refresh-cold',
+      {},
+      {
+        repeat: { every: listingPriceColdEveryMs },
+        jobId: 'listing-price-refresh-cold',
       },
     );
 
@@ -157,7 +167,7 @@ export class AmazonSyncService implements OnModuleInit {
     );
 
     this.logger.log(
-      `Scheduled Amazon sync jobs (orders=${ordersEveryMs}ms, inventory=${inventoryEveryMs}ms, shipments=${shipmentsEveryMs}ms, feeCron=${feeEstimateCron}, listingPrice=${listingPriceEveryMs}ms, titlesBackfill=${titlesBackfillEveryMs}ms)`,
+      `Scheduled Amazon sync jobs (orders=${ordersEveryMs}ms, inventory=${inventoryEveryMs}ms, shipments=${shipmentsEveryMs}ms, feeCron=${feeEstimateCron}, listingHot=${listingPriceHotEveryMs}ms, listingCold=${listingPriceColdEveryMs}ms, titlesBackfill=${titlesBackfillEveryMs}ms)`,
     );
   }
 

@@ -2160,6 +2160,10 @@ export class AmazonService {
     marketplaceId?: string,
   ): Promise<{
     revenue: number;
+    promotionalAdjustments: number;
+    reimbursementAdjustments: number;
+    otherAdjustments: number;
+    totalAdjustments: number;
     totalSellingCosts: number;
     totalCogs: number;
     prepFees: number;
@@ -2169,6 +2173,7 @@ export class AmazonService {
     totalAmazonFees: number;
     softwareSubsTotal: number;
     otherSubsTotal: number;
+    otherFixedCostsTotal: number;
     totalFixedCosts: number;
     totalProfit: number;
     outputVat: number;
@@ -2196,6 +2201,9 @@ export class AmazonService {
       return Number((v as any).toString?.() ?? 0) || 0;
     };
     let revenue = 0;
+    let promotionalAdjustments = 0;
+    let reimbursementAdjustments = 0;
+    let otherAdjustments = 0;
     let outputVat = 0;
     let inputVat = 0;
 
@@ -2250,6 +2258,22 @@ export class AmazonService {
       const pnlExclusionByOrderDbId = await this.buildOrderSalesExclusionMap(
         items.map((it: any) => String(it.orderDbId ?? '')).filter(Boolean),
       );
+      const promoFromRaw = (raw: unknown): number => {
+        const it = raw as any;
+        if (!it || typeof it !== 'object') return 0;
+        const readAmt = (obj: any): number => {
+          if (!obj) return 0;
+          const n = Number(obj?.Amount ?? obj?.amount ?? obj?.CurrencyAmount ?? obj?.currencyAmount ?? 0);
+          return Number.isFinite(n) ? n : 0;
+        };
+        // Orders API fields (usually positive magnitude); treat as a negative adjustment to profit.
+        const promo =
+          readAmt(it.PromotionDiscount ?? it.promotionDiscount) +
+          readAmt(it.PromotionDiscountTax ?? it.promotionDiscountTax) +
+          readAmt(it.ShippingDiscount ?? it.shippingDiscount) +
+          readAmt(it.ShippingDiscountTax ?? it.shippingDiscountTax);
+        return promo;
+      };
       for (const it of items) {
         const pnlOid = String((it as { orderDbId?: unknown }).orderDbId ?? '');
         if (pnlOid && pnlExclusionByOrderDbId.has(pnlOid)) continue;
@@ -2267,6 +2291,8 @@ export class AmazonService {
           pnlOrderLineQtySum,
         );
         revenue += lineRev;
+        const promoAdj = promoFromRaw((it as any).rawResponse);
+        if (promoAdj !== 0) promotionalAdjustments -= Math.abs(promoAdj);
         const rev = lineRev;
         const cogs = it.cogsTotal != null ? toNum(it.cogsTotal) : null;
         const qty = Math.max(1, Number(it.quantity) || 1);
@@ -2336,13 +2362,12 @@ export class AmazonService {
 
     let softwareSubsTotal = 0;
     let otherSubsTotal = 0;
+    let otherFixedCostsTotal = 0;
     if (userIds.length > 0) {
-      const rows = await (this.prisma as any).aggDailyKpiSummary.findMany({
-        where: {
-          userId: { in: userIds },
-          date: { gte: safeStart, lte: safeEnd },
-        },
-        select: { softwareSubsTotal: true, otherSubsTotal: true },
+      // Fixed costs are stored monthly on the org. Apportion them into the chosen date range.
+      const org = await (this.prisma as any).organization.findUnique({
+        where: { id: orgId },
+        select: { fixedCostsSoftware: true, fixedCostsOtherSubs: true, fixedCostsOther: true },
       });
       const toNum = (v: unknown): number => {
         if (v == null) return 0;
@@ -2350,21 +2375,34 @@ export class AmazonService {
         if (typeof v === 'string') return parseFloat(v) || 0;
         return Number((v as any).toString?.() ?? 0) || 0;
       };
-      for (const r of rows) {
-        softwareSubsTotal += toNum(r.softwareSubsTotal);
-        otherSubsTotal += toNum(r.otherSubsTotal);
-      }
+      const monthlySoftware = toNum(org?.fixedCostsSoftware);
+      const monthlyOtherSubs = toNum(org?.fixedCostsOtherSubs);
+      const monthlyOtherFixed = toNum(org?.fixedCostsOther);
+      const dayMs = 24 * 60 * 60 * 1000;
+      const days = Math.max(1, Math.round((safeEnd.getTime() - safeStart.getTime()) / dayMs) + 1);
+      const monthDays = 30; // simple monthly apportionment
+      const factor = days / monthDays;
+      softwareSubsTotal = Math.round(monthlySoftware * factor * 100) / 100;
+      otherSubsTotal = Math.round(monthlyOtherSubs * factor * 100) / 100;
+      otherFixedCostsTotal = Math.round(monthlyOtherFixed * factor * 100) / 100;
     }
 
     const totalSellingCosts =
       cost.totalCogs +
       cost.prepFees +
       cost.totalAmazonFees;
-    const totalFixedCosts = softwareSubsTotal + otherSubsTotal;
-    const totalProfit = revenue - totalSellingCosts - totalFixedCosts;
+    const totalFixedCosts = softwareSubsTotal + otherSubsTotal + otherFixedCostsTotal;
+    const totalAdjustments =
+      promotionalAdjustments + reimbursementAdjustments + otherAdjustments;
+    const totalProfit =
+      revenue + totalAdjustments - totalSellingCosts - totalFixedCosts;
 
     return {
       revenue,
+      promotionalAdjustments,
+      reimbursementAdjustments,
+      otherAdjustments,
+      totalAdjustments,
       totalSellingCosts,
       totalCogs: cost.totalCogs,
       prepFees: cost.prepFees,
@@ -2374,6 +2412,7 @@ export class AmazonService {
       totalAmazonFees: cost.totalAmazonFees,
       softwareSubsTotal,
       otherSubsTotal,
+      otherFixedCostsTotal,
       totalFixedCosts,
       totalProfit,
       outputVat,
@@ -4579,7 +4618,8 @@ export class AmazonService {
     marketplaceId?: string,
   ): Promise<{ total: number; items: Array<{ id: string; sku: string; asin: string | null; title: string | null; imageUrl: string | null }> }> {
     const userIds = await this.getOrgMemberUserIds(orgId);
-    const take = Math.max(1, Math.min(100, opts?.take ?? 10));
+    // Controller allows up to 500 for these list endpoints; keep service in sync.
+    const take = Math.max(1, Math.min(500, opts?.take ?? 10));
     const skip = Math.max(0, opts?.skip ?? 0);
 
     const invRows = marketplaceId
@@ -4608,6 +4648,209 @@ export class AmazonService {
       if (p) return p;
       return { id, sku: id, asin: null as string | null, title: null as string | null, imageUrl: null as string | null };
     });
+    return { total, items };
+  }
+
+  /**
+   * Cost of Goods "All" tab: list every inventory SKU, enriched with:
+   * - latestCostEntry (latest Purchase row per product, if any)
+   * - productFallbackUnitCost (Product.costOfGoods when set but there is no Purchase row)
+   *
+   * Sorted by available stock (desc) then sales revenue (desc), paginated.
+   */
+  async listProductsWithCostInfoFromInventory(
+    orgId: string,
+    opts?: { take?: number; skip?: number },
+    marketplaceId?: string,
+  ): Promise<{
+    total: number;
+    items: Array<{
+      id: string;
+      sku: string;
+      asin: string | null;
+      title: string | null;
+      imageUrl: string | null;
+      latestCostEntry: {
+        id: string;
+        fulfilment: string;
+        supplier: string | null;
+        supplierLink: string | null;
+        bundleSize: number;
+        purchaseDate: string;
+        orderNumber: string | null;
+        shipmentId: string | null;
+        qtyPurchased: number;
+        qtyDelivered: number;
+        currency: string;
+        vatRatePct: number;
+        unitCostIncVat: number;
+        deliveryCostIncVat: number;
+        prepCostIncVat: number;
+        totalCostIncVat: number;
+        product: {
+          id: string;
+          sku: string;
+          asin: string | null;
+          title: string | null;
+          imageUrl: string | null;
+        };
+      } | null;
+      productFallbackUnitCost: number | null;
+    }>;
+  }> {
+    const userIds = await this.getOrgMemberUserIds(orgId);
+    const take = Math.max(1, Math.min(100, opts?.take ?? 10));
+    const skip = Math.max(0, opts?.skip ?? 0);
+
+    const invRows = marketplaceId
+      ? await this.prisma.inventoryByMarketplace.findMany({
+          where: { userId: { in: userIds }, marketplaceId },
+          select: { productId: true },
+        })
+      : await this.prisma.inventory.findMany({
+          where: { userId: { in: userIds } },
+          select: { productId: true },
+        });
+    const inventoryProductIds = [...new Set(invRows.map((r) => r.productId))];
+    const total = inventoryProductIds.length;
+    if (total === 0) return { total: 0, items: [] };
+
+    const sortedIds = await this.sortProductIdsByStockAndRevenue(userIds, inventoryProductIds);
+    const pageIds = sortedIds.slice(skip, skip + take);
+    if (pageIds.length === 0) return { total, items: [] };
+
+    const products = await this.prisma.product.findMany({
+      where: { id: { in: pageIds } },
+      select: { id: true, sku: true, asin: true, title: true, imageUrl: true, costOfGoods: true },
+    });
+    const byId = new Map(products.map((p) => [p.id, p]));
+
+    const toNum = (value: unknown): number => {
+      if (value == null) return 0;
+      if (typeof value === 'number') return value;
+      if (typeof value === 'string') return Number(value);
+      if (typeof value === 'bigint') return Number(value);
+      if (typeof value === 'object') {
+        const anyVal = value as any;
+        if (typeof anyVal?.toNumber === 'function') return anyVal.toNumber();
+        if (typeof anyVal?.toString === 'function') return Number(anyVal.toString());
+      }
+      return Number(value as any);
+    };
+
+    type LatestPurRow = {
+      id: string;
+      product_id: string;
+      fulfilment: string;
+      supplier: string | null;
+      supplier_link: string | null;
+      bundle_size: number;
+      purchase_date: Date;
+      order_number: string | null;
+      shipment_id: string | null;
+      qty_purchased: number;
+      qty_delivered: number;
+      currency: string;
+      vat_rate_pct: unknown;
+      unit_cost_inc_vat: unknown;
+      delivery_cost_inc_vat: unknown;
+      prep_cost_inc_vat: unknown;
+      total_cost_inc_vat: unknown;
+    };
+
+    const latestRows =
+      pageIds.length > 0 && userIds.length > 0
+        ? await this.prisma.$queryRaw<LatestPurRow[]>(Prisma.sql`
+            SELECT DISTINCT ON (p.product_id)
+              p.id,
+              p.product_id,
+              p.fulfilment,
+              p.supplier,
+              p.supplier_link,
+              p.bundle_size,
+              p.purchase_date,
+              p.order_number,
+              p.shipment_id,
+              p.qty_purchased,
+              p.qty_delivered,
+              p.currency,
+              p.vat_rate_pct,
+              p.unit_cost_inc_vat,
+              p.delivery_cost_inc_vat,
+              p.prep_cost_inc_vat,
+              p.total_cost_inc_vat
+            FROM purchases p
+            WHERE p.product_id IN (${Prisma.join(pageIds)})
+              AND p.user_id IN (${Prisma.join(userIds)})
+            ORDER BY p.product_id, p.purchase_date DESC, p.updated_at DESC
+          `)
+        : [];
+
+    const latestByProduct = new Map<string, LatestPurRow>();
+    for (const r of latestRows) {
+      latestByProduct.set(r.product_id, r);
+    }
+
+    const items = pageIds.map((id) => {
+      const p = byId.get(id);
+      const base = p ?? {
+        id,
+        sku: id,
+        asin: null as string | null,
+        title: null as string | null,
+        imageUrl: null as string | null,
+        costOfGoods: null as any,
+      };
+
+      const row = latestByProduct.get(id);
+      if (row) {
+        return {
+          id: base.id,
+          sku: base.sku,
+          asin: base.asin,
+          title: base.title,
+          imageUrl: base.imageUrl,
+          latestCostEntry: {
+            id: row.id,
+            fulfilment: row.fulfilment,
+            supplier: row.supplier,
+            supplierLink: row.supplier_link,
+            bundleSize: row.bundle_size,
+            purchaseDate: row.purchase_date.toISOString(),
+            orderNumber: row.order_number,
+            shipmentId: row.shipment_id,
+            qtyPurchased: row.qty_purchased,
+            qtyDelivered: row.qty_delivered,
+            currency: row.currency,
+            vatRatePct: toNum(row.vat_rate_pct),
+            unitCostIncVat: toNum(row.unit_cost_inc_vat),
+            deliveryCostIncVat: toNum(row.delivery_cost_inc_vat),
+            prepCostIncVat: toNum(row.prep_cost_inc_vat),
+            totalCostIncVat: toNum(row.total_cost_inc_vat),
+            product: {
+              id: base.id,
+              sku: base.sku,
+              asin: base.asin,
+              title: base.title,
+              imageUrl: base.imageUrl,
+            },
+          },
+          productFallbackUnitCost: null as number | null,
+        };
+      }
+
+      const fb = toNum((base as any).costOfGoods);
+      return {
+        id: base.id,
+        sku: base.sku,
+        asin: base.asin,
+        title: base.title,
+        imageUrl: base.imageUrl,
+        latestCostEntry: null,
+        productFallbackUnitCost: fb != null && fb > 0 ? Number(fb.toFixed(2)) : null,
+      };
+    });
+
     return { total, items };
   }
 
@@ -4657,7 +4900,8 @@ export class AmazonService {
     }>;
   }> {
     const userIds = await this.getOrgMemberUserIds(orgId);
-    const take = Math.max(1, Math.min(100, opts?.take ?? 10));
+    // Controller allows up to 500 for these list endpoints; keep service in sync.
+    const take = Math.max(1, Math.min(500, opts?.take ?? 10));
     const skip = Math.max(0, opts?.skip ?? 0);
 
     const invRows = marketplaceId
@@ -5843,6 +6087,7 @@ export class AmazonService {
         estimatedFbaFeePerUnit: true,
         estimatedAmazonFeeUpdatedAt: true,
         currentListedPrice: true,
+        currentListedPriceUpdatedAt: true,
         costOfGoods: true,
         feeEstimateRawJson: true,
         inventory: {
@@ -6051,11 +6296,13 @@ export class AmazonService {
       currentListedPrice: (p as any).currentListedPrice != null ? Number((p as any).currentListedPrice) : null,
       costOfGoods: (p as any).costOfGoods != null ? Number((p as any).costOfGoods) : null,
       feeEstimateRawJson: (p as any).feeEstimateRawJson ?? null,
-      availableQty: marketplaceId ? selectedAvailable : p.inventory?.availableQty ?? null,
-      reservedQty: marketplaceId ? selectedReserved : p.inventory?.reservedQty ?? null,
-      inboundQty: marketplaceId ? selectedInbound : p.inventory?.inboundQty ?? null,
-      issueQty: marketplaceId ? selectedIssue : p.inventory?.issueQty ?? null,
-      totalQty: marketplaceId ? selectedTotal : p.inventory?.totalQty ?? null,
+      // When a marketplace is selected, prefer that row *when present* but fall back to
+      // the aggregated inventory snapshot so we don't zero-out stock when per-marketplace is missing.
+      availableQty: marketplaceId ? (selectedAvailable ?? p.inventory?.availableQty ?? null) : p.inventory?.availableQty ?? null,
+      reservedQty: marketplaceId ? (selectedReserved ?? p.inventory?.reservedQty ?? null) : p.inventory?.reservedQty ?? null,
+      inboundQty: marketplaceId ? (selectedInbound ?? p.inventory?.inboundQty ?? null) : p.inventory?.inboundQty ?? null,
+      issueQty: marketplaceId ? (selectedIssue ?? p.inventory?.issueQty ?? null) : p.inventory?.issueQty ?? null,
+      totalQty: marketplaceId ? (selectedTotal ?? p.inventory?.totalQty ?? null) : p.inventory?.totalQty ?? null,
       inventoryUpdatedAt: p.inventory?.updatedAt ?? null,
       rawJson: p.inventory?.rawJson ?? null,
       byMarketplace: (p as any).inventoryByMarketplace?.map((m: any) => ({
@@ -7413,11 +7660,12 @@ try {
             const persistPrice = listingPriceToPersist !== defaultListingPrice
               || currentListedPriceToSave != null
               || currentListedPriceByProductId.has(product.id);
+            const now = new Date();
             await this.prisma.product.update({
               where: { id: product.id },
               data: {
                 feeEstimateRawJson: res ?? undefined,
-                ...(persistPrice ? { currentListedPrice: listingPriceToPersist } : {}),
+                ...(persistPrice ? ({ currentListedPrice: listingPriceToPersist, currentListedPriceUpdatedAt: now } as any) : {}),
                 ...(hasValidTotal
                   ? {
                       estimatedAmazonFeePerUnit: breakdown.total,
@@ -7572,11 +7820,12 @@ try {
           || currentListedPriceToSave != null
           || currentListedPriceByProductId.has(product.id);
         // Update only fee and price fields; do not touch productType, displayGroup, or other catalog data.
+        const now = new Date();
         await this.prisma.product.update({
           where: { id: product.id },
           data: {
             feeEstimateRawJson: res ?? undefined,
-            ...(persistPrice ? { currentListedPrice: listingPriceToPersist } : {}),
+            ...(persistPrice ? ({ currentListedPrice: listingPriceToPersist, currentListedPriceUpdatedAt: now } as any) : {}),
             ...(hasValidTotal
               ? {
                   estimatedAmazonFeePerUnit: breakdown.total,
@@ -7655,6 +7904,7 @@ try {
   async refreshListedPricesForOrg(
     orgId: string,
     options?: {
+      mode?: 'hot' | 'cold' | 'all';
       onProgress?: (progress: { processed: number; total: number }) => void | Promise<void>;
     },
   ): Promise<{
@@ -7662,18 +7912,15 @@ try {
     reason?: string;
     updatedCount: number;
     errorCount: number;
+    notFoundCount: number;
     total: number;
     processed: number;
   }> {
     const credentials = await this.getAmazonCredentialsForOrg(orgId);
     const userIds = await this.getOrgMemberUserIds(orgId);
-    const regionMarketplaceIds: Record<string, string[]> = {
-      eu: ['A1F83G8C2ARO7P', 'A1PA6795UKMFR9', 'A13V1IB3VIYZZH'],
-      na: ['ATVPDKIKX0DER'],
-      fe: ['A1VC38T7YXB528'],
-    };
-    const marketplaceId =
-      (regionMarketplaceIds[credentials.region ?? 'na'] ?? regionMarketplaceIds.na)[0] ?? 'ATVPDKIKX0DER';
+    const listingMarketplaceTryOrder = this.spApiClient.marketplaceIdsForListingPriceRefresh(
+      credentials.region,
+    );
 
     const account = await this.prisma.sellerAccount.findFirst({
       where: { userId: { in: userIds }, marketplace: 'amazon' },
@@ -7687,6 +7934,7 @@ try {
         reason: 'no_seller_id',
         updatedCount: 0,
         errorCount: 0,
+        notFoundCount: 0,
         total: 0,
         processed: 0,
       };
@@ -7699,23 +7947,46 @@ try {
     );
     const retryWaitMs = 60000;
 
-    const totalProductCount = await this.prisma.product.count({
-      where: { userId: { in: userIds }, sku: { not: '' } },
-    });
+    const mode = options?.mode ?? 'all';
+    const now = Date.now();
+    const recentlySoldSince = new Date(
+      now - (Number(this.configService.get<string>('LISTING_PRICE_HOT_RECENTLY_SOLD_WITHIN_HOURS')) || 72) * 60 * 60 * 1000,
+    );
+
+    const hotWhere = {
+      userId: { in: userIds },
+      sku: { not: '' },
+      OR: [
+        { inventory: { is: { totalQty: { gt: 0 } } } },
+        { orderItems: { some: { createdAt: { gte: recentlySoldSince } } } },
+      ],
+    } as const;
+
+    const coldWhere = {
+      userId: { in: userIds },
+      sku: { not: '' },
+      NOT: hotWhere,
+    } as const;
+
+    const where =
+      mode === 'hot' ? hotWhere : mode === 'cold' ? coldWhere : { userId: { in: userIds }, sku: { not: '' } };
+
+    const totalProductCount = await this.prisma.product.count({ where: where as any });
     if (totalProductCount === 0) {
-      return { updatedCount: 0, errorCount: 0, total: 0, processed: 0 };
+      return { updatedCount: 0, errorCount: 0, notFoundCount: 0, total: 0, processed: 0 };
     }
 
     await options?.onProgress?.({ processed: 0, total: totalProductCount });
 
     let updatedCount = 0;
     let errorCount = 0;
+    let notFoundCount = 0;
     let processed = 0;
     let cursorId: string | undefined;
 
     while (true) {
       const products = await this.prisma.product.findMany({
-        where: { userId: { in: userIds }, sku: { not: '' } },
+        where: where as any,
         orderBy: { id: 'asc' },
         take: batchSize,
         ...(cursorId ? { cursor: { id: cursorId }, skip: 1 } : {}),
@@ -7726,21 +7997,37 @@ try {
       for (const product of products) {
         await new Promise((r) => setTimeout(r, delayMs));
         const run = async (): Promise<boolean> => {
-          const listingRes = await this.spApiClient.getListingsItem(
-            credentials,
-            sellerId,
-            product.sku,
-            [marketplaceId],
-            ['summaries', 'offers', 'attributes'],
-          );
-          const parsed = this.parseListingsItemPrice(listingRes as any);
-          if (parsed != null && parsed > 0) {
-            await this.prisma.product.update({
-              where: { id: product.id },
-              data: { currentListedPrice: parsed },
-            });
-            return true;
+          // GET list listings item: max 1 marketplaceId per request (Amazon returns 400 if many).
+          let lastErr: Error | null = null;
+          for (const mid of listingMarketplaceTryOrder) {
+            try {
+              const listingRes = await this.spApiClient.getListingsItem(
+                credentials,
+                sellerId,
+                product.sku,
+                [mid],
+                ['summaries', 'offers', 'attributes'],
+              );
+              const parsed = this.parseListingsItemPrice(listingRes as any);
+              if (parsed != null && parsed > 0) {
+                await this.prisma.product.update({
+                  where: { id: product.id },
+                  data: { currentListedPrice: parsed, currentListedPriceUpdatedAt: new Date() } as any,
+                });
+                return true;
+              }
+            } catch (e) {
+              lastErr = e instanceof Error ? e : new Error(String(e));
+              const msg = lastErr.message ?? '';
+              const is404 = msg.includes('(404)') && msg.includes('/listings/');
+              const isTooManyMids =
+                msg.includes('(400)') &&
+                (msg.includes('marketplaceIds') || msg.includes('Too many'));
+              if (is404 || isTooManyMids) continue;
+              throw lastErr;
+            }
           }
+          if (lastErr) throw lastErr;
           return false;
         };
 
@@ -7750,6 +8037,7 @@ try {
         } catch (e) {
           const msg = (e as Error).message ?? '';
           const is429 = msg.includes('(429)') || msg.includes('QuotaExceeded');
+          const isListings404 = msg.includes('(404)') && msg.includes('/listings/');
           if (is429) {
             this.logger.warn(
               `[refreshListedPricesForOrg] SKU ${product.sku} rate limited (429); waiting ${retryWaitMs / 1000}s…`,
@@ -7759,11 +8047,19 @@ try {
               const ok = await run();
               if (ok) updatedCount += 1;
             } catch (retryErr) {
-              this.logger.warn(
-                `[refreshListedPricesForOrg] SKU ${product.sku} failed after retry: ${(retryErr as Error).message}`,
-              );
-              errorCount += 1;
+              const rmsg = (retryErr as Error).message ?? '';
+              const retry404 = rmsg.includes('(404)') && rmsg.includes('/listings/');
+              if (retry404) {
+                notFoundCount += 1;
+              } else {
+                this.logger.warn(
+                  `[refreshListedPricesForOrg] SKU ${product.sku} failed after retry: ${rmsg}`,
+                );
+                errorCount += 1;
+              }
             }
+          } else if (isListings404) {
+            notFoundCount += 1;
           } else {
             this.logger.warn(`[refreshListedPricesForOrg] SKU ${product.sku} failed: ${msg}`);
             errorCount += 1;
@@ -7778,7 +8074,10 @@ try {
       if (products.length < batchSize) break;
     }
 
-    return { updatedCount, errorCount, total: totalProductCount, processed };
+    this.logger.log(
+      `[refreshListedPricesForOrg] org=${orgId} updated=${updatedCount} notFound=${notFoundCount} errors=${errorCount} processed=${processed}/${totalProductCount}`,
+    );
+    return { updatedCount, errorCount, notFoundCount, total: totalProductCount, processed };
   }
 
   /** Parse total fee amount from Product Fees API (referral + FBA + all components).
