@@ -7,10 +7,12 @@ import { useDisplaySettings } from "@/contexts/display-settings-context";
 import { useMarketplace } from "@/contexts/marketplace-context";
 import {
   aggregateOrderRows,
-  filterOrderRowsForOrdersTabPeriod,
+  DASHBOARD_RANGE_PERIOD_SELECT_OPTIONS,
+  filterOrderRowsForDashboardPreset,
+  type DashboardRangePreset,
 } from "@/lib/orders-period-metrics";
 import { getMarketplaceIanaTimeZone } from "@/lib/marketplace-timezone";
-import { accountSummaryDateRangeForOrdersTab } from "@/lib/account-summary-date-range";
+import { marketplaceLocalDateAnchors } from "@/lib/marketplace-date-anchors";
 import { SignInButtonWithReturn } from "@/components/sign-in-button-with-return";
 import { getDevImpersonationHeaders } from "@/lib/impersonation";
 
@@ -30,23 +32,16 @@ type OrderRow = {
   referralFeeTotal: number | null;
   fbaFeeTotal: number | null;
   digitalServiceFeeTotal: number | null;
-  feesSource: string | null; // 'finances' = settled (exact); 'estimate' = from product estimate
+  feesSource: string | null; // 'finances' = settled; 'estimate_sold' = Product Fees at sale price until settlement; 'estimate' = product table estimate
   /** SP-API line FulfillmentChannel: AFN→FBA, MFN→FBM */
   fulfillmentType?: "FBA" | "FBM" | null;
   availableStock: number | null;
   totalStock: number | null;
   orderStatusLabel?: string | null;
   excludedFromSales?: boolean;
+  excludedFromProfitMetrics?: boolean;
   excludedFromOrderCount?: boolean;
 };
-
-type PeriodKey = "today" | "7" | "14" | "30";
-const PERIOD_OPTIONS: { value: PeriodKey; label: string }[] = [
-  { value: "today", label: "Today" },
-  { value: "7", label: "7 days" },
-  { value: "14", label: "14 days" },
-  { value: "30", label: "30 days" },
-];
 
 const PAGE_SIZE = 20;
 
@@ -62,8 +57,9 @@ export default function OrdersPage() {
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
-  const [period, setPeriod] = useState<PeriodKey>("today");
-  const [summaryTotalOrders, setSummaryTotalOrders] = useState<number | null>(null);
+  const [period, setPeriod] = useState<DashboardRangePreset>("today");
+  const [periodCustomStart, setPeriodCustomStart] = useState("");
+  const [periodCustomEnd, setPeriodCustomEnd] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -87,7 +83,7 @@ export default function OrdersPage() {
     } finally {
       setLoading(false);
     }
-  }, [getToken, baseUrl, selectedMarketplaceId]);
+  }, [getToken, baseUrl, selectedMarketplaceId, devImpersonate]);
 
   useEffect(() => {
     if (!isSignedIn) {
@@ -118,13 +114,25 @@ export default function OrdersPage() {
   );
 
   const marketplaceTz = getMarketplaceIanaTimeZone(selectedMarketplaceId);
+  const { defaultEnd, defaultStart30 } =
+    marketplaceLocalDateAnchors(selectedMarketplaceId);
+
+  const periodCustomRange = useMemo(() => {
+    if (period !== "custom") return undefined;
+    const start = periodCustomStart || defaultStart30;
+    const end = periodCustomEnd || defaultEnd;
+    return { start, end };
+  }, [period, periodCustomStart, periodCustomEnd, defaultStart30, defaultEnd]);
 
   const rowsInPeriod = useMemo(
     () =>
-      filterOrderRowsForOrdersTabPeriod(rows, period, {
-        timeZone: marketplaceTz,
-      }),
-    [rows, period, marketplaceTz],
+      filterOrderRowsForDashboardPreset(
+        rows,
+        period,
+        periodCustomRange,
+        { timeZone: marketplaceTz },
+      ),
+    [rows, period, periodCustomRange, marketplaceTz],
   );
 
   const periodSummary = useMemo(() => {
@@ -138,12 +146,11 @@ export default function OrdersPage() {
 
   useEffect(() => {
     setPage(1);
-  }, [query]);
+  }, [query, period, periodCustomStart, periodCustomEnd]);
 
   const formatDate = (d: string) => new Date(d).toLocaleDateString(undefined, { dateStyle: "short" });
   const formatCurrency = (n: number) =>
     new Intl.NumberFormat(undefined, { style: "currency", currency: selectedCurrency, minimumFractionDigits: 2 }).format(n);
-  const nil = (v: string | number | null | undefined) => (v == null || v === "" ? "—" : String(v));
 
   const { backgroundClass } = useDisplaySettings();
 
@@ -194,21 +201,45 @@ export default function OrdersPage() {
               <label className="text-xs font-medium text-[var(--foreground)]">Period</label>
               <select
                 value={period}
-                onChange={(e) => setPeriod(e.target.value as PeriodKey)}
+                onChange={(e) => {
+                  const v = e.target.value as DashboardRangePreset;
+                  setPeriod(v);
+                  if (v === "custom" && !periodCustomStart && !periodCustomEnd) {
+                    setPeriodCustomStart(defaultStart30);
+                    setPeriodCustomEnd(defaultEnd);
+                  }
+                }}
                 className="h-8 cursor-pointer rounded-lg border border-zinc-600 bg-black px-2.5 text-xs text-white outline-none focus:ring-2 focus:ring-sb-accent/40"
               >
-                {PERIOD_OPTIONS.map((opt) => (
-                  <option key={opt.value} className="bg-black text-white" value={opt.value}>
-                    {opt.label}
+                {DASHBOARD_RANGE_PERIOD_SELECT_OPTIONS.map(({ value, label }) => (
+                  <option key={value} className="bg-black text-white" value={value}>
+                    {label}
                   </option>
                 ))}
               </select>
+              {period === "custom" ? (
+                <>
+                  <input
+                    type="date"
+                    value={periodCustomStart}
+                    onChange={(e) => setPeriodCustomStart(e.target.value)}
+                    className="h-8 rounded-lg border border-zinc-600 bg-black px-2 text-xs text-white outline-none [color-scheme:dark]"
+                  />
+                  <span className="text-[var(--muted-foreground)]">→</span>
+                  <input
+                    type="date"
+                    value={periodCustomEnd}
+                    onChange={(e) => setPeriodCustomEnd(e.target.value)}
+                    className="h-8 rounded-lg border border-zinc-600 bg-black px-2 text-xs text-white outline-none [color-scheme:dark]"
+                  />
+                </>
+              ) : null}
             </div>
             <div className="flex flex-wrap gap-5 sm:gap-6">
               <div>
                 <span className="text-[10px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">Orders</span>
                 <div className="text-sm font-semibold tabular-nums text-[var(--foreground)]">
-                  {summaryTotalOrders ?? periodSummary.orderCount}
+                  {periodSummary.orderCount}
                 </div>
               </div>
               <div>
@@ -303,6 +334,7 @@ export default function OrdersPage() {
                             <div className="font-medium">
                               {formatCurrency(Math.abs(r.amazonFeesTotal))}
                               {r.feesSource === "finances" && <span className="text-[9px] text-[var(--muted-foreground)] font-normal ml-0.5">Settled</span>}
+                              {r.feesSource === "estimate_sold" && <span className="text-[9px] text-[var(--muted-foreground)] font-normal ml-0.5">Sale est.</span>}
                               {r.feesSource === "estimate" && <span className="text-[9px] text-[var(--muted-foreground)] font-normal ml-0.5">Est.</span>}
                             </div>
                             <div className="text-[9px] text-[var(--muted-foreground)] space-y-0.5">

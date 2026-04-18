@@ -29,6 +29,7 @@ export class RepricerService {
       title: string | null;
       imageUrl: string | null;
       totalQty: number;
+      availableQty: number;
       activeUnits30d: number;
       currentListedPrice: number | null;
       currentListedPriceUpdatedAt: Date | null;
@@ -70,13 +71,14 @@ export class RepricerService {
         currentListedPriceUpdatedAt: true,
         costOfGoods: true,
         estimatedAmazonFeePerUnit: true,
-        inventory: { select: { totalQty: true } },
+        inventory: { select: { totalQty: true, availableQty: true } },
       },
     });
 
     const mapped = products
       .map((p) => {
         const totalQty = Number((p as any)?.inventory?.totalQty ?? 0);
+        const availableQty = Number((p as any)?.inventory?.availableQty ?? 0);
         const activeUnits30d = unitsByProductId.get(p.id) ?? 0;
         return {
           productId: p.id,
@@ -85,6 +87,7 @@ export class RepricerService {
           title: p.title ?? null,
           imageUrl: p.imageUrl ?? null,
           totalQty: Number.isFinite(totalQty) ? totalQty : 0,
+          availableQty: Number.isFinite(availableQty) ? availableQty : 0,
           activeUnits30d,
           currentListedPrice: p.currentListedPrice != null ? Number(p.currentListedPrice) : null,
           currentListedPriceUpdatedAt: (p as any).currentListedPriceUpdatedAt ?? null,
@@ -92,7 +95,7 @@ export class RepricerService {
           estimatedAmazonFeePerUnit: p.estimatedAmazonFeePerUnit != null ? Number(p.estimatedAmazonFeePerUnit) : null,
         };
       })
-      .filter((r) => r.totalQty > 0);
+      .filter((r) => r.availableQty > 0);
 
     mapped.sort((a, b) => {
       if (b.activeUnits30d !== a.activeUnits30d) return b.activeUnits30d - a.activeUnits30d;
@@ -153,6 +156,10 @@ export class RepricerService {
     if (!pid || !rid) {
       throw new BadRequestException('productId and ruleSetId are required');
     }
+    // Legacy rows from older "unassign = null rule" behaviour still counted toward the cap.
+    await (this.prisma as any).repricerSelectedSku.deleteMany({
+      where: { orgId, ruleSetId: null },
+    });
     const userIds = await this.getOrgMemberUserIds(orgId);
     const productOk = await this.prisma.product.findFirst({
       where: { id: pid, userId: { in: userIds } },
@@ -183,7 +190,7 @@ export class RepricerService {
     return { ok: true as const, selected: await this.getSelectedSkus(orgId) };
   }
 
-  /** Clear a SKU's assigned pricing preset (keeps SKU in the selected list). */
+  /** Remove SKU from the repricer cohort (frees a slot for another SKU; max 10 rows per org). */
   async unassignSkuFromPreset(orgId: string, productId: string) {
     const pid = productId.trim();
     if (!pid) throw new BadRequestException('productId is required');
@@ -203,9 +210,8 @@ export class RepricerService {
       return { ok: true as const, selected: await this.getSelectedSkus(orgId) };
     }
 
-    await (this.prisma as any).repricerSelectedSku.update({
+    await (this.prisma as any).repricerSelectedSku.delete({
       where: { orgId_productId: { orgId, productId: pid } },
-      data: { ruleSetId: null },
     });
 
     return { ok: true as const, selected: await this.getSelectedSkus(orgId) };
@@ -216,6 +222,9 @@ export class RepricerService {
     if (unique.length > 10) {
       throw new Error('You can only select up to 10 SKUs during testing');
     }
+    await (this.prisma as any).repricerSelectedSku.deleteMany({
+      where: { orgId, ruleSetId: null },
+    });
     const userIds = await this.getOrgMemberUserIds(orgId);
     const okCount = await this.prisma.product.count({
       where: { id: { in: unique }, userId: { in: userIds } },
@@ -379,10 +388,9 @@ export class RepricerService {
     });
     if (!row) throw new BadRequestException('Pricing rule not found');
 
-    // Remove SKU assignments first so we don't leave dangling ruleSetId references.
-    await (this.prisma as any).repricerSelectedSku.updateMany({
+    // Drop SKUs from the repricer cohort that used this preset (same as unassign; frees slots).
+    await (this.prisma as any).repricerSelectedSku.deleteMany({
       where: { orgId, ruleSetId: rid },
-      data: { ruleSetId: null },
     });
 
     await (this.prisma as any).repricerRuleSet.delete({
@@ -1360,7 +1368,7 @@ export class RepricerService {
 
   async runEngineForOrg(orgId: string, opts?: { dryRun?: boolean }) {
     const selected = await (this.prisma as any).repricerSelectedSku.findMany({
-      where: { orgId, enabled: true },
+      where: { orgId, enabled: true, ruleSetId: { not: null } },
       include: {
         product: {
           select: {
@@ -1839,13 +1847,15 @@ export class RepricerService {
 
   private async touchRepricerEngineAt(orgId: string) {
     try {
-      await (this.prisma as any).organization.update({
-        where: { id: orgId },
-        data: { repricerLastEngineAt: new Date() },
-      });
+      // Raw UPDATE: Prisma `organization.update` can fail when the DB is behind `schema.prisma`
+      // (e.g. missing `fixed_costs_software_items`) because the client still materializes the full model.
+      const now = new Date();
+      await this.prisma.$executeRaw(
+        Prisma.sql`UPDATE organizations SET repricer_last_engine_at = ${now} WHERE id = ${orgId}`,
+      );
     } catch (e) {
       this.logger.warn(
-        `[repricer] could not set repricerLastEngineAt for org ${orgId} (migration applied?): ${e instanceof Error ? e.message : String(e)}`,
+        `[repricer] could not set repricerLastEngineAt for org ${orgId}: ${e instanceof Error ? e.message : String(e)}`,
       );
     }
   }

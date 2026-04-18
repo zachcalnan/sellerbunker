@@ -13,16 +13,23 @@ import {
   SpApiRegion,
 } from './sp-api.client';
 import { PrismaService } from '../prisma/prisma.service';
+import { withPrismaTransientRetry } from '../prisma/database-transient-retry.util';
 import { LinkAmazonAccountDto } from './dto/link-amazon-account.dto';
 import { UsersService } from '../users/users.service';
 import {
   amountExVatFromIncl,
+  amountInclVatFromEx,
   vatAmountFromIncl,
   vatAmountFromEx,
 } from '../common/vat.util';
 import { Prisma } from '@prisma/client';
 import { MARKETPLACE_MAP } from '../marketplace/marketplace.constants';
 import { resolveDashboardRangeUtc } from '../marketplace/marketplace-timezone';
+import { AMAZON_EXTENDED_ORDER_HISTORY_EMAIL } from './amazon-extended-sync.constants';
+import {
+  parseFinancesShipmentItemFeesBreakdown,
+  parseFinancesShipmentItemFeesSignedTotal,
+} from './finances-item-fee-parse.util';
 
 /** When we have no settled fees and no product fee estimate, use this share of revenue as fee so profit/ROI are not overstated. */
 const DEFAULT_AMAZON_FEE_RATE_WHEN_UNKNOWN = 0.35;
@@ -58,6 +65,85 @@ export class AmazonService {
 
   private async getOrgMemberUserIds(orgId: string): Promise<string[]> {
     return this.usersService.getOrgMemberUserIds(orgId);
+  }
+
+  /**
+   * User ids to use for **Amazon-synced** tables (`orders`, `order_items`, products used with those orders, etc.).
+   * When several org members link the same Seller Central account (`seller_accounts.seller_id`), each sync
+   * duplicates all orders; `userId: { in: allMembers }` multiplies revenue and fees. One canonical user
+   * per distinct seller id (latest `ordersLastSyncedAt` / `updatedAt` wins).
+   *
+   * Do **not** use this for org-wide manual data (e.g. `purchases`) — those stay on {@link getOrgMemberUserIds}.
+   */
+  private async getOrgAmazonAggregateUserIds(orgId: string): Promise<string[]> {
+    const members = await this.usersService.getOrgMemberUserIds(orgId);
+    if (members.length <= 1) return members;
+
+    try {
+      const accounts = await this.prisma.sellerAccount.findMany({
+        where: {
+          userId: { in: members },
+          marketplace: 'amazon',
+          isActive: true,
+        },
+        select: {
+          userId: true,
+          sellerId: true,
+          ordersLastSyncedAt: true,
+          updatedAt: true,
+        },
+      });
+      const accountByUser = new Map(
+        accounts.map((a) => [a.userId, a] as const),
+      );
+
+      const groups = new Map<string, string[]>();
+      for (const uid of members) {
+        const acc = accountByUser.get(uid);
+        const sidRaw = acc?.sellerId != null ? String(acc.sellerId).trim() : '';
+        const sid = sidRaw ? sidRaw.toUpperCase() : '';
+        const key = sid || `__user_${uid}`;
+        const arr = groups.get(key) ?? [];
+        arr.push(uid);
+        groups.set(key, arr);
+      }
+
+      const out: string[] = [];
+      for (const [key, uids] of groups) {
+        if (uids.length === 1) {
+          out.push(uids[0]!);
+          continue;
+        }
+        let best = uids[0]!;
+        let bestTs = -1;
+        for (const uid of uids) {
+          const acc = accountByUser.get(uid);
+          const t1 =
+            acc?.ordersLastSyncedAt instanceof Date
+              ? acc.ordersLastSyncedAt.getTime()
+              : 0;
+          const t2 =
+            acc?.updatedAt instanceof Date ? acc.updatedAt.getTime() : 0;
+          const ts = Math.max(t1, t2);
+          if (ts > bestTs || (ts === bestTs && uid < best)) {
+            bestTs = ts;
+            best = uid;
+          }
+        }
+        out.push(best);
+        const sellerLabel = key.startsWith('__user_') ? 'unset seller id' : key;
+        this.logger.warn(
+          `[orgAggregates] orgId=${orgId} ${uids.length} users share Amazon seller ${sellerLabel}; using canonical userId=${best} for order/fee aggregates (duplicate seller links).`,
+        );
+      }
+      return [...new Set(out)];
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.warn(
+        `[orgAggregates] seller de-dupe failed for orgId=${orgId}: ${msg}; falling back to all member user ids.`,
+      );
+      return members;
+    }
   }
 
   private resolveCurrencyFromMarketplace(
@@ -99,6 +185,39 @@ export class AmazonService {
     if (n.includes('refund')) return 'returned';
     if (n.includes('return')) return 'returned';
     return null;
+  }
+
+  /**
+   * When `revenueTotal` is stored as **0**, only reconstruct a positive sale from order splits / list price
+   * if the parent order still looks **unfulfilled** (pending*, unshipped, etc.). For **Shipped** and similar,
+   * a zero line total usually means the sale was cleared after a refund — do not inflate back to a full sale
+   * (avoids overstating revenue and unit counts vs tools like STK).
+   */
+  private orderParentStatusAllowsReconstructedRevenueForZeroStoredLine(
+    amazonOrderStatus: string | null | undefined,
+    rawOrder?: unknown,
+  ): boolean {
+    const fromCol =
+      typeof amazonOrderStatus === 'string' && amazonOrderStatus.trim()
+        ? amazonOrderStatus.trim()
+        : '';
+    const raw =
+      rawOrder && typeof rawOrder === 'object'
+        ? (rawOrder as Record<string, unknown>)
+        : null;
+    const fromRaw =
+      typeof raw?.OrderStatus === 'string'
+        ? String(raw.OrderStatus).trim()
+        : typeof raw?.orderStatus === 'string'
+          ? String(raw.orderStatus).trim()
+          : '';
+    const s = (fromCol || fromRaw).toLowerCase();
+    if (!s) return true;
+    if (s.includes('pending')) return true;
+    if (s === 'unshipped') return true;
+    if (s.includes('partiallyshipped')) return true;
+    if (s === 'invoiceunconfirmed') return true;
+    return false;
   }
 
   private orderSalesExclusionDisplayLabel(
@@ -174,9 +293,64 @@ export class AmazonService {
     return out;
   }
 
+  /** Normalize Amazon order id so the same order synced under different rows still dedupes. */
+  private normalizeAmazonOrderIdForDedupe(raw: unknown): string {
+    return String(raw ?? '')
+      .trim()
+      .replace(/\s+/g, '')
+      .toUpperCase();
+  }
+
+  private effectiveOrderItemIdForDedupe(it: {
+    orderItemId?: string | null;
+    rawResponse?: unknown;
+  }): string {
+    const direct = String(it.orderItemId ?? '').trim();
+    if (direct) return direct;
+    const raw = it.rawResponse;
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      const ro = raw as Record<string, unknown>;
+      const v = ro.OrderItemId ?? ro.orderItemId;
+      if (typeof v === 'string' && v.trim()) return v.trim();
+    }
+    return '';
+  }
+
+  /**
+   * Stable key for the same logical Amazon order line across duplicate DB rows
+   * (duplicate parent `orders`, or multiple org members each syncing the same seller account).
+   */
+  private orderLineDedupeKey<
+    T extends {
+      id: string;
+      orderId: string;
+      orderItemId?: string | null;
+      marketplace?: string | null;
+      rawResponse?: unknown;
+      sku?: string | null;
+      quantity?: unknown;
+      revenueTotal?: unknown;
+      asin?: string | null;
+    },
+  >(it: T): string {
+    const mk = String(it.marketplace ?? '')
+      .trim()
+      .toLowerCase();
+    const oid = this.normalizeAmazonOrderIdForDedupe(it.orderId);
+    const oiid = this.effectiveOrderItemIdForDedupe(it);
+    if (oiid) {
+      return `${mk}\0${oid}\0${oiid}`;
+    }
+    const sku = String(it.sku ?? '').trim();
+    const asin = String(it.asin ?? '').trim();
+    const qty = Math.max(1, Math.round(Number(it.quantity) || 1));
+    const revCent = Math.round(Math.abs(this.safeNumOrderMoney(it.revenueTotal)) * 100);
+    return `${mk}\0${oid}\0fb:${sku}\0${asin}\0q:${qty}\0r:${revCent}`;
+  }
+
   /**
    * When duplicate `order_items` exist for the same Amazon order line (e.g. duplicate parent `orders` rows),
-   * keep one row: prefer settled finances, then newest updatedAt.
+   * or the same seller synced under multiple org users, keep one row: prefer settled finances, then newest updatedAt.
    */
   private dedupeOrderItemsByOrderLine<
     T extends {
@@ -185,26 +359,36 @@ export class AmazonService {
       orderItemId?: string | null;
       feesSource?: string | null;
       updatedAt?: Date | string;
+      marketplace?: string | null;
+      rawResponse?: unknown;
+      sku?: string | null;
+      quantity?: unknown;
+      revenueTotal?: unknown;
+      asin?: string | null;
     },
   >(items: T[]): T[] {
     const rank = (it: T) => {
       const fs = String(it.feesSource ?? '');
-      const fin = fs === 'finances' ? 1e15 : 0;
+      const sourceRank =
+        fs === 'finances'
+          ? 3e15
+          : fs === 'estimate_sold'
+            ? 2e15
+            : fs === 'estimate'
+              ? 1e14
+              : 0;
       const u =
         it.updatedAt instanceof Date
           ? it.updatedAt.getTime()
           : typeof it.updatedAt === 'string'
             ? new Date(it.updatedAt).getTime()
             : 0;
-      return fin + u;
+      return sourceRank + u;
     };
     const sorted = [...items].sort((a, b) => rank(b) - rank(a));
     const seen = new Set<string>();
     return sorted.filter((it) => {
-      const oiid = String(it.orderItemId ?? '').trim();
-      const key = oiid
-        ? `${String(it.orderId)}\0${oiid}`
-        : `${String(it.orderId)}\0${String(it.id)}`;
+      const key = this.orderLineDedupeKey(it);
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
@@ -355,6 +539,47 @@ export class AmazonService {
   }
 
   /**
+   * Same reconstruction as {@link resolveOrderLineRevenueTotal}, but if the DB has a **non-zero**
+   * `revenueTotal` (including refunds / chargebacks), return that signed value instead of
+   * replacing negatives with positive splits.
+   */
+  private resolveOrderLineRevenueSigned(
+    it: {
+      revenueTotal?: unknown;
+      quantity?: unknown;
+      orderDbId?: unknown;
+      sku?: unknown;
+      rawResponse?: unknown;
+    },
+    orderPriceByDbId: Map<
+      string,
+      { itemPrice: number; quantity: number; orderTotalAmount: number }
+    >,
+    skuUnitPriceFallback: Map<string, number>,
+    orderLineQtySumByOrderDbId: Map<string, number>,
+    parentOrder?: { amazonOrderStatus?: string | null; rawOrder?: unknown } | null,
+  ): number {
+    const stored = this.safeNumOrderMoney(it.revenueTotal);
+    if (stored !== 0 && Number.isFinite(stored)) return stored;
+    if (
+      stored === 0 &&
+      parentOrder != null &&
+      !this.orderParentStatusAllowsReconstructedRevenueForZeroStoredLine(
+        parentOrder.amazonOrderStatus,
+        parentOrder.rawOrder,
+      )
+    ) {
+      return 0;
+    }
+    return this.resolveOrderLineRevenueTotal(
+      it,
+      orderPriceByDbId,
+      skuUnitPriceFallback,
+      orderLineQtySumByOrderDbId,
+    );
+  }
+
+  /**
    * SP-API order line includes `FulfillmentChannel`: **AFN** = Amazon fulfilled (FBA), **MFN** = merchant fulfilled (FBM).
    * Not persisted separately; read from `OrderItem.rawResponse` when present.
    */
@@ -472,6 +697,12 @@ export class AmazonService {
   }
 
   private static readonly LIST_ORDERS_MAX_AT_PRICE_FEE_JOBS = 40;
+
+  /** Order-item rows from Product Fees (listing or sold-unit), not Finances settlement. */
+  private isPersistedAmazonFeeEstimateSource(s: string | null | undefined): boolean {
+    const fs = String(s ?? '');
+    return fs === 'estimate' || fs === 'estimate_sold';
+  }
   /** Above this fee/revenue on a settled line, re-shape fees using a prior plausible same-ASIN/SKU sale. */
   private static readonly LIST_ORDERS_MAX_FEE_TO_REVENUE_RATIO = 0.5;
 
@@ -543,7 +774,19 @@ export class AmazonService {
       const feeSumMag = Math.abs(ref) + Math.abs(fba) + Math.abs(dig);
       if (feeSumMag < 1e-6) continue;
       const qty = this.safeNumOrderMoney(it.quantity) || 1;
-      let revenue = this.resolveOrderLineRevenueTotal(
+      const ord = (it as any).order as
+        | { amazonOrderStatus?: string | null; rawResponse?: unknown }
+        | undefined;
+      const orderCtx = ord
+        ? { amazonOrderStatus: ord.amazonOrderStatus, rawOrder: ord.rawResponse }
+        : undefined;
+      const allowRecon =
+        orderCtx == null ||
+        this.orderParentStatusAllowsReconstructedRevenueForZeroStoredLine(
+          orderCtx.amazonOrderStatus,
+          orderCtx.rawOrder,
+        );
+      const signedRev = this.resolveOrderLineRevenueSigned(
         it as {
           revenueTotal?: unknown;
           quantity?: unknown;
@@ -554,15 +797,19 @@ export class AmazonService {
         args.orderPriceByDbId,
         args.skuUnitPriceFallback,
         args.orderLineQtySumByOrderDbId,
+        orderCtx,
       );
-      if (revenue <= 0) {
+      let revenue = signedRev;
+      if (allowRecon && signedRev === 0) {
         const prod = it.product as { currentListedPrice?: unknown } | undefined;
         const lp = this.safeNumOrderMoney(prod?.currentListedPrice);
         if (lp > 0) revenue = lp * qty;
       }
       if (revenue <= 0.01) continue;
       const ratio = feeSumMag / revenue;
-      if (ratio > AmazonService.LIST_ORDERS_MAX_FEE_TO_REVENUE_RATIO + 0.03) continue;
+      // Keep references for “elevated but not insane” lines (e.g. ~35–50% fees) so a bad 98% row can still
+      // find a same-ASIN peer from an older sane sale. Truly impossible rows stay out of the map.
+      if (ratio > 0.92) continue;
       const unitPrice = revenue / qty;
       const row: Row = { ref, fba, dig, qty, revenue, unitPrice, feeSumMag };
       const sku = String(it.sku ?? '').trim();
@@ -629,7 +876,12 @@ export class AmazonService {
 
       const feesSource = String(it.feesSource ?? '');
       let settledFees = this.safeNumOrderMoney(it.amazonFeesTotal);
-      if ((feesSource === 'finances' || feesSource === 'estimate') && settledFees > 0) {
+      if (
+        (feesSource === 'finances' ||
+          feesSource === 'estimate' ||
+          feesSource === 'estimate_sold') &&
+        settledFees > 0
+      ) {
         settledFees = -Math.abs(settledFees);
       }
 
@@ -643,9 +895,23 @@ export class AmazonService {
         hasStoredComponents &&
         this.isLikelyLegacyEqualReferralFbaSplit(sr, sf, sd, settledFees);
       if (feesSource === 'finances' && hasStoredComponents && !looksFake) continue;
+      // Pre-sale product estimates drive unsettled rows; do not re-call Product Fees at sold unit price here.
+      if (feesSource === 'estimate' || feesSource === 'estimate_sold') continue;
 
       const qty = this.safeNumOrderMoney(it.quantity) || 1;
-      let revenueTotal = this.resolveOrderLineRevenueTotal(
+      const ord = (it as any).order as
+        | { amazonOrderStatus?: string | null; rawResponse?: unknown }
+        | undefined;
+      const orderCtx = ord
+        ? { amazonOrderStatus: ord.amazonOrderStatus, rawOrder: ord.rawResponse }
+        : undefined;
+      const allowRecon =
+        orderCtx == null ||
+        this.orderParentStatusAllowsReconstructedRevenueForZeroStoredLine(
+          orderCtx.amazonOrderStatus,
+          orderCtx.rawOrder,
+        );
+      const signedRev = this.resolveOrderLineRevenueSigned(
         it as {
           revenueTotal?: unknown;
           quantity?: unknown;
@@ -656,9 +922,11 @@ export class AmazonService {
         args.orderPriceByDbId,
         args.skuUnitPriceFallback,
         args.orderLineQtySumByOrderDbId,
+        orderCtx,
       );
+      let revenueTotal = signedRev;
       const product = it.product as { currentListedPrice?: unknown } | null | undefined;
-      if (revenueTotal <= 0 && product?.currentListedPrice != null) {
+      if (allowRecon && signedRev === 0 && product?.currentListedPrice != null) {
         const listPx = this.safeNumOrderMoney(product.currentListedPrice);
         if (listPx > 0) revenueTotal = listPx * qty;
       }
@@ -1067,6 +1335,87 @@ export class AmazonService {
   }
 
   /**
+   * Unsettled order lines: **pre-sale** `products` fee estimates (referral + FBA + digital per unit),
+   * ex-VAT magnitudes as Seller Central shows before settlement. Line totals are ≤0 for DB math.
+   */
+  private orderItemFeeEstimateFromPreSaleProduct(
+    product: {
+      estimatedReferralFeePerUnit?: unknown;
+      estimatedFbaFeePerUnit?: unknown;
+      estimatedDigitalServiceFeePerUnit?: unknown;
+      estimatedAmazonFeePerUnit?: unknown;
+    } | null,
+    quantityOrdered: number,
+  ): {
+    itemFees: number;
+    referralLine: number | null;
+    fbaLine: number | null;
+    digitalLine: number | null;
+  } | null {
+    if (!product) return null;
+    const qty = quantityOrdered > 0 ? quantityOrdered : 1;
+    const r =
+      product.estimatedReferralFeePerUnit != null
+        ? Number(product.estimatedReferralFeePerUnit)
+        : null;
+    const f =
+      product.estimatedFbaFeePerUnit != null
+        ? Number(product.estimatedFbaFeePerUnit)
+        : null;
+    const d =
+      product.estimatedDigitalServiceFeePerUnit != null
+        ? Number(product.estimatedDigitalServiceFeePerUnit)
+        : null;
+    const t =
+      product.estimatedAmazonFeePerUnit != null
+        ? Number(product.estimatedAmazonFeePerUnit)
+        : null;
+
+    if ((r != null && !Number.isNaN(r)) || (f != null && !Number.isNaN(f)) || (d != null && !Number.isNaN(d))) {
+      const rPu = Math.abs(Number(r ?? 0));
+      const fPu = Math.abs(Number(f ?? 0));
+      let dPu = Math.abs(Number(d ?? 0));
+      if (dPu < 1e-9 && (rPu > 0 || fPu > 0)) {
+        dPu = Math.round((rPu + fPu) * 0.02 * 100) / 100;
+      }
+      const perUnit = rPu + fPu + dPu;
+      if (perUnit < 1e-9) return null;
+      const referralLine = rPu > 1e-9 ? -Math.abs(Number((rPu * qty).toFixed(2))) : null;
+      const fbaLine = fPu > 1e-9 ? -Math.abs(Number((fPu * qty).toFixed(2))) : null;
+      const digitalLine = dPu > 1e-9 ? -Math.abs(Number((dPu * qty).toFixed(2))) : null;
+      const itemFees = -Math.abs(Number((perUnit * qty).toFixed(2)));
+      return { itemFees, referralLine, fbaLine, digitalLine };
+    }
+    if (t != null && !Number.isNaN(t) && t > 0) {
+      const itemFees = -Math.abs(Number((t * qty).toFixed(2)));
+      return { itemFees, referralLine: null, fbaLine: null, digitalLine: null };
+    }
+    return null;
+  }
+
+  /**
+   * Non–VAT-registered (or before VAT effective date): show Amazon fee **including** UK-style VAT on fees.
+   * VAT-registered standard/flat after effective date: fee figures stay ex-VAT; fee VAT line hidden in UI.
+   */
+  private shouldShowAmazonFeesWithVatIncluded(
+    vatSettings: {
+      vatRegistrationType: string;
+      vatEffectiveDate: Date | null;
+    } | null,
+    orderDate: Date,
+  ): boolean {
+    if (!vatSettings) return true;
+    if (vatSettings.vatRegistrationType === 'NON_VAT_REGISTERED') return true;
+    if (
+      vatSettings.vatEffectiveDate != null &&
+      orderDate < vatSettings.vatEffectiveDate
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  /**
    * Compute profit and VAT breakdown for an order item based on org VAT settings and order date.
    * Returns profit (ex-VAT for VAT reg, gross for non-VAT). Always computes and returns inc/excl
    * VAT figures (and fee VAT) so we can persist them even when not VAT registered; when the user
@@ -1108,10 +1457,14 @@ export class AmazonService {
     const safeQty = quantity > 0 ? quantity : 1;
     const costPerUnit = cogsTotal != null ? cogsTotal / safeQty : null;
 
-    // Fee VAT: Amazon fees are typically reported ex VAT; always compute for storage
+    // Fee VAT: Amazon fee **magnitudes** are ex-VAT; `itemFees` is stored ≤ 0. VAT applies to |fees|, not lost when negative.
     const amazonFeesExVat = Math.round(itemFees * 100) / 100;
-    const amazonFeesVatAmount = itemFees > 0 ? vatAmountFromEx(itemFees, rate) : 0;
-    const amazonFeesIncVat = Math.round((amazonFeesExVat + amazonFeesVatAmount) * 100) / 100;
+    const feeMag = Math.abs(itemFees);
+    const amazonFeesVatAmount =
+      feeMag > 1e-9 ? Math.round(vatAmountFromEx(feeMag, rate) * 100) / 100 : 0;
+    const amazonFeesIncVat = Math.round(
+      (itemFees < 0 ? itemFees - amazonFeesVatAmount : itemFees + amazonFeesVatAmount) * 100,
+    ) / 100;
     const feeVat = {
       amazonFeesExVat,
       amazonFeesIncVat,
@@ -1293,7 +1646,7 @@ export class AmazonService {
     orgId: string,
     preferredUserId?: string,
   ): Promise<SpApiCredentials> {
-    const userIds = await this.getOrgMemberUserIds(orgId);
+    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
 
     // Prefer the currently-authenticated user's connection if present.
     // This avoids "findFirst picks a different org member's stale creds" issues.
@@ -1356,7 +1709,7 @@ export class AmazonService {
   }
 
   async getAmazonConnectionDebug(orgId: string, preferredUserId: string) {
-    const userIds = await this.getOrgMemberUserIds(orgId);
+    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
 
     const preferredAccount = userIds.includes(preferredUserId)
       ? await this.prisma.sellerAccount.findUnique({
@@ -1520,7 +1873,7 @@ export class AmazonService {
       nowSafe,
     );
 
-    const userIds = await this.getOrgMemberUserIds(orgId);
+    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
 
     const toNumber = (value: unknown): number => {
       if (value == null) return 0;
@@ -1554,6 +1907,8 @@ export class AmazonService {
           orderId: true,
           orderItemId: true,
           orderDbId: true,
+          marketplace: true,
+          asin: true,
           sku: true,
           updatedAt: true,
           profit: true,
@@ -1600,6 +1955,7 @@ export class AmazonService {
         period:
           range?.start || range?.end ? 'custom' : 'last_30_days',
         revenue: 0,
+        refundsRevenue: 0,
         profitMargin: 0,
         unitsSold: 0,
         totalOrders: 0,
@@ -1645,6 +2001,7 @@ export class AmazonService {
         period:
           range?.start || range?.end ? 'custom' : 'last_30_days',
         revenue: 0,
+        refundsRevenue: 0,
         profitMargin: 0,
         unitsSold: 0,
         totalOrders: totalOrdersOnly,
@@ -1668,28 +2025,80 @@ export class AmazonService {
     const { orderPriceByDbId, skuUnitPriceFallback, orderLineQtySumByOrderDbId } =
       await this.buildRevenueFallbackMapsForOrderItems(orderItems);
 
-    const revenue = orderItems.reduce((sum, it) => {
+    const orderMetaByDbId = new Map<
+      string,
+      { amazonOrderStatus: string | null; rawResponse: unknown }
+    >();
+    const metaIds = Array.from(
+      new Set(
+        orderItems
+          .map((it: { orderDbId?: unknown }) => String(it.orderDbId ?? '').trim())
+          .filter((id): id is string => Boolean(id)),
+      ),
+    ) as string[];
+    if (metaIds.length > 0) {
+      try {
+        const orows = await this.prisma.order.findMany({
+          where: { id: { in: metaIds } },
+          select: { id: true, amazonOrderStatus: true, rawResponse: true },
+        });
+        for (const o of orows) {
+          orderMetaByDbId.set(String(o.id), {
+            amazonOrderStatus: o.amazonOrderStatus,
+            rawResponse: o.rawResponse,
+          });
+        }
+      } catch {
+        // non-fatal
+      }
+    }
+    const parentOrderCtxForSummary = (it: { orderDbId?: unknown }) => {
+      const id = String(it.orderDbId ?? '').trim();
+      const o = id ? orderMetaByDbId.get(id) : undefined;
+      return o
+        ? { amazonOrderStatus: o.amazonOrderStatus, rawOrder: o.rawResponse }
+        : undefined;
+    };
+
+    let salesRevenue = 0;
+    let refundsRevenue = 0;
+    for (const it of orderItems) {
       const oid = String((it as { orderDbId?: unknown }).orderDbId ?? '');
-      if (oid && exclusionByOrderDbId.has(oid)) return sum;
-      return (
-        sum +
-        this.resolveOrderLineRevenueTotal(
-          it as {
-            revenueTotal?: unknown;
-            quantity?: unknown;
-            orderDbId?: unknown;
-            sku?: unknown;
-            rawResponse?: unknown;
-          },
-          orderPriceByDbId,
-          skuUnitPriceFallback,
-          orderLineQtySumByOrderDbId,
-        )
+      if (oid && exclusionByOrderDbId.has(oid)) continue;
+      const line = this.resolveOrderLineRevenueSigned(
+        it as {
+          revenueTotal?: unknown;
+          quantity?: unknown;
+          orderDbId?: unknown;
+          sku?: unknown;
+          rawResponse?: unknown;
+        },
+        orderPriceByDbId,
+        skuUnitPriceFallback,
+        orderLineQtySumByOrderDbId,
+        parentOrderCtxForSummary(it),
       );
-    }, 0);
+      if (line > 0) salesRevenue += line;
+      else if (line < 0) refundsRevenue += line;
+    }
+    const revenue = salesRevenue;
     const unitsSold = orderItems.reduce((sum, it) => {
       const oid = String((it as { orderDbId?: unknown }).orderDbId ?? '');
       if (oid && exclusionByOrderDbId.has(oid)) return sum;
+      const lineRev = this.resolveOrderLineRevenueSigned(
+        it as {
+          revenueTotal?: unknown;
+          quantity?: unknown;
+          orderDbId?: unknown;
+          sku?: unknown;
+          rawResponse?: unknown;
+        },
+        orderPriceByDbId,
+        skuUnitPriceFallback,
+        orderLineQtySumByOrderDbId,
+        parentOrderCtxForSummary(it),
+      );
+      if (lineRev <= 0) return sum;
       return sum + toNumber((it as { quantity?: unknown }).quantity ?? 0);
     }, 0);
     const totalOrders = this.countDistinctAmazonOrdersForSummary(
@@ -1708,7 +2117,7 @@ export class AmazonService {
       const oid = String((it as { orderDbId?: unknown }).orderDbId ?? '');
       if (oid && exclusionByOrderDbId.has(oid)) continue;
 
-      const revenueTotal = this.resolveOrderLineRevenueTotal(
+      const revenueTotal = this.resolveOrderLineRevenueSigned(
         it as {
           revenueTotal?: unknown;
           quantity?: unknown;
@@ -1719,6 +2128,7 @@ export class AmazonService {
         orderPriceByDbId,
         skuUnitPriceFallback,
         orderLineQtySumByOrderDbId,
+        parentOrderCtxForSummary(it),
       );
       const taxChargedTotal = toNumber(it.taxChargedTotal ?? 0);
       const amazonFeesTotalRaw = toNumber(it.amazonFeesTotal ?? 0);
@@ -1752,7 +2162,9 @@ export class AmazonService {
       const feesSource = (it as any).feesSource ?? null;
       let settledFees = amazonFeesTotalRaw;
       if (
-        (feesSource === 'finances' || feesSource === 'estimate') &&
+        (feesSource === 'finances' ||
+          feesSource === 'estimate' ||
+          feesSource === 'estimate_sold') &&
         settledFees > 0
       ) {
         settledFees = -Math.abs(settledFees);
@@ -1840,13 +2252,33 @@ export class AmazonService {
           digitalServiceFeeTotal = null;
         }
       }
+      if (feesSource === 'finances' && Math.abs(feesForDisplay) > 1e-4) {
+        const tr = referralFeeTotal ?? 0;
+        const tf = fbaFeeTotal ?? 0;
+        const td = digitalServiceFeeTotal ?? 0;
+        const sumB = tr + tf + td;
+        if (
+          (referralFeeTotal != null || fbaFeeTotal != null || digitalServiceFeeTotal != null) &&
+          Math.abs(sumB) > 1e-4 &&
+          Math.abs(sumB - feesForDisplay) > 0.02
+        ) {
+          const scaled = this.scaleSignedFeeTripToTarget(tr, tf, td, feesForDisplay);
+          if (scaled) {
+            referralFeeTotal = scaled.r !== 0 ? scaled.r : null;
+            fbaFeeTotal = scaled.f !== 0 ? scaled.f : null;
+            digitalServiceFeeTotal = scaled.d !== 0 ? scaled.d : null;
+          }
+        }
+      }
       const totalFromBreakdown =
         (referralFeeTotal ?? 0) + (fbaFeeTotal ?? 0) + (digitalServiceFeeTotal ?? 0);
-      const finalFeesForDisplay =
+      const useBreakdownSum =
+        feesSource !== 'finances' &&
         (referralFeeTotal != null || fbaFeeTotal != null || digitalServiceFeeTotal != null) &&
-        totalFromBreakdown !== 0
-          ? Math.round(totalFromBreakdown * 100) / 100
-          : feesForDisplay;
+        totalFromBreakdown !== 0;
+      const finalFeesForDisplay = useBreakdownSum
+        ? Math.round(totalFromBreakdown * 100) / 100
+        : Math.round(feesForDisplay * 100) / 100;
 
       // Same formula as listOrders: revenue - tax - COGS + fees (fees negative) so circles match orders sheet.
       const itemProfit =
@@ -1864,7 +2296,7 @@ export class AmazonService {
       marketplaceId,
     );
     const hasCostData = hasProfitData;
-    const profitMargin = hasCostData && revenue > 0 ? totalProfit / revenue : 0;
+    const profitMargin = hasCostData && salesRevenue > 0 ? totalProfit / salesRevenue : 0;
     const roiPct =
       totalCostOfGoods > 0 ? (totalProfit / totalCostOfGoods) * 100 : null;
 
@@ -1874,6 +2306,7 @@ export class AmazonService {
       currency,
       period: 'last_30_days',
       revenue,
+      refundsRevenue,
       profitMargin,
       unitsSold,
       totalOrders,
@@ -1922,7 +2355,7 @@ export class AmazonService {
       nowSafe,
     );
 
-    const userIds = await this.getOrgMemberUserIds(orgId);
+    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
     if (userIds.length === 0) return defaultRes;
 
     const rawCategoryItems = await (this.prisma as any).orderItem.findMany({
@@ -1936,6 +2369,8 @@ export class AmazonService {
         orderId: true,
         orderItemId: true,
         orderDbId: true,
+        marketplace: true,
+        asin: true,
         sku: true,
         feesSource: true,
         updatedAt: true,
@@ -1958,6 +2393,41 @@ export class AmazonService {
       orderItems.map((it: any) => String(it.orderDbId ?? '')).filter(Boolean),
     );
 
+    const catOrderMetaByDbId = new Map<
+      string,
+      { amazonOrderStatus: string | null; rawResponse: unknown }
+    >();
+    const catMetaIds = Array.from(
+      new Set(
+        orderItems
+          .map((it: { orderDbId?: unknown }) => String(it.orderDbId ?? '').trim())
+          .filter((id): id is string => Boolean(id)),
+      ),
+    ) as string[];
+    if (catMetaIds.length > 0) {
+      try {
+        const orows = await this.prisma.order.findMany({
+          where: { id: { in: catMetaIds } },
+          select: { id: true, amazonOrderStatus: true, rawResponse: true },
+        });
+        for (const o of orows) {
+          catOrderMetaByDbId.set(String(o.id), {
+            amazonOrderStatus: o.amazonOrderStatus,
+            rawResponse: o.rawResponse,
+          });
+        }
+      } catch {
+        // non-fatal
+      }
+    }
+    const parentOrderCtxForCategory = (it: { orderDbId?: unknown }) => {
+      const id = String(it.orderDbId ?? '').trim();
+      const o = id ? catOrderMetaByDbId.get(id) : undefined;
+      return o
+        ? { amazonOrderStatus: o.amazonOrderStatus, rawOrder: o.rawResponse }
+        : undefined;
+    };
+
     const toNum = (v: unknown): number => {
       if (v == null) return 0;
       if (typeof v === 'number' && Number.isFinite(v)) return v;
@@ -1973,7 +2443,7 @@ export class AmazonService {
 
       const cat = (it.product?.displayGroup ?? '').trim() || 'Uncategorized';
       const cur = byCategory.get(cat) ?? { sales: 0, profit: 0, cogs: 0, units: 0 };
-      cur.sales += this.resolveOrderLineRevenueTotal(
+      const lineRev = this.resolveOrderLineRevenueSigned(
         it as {
           revenueTotal?: unknown;
           quantity?: unknown;
@@ -1984,10 +2454,12 @@ export class AmazonService {
         orderPriceByDbId,
         skuUnitPriceFallback,
         orderLineQtySumByOrderDbId,
+        parentOrderCtxForCategory(it),
       );
+      if (lineRev > 0) cur.sales += lineRev;
       cur.profit += toNum(it.profit);
       cur.cogs += toNum(it.cogsTotal);
-      cur.units += toNum(it.quantity) || 0;
+      if (lineRev > 0) cur.units += toNum(it.quantity) || 0;
       byCategory.set(cat, cur);
     }
 
@@ -2044,7 +2516,7 @@ export class AmazonService {
       nowSafe,
     );
 
-    const userIds = await this.getOrgMemberUserIds(orgId);
+    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
     if (userIds.length === 0) {
       return {
         totalCogs: 0,
@@ -2070,6 +2542,10 @@ export class AmazonService {
         orderId: true,
         orderItemId: true,
         orderDbId: true,
+        marketplace: true,
+        asin: true,
+        sku: true,
+        rawResponse: true,
         feesSource: true,
         updatedAt: true,
         cogsTotal: true,
@@ -2080,6 +2556,7 @@ export class AmazonService {
         settledFbaFeeTotal: true,
         settledDigitalServiceFeeTotal: true,
         amazonFeesTotal: true,
+        revenueTotal: true,
         product: {
           select: {
             estimatedReferralFeePerUnit: true,
@@ -2130,10 +2607,66 @@ export class AmazonService {
       const settledFba = asCost(toNum(it.settledFbaFeeTotal));
       const settledDigital = asCost(toNum(it.settledDigitalServiceFeeTotal));
       const settledTotal = asCost(toNum(it.amazonFeesTotal));
-      referralFees += settledReferral > 0 ? settledReferral : asCost(estReferral);
-      fbaFees += settledFba > 0 ? settledFba : asCost(estFba);
-      digitalServiceFees += settledDigital > 0 ? settledDigital : asCost(estDsf);
-      totalAmazonFees += settledTotal > 0 ? settledTotal : asCost(estTotal);
+      const estReferralC = asCost(estReferral);
+      const estFbaC = asCost(estFba);
+      const estDsfC = asCost(estDsf);
+      const estTotalC = asCost(estTotal);
+
+      let lineReferral = 0;
+      let lineFba = 0;
+      let lineDigital = 0;
+      let lineAmazonTotal = 0;
+
+      if (settledTotal > 0) {
+        // Finances lump is authoritative: breakdown rows must sum to it (never add full estimates on top of a lump).
+        lineAmazonTotal = settledTotal;
+        const sr = settledReferral > 0 ? settledReferral : 0;
+        const sf = settledFba > 0 ? settledFba : 0;
+        const sd = settledDigital > 0 ? settledDigital : 0;
+        const parts = sr + sf + sd;
+        if (parts > 1e-6) {
+          lineReferral = settledTotal * (sr / parts);
+          lineFba = settledTotal * (sf / parts);
+          lineDigital = settledTotal * (sd / parts);
+        } else {
+          const w = estReferralC + estFbaC + estDsfC;
+          if (w > 1e-6) {
+            lineReferral = settledTotal * (estReferralC / w);
+            lineFba = settledTotal * (estFbaC / w);
+            lineDigital = settledTotal * (estDsfC / w);
+          } else {
+            lineFba = settledTotal;
+          }
+        }
+      } else {
+        lineReferral = estReferralC;
+        lineFba = estFbaC;
+        lineDigital = estDsfC;
+        lineAmazonTotal = estTotalC > 0 ? estTotalC : estReferralC + estFbaC + estDsfC;
+        const cs = lineReferral + lineFba + lineDigital;
+        if (lineAmazonTotal > 1e-6 && cs > lineAmazonTotal * 1.02) {
+          const scale = lineAmazonTotal / cs;
+          lineReferral *= scale;
+          lineFba *= scale;
+          lineDigital *= scale;
+        }
+      }
+
+      const storedRev = toNum((it as { revenueTotal?: unknown }).revenueTotal);
+      const lineRev = storedRev < 0 ? 0 : Math.max(0, storedRev);
+      const feeCap = lineRev > 0 ? lineRev * 0.95 : null;
+      if (feeCap != null && lineAmazonTotal > feeCap + 1e-6) {
+        const scale = feeCap / lineAmazonTotal;
+        lineReferral *= scale;
+        lineFba *= scale;
+        lineDigital *= scale;
+        lineAmazonTotal = feeCap;
+      }
+
+      referralFees += lineReferral;
+      fbaFees += lineFba;
+      digitalServiceFees += lineDigital;
+      totalAmazonFees += lineAmazonTotal;
     }
 
     return {
@@ -2150,8 +2683,11 @@ export class AmazonService {
   }
 
   /**
-   * Profit & Loss for a period: revenue minus selling unit costs (COGS, prep, fees) and fixed costs (software/other subscriptions).
-   * Total profit = revenue - totalSellingCosts - totalFixedCosts.
+   * Profit & Loss for a period: sales revenue (positive lines only) plus refunds (negative, separate field),
+   * minus selling unit costs (COGS, prep, fees) and fixed costs.
+   * Total profit = sales revenue + refunds revenue + adjustments − selling costs − fixed costs.
+   * Promotional discounts come from Orders API line `rawResponse`. Reimbursements and other account
+   * adjustments come from Finances v0 `listFinancialEvents` by **posted** date (chunked ≤170d per request).
    * Also returns VAT adjustment: outputVat (on sales), inputVat (on costs), vatBalance = outputVat - inputVat.
    */
   async getProfitAndLoss(
@@ -2160,6 +2696,8 @@ export class AmazonService {
     marketplaceId?: string,
   ): Promise<{
     revenue: number;
+    /** Sum of negative line revenues (refunds / clawbacks), ≤ 0. */
+    refundsRevenue: number;
     promotionalAdjustments: number;
     reimbursementAdjustments: number;
     otherAdjustments: number;
@@ -2193,14 +2731,16 @@ export class AmazonService {
       nowSafe,
     );
 
-    const userIds = await this.getOrgMemberUserIds(orgId);
+    const allMemberUserIds = await this.getOrgMemberUserIds(orgId);
+    const amazonAggUserIds = await this.getOrgAmazonAggregateUserIds(orgId);
     const toNum = (v: unknown): number => {
       if (v == null) return 0;
       if (typeof v === 'number' && Number.isFinite(v)) return v;
       if (typeof v === 'string') return parseFloat(v) || 0;
       return Number((v as any).toString?.() ?? 0) || 0;
     };
-    let revenue = 0;
+    let salesRevenue = 0;
+    let refundsRevenue = 0;
     let promotionalAdjustments = 0;
     let reimbursementAdjustments = 0;
     let otherAdjustments = 0;
@@ -2209,18 +2749,18 @@ export class AmazonService {
 
     // VAT settings for computing VAT when not stored on order items
     let vatSettings: Awaited<ReturnType<AmazonService['getVatSettingsForUser']>> = null;
-    if (userIds.length > 0) {
+    if (allMemberUserIds.length > 0) {
       try {
-        vatSettings = await this.getVatSettingsForUser(userIds[0]);
+        vatSettings = await this.getVatSettingsForUser(allMemberUserIds[0]);
       } catch {
         // ignore
       }
     }
 
-    if (userIds.length > 0) {
+    if (amazonAggUserIds.length > 0) {
       const rawPnlItems = await (this.prisma as any).orderItem.findMany({
         where: {
-          userId: { in: userIds },
+          userId: { in: amazonAggUserIds },
           marketplace: marketplaceFilter,
           ...this.whereOrderItemInUtcDashboardRange(safeStart, safeEnd),
         },
@@ -2245,6 +2785,7 @@ export class AmazonService {
           deliveryVatAmount: true,
           amazonFeesVatAmount: true,
           rawResponse: true,
+          order: { select: { amazonOrderStatus: true, rawResponse: true } },
         },
       });
       const items = this.dedupeOrderItemsByOrderLine(
@@ -2278,7 +2819,14 @@ export class AmazonService {
         const pnlOid = String((it as { orderDbId?: unknown }).orderDbId ?? '');
         if (pnlOid && pnlExclusionByOrderDbId.has(pnlOid)) continue;
 
-        const lineRev = this.resolveOrderLineRevenueTotal(
+        const ord = (it as any).order as
+          | { amazonOrderStatus?: string | null; rawResponse?: unknown }
+          | null
+          | undefined;
+        const pnlParentCtx = ord
+          ? { amazonOrderStatus: ord.amazonOrderStatus, rawOrder: ord.rawResponse }
+          : undefined;
+        const lineRev = this.resolveOrderLineRevenueSigned(
           it as {
             revenueTotal?: unknown;
             quantity?: unknown;
@@ -2289,8 +2837,10 @@ export class AmazonService {
           pnlOrderPrices,
           pnlSkuFallback,
           pnlOrderLineQtySum,
+          pnlParentCtx,
         );
-        revenue += lineRev;
+        if (lineRev > 0) salesRevenue += lineRev;
+        else if (lineRev < 0) refundsRevenue += lineRev;
         const promoAdj = promoFromRaw((it as any).rawResponse);
         if (promoAdj !== 0) promotionalAdjustments -= Math.abs(promoAdj);
         const rev = lineRev;
@@ -2306,7 +2856,13 @@ export class AmazonService {
           toNum(it.prepVatAmount) +
           toNum(it.deliveryVatAmount) +
           toNum(it.amazonFeesVatAmount);
-        if ((saleVat === 0 && itemInputVat === 0) && vatSettings && vatSettings.vatRegistrationType !== 'NON_VAT_REGISTERED') {
+        if (
+          rev > 0 &&
+          saleVat === 0 &&
+          itemInputVat === 0 &&
+          vatSettings &&
+          vatSettings.vatRegistrationType !== 'NON_VAT_REGISTERED'
+        ) {
           const vatResult = this.computeOrderItemVatAndProfit(
             rev,
             cogs,
@@ -2326,11 +2882,48 @@ export class AmazonService {
         outputVat += saleVat;
         inputVat += itemInputVat;
       }
+    }
 
-      // Input VAT from purchases in the period
+    // Finances v0 `listFinancialEvents` (posted date): reimbursements / adjustments not represented on order lines.
+    if (amazonAggUserIds.length > 0) {
+      try {
+        const credentials = await this.getAmazonCredentialsForOrg(orgId);
+        const rangeStartMs = safeStart.getTime();
+        const rangeEndMs = safeEnd.getTime();
+        const maxWindowMs = 170 * 24 * 60 * 60 * 1000;
+        let windowStartMs = rangeStartMs;
+        while (windowStartMs <= rangeEndMs) {
+          const windowEndMs = Math.min(windowStartMs + maxWindowMs, rangeEndMs);
+          const postedAfter = new Date(windowStartMs).toISOString();
+          const postedBefore = new Date(
+            Math.max(windowEndMs, windowStartMs + 60_000),
+          ).toISOString();
+          const range = await this.fetchFinancialEventsPostedRangeAllPages(
+            credentials,
+            postedAfter,
+            postedBefore,
+          );
+          const bucket = this.getFinancialEventsBucket(range.merged);
+          if (bucket) {
+            const sums = this.sumProfitAndLossFinancesPostedBucket(bucket);
+            reimbursementAdjustments += sums.reimbursementAdjustments;
+            otherAdjustments += sums.otherAdjustments;
+          }
+          windowStartMs = windowEndMs + 1;
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        this.logger.warn(
+          `[getProfitAndLoss] Finances posted-range reimbursements/adjustments skipped: ${msg}`,
+        );
+      }
+    }
+
+    // Input VAT from purchases in the period (all org members — not de-duped by Amazon seller)
+    if (allMemberUserIds.length > 0) {
       const purchases = await (this.prisma as any).purchase.findMany({
         where: {
-          userId: { in: userIds },
+          userId: { in: allMemberUserIds },
           purchaseDate: { gte: safeStart, lte: safeEnd },
         },
         select: {
@@ -2363,7 +2956,7 @@ export class AmazonService {
     let softwareSubsTotal = 0;
     let otherSubsTotal = 0;
     let otherFixedCostsTotal = 0;
-    if (userIds.length > 0) {
+    if (allMemberUserIds.length > 0) {
       // Fixed costs are stored monthly on the org. Apportion them into the chosen date range.
       const org = await (this.prisma as any).organization.findUnique({
         where: { id: orgId },
@@ -2394,11 +2987,17 @@ export class AmazonService {
     const totalFixedCosts = softwareSubsTotal + otherSubsTotal + otherFixedCostsTotal;
     const totalAdjustments =
       promotionalAdjustments + reimbursementAdjustments + otherAdjustments;
+    const revenue = salesRevenue;
     const totalProfit =
-      revenue + totalAdjustments - totalSellingCosts - totalFixedCosts;
+      salesRevenue +
+      refundsRevenue +
+      totalAdjustments -
+      totalSellingCosts -
+      totalFixedCosts;
 
     return {
       revenue,
+      refundsRevenue,
       promotionalAdjustments,
       reimbursementAdjustments,
       otherAdjustments,
@@ -2452,7 +3051,7 @@ export class AmazonService {
     const startDate = range?.start ? new Date(range.start) : defaultStart;
     const endDate = range?.end ? new Date(range.end) : nowSafe;
 
-    const userIds = await this.getOrgMemberUserIds(orgId);
+    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
     const rawTsItems = await (this.prisma as any).orderItem.findMany({
       where: {
         userId: { in: userIds },
@@ -2464,6 +3063,8 @@ export class AmazonService {
         orderId: true,
         orderItemId: true,
         orderDbId: true,
+        marketplace: true,
+        asin: true,
         sku: true,
         quantity: true,
         updatedAt: true,
@@ -2472,7 +3073,7 @@ export class AmazonService {
         revenueTotal: true,
         profit: true,
         rawResponse: true,
-        order: { select: { orderDate: true } },
+        order: { select: { orderDate: true, amazonOrderStatus: true, rawResponse: true } },
       },
     });
 
@@ -2506,7 +3107,26 @@ export class AmazonService {
     for (const it of tsItems) {
       const tsOid = String((it as { orderDbId?: unknown }).orderDbId ?? '');
       const kind = tsOid ? tsExclusionByOrderDbId.get(tsOid) : undefined;
-      const excludedFromSales = kind != null;
+      const tsOrd = (it as any).order as
+        | { amazonOrderStatus?: string | null; rawResponse?: unknown }
+        | undefined;
+      const tsParentCtx = tsOrd
+        ? { amazonOrderStatus: tsOrd.amazonOrderStatus, rawOrder: tsOrd.rawResponse }
+        : undefined;
+      const signedTs = this.resolveOrderLineRevenueSigned(
+        it as {
+          revenueTotal?: unknown;
+          quantity?: unknown;
+          orderDbId?: unknown;
+          sku?: unknown;
+          rawResponse?: unknown;
+        },
+        tsOrderPrices,
+        tsSkuFallback,
+        tsOrderLineQtySum,
+        tsParentCtx,
+      );
+      const excludedFromSales = kind != null || signedTs < 0;
       const excludedFromOrderCount = kind === 'cancelled';
 
       const itAny = it as { orderDate?: unknown; order?: { orderDate?: unknown } };
@@ -2528,18 +3148,7 @@ export class AmazonService {
       };
 
       if (!excludedFromSales) {
-        const revenueForLine = this.resolveOrderLineRevenueTotal(
-          it as {
-            revenueTotal?: unknown;
-            quantity?: unknown;
-            orderDbId?: unknown;
-            sku?: unknown;
-            rawResponse?: unknown;
-          },
-          tsOrderPrices,
-          tsSkuFallback,
-          tsOrderLineQtySum,
-        );
+        const revenueForLine = Math.max(0, signedTs);
         const profitForLine = it.profit != null ? toNumTs(it.profit) : 0;
         existing.revenue += revenueForLine;
         existing.profit += profitForLine;
@@ -2612,6 +3221,19 @@ export class AmazonService {
    */
   /** Default days of orders to sync (used when opts.days not provided). */
   static readonly SYNC_ORDERS_DAYS_DEFAULT = 30;
+
+  /**
+   * Max calendar days of orders SP-API may pull for this user (30 for everyone except one
+   * allowlisted account — see `amazon-extended-sync.constants.ts`).
+   */
+  async orderSyncMaxDaysForUser(userId: string): Promise<number> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { email: true },
+    });
+    const em = (user?.email ?? '').trim().toLowerCase();
+    return em === AMAZON_EXTENDED_ORDER_HISTORY_EMAIL ? 365 : 30;
+  }
 
   /**
    * Merge duplicate `orders` rows for the same Amazon order id (same user) caused by inconsistent
@@ -2694,7 +3316,7 @@ export class AmazonService {
     ordersRemoved: number;
     orgUserIds: string[];
   }> {
-    const userIds = await this.getOrgMemberUserIds(orgId);
+    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
     let ordersRemoved = 0;
     for (const uid of userIds) {
       const r = await this.repairDuplicateAmazonOrdersForUser(uid);
@@ -2705,7 +3327,7 @@ export class AmazonService {
 
   /**
    * Sync orders from SP-API into DB (including finances per order via listFinancialEventsByOrderId). Call paths:
-   * - full-sync (initial): days=30, no cap → all 30-day orders + finances.
+   * - full-sync (initial): days=30 (or env-extended cap for allowlisted user IDs), no cap → orders + finances.
    * - orders-batch-sync (recurring): days=30; runs when initial sync is 100%.
    * Optional maxOrders/maxOrderItems cap for testing or limited sync.
    */
@@ -2734,12 +3356,24 @@ export class AmazonService {
     });
 
     const nowSafe = new Date(Date.now() - 5 * 60 * 1000);
-    const days = Math.max(
-      1,
-      Math.min(30, Number(opts?.days ?? AmazonService.SYNC_ORDERS_DAYS_DEFAULT) || AmazonService.SYNC_ORDERS_DAYS_DEFAULT),
-    );
+    const maxDaysAllowed = await this.orderSyncMaxDaysForUser(userId);
+    const requested =
+      Number(opts?.days ?? AmazonService.SYNC_ORDERS_DAYS_DEFAULT) ||
+      AmazonService.SYNC_ORDERS_DAYS_DEFAULT;
+    const days = Math.max(1, Math.min(maxDaysAllowed, requested));
+    if (maxDaysAllowed > 30 && days > 30) {
+      this.logger.log(
+        `[syncRecentOrdersToDb] extended order window: days=${days} (cap=${maxDaysAllowed}, userId=${userId.slice(0, 8)}…)`,
+      );
+    }
     const onProgress = opts?.onProgress;
     if (onProgress) await onProgress(1);
+
+    /** Extra delay between Finances calls during order sync (large windows hit strict quotas). */
+    const orderFinancesPauseMs = Math.max(
+      400,
+      Number(this.configService.get<string>('AMAZON_ORDER_FINANCES_PAUSE_MS')) || 2200,
+    );
 
     try {
       const { ordersRemoved } = await this.repairDuplicateAmazonOrdersForUser(userId);
@@ -3062,12 +3696,16 @@ export class AmazonService {
 
       if (shouldFetchLineItems && shouldFetchFinances) {
         try {
-          [itemsRes, finRes] = await Promise.all([
-            this.spApiClient.getOrderItems(credentials, amazonOrderId),
-            this.spApiClient.listFinancialEventsByOrderId(credentials, amazonOrderId, { maxResultsPerPage: 100 }),
-          ]);
-          itemsRes = itemsRes as any;
-          finRes = finRes as any;
+          // Sequential calls: Finances + Orders in parallel spikes 429s on long backfills.
+          itemsRes = (await this.spApiClient.getOrderItems(credentials, amazonOrderId)) as any;
+          await new Promise((r) =>
+            setTimeout(r, Math.max(300, Math.floor(orderFinancesPauseMs / 2))),
+          );
+          finRes = (await this.spApiClient.listFinancialEventsByOrderId(
+            credentials,
+            amazonOrderId,
+            { maxResultsPerPage: 100 },
+          )) as any;
           orderItems = itemsRes?.payload?.OrderItems ?? [];
           for (const item of orderItems) {
             const itemTaxAmt = Number(item?.ItemTax?.Amount ?? 0);
@@ -3153,7 +3791,9 @@ export class AmazonService {
           : totalAmount;
 
       // When Finances API returns settled fee data we save it per order item (feesSource='finances').
-      // ShipmentSettleEventList (deferred) is parsed first; if same item appears in both lists, first wins to avoid double-counting.
+      // Same OrderItemId can appear in Shipment + Settle + refunds. **First** non-zero fee wins (avoid stacking
+      // duplicate full fees). **Breakdown** uses last non-zero wins so referral/FBA splits can follow the
+      // latest Shipment* row (see shipmentLists order: Settle after ShipmentEvent).
       const feeByOrderItemId = new Map<string, number>();
       const feeBySku = new Map<string, number>();
 
@@ -3162,20 +3802,10 @@ export class AmazonService {
         key: string,
         amount: number,
       ) => {
-        if (!key) return;
+        if (!key || amount === 0 || !Number.isFinite(amount)) return;
         const prev = map.get(key) ?? 0;
         if (prev !== 0) return;
         map.set(key, amount);
-      };
-
-      const sumFeeOrChargeList = (list: any[] | undefined): number => {
-        if (!Array.isArray(list)) return 0;
-        return list.reduce((sum, fc) => {
-          const feeAmt = fc?.FeeAmount?.CurrencyAmount ?? fc?.FeeAmount?.Amount;
-          const chargeAmt = fc?.ChargeAmount?.CurrencyAmount ?? fc?.ChargeAmount?.Amount ?? fc?.ChargeAmount;
-          const n = Number(feeAmt ?? chargeAmt ?? 0);
-          return Number.isNaN(n) ? sum : sum + n;
-        }, 0);
       };
 
       type FeeBreakdown = { referral: number; fba: number; digital: number };
@@ -3189,60 +3819,24 @@ export class AmazonService {
         d: number,
       ) => {
         if (!key) return;
-        const cur = map.get(key) ?? { referral: 0, fba: 0, digital: 0 };
-        const hasExisting = cur.referral !== 0 || cur.fba !== 0 || cur.digital !== 0;
-        if (hasExisting) return;
-        map.set(key, {
-          referral: cur.referral + r,
-          fba: cur.fba + f,
-          digital: cur.digital + d,
-        });
-      };
-      const parseFeeBreakdown = (list: any[] | undefined): FeeBreakdown => {
-        const out = { referral: 0, fba: 0, digital: 0 };
-        const readAmt = (obj: any): number => {
-          if (!obj) return 0;
-          const a = obj?.FeeAmount ?? obj?.feeAmount ?? obj;
-          const n = a?.CurrencyAmount ?? a?.currencyAmount ?? a?.Amount ?? a?.amount;
-          const num = Number(n);
-          return Number.isNaN(num) ? 0 : num;
-        };
-        const addFee = (feeType: string, amt: number) => {
-          if (amt === 0) return;
-          const t = (feeType || '').toLowerCase();
-          if (t === 'referralfee' || t.includes('referral') || t === 'commission') out.referral += amt;
-          else if (t === 'fbafees' || t.startsWith('fba') || t.includes('fulfillment')) out.fba += amt;
-          else if (t === 'variableclosingfee' || t === 'digitalservicefee' || t.includes('digital')) out.digital += amt;
-        };
-        if (!Array.isArray(list)) return out;
-        for (const fc of list) {
-          const feeType = (fc?.FeeType ?? fc?.feeType ?? fc?.Type ?? '') as string;
-          const amt = readAmt(fc);
-          if (amt !== 0) addFee(feeType, amt);
-          // SP-API often nests fee components: ItemFeeList[].FeeComponent[] with FeeType/FeeAmount.
-          const components = fc?.FeeComponent ?? fc?.feeComponent ?? fc?.FeeDetailList;
-          if (Array.isArray(components)) {
-            for (const comp of components) {
-              const ct = (comp?.FeeType ?? comp?.feeType ?? comp?.Type ?? '') as string;
-              const ca = readAmt(comp);
-              if (ca !== 0) addFee(ct, ca);
-            }
-          }
-        }
-        return out;
+        const mag = Math.abs(r) + Math.abs(f) + Math.abs(d);
+        if (mag < 1e-9) return;
+        map.set(key, { referral: r, fba: f, digital: d });
       };
 
       if (finRes) {
-        amazonFeesTotal = sumCurrencyAmountsByKey(finRes, 'FeeAmount');
-        // Support both PascalCase and camelCase (SP-API can return either). Include ShipmentSettleEventList (deferred transactions).
+        const recursiveSigned = sumCurrencyAmountsByKey(finRes, 'FeeAmount');
+        amazonFeesTotal = recursiveSigned;
+        // Support both PascalCase and camelCase (SP-API can return either).
         const events =
           finRes?.payload?.FinancialEvents ??
           finRes?.payload?.financialEvents ??
           finRes?.FinancialEvents ??
           {};
         const shipmentLists = [
-          ...(events?.ShipmentSettleEventList ?? events?.shipmentSettleEventList ?? []),
           ...(events?.ShipmentEventList ?? events?.shipmentEventList ?? []),
+          ...(events?.ShipmentSettleEventList ?? events?.shipmentSettleEventList ?? []),
+          ...(events?.DeferredTransactionEventList ?? events?.deferredTransactionEventList ?? []),
           ...(events?.RefundEventList ?? events?.refundEventList ?? []),
           ...(events?.ChargebackEventList ?? events?.chargebackEventList ?? []),
           ...(events?.GuaranteeClaimEventList ?? events?.guaranteeClaimEventList ?? []),
@@ -3250,10 +3844,7 @@ export class AmazonService {
         for (const ev of shipmentLists) {
           const items = ev?.ShipmentItemList ?? ev?.shipmentItemList ?? [];
           for (const si of items) {
-            const fee =
-              sumFeeOrChargeList(si?.ItemFeeList ?? si?.itemFeeList) +
-              sumFeeOrChargeList(si?.ItemFeeAdjustmentList ?? si?.itemFeeAdjustmentList) +
-              sumFeeOrChargeList(si?.ItemChargeList ?? si?.itemChargeList);
+            const fee = parseFinancesShipmentItemFeesSignedTotal(si);
             const orderItemIdRaw = si?.OrderItemId ?? si?.orderItemId;
             const orderItemId = orderItemIdRaw != null ? String(orderItemIdRaw) : '';
             const sku = (si?.SellerSKU ?? si?.sellerSKU) as string | undefined;
@@ -3261,12 +3852,31 @@ export class AmazonService {
               if (orderItemId) addFee(feeByOrderItemId, orderItemId, fee);
               if (sku) addFee(feeBySku, sku, fee);
             }
-            const b1 = parseFeeBreakdown(si?.ItemFeeList ?? si?.itemFeeList);
-            const b2 = parseFeeBreakdown(si?.ItemFeeAdjustmentList ?? si?.itemFeeAdjustmentList);
-            const r = b1.referral + b2.referral, f = b1.fba + b2.fba, d = b1.digital + b2.digital;
+            const shipBd = parseFinancesShipmentItemFeesBreakdown(si);
+            const { referral: r, fba: f, digital: d } = shipBd;
             if (orderItemId) addFeeBreakdown(breakdownByOrderItemId, orderItemId, r, f, d);
             if (sku) addFeeBreakdown(breakdownBySku, sku, r, f, d);
           }
+        }
+        // Recursive FeeAmount scan sums the whole Finances payload (Principal, nested duplicates, etc.).
+        // Shipment `ItemFeeList` + `ItemFeeAdjustmentList` via parseFinancesShipmentItemFeesSignedTotal is authoritative.
+        const itemizedSignedSum =
+          feeByOrderItemId.size > 0
+            ? [...feeByOrderItemId.values()].reduce((a, b) => a + b, 0)
+            : [...feeBySku.values()].reduce((a, b) => a + b, 0);
+        if (Math.abs(itemizedSignedSum) > 1e-6) {
+          amazonFeesTotal = itemizedSignedSum;
+        } else if (
+          Math.abs(recursiveSigned) > 1e-4 &&
+          totalAmount > 0.01 &&
+          Math.abs(recursiveSigned) > totalAmount * 0.35
+        ) {
+          // Per-line parser summed to ~0 but recursive FeeAmount is huge — that scan includes Principal /
+          // non-fee rows. Never persist the raw recursive total in that situation.
+          amazonFeesTotal = -Math.min(
+            Math.abs(recursiveSigned),
+            totalAmount * AmazonService.LIST_ORDERS_MAX_FEE_TO_REVENUE_RATIO,
+          );
         }
       }
 
@@ -3274,6 +3884,9 @@ export class AmazonService {
       if (!financesUnauthorized && existingOrderItemOrderIds.has(amazonOrderId)) {
         if (!finRes) {
           try {
+            await new Promise((r) =>
+              setTimeout(r, Math.max(300, Math.floor(orderFinancesPauseMs / 2))),
+            );
             const finResBackfill = (await this.spApiClient.listFinancialEventsByOrderId(
               credentials,
               amazonOrderId,
@@ -3284,8 +3897,9 @@ export class AmazonService {
               finResBackfill?.payload?.financialEvents ??
               {};
             const shipmentLists = [
-              ...(events?.ShipmentSettleEventList ?? events?.shipmentSettleEventList ?? []),
               ...(events?.ShipmentEventList ?? events?.shipmentEventList ?? []),
+              ...(events?.ShipmentSettleEventList ?? events?.shipmentSettleEventList ?? []),
+              ...(events?.DeferredTransactionEventList ?? events?.deferredTransactionEventList ?? []),
               ...(events?.RefundEventList ?? events?.refundEventList ?? []),
               ...(events?.ChargebackEventList ?? events?.chargebackEventList ?? []),
               ...(events?.GuaranteeClaimEventList ?? events?.guaranteeClaimEventList ?? []),
@@ -3293,18 +3907,16 @@ export class AmazonService {
             for (const ev of shipmentLists) {
               const items = ev?.ShipmentItemList ?? ev?.shipmentItemList ?? [];
               for (const si of items) {
-                const fee =
-                  sumFeeOrChargeList(si?.ItemFeeList ?? si?.itemFeeList) +
-                  sumFeeOrChargeList(si?.ItemFeeAdjustmentList ?? si?.itemFeeAdjustmentList) +
-                  sumFeeOrChargeList(si?.ItemChargeList ?? si?.itemChargeList);
+                const fee = parseFinancesShipmentItemFeesSignedTotal(si);
                 const orderItemIdRaw = si?.OrderItemId ?? si?.orderItemId;
                 const orderItemId = orderItemIdRaw != null ? String(orderItemIdRaw) : '';
                 const sku = (si?.SellerSKU ?? si?.sellerSKU) as string | undefined;
-                if (fee !== 0 && orderItemId) addFee(feeByOrderItemId, orderItemId, fee);
-                if (fee !== 0 && sku) addFee(feeBySku, sku, fee);
-                const b1 = parseFeeBreakdown(si?.ItemFeeList ?? si?.itemFeeList);
-                const b2 = parseFeeBreakdown(si?.ItemFeeAdjustmentList ?? si?.itemFeeAdjustmentList);
-                const r = b1.referral + b2.referral, f = b1.fba + b2.fba, d = b1.digital + b2.digital;
+                if (fee !== 0) {
+                  if (orderItemId) addFee(feeByOrderItemId, orderItemId, fee);
+                  if (sku) addFee(feeBySku, sku, fee);
+                }
+                const shipBd = parseFinancesShipmentItemFeesBreakdown(si);
+                const { referral: r, fba: f, digital: d } = shipBd;
                 if (orderItemId) addFeeBreakdown(breakdownByOrderItemId, orderItemId, r, f, d);
                 if (sku) addFeeBreakdown(breakdownBySku, sku, r, f, d);
               }
@@ -3546,11 +4158,15 @@ export class AmazonService {
         select: { id: true },
       });
       const persistedOrder = existingOrderRow
-        ? await (this.prisma as any).order.update({
-            where: { id: existingOrderRow.id },
-            data: updateData,
-          })
-        : await (this.prisma as any).order.create({ data: createData });
+        ? await withPrismaTransientRetry<{ id: string }>(() =>
+            (this.prisma as any).order.update({
+              where: { id: existingOrderRow.id },
+              data: updateData,
+            }),
+          )
+        : await withPrismaTransientRetry<{ id: string }>(() =>
+            (this.prisma as any).order.create({ data: createData }),
+          );
 
       // Persist accurate line items for per-product profitability.
       // If we don't have orderItems (e.g. call failed), we skip creating OrderItem rows.
@@ -3563,6 +4179,14 @@ export class AmazonService {
         const itemsToWrite = Math.min(orderItems.length, itemCap);
         const lineRevenues = this.computeLineRevenueTotals(orderItems, totalAmount);
         const totalLineRevenue = lineRevenues.reduce((a, b) => a + b, 0);
+
+        const clampOrderItemFeesToRevenue = (rev: number, fees: number): number => {
+          if (!Number.isFinite(fees) || fees === 0) return fees;
+          if (!Number.isFinite(rev) || rev <= 0) return fees;
+          const maxAbs = Math.abs(rev * 0.95);
+          if (Math.abs(fees) <= maxAbs) return fees;
+          return fees < 0 ? -maxAbs : maxAbs;
+        };
 
         for (let idx = 0; idx < itemsToWrite; idx++) {
           const it = orderItems[idx];
@@ -3627,23 +4251,7 @@ export class AmazonService {
               usedSameAsinSettled = true;
             }
           }
-          // If no settled fees yet (this order or same ASIN), use product's saved estimate (per unit × qty).
-          if (itemFees === 0 && sku) {
-            const productWithEst = await this.prisma.product.findUnique({
-              where: { userId_sku: { userId, sku } },
-              select: { estimatedAmazonFeePerUnit: true },
-            });
-            const estPerUnit = productWithEst?.estimatedAmazonFeePerUnit != null
-              ? Number(productWithEst.estimatedAmazonFeePerUnit)
-              : null;
-            if (estPerUnit != null && !Number.isNaN(estPerUnit)) {
-              // Product table stores fee **magnitudes** as positive; profit math expects the same sign
-              // convention as Finances (fees negative) so `revenue + itemFees` subtracts them.
-              itemFees = -Math.abs(estPerUnit * quantityOrdered);
-            }
-          }
-
-          // Attach to a real product for this SKU.
+          // Attach to a real product for this SKU (needed for pre-sale fee estimates on the row).
           const itemProduct = sku
             ? await this.prisma.product.upsert({
                 where: { userId_sku: { userId, sku } },
@@ -3663,74 +4271,79 @@ export class AmazonService {
             }
           }
 
-          // When we have no fees (Finances API not settled yet) and product has no estimate, fetch fee estimate so we don't persist 0 and overstate profit/ROI.
-          if (
-            itemFees === 0 &&
-            (asin || sku) &&
-            (itemProduct as any).estimatedAmazonFeePerUnit == null
-          ) {
-            try {
-              const marketplaceId = (
-                regionMarketplaceIds[credentials.region ?? 'eu'] ??
-                regionMarketplaceIds.eu
-              )[0];
-              const listingPriceAmount =
-                quantityOrdered > 0 ? revenueTotal / quantityOrdered : 15;
-              const listingCurrency =
-                credentials.region === 'eu' ? 'GBP' : 'USD';
-              const params = {
-                marketplaceId,
-                isAmazonFulfilled: true,
-                listingPriceAmount,
-                listingPriceCurrency: listingCurrency,
-              };
-              const res =
-                asin && String(asin).trim()
-                  ? await this.spApiClient.getMyFeesEstimateForASIN(
-                      credentials,
-                      String(asin).trim(),
-                      params,
-                    )
-                  : await this.spApiClient.getMyFeesEstimateForSKU(
-                      credentials,
-                      sku,
-                      params,
-                    );
-              const breakdown = this.parseFeesEstimateBreakdown(res as any);
-              if (
-                breakdown.total != null &&
-                Number.isFinite(breakdown.total)
-              ) {
-                const ref = breakdown.referralFee ?? 0;
-                const fba = breakdown.fbaFee ?? 0;
-                const digitalToSave =
-                  breakdown.digitalServiceFee ??
-                  (credentials.region === 'eu' && (ref !== 0 || fba !== 0)
-                    ? Math.round((ref + fba) * 0.02 * 100) / 100
-                    : 0);
-                await this.prisma.product.update({
-                  where: { id: itemProduct.id },
-                  data: {
-                    estimatedAmazonFeePerUnit: breakdown.total,
-                    estimatedReferralFeePerUnit: breakdown.referralFee ?? undefined,
-                    estimatedFbaFeePerUnit: breakdown.fbaFee ?? undefined,
-                    estimatedDigitalServiceFeePerUnit:
-                      digitalToSave || undefined,
-                    estimatedAmazonFeeUpdatedAt: new Date(),
-                  },
-                });
-                itemFees = -Math.abs(breakdown.total * quantityOrdered);
-              }
-            } catch (err) {
-              this.logger.warn(
-                '[syncRecentOrdersToDb] fee estimate fetch failed for order item',
-                {
-                  orderItemId,
-                  sku,
-                  asin,
-                  err: (err as Error)?.message,
+          const existingItem = await this.prisma.orderItem.findUnique({
+            where: {
+              orderDbId_orderItemId: {
+                orderDbId: persistedOrder.id,
+                orderItemId,
+              },
+            },
+            select: {
+              amazonFeesTotal: true,
+              profit: true,
+              feesSource: true,
+              atSaleEstimateReferralFeeTotal: true,
+              atSaleEstimateFbaFeeTotal: true,
+              atSaleEstimateDigitalServiceFeeTotal: true,
+            },
+          });
+
+          const feesFromFinancesForLine =
+            (orderItemId && feeByOrderItemId.has(orderItemId)) ||
+            (sku && feeBySku.has(sku)) ||
+            usedSameAsinSettled ||
+            usedOrderLevelFinances;
+
+          const preserveFrozenEstimate =
+            !feesFromFinancesForLine &&
+            existingItem != null &&
+            this.isPersistedAmazonFeeEstimateSource(existingItem.feesSource as string) &&
+            existingItem.amazonFeesTotal != null &&
+            Math.abs(Number(existingItem.amazonFeesTotal)) > 1e-9;
+
+          let estimateSnapRef: number | null = null;
+          let estimateSnapFba: number | null = null;
+          let estimateSnapDig: number | null = null;
+
+          if (preserveFrozenEstimate) {
+            let preserved = Number(existingItem!.amazonFeesTotal);
+            if (preserved > 0) preserved = -Math.abs(preserved);
+            itemFees = preserved;
+          } else if (itemFees === 0 && !usedSameAsinSettled) {
+            const fromProd = this.orderItemFeeEstimateFromPreSaleProduct(
+              itemProduct as {
+                estimatedReferralFeePerUnit?: unknown;
+                estimatedFbaFeePerUnit?: unknown;
+                estimatedDigitalServiceFeePerUnit?: unknown;
+                estimatedAmazonFeePerUnit?: unknown;
+              },
+              quantityOrdered,
+            );
+            if (fromProd != null) {
+              itemFees = fromProd.itemFees;
+              estimateSnapRef = fromProd.referralLine;
+              estimateSnapFba = fromProd.fbaLine;
+              estimateSnapDig = fromProd.digitalLine;
+            } else if (sku) {
+              const productWithEst = await this.prisma.product.findUnique({
+                where: { userId_sku: { userId, sku } },
+                select: {
+                  estimatedReferralFeePerUnit: true,
+                  estimatedFbaFeePerUnit: true,
+                  estimatedDigitalServiceFeePerUnit: true,
+                  estimatedAmazonFeePerUnit: true,
                 },
+              });
+              const fromDb = this.orderItemFeeEstimateFromPreSaleProduct(
+                productWithEst,
+                quantityOrdered,
               );
+              if (fromDb != null) {
+                itemFees = fromDb.itemFees;
+                estimateSnapRef = fromDb.referralLine;
+                estimateSnapFba = fromDb.fbaLine;
+                estimateSnapDig = fromDb.digitalLine;
+              }
             }
           }
 
@@ -3740,16 +4353,14 @@ export class AmazonService {
           const cogsTotal =
             cogsPerUnit != null ? cogsPerUnit * quantityOrdered : null;
           const taxChargedNum = Number.isNaN(taxCharged) ? 0 : taxCharged;
-          const feesFromFinances =
-            (orderItemId && feeByOrderItemId.has(orderItemId)) ||
-            (sku && feeBySku.has(sku)) ||
-            usedSameAsinSettled ||
-            usedOrderLevelFinances;
+          const feesFromFinances = feesFromFinancesForLine;
+          const orderLineFeesSource = feesFromFinances ? 'finances' : 'estimate';
           // Product fee estimates are positive magnitudes; Finances totals are negative. Profit math always
           // expects fees ≤ 0 (`revenue - tax - cogs + fees`). Coerce any stray positive estimate before VAT.
           if (!feesFromFinances && itemFees > 0) {
             itemFees = -Math.abs(itemFees);
           }
+          itemFees = clampOrderItemFeesToRevenue(revenueTotal, itemFees);
           let vatResult = this.computeOrderItemVatAndProfit(
             revenueTotal,
             cogsTotal,
@@ -3763,15 +4374,6 @@ export class AmazonService {
             (orderItemId && breakdownByOrderItemId.get(orderItemId)) ??
             (sku && breakdownBySku.get(sku)) ??
             null;
-          const existingItem = await this.prisma.orderItem.findUnique({
-            where: {
-              orderDbId_orderItemId: {
-                orderDbId: persistedOrder.id,
-                orderItemId,
-              },
-            },
-            select: { amazonFeesTotal: true, profit: true, feesSource: true },
-          });
           let finalFees = Number.isNaN(itemFees) ? 0 : Number(itemFees.toFixed(2));
           // Never overwrite a saved estimate with 0: keep existing order-item estimate until settled fees arrive.
           if (
@@ -3779,12 +4381,38 @@ export class AmazonService {
             existingItem &&
             existingItem.amazonFeesTotal != null &&
             Number(existingItem.amazonFeesTotal) !== 0 &&
-            (existingItem.feesSource as string) === 'estimate'
+            this.isPersistedAmazonFeeEstimateSource(existingItem.feesSource as string)
           ) {
             finalFees = Number(existingItem.amazonFeesTotal);
-            if ((existingItem.feesSource as string) === 'estimate' && finalFees > 0) {
+            if (this.isPersistedAmazonFeeEstimateSource(existingItem.feesSource as string) && finalFees > 0) {
               finalFees = -Math.abs(finalFees);
             }
+            vatResult = this.computeOrderItemVatAndProfit(
+              revenueTotal,
+              cogsTotal,
+              quantityOrdered,
+              orderDate,
+              finalFees,
+              taxChargedNum,
+              vatSettings,
+            );
+          }
+          // Finances: keep `amazonFeesTotal` identical to Ref+FBA+Dig so the UI and DB never disagree
+          // (shipment signed total vs breakdown bucket sum can drift on odd fee types).
+          if (
+            feesFromFinances &&
+            settledBreakdown &&
+            Math.abs(
+              settledBreakdown.referral +
+                settledBreakdown.fba +
+                settledBreakdown.digital,
+            ) > 1e-6
+          ) {
+            const sumBd =
+              settledBreakdown.referral +
+              settledBreakdown.fba +
+              settledBreakdown.digital;
+            finalFees = Number(sumBd.toFixed(2));
             vatResult = this.computeOrderItemVatAndProfit(
               revenueTotal,
               cogsTotal,
@@ -3812,13 +4440,13 @@ export class AmazonService {
           if (vatResult.amazonFeesExVat != null) vatData.amazonFeesExVat = vatResult.amazonFeesExVat;
           if (vatResult.amazonFeesIncVat != null) vatData.amazonFeesIncVat = vatResult.amazonFeesIncVat;
           if (vatResult.amazonFeesVatAmount != null) vatData.amazonFeesVatAmount = vatResult.amazonFeesVatAmount;
-          const updateFeesAndProfit =
+          const updateFeeColumns =
             feesFromFinances || (existingItem?.feesSource as string) !== 'finances';
+          const shouldUpdateFeeColumns = updateFeeColumns && !preserveFrozenEstimate;
           const breakdownSum = settledBreakdown
             ? settledBreakdown.referral + settledBreakdown.fba + settledBreakdown.digital
             : 0;
           const hasBreakdown = settledBreakdown && breakdownSum !== 0;
-          const totalFeeAbs = Math.abs(finalFees);
           const settledFeeFields =
             feesFromFinances && hasBreakdown && Math.abs(breakdownSum) > 1e-9
               ? {
@@ -3833,6 +4461,36 @@ export class AmazonService {
                     settledDigitalServiceFeeTotal: null,
                   }
                 : {};
+          let estimateSnapshotPayload: Record<string, number | null> = {};
+          if (shouldUpdateFeeColumns) {
+            if (feesFromFinancesForLine) {
+              estimateSnapshotPayload = {
+                atSaleEstimateReferralFeeTotal: null,
+                atSaleEstimateFbaFeeTotal: null,
+                atSaleEstimateDigitalServiceFeeTotal: null,
+              };
+            } else if (orderLineFeesSource === 'estimate') {
+              estimateSnapshotPayload = {
+                atSaleEstimateReferralFeeTotal: estimateSnapRef,
+                atSaleEstimateFbaFeeTotal: estimateSnapFba,
+                atSaleEstimateDigitalServiceFeeTotal: estimateSnapDig,
+              };
+            }
+          }
+          const createEstimateSnapshots =
+            orderLineFeesSource === 'estimate' && !feesFromFinancesForLine
+              ? {
+                  atSaleEstimateReferralFeeTotal: estimateSnapRef,
+                  atSaleEstimateFbaFeeTotal: estimateSnapFba,
+                  atSaleEstimateDigitalServiceFeeTotal: estimateSnapDig,
+                }
+              : feesFromFinancesForLine
+                ? {
+                    atSaleEstimateReferralFeeTotal: null,
+                    atSaleEstimateFbaFeeTotal: null,
+                    atSaleEstimateDigitalServiceFeeTotal: null,
+                  }
+                : {};
           const updatePayload = {
             userId,
             productId: itemProduct.id,
@@ -3844,12 +4502,13 @@ export class AmazonService {
             revenueTotal,
             shippingChargedTotal: Number.isNaN(shippingCharged) ? 0 : shippingCharged,
             taxChargedTotal: Number.isNaN(taxCharged) ? 0 : taxCharged,
-            ...(updateFeesAndProfit
+            profit: finalProfit,
+            ...(shouldUpdateFeeColumns
               ? {
                   amazonFeesTotal: finalFees,
-                  profit: finalProfit,
-                  feesSource: feesFromFinances ? 'finances' : 'estimate',
+                  feesSource: orderLineFeesSource,
                   ...settledFeeFields,
+                  ...estimateSnapshotPayload,
                 }
               : {}),
             cogsTotal,
@@ -3879,8 +4538,9 @@ export class AmazonService {
               shippingChargedTotal: Number.isNaN(shippingCharged) ? 0 : shippingCharged,
               taxChargedTotal: Number.isNaN(taxCharged) ? 0 : taxCharged,
               amazonFeesTotal: finalFees,
-              feesSource: feesFromFinances ? 'finances' : 'estimate',
+              feesSource: orderLineFeesSource,
               ...settledFeeFields,
+              ...createEstimateSnapshots,
               cogsTotal,
               profit: finalProfit,
               ...vatData,
@@ -3895,6 +4555,18 @@ export class AmazonService {
             `[syncRecentOrdersToDb] initial sync: wrote ${orderItemsWrittenThisSync} order items, stopping (userId=${userId})`,
           );
           break;
+        }
+      }
+
+      if (!financesUnauthorized) {
+        const paceMs =
+          days > 30
+            ? orderFinancesPauseMs
+            : shouldFetchFinances
+              ? Math.max(200, Math.floor(orderFinancesPauseMs / 5))
+              : 0;
+        if (paceMs > 0) {
+          await new Promise((r) => setTimeout(r, paceMs));
         }
       }
     }
@@ -4295,7 +4967,7 @@ export class AmazonService {
       period === 'month'
         ? new Date(nowSafe.getFullYear(), nowSafe.getMonth(), 1)
         : new Date(nowSafe.getTime() - 30 * 24 * 60 * 60 * 1000);
-    const userIds = await this.getOrgMemberUserIds(orgId);
+    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
     const dateFilter = {
       orderDate: { gte: startDate, lte: nowSafe },
     };
@@ -4461,7 +5133,7 @@ export class AmazonService {
    */
   async getReplenishProducts(orgId: string, limit = 5000, marketplaceId?: string) {
     const marketplaceFilter = this.resolveMarketplaceFilter(marketplaceId);
-    const userIds = await this.getOrgMemberUserIds(orgId);
+    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
 
     // All products for org, with inventory (so we can filter by stock)
     const products = await this.prisma.product.findMany({
@@ -4554,7 +5226,7 @@ export class AmazonService {
   }
 
   async listProducts(orgId: string) {
-    const userIds = await this.getOrgMemberUserIds(orgId);
+    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
     const products = await this.prisma.product.findMany({
       where: { userId: { in: userIds } },
       orderBy: [{ updatedAt: 'desc' }],
@@ -4617,7 +5289,7 @@ export class AmazonService {
     opts?: { take?: number; skip?: number },
     marketplaceId?: string,
   ): Promise<{ total: number; items: Array<{ id: string; sku: string; asin: string | null; title: string | null; imageUrl: string | null }> }> {
-    const userIds = await this.getOrgMemberUserIds(orgId);
+    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
     // Controller allows up to 500 for these list endpoints; keep service in sync.
     const take = Math.max(1, Math.min(500, opts?.take ?? 10));
     const skip = Math.max(0, opts?.skip ?? 0);
@@ -4698,7 +5370,7 @@ export class AmazonService {
       productFallbackUnitCost: number | null;
     }>;
   }> {
-    const userIds = await this.getOrgMemberUserIds(orgId);
+    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
     const take = Math.max(1, Math.min(100, opts?.take ?? 10));
     const skip = Math.max(0, opts?.skip ?? 0);
 
@@ -4899,7 +5571,7 @@ export class AmazonService {
       productFallbackUnitCost: number | null;
     }>;
   }> {
-    const userIds = await this.getOrgMemberUserIds(orgId);
+    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
     // Controller allows up to 500 for these list endpoints; keep service in sync.
     const take = Math.max(1, Math.min(500, opts?.take ?? 10));
     const skip = Math.max(0, opts?.skip ?? 0);
@@ -5090,7 +5762,7 @@ export class AmazonService {
     productId: string,
     costOfGoods: number | null,
   ) {
-    const userIds = await this.getOrgMemberUserIds(orgId);
+    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
     const result = await this.prisma.product.updateMany({
       where: { id: productId, userId: { in: userIds } },
       data: { costOfGoods },
@@ -5158,7 +5830,10 @@ export class AmazonService {
         const taxChargedTotal = Number(it.taxChargedTotal ?? 0);
         let amazonFeesTotal = Number(it.amazonFeesTotal ?? 0);
         let correctedEstimateFees: number | undefined;
-        if ((it.feesSource as string) === 'estimate' && amazonFeesTotal > 0) {
+        if (
+          this.isPersistedAmazonFeeEstimateSource(it.feesSource as string) &&
+          amazonFeesTotal > 0
+        ) {
           amazonFeesTotal = -Math.abs(amazonFeesTotal);
           correctedEstimateFees = amazonFeesTotal;
         }
@@ -5272,7 +5947,7 @@ export class AmazonService {
     error?: string;
   }> {
     try {
-      const userIds = await this.getOrgMemberUserIds(orgId);
+      const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
       const withAccount = await this.prisma.sellerAccount.findFirst({
         where: {
           userId: userIds.length && preferredUserId && userIds.includes(preferredUserId) ? preferredUserId : { in: userIds },
@@ -5443,7 +6118,7 @@ export class AmazonService {
   }> {
     let userIds: string[];
     try {
-      userIds = await this.getOrgMemberUserIds(orgId);
+      userIds = await this.getOrgAmazonAggregateUserIds(orgId);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       return {
@@ -5476,10 +6151,776 @@ export class AmazonService {
   }
 
   /**
+   * Dev-only: one Amazon order — raw `order_items` fee columns vs `listOrders` mapping (what the UI uses).
+   * Call while logged in (same session as the app). No SP-API call; pure DB + in-app mapping.
+   */
+  async getOrderFeeSanityDebug(
+    orgId: string,
+    amazonOrderId: string,
+    marketplaceId?: string,
+  ): Promise<{
+    orgId: string;
+    amazonOrderId: string;
+    aggregateUserIds: string[];
+    summary: { ok: boolean; message: string };
+    dbLines: Array<Record<string, unknown>>;
+    listOrdersLines: Array<Record<string, unknown>>;
+    checks: string[];
+  }> {
+    const checks: string[] = [];
+    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
+    const oid = String(amazonOrderId || '').trim();
+    if (!oid) {
+      return {
+        orgId,
+        amazonOrderId: oid,
+        aggregateUserIds: userIds,
+        summary: { ok: false, message: 'Missing amazonOrderId' },
+        dbLines: [],
+        listOrdersLines: [],
+        checks: ['Pass amazonOrderId query, e.g. 204-9599325-7606713'],
+      };
+    }
+    const items = await this.prisma.orderItem.findMany({
+      where: {
+        userId: { in: userIds },
+        marketplace: 'amazon',
+        orderId: oid,
+      },
+      select: {
+        id: true,
+        userId: true,
+        orderItemId: true,
+        sku: true,
+        asin: true,
+        revenueTotal: true,
+        amazonFeesTotal: true,
+        feesSource: true,
+        settledReferralFeeTotal: true,
+        settledFbaFeeTotal: true,
+        settledDigitalServiceFeeTotal: true,
+        quantity: true,
+        orderDate: true,
+      },
+      orderBy: { orderDate: 'desc' },
+    });
+    if (items.length === 0) {
+      checks.push(
+        'No order_items for this orderId under org aggregate user(s). Sync/backfill may not have written this order yet.',
+      );
+    }
+    const normNeg = (v: unknown): number => {
+      const n = Number(v ?? 0);
+      if (!Number.isFinite(n)) return 0;
+      if (n === 0) return 0;
+      return n > 0 ? -Math.abs(n) : n;
+    };
+    const dbLines = items.map((it) => {
+      const fee = normNeg(it.amazonFeesTotal);
+      const r = normNeg(it.settledReferralFeeTotal);
+      const f = normNeg(it.settledFbaFeeTotal);
+      const d = normNeg(it.settledDigitalServiceFeeTotal);
+      const sum = r + f + d;
+      const delta = Math.abs(sum - fee);
+      if (it.feesSource === 'finances' && delta > 0.05 && Math.abs(sum) > 1e-4) {
+        checks.push(
+          `DB line ${it.id}: breakdown sum ${sum.toFixed(2)} vs amazonFeesTotal ${fee.toFixed(2)} (Δ ${delta.toFixed(2)})`,
+        );
+      }
+      return {
+        id: it.id,
+        orderItemId: it.orderItemId,
+        userId: it.userId,
+        sku: it.sku,
+        asin: it.asin,
+        revenueTotal: it.revenueTotal != null ? Number(it.revenueTotal) : null,
+        amazonFeesTotal: it.amazonFeesTotal != null ? Number(it.amazonFeesTotal) : null,
+        feesSource: it.feesSource,
+        settledReferralFeeTotal: it.settledReferralFeeTotal,
+        settledFbaFeeTotal: it.settledFbaFeeTotal,
+        settledDigitalServiceFeeTotal: it.settledDigitalServiceFeeTotal,
+        dbBreakdownSumSigned: Number(sum.toFixed(2)),
+        dbBreakdownVsTotalDelta: Number(delta.toFixed(4)),
+      };
+    });
+
+    let listOrdersLines: Array<Record<string, unknown>> = [];
+    try {
+      const all = await this.listOrders(orgId, marketplaceId);
+      listOrdersLines = all
+        .filter((row) => row.orderId === oid)
+        .map((row) => ({
+          id: row.id,
+          orderId: row.orderId,
+          sku: row.sku,
+          amazonFeesTotal: row.amazonFeesTotal,
+          referralFeeTotal: row.referralFeeTotal,
+          fbaFeeTotal: row.fbaFeeTotal,
+          digitalServiceFeeTotal: row.digitalServiceFeeTotal,
+          feesSource: row.feesSource,
+          salePrice: row.salePrice,
+        }));
+      if (listOrdersLines.length === 0 && items.length > 0) {
+        checks.push(
+          'listOrders returned no rows for this orderId (marketplace filter, dedupe, or data user mismatch).',
+        );
+      }
+      for (const it of items) {
+        const lo = listOrdersLines.find((r) => String(r.id) === String(it.id));
+        if (!lo) {
+          checks.push(`DB order_item id=${it.id} missing from listOrders output for this order.`);
+          continue;
+        }
+        const dbFee = normNeg(it.amazonFeesTotal);
+        const loFee = Number((lo as { amazonFeesTotal?: unknown }).amazonFeesTotal ?? 0);
+        if (Math.abs(dbFee - loFee) > 0.05) {
+          checks.push(
+            `Line id=${it.id}: DB amazonFeesTotal ${dbFee} vs listOrders ${loFee}`,
+          );
+        }
+      }
+    } catch (e) {
+      checks.push(`listOrders failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
+    const ok = checks.length === 0;
+    return {
+      orgId,
+      amazonOrderId: oid,
+      aggregateUserIds: userIds,
+      summary: {
+        ok,
+        message: ok
+          ? 'Checks passed (≤£0.05 drift): DB breakdown vs total, listOrders vs DB fee.'
+          : checks.slice(0, 10).join(' | ') + (checks.length > 10 ? ' …' : ''),
+      },
+      dbLines,
+      listOrdersLines,
+      checks,
+    };
+  }
+
+  private extractFinancesListNextToken(res: unknown): string | undefined {
+    if (!res || typeof res !== 'object') return undefined;
+    const r = res as Record<string, unknown>;
+    const p = (r.payload ?? r.Payload ?? r) as Record<string, unknown>;
+    if (p && typeof p === 'object') {
+      const nt = p.NextToken ?? p.nextToken;
+      if (typeof nt === 'string' && nt.length > 0) return nt;
+    }
+    const top = r.NextToken ?? r.nextToken;
+    if (typeof top === 'string' && top.length > 0) return top;
+    return undefined;
+  }
+
+  private getFinancialEventsBucket(res: unknown): Record<string, unknown> | null {
+    if (!res || typeof res !== 'object') return null;
+    const r = res as Record<string, unknown>;
+    const p = (r.payload ?? r.Payload ?? r) as Record<string, unknown>;
+    if (!p || typeof p !== 'object') return null;
+    const fe = p.FinancialEvents ?? p.financialEvents;
+    if (!fe || typeof fe !== 'object' || Array.isArray(fe)) return null;
+    return fe as Record<string, unknown>;
+  }
+
+  /** Concatenate `FinancialEvents.*EventList` arrays across Finances pages (same order id). */
+  private mergeFinancesPagesFinancialEvents(accum: unknown, page: unknown): void {
+    const accFe = this.getFinancialEventsBucket(accum);
+    const pageFe = this.getFinancialEventsBucket(page);
+    if (!accFe || !pageFe) return;
+    for (const [k, v] of Object.entries(pageFe)) {
+      if (!Array.isArray(v) || v.length === 0) continue;
+      if (!Array.isArray(accFe[k])) accFe[k] = [];
+      (accFe[k] as unknown[]).push(...v);
+    }
+  }
+
+  /**
+   * Finances v0 listFinancialEventsByOrderId — all pages merged into one payload-shaped object.
+   * Adds `__debugFigure` on objects that carry FeeAmount / Principal / ChargeAmount so humans see figures inline.
+   */
+  private injectFinancesMoneyDebugFigures(node: unknown): unknown {
+    if (node === null || typeof node !== 'object') return node;
+    if (Array.isArray(node)) return node.map((x) => this.injectFinancesMoneyDebugFigures(x));
+    const o = node as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(o)) {
+      out[k] = this.injectFinancesMoneyDebugFigures(v);
+    }
+    const fig = this.readFinancesLeafMoneyLabel(out);
+    if (fig) out.__debugFigure = fig;
+    return out;
+  }
+
+  private readFinancesLeafMoneyLabel(o: Record<string, unknown>): string | null {
+    const pack = (block: unknown): string | null => {
+      if (!block || typeof block !== 'object' || Array.isArray(block)) return null;
+      const b = block as Record<string, unknown>;
+      const raw = b.CurrencyAmount ?? b.currencyAmount ?? b.Amount ?? b.amount;
+      const ccy = String(b.CurrencyCode ?? b.currencyCode ?? '').trim();
+      const n = Number(raw);
+      if (!Number.isFinite(n) || Math.abs(n) < 1e-9) return null;
+      return ccy ? `${n.toFixed(2)} ${ccy}` : String(n.toFixed(2));
+    };
+    const ft = o.FeeType ?? o.feeType ?? o.ChargeType ?? o.chargeType ?? o.Type ?? o.type;
+    const fa = pack(o.FeeAmount ?? o.feeAmount);
+    if (fa) return ft ? `${fa} (${String(ft)})` : fa;
+    const pr = pack(o.Principal ?? o.principal);
+    if (pr) return `Principal ${pr}`;
+    const ch = pack(o.ChargeAmount ?? o.chargeAmount);
+    if (ch) return ft ? `${ch} (${String(ft)})` : ch;
+    const ship = pack(o.ShippingCharge ?? o.shippingCharge);
+    if (ship) return `ShippingCharge ${ship}`;
+    const top = pack(o);
+    if (top) return ft ? `${top} (${String(ft)})` : top;
+    return null;
+  }
+
+  /** Read a Finances v0 `Currency` block (or plain number) as a scalar amount. */
+  private readFinancesCurrencyAmount(block: unknown): number {
+    if (!block || typeof block !== 'object' || Array.isArray(block)) return 0;
+    const b = block as Record<string, unknown>;
+    let raw: unknown =
+      b.CurrencyAmount ??
+      b.currencyAmount ??
+      b.Amount ??
+      b.amount;
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      const nested = raw as Record<string, unknown>;
+      raw =
+        nested.Amount ??
+        nested.amount ??
+        nested.CurrencyAmount ??
+        nested.currencyAmount;
+    }
+    if (typeof raw === 'number') return Number.isFinite(raw) ? raw : 0;
+    const n = parseFloat(String(raw ?? '').replace(/[,£$€\s]/g, ''));
+    return Number.isFinite(n) ? n : 0;
+  }
+
+  /**
+   * Finances `AdjustmentType` values we bucket as **reimbursements** on the P&amp;L row (signed;
+   * clawbacks are negative). Other adjustment types go to `otherAdjustments`.
+   */
+  private pnlFinancesAdjustmentTypeIsReimbursementBucket(adjustmentType: string): boolean {
+    const t = String(adjustmentType ?? '').trim();
+    if (!t) return false;
+    const bucket = new Set<string>([
+      'FBAInventoryReimbursement',
+      'PostageRefund',
+      'LostOrDamagedReimbursement',
+      'CanceledButPickedUpReimbursement',
+      'ReimbursementClawback',
+      'SellerRewards',
+    ]);
+    if (bucket.has(t)) return true;
+    return /reimbursement/i.test(t);
+  }
+
+  /**
+   * Sums Finances v0 `listFinancialEvents` **posted-range** payloads for P&amp;L adjustment lines.
+   * Order-line revenue/fees in our DB do not include these; they must be added separately.
+   */
+  private sumProfitAndLossFinancesPostedBucket(fe: Record<string, unknown>): {
+    reimbursementAdjustments: number;
+    otherAdjustments: number;
+  } {
+    let reimbursementAdjustments = 0;
+    let otherAdjustments = 0;
+
+    const addReimbList = (list: unknown, amountKeys: string[]) => {
+      if (!Array.isArray(list)) return;
+      for (const ev of list) {
+        if (!ev || typeof ev !== 'object' || Array.isArray(ev)) continue;
+        const o = ev as Record<string, unknown>;
+        for (const k of amountKeys) {
+          const snake = k.charAt(0).toLowerCase() + k.slice(1);
+          const amt = this.readFinancesCurrencyAmount(o[k] ?? o[snake]);
+          if (amt !== 0) {
+            reimbursementAdjustments += amt;
+            break;
+          }
+        }
+      }
+    };
+
+    addReimbList(fe.SAFETReimbursementEventList ?? fe.safetReimbursementEventList, [
+      'ReimbursedAmount',
+    ]);
+    addReimbList(fe.TDSReimbursementEventList ?? fe.tdsReimbursementEventList, [
+      'ReimbursedAmount',
+    ]);
+    addReimbList(
+      fe.EBTRefundReimbursementOnlyEventList ?? fe.ebtRefundReimbursementOnlyEventList,
+      ['Amount'],
+    );
+
+    const adjList = fe.AdjustmentEventList ?? fe.adjustmentEventList ?? [];
+    if (Array.isArray(adjList)) {
+      for (const ev of adjList) {
+        if (!ev || typeof ev !== 'object' || Array.isArray(ev)) continue;
+        const o = ev as Record<string, unknown>;
+        const typ = String(o.AdjustmentType ?? o.adjustmentType ?? '');
+        const amt = this.readFinancesCurrencyAmount(
+          o.AdjustmentAmount ?? o.adjustmentAmount,
+        );
+        if (this.pnlFinancesAdjustmentTypeIsReimbursementBucket(typ)) {
+          reimbursementAdjustments += amt;
+        } else {
+          otherAdjustments += amt;
+        }
+      }
+    }
+
+    return {
+      reimbursementAdjustments:
+        Math.round(reimbursementAdjustments * 100) / 100,
+      otherAdjustments: Math.round(otherAdjustments * 100) / 100,
+    };
+  }
+
+  private async fetchFinancialEventsByOrderIdAllPages(
+    credentials: SpApiCredentials,
+    amazonOrderId: string,
+  ): Promise<{ merged: unknown; pagesFetched: number }> {
+    let page = (await this.spApiClient.listFinancialEventsByOrderId(credentials, amazonOrderId, {
+      maxResultsPerPage: 100,
+    })) as unknown;
+    const merged = JSON.parse(JSON.stringify(page)) as Record<string, unknown>;
+    let pagesFetched = 1;
+    let next = this.extractFinancesListNextToken(page);
+    while (next && pagesFetched < 80) {
+      await new Promise<void>((r) => setTimeout(r, 400));
+      const nextPage = (await this.spApiClient.listFinancialEventsByOrderId(credentials, amazonOrderId, {
+        maxResultsPerPage: 100,
+        nextToken: next,
+      })) as unknown;
+      this.mergeFinancesPagesFinancialEvents(merged, nextPage);
+      pagesFetched += 1;
+      next = this.extractFinancesListNextToken(nextPage);
+    }
+    const p = merged.payload ?? merged.Payload;
+    if (p && typeof p === 'object') {
+      delete (p as Record<string, unknown>).NextToken;
+      delete (p as Record<string, unknown>).nextToken;
+    }
+    return { merged, pagesFetched };
+  }
+
+  private countFinancialEventListItems(res: unknown): number {
+    const fe = this.getFinancialEventsBucket(res);
+    if (!fe) return 0;
+    let n = 0;
+    for (const v of Object.values(fe)) {
+      if (Array.isArray(v)) n += v.length;
+    }
+    return n;
+  }
+
+  /** Keep only events whose JSON mentions this Amazon order id (coarse filter on range-wide Finances). */
+  private filterFinancialEventsByAmazonOrderId(
+    fe: Record<string, unknown>,
+    amazonOrderId: string,
+  ): Record<string, unknown> {
+    const out: Record<string, unknown> = { ...fe };
+    for (const key of Object.keys(out)) {
+      const arr = out[key];
+      if (!Array.isArray(arr)) continue;
+      try {
+        out[key] = arr.filter((ev) => JSON.stringify(ev).includes(amazonOrderId));
+      } catch {
+        out[key] = [];
+      }
+    }
+    return out;
+  }
+
+  private async fetchFinancialEventsPostedRangeAllPages(
+    credentials: SpApiCredentials,
+    postedAfter: string,
+    postedBefore: string,
+  ): Promise<{ merged: unknown; pagesFetched: number }> {
+    let page = (await this.spApiClient.listFinancialEvents(credentials, {
+      postedAfter,
+      postedBefore,
+      maxResultsPerPage: 100,
+    })) as unknown;
+    const merged = JSON.parse(JSON.stringify(page)) as Record<string, unknown>;
+    let pagesFetched = 1;
+    let next = this.extractFinancesListNextToken(page);
+    while (next && pagesFetched < 80) {
+      await new Promise<void>((r) => setTimeout(r, 400));
+      const nextPage = (await this.spApiClient.listFinancialEvents(credentials, {
+        postedAfter,
+        postedBefore,
+        maxResultsPerPage: 100,
+        nextToken: next,
+      })) as unknown;
+      this.mergeFinancesPagesFinancialEvents(merged, nextPage);
+      pagesFetched += 1;
+      next = this.extractFinancesListNextToken(nextPage);
+    }
+    const p = merged.payload ?? merged.Payload;
+    if (p && typeof p === 'object') {
+      delete (p as Record<string, unknown>).NextToken;
+      delete (p as Record<string, unknown>).nextToken;
+    }
+    return { merged, pagesFetched };
+  }
+
+  /**
+   * Amazon: if postedAfter/postedBefore are **more than 180 days** apart, `listTransactions` returns **empty**.
+   * Use the widest safe window ending shortly before "now" so deferred rows posted months ago still match.
+   */
+  private finances2024ListTransactionsMaxPostedWindowIso(nowMs = Date.now()): {
+    postedAfter: string;
+    postedBefore: string;
+  } {
+    const postedBeforeMs = nowMs - 2.5 * 60 * 1000;
+    const postedAfterMs = postedBeforeMs - 179 * 24 * 60 * 60 * 1000;
+    return {
+      postedAfter: new Date(postedAfterMs).toISOString(),
+      postedBefore: new Date(postedBeforeMs).toISOString(),
+    };
+  }
+
+  private async finances2024ListTransactionsFetchAllPages(
+    credentials: SpApiCredentials,
+    args: {
+      marketplaceId: string;
+      postedAfter: string;
+      postedBefore: string;
+      transactionStatus?: 'DEFERRED' | 'RELEASED' | 'DEFERRED_RELEASED' | null;
+      relatedIdentifierName: 'ORDER_ID' | 'FINANCIAL_EVENT_GROUP_ID';
+      relatedIdentifierValue: string;
+    },
+  ): Promise<{ pagesFetched: number; transactions: unknown[] }> {
+    const transactions: unknown[] = [];
+    let next: string | undefined;
+    let pagesFetched = 0;
+    while (pagesFetched < 40) {
+      pagesFetched += 1;
+      const page = (await this.spApiClient.listFinancesTransactions20240619(credentials, {
+        marketplaceId: args.marketplaceId,
+        postedAfter: args.postedAfter,
+        postedBefore: args.postedBefore,
+        ...(args.transactionStatus != null
+          ? { transactionStatus: args.transactionStatus }
+          : {}),
+        relatedIdentifierName: args.relatedIdentifierName,
+        relatedIdentifierValue: args.relatedIdentifierValue,
+        nextToken: next,
+      })) as Record<string, unknown>;
+      const payload = (page?.payload ?? page?.Payload) as Record<string, unknown> | undefined;
+      const txs = payload?.transactions ?? payload?.Transactions;
+      if (Array.isArray(txs)) transactions.push(...txs);
+      const nt = payload?.nextToken ?? payload?.NextToken;
+      next = typeof nt === 'string' && nt.length > 0 ? nt : undefined;
+      if (!next) break;
+      await new Promise<void>((r) => setTimeout(r, 400));
+    }
+    return { pagesFetched, transactions };
+  }
+
+  /** Prefer SP-API marketplace id from Orders `getOrderItems` payload (UK vs DE etc.). */
+  private extractMarketplaceIdFromOrdersGetOrderItemsPayload(res: unknown): string | null {
+    const root = res as Record<string, unknown> | null;
+    if (!root) return null;
+    const p = (root.payload ?? root.Payload) as Record<string, unknown> | undefined;
+    const items = (p?.OrderItems ?? p?.orderItems) as unknown[] | undefined;
+    if (!Array.isArray(items) || items.length === 0) return null;
+    const first = items[0] as Record<string, unknown>;
+    const id = first?.MarketplaceId ?? first?.marketplaceId;
+    return typeof id === 'string' && id.length >= 10 && id.startsWith('A') ? id : null;
+  }
+
+  /**
+   * Dev-only: raw SP-API `GET /finances/v0/orders/{orderId}/financialEvents` for mapping fee rows.
+   * If `amazonOrderId` is omitted, uses the most recent DB `order_item` with `feesSource === 'finances'`.
+   * Follows **NextToken** until exhausted, merges all `FinancialEvents` event lists, then adds `__debugFigure`
+   * on each money-bearing object so JSON is self-describing.
+   *
+   * When **by-order** returns empty event lists (common: settlement delay / events only on posted-range API),
+   * also calls `GET /finances/v0/financialEvents` for a window around the line’s `orderDate`, merges pages,
+   * filters to this `amazonOrderId`, and returns that as `financesPostedRangeFilteredResponse`.
+   */
+  async getOrderFinancesRawDebug(
+    orgId: string,
+    query: { amazonOrderId?: string },
+    preferredUserId: string,
+  ): Promise<{
+    amazonOrderId: string;
+    resolvedBy: 'query' | 'latest_finances_db';
+    financesPagesFetched: number;
+    financesResponse: unknown;
+    financialEventsByOrderIdItemCount: number;
+    amazonNote: string | null;
+    /** Why Seller Central can show fees while v0 Finances is empty (deferred / not in API yet). */
+    sellerCentralFinancesGap: string | null;
+    /** Raw `getOrderItems` response (line ItemPrice, tax, etc.) — always present when call succeeds. */
+    ordersApiGetOrderItems: unknown | null;
+    financesPostedRange: { postedAfter: string; postedBefore: string } | null;
+    financesPostedRangePagesFetched: number | null;
+    financesPostedRangeFilteredResponse: unknown | null;
+    /** Total event objects across all `*EventList` keys after posted-range filter to this order id. */
+    financesPostedRangeFilteredEventItemCount: number | null;
+    /** Finances API 2024-06-19 `listTransactions` by ORDER_ID (merged sweeps; see `sweeps` inside). */
+    finances2024ListTransactionsDeferred: unknown | null;
+    finances2024ListTransactionsError: string | null;
+    finances2024ListTransactionsPagesFetched: number | null;
+    /** Per-status sweep counts (DEFERRED / DEFERRED_RELEASED / RELEASED / any). */
+    finances2024ListTransactionsSweeps: Array<{
+      transactionStatus: string | null;
+      pagesFetched: number;
+      transactionCount: number;
+    }>;
+    finances2024ListTransactionsMarketplaceId: string;
+    finances2024ListTransactionsPostedWindow: { postedAfter: string; postedBefore: string };
+  }> {
+    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
+    const trimmed = query.amazonOrderId?.trim();
+    let amazonOrderId: string;
+    let resolvedBy: 'query' | 'latest_finances_db';
+    if (trimmed) {
+      amazonOrderId = trimmed;
+      resolvedBy = 'query';
+    } else {
+      const hit = await this.prisma.orderItem.findFirst({
+        where: { userId: { in: userIds }, marketplace: 'amazon', feesSource: 'finances' },
+        orderBy: { orderDate: 'desc' },
+        select: { orderId: true },
+      });
+      if (!hit?.orderId) {
+        throw new NotFoundException(
+          'No order_item with feesSource=finances in this org; pass amazonOrderId=… explicitly.',
+        );
+      }
+      amazonOrderId = hit.orderId;
+      resolvedBy = 'latest_finances_db';
+    }
+    const credentials = await this.getAmazonCredentialsForOrg(orgId, preferredUserId);
+    const { merged, pagesFetched } = await this.fetchFinancialEventsByOrderIdAllPages(
+      credentials,
+      amazonOrderId,
+    );
+    const itemCount = this.countFinancialEventListItems(merged);
+    const financesResponse = this.injectFinancesMoneyDebugFigures(merged);
+
+    let amazonNote: string | null = null;
+    let financesPostedRange: { postedAfter: string; postedBefore: string } | null = null;
+    let financesPostedRangePagesFetched: number | null = null;
+    let financesPostedRangeFilteredResponse: unknown | null = null;
+
+    let financesPostedRangeFilteredEventItemCount: number | null = null;
+
+    if (itemCount === 0) {
+      amazonNote =
+        'listFinancialEventsByOrderId: zero events in FinancialEvents. Posted-range fallback may still be empty for deferred orders — see sellerCentralFinancesGap.';
+
+      const line = await this.prisma.orderItem.findFirst({
+        where: {
+          userId: { in: userIds },
+          marketplace: 'amazon',
+          orderId: amazonOrderId,
+        },
+        orderBy: { orderDate: 'desc' },
+        select: { orderDate: true },
+      });
+
+      if (line?.orderDate) {
+        const beforeBoundMs = Date.now() - 2.5 * 60 * 1000;
+        const orderMs = new Date(line.orderDate).getTime();
+        let postedBeforeMs = Math.min(beforeBoundMs, orderMs + 45 * 24 * 60 * 60 * 1000);
+        let postedAfterMs = orderMs - 5 * 24 * 60 * 60 * 1000;
+        const maxSpanMs = 179 * 24 * 60 * 60 * 1000;
+        if (postedBeforeMs - postedAfterMs > maxSpanMs) {
+          postedAfterMs = postedBeforeMs - maxSpanMs;
+        }
+        if (postedAfterMs >= postedBeforeMs) {
+          postedAfterMs = postedBeforeMs - 48 * 60 * 60 * 1000;
+        }
+        const postedAfter = new Date(postedAfterMs).toISOString();
+        const postedBefore = new Date(postedBeforeMs).toISOString();
+
+        try {
+          const range = await this.fetchFinancialEventsPostedRangeAllPages(
+            credentials,
+            postedAfter,
+            postedBefore,
+          );
+          const bucket = this.getFinancialEventsBucket(range.merged);
+          if (bucket) {
+            const filtered = this.filterFinancialEventsByAmazonOrderId(bucket, amazonOrderId);
+            financesPostedRangeFilteredEventItemCount = 0;
+            for (const v of Object.values(filtered)) {
+              if (Array.isArray(v)) financesPostedRangeFilteredEventItemCount += v.length;
+            }
+            const wrapped = JSON.parse(JSON.stringify(range.merged)) as Record<string, unknown>;
+            const p = (wrapped.payload ?? wrapped.Payload) as Record<string, unknown>;
+            if (p && typeof p === 'object') {
+              p.FinancialEvents = filtered;
+            }
+            financesPostedRange = { postedAfter, postedBefore };
+            financesPostedRangePagesFetched = range.pagesFetched;
+            financesPostedRangeFilteredResponse = this.injectFinancesMoneyDebugFigures(wrapped);
+          }
+        } catch (err) {
+          this.logger.warn('[getOrderFinancesRawDebug] listFinancialEvents fallback failed', {
+            amazonOrderId,
+            err: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
+
+    let ordersApiGetOrderItems: unknown | null = null;
+    try {
+      ordersApiGetOrderItems = await this.spApiClient.getOrderItems(credentials, amazonOrderId);
+    } catch (err) {
+      this.logger.warn('[getOrderFinancesRawDebug] getOrderItems failed', {
+        amazonOrderId,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    const mpFromOrderItems =
+      this.extractMarketplaceIdFromOrdersGetOrderItemsPayload(ordersApiGetOrderItems);
+    const marketplaceIdFor2024 =
+      mpFromOrderItems ??
+      (credentials.region === 'eu'
+        ? 'A1F83G8C2ARO7P'
+        : credentials.region === 'fe'
+          ? 'A1VC38T7YXB528'
+          : 'ATVPDKIKX0DER');
+    const { postedAfter: postedAfter2024, postedBefore: postedBefore2024 } =
+      this.finances2024ListTransactionsMaxPostedWindowIso();
+
+    const transactions2024Agg: unknown[] = [];
+    const finances2024ListTransactionsSweeps: Array<{
+      transactionStatus: string | null;
+      pagesFetched: number;
+      transactionCount: number;
+    }> = [];
+    let finances2024ListTransactionsDeferred: unknown | null = null;
+    let finances2024ListTransactionsError: string | null = null;
+    let finances2024ListTransactionsPagesFetched: number | null = null;
+
+    const seenTx = new Set<string>();
+    const dedupePush = (list: unknown[]) => {
+      for (const t of list) {
+        const rec = t as Record<string, unknown>;
+        const tid = rec?.transactionId ?? rec?.TransactionId;
+        const key =
+          typeof tid === 'string' && tid.length > 0
+            ? tid
+            : `hash:${JSON.stringify(rec).slice(0, 400)}`;
+        if (seenTx.has(key)) continue;
+        seenTx.add(key);
+        transactions2024Agg.push(t);
+      }
+    };
+
+    const sweepStatuses = ['DEFERRED', 'DEFERRED_RELEASED', 'RELEASED'] as const;
+    try {
+      let totalPages = 0;
+      for (const st of sweepStatuses) {
+        const { pagesFetched, transactions } =
+          await this.finances2024ListTransactionsFetchAllPages(credentials, {
+            marketplaceId: marketplaceIdFor2024,
+            postedAfter: postedAfter2024,
+            postedBefore: postedBefore2024,
+            transactionStatus: st,
+            relatedIdentifierName: 'ORDER_ID',
+            relatedIdentifierValue: amazonOrderId,
+          });
+        totalPages += pagesFetched;
+        finances2024ListTransactionsSweeps.push({
+          transactionStatus: st,
+          pagesFetched,
+          transactionCount: transactions.length,
+        });
+        dedupePush(transactions);
+        await new Promise<void>((r) => setTimeout(r, 350));
+      }
+      {
+        const { pagesFetched, transactions } =
+          await this.finances2024ListTransactionsFetchAllPages(credentials, {
+            marketplaceId: marketplaceIdFor2024,
+            postedAfter: postedAfter2024,
+            postedBefore: postedBefore2024,
+            transactionStatus: null,
+            relatedIdentifierName: 'ORDER_ID',
+            relatedIdentifierValue: amazonOrderId,
+          });
+        totalPages += pagesFetched;
+        finances2024ListTransactionsSweeps.push({
+          transactionStatus: null,
+          pagesFetched,
+          transactionCount: transactions.length,
+        });
+        dedupePush(transactions);
+      }
+      finances2024ListTransactionsPagesFetched = totalPages;
+      finances2024ListTransactionsDeferred = this.injectFinancesMoneyDebugFigures({
+        api: 'GET /finances/2024-06-19/transactions',
+        note:
+          'Sweeps: DEFERRED, DEFERRED_RELEASED, RELEASED, then no transactionStatus (Amazon may still filter by ORDER_ID). ' +
+          'Posted window is max span **179 days** ending now−2.5m (Amazon returns **empty** if postedAfter/postedBefore are >180 days apart; a 120-day rolling window can miss older postedDate rows). ' +
+          'marketplaceId prefers getOrderItems line MarketplaceId when present.',
+        marketplaceIdUsed: marketplaceIdFor2024,
+        marketplaceIdFromOrderItems: mpFromOrderItems,
+        postedWindow: { postedAfter: postedAfter2024, postedBefore: postedBefore2024 },
+        sweeps: finances2024ListTransactionsSweeps,
+        transactions: transactions2024Agg,
+      });
+    } catch (e) {
+      finances2024ListTransactionsError = e instanceof Error ? e.message : String(e);
+    }
+
+    const rangeEmpty =
+      financesPostedRangeFilteredEventItemCount == null ||
+      financesPostedRangeFilteredEventItemCount === 0;
+    const v2024HasRows = transactions2024Agg.length > 0;
+    const sellerCentralFinancesGap =
+      v2024HasRows
+        ? `Finances v0 was empty for this order, but Finances 2024-06-19 listTransactions (ORDER_ID sweeps) returned ${transactions2024Agg.length} merged transaction object(s). See finances2024ListTransactionsDeferred (includes sweeps + posted window).`
+        : itemCount === 0 && rangeEmpty
+          ? 'Seller Central can show deferred rows that still do not appear in SP-API for this order: we sweep GET /finances/2024-06-19/transactions with ORDER_ID for DEFERRED, DEFERRED_RELEASED, RELEASED, and once without transactionStatus, using a **179-day** posted window (Amazon returns empty if postedAfter/postedBefore span >180 days; a short rolling window can miss rows by postedDate). Inspect `finances2024ListTransactionsSweeps`, `marketplaceIdUsed` vs `ordersApiGetOrderItems` MarketplaceId, and `finances2024ListTransactionsError` (403 → Finance and Accounting role). If all sweeps are zero, sync/order profit uses **pre-sale** `products` fee estimates until Finances settlement.'
+          : itemCount === 0
+            ? 'Finances by order id returned zero events; posted-range fallback returned some events — inspect financesPostedRangeFilteredResponse for fee rows.'
+            : null;
+
+    return {
+      amazonOrderId,
+      resolvedBy,
+      financesPagesFetched: pagesFetched,
+      financesResponse,
+      financialEventsByOrderIdItemCount: itemCount,
+      amazonNote,
+      sellerCentralFinancesGap,
+      ordersApiGetOrderItems,
+      financesPostedRange,
+      financesPostedRangePagesFetched,
+      financesPostedRangeFilteredResponse,
+      financesPostedRangeFilteredEventItemCount,
+      finances2024ListTransactionsDeferred,
+      finances2024ListTransactionsError,
+      finances2024ListTransactionsPagesFetched,
+      finances2024ListTransactionsSweeps,
+      finances2024ListTransactionsMarketplaceId: marketplaceIdFor2024,
+      finances2024ListTransactionsPostedWindow: {
+        postedAfter: postedAfter2024,
+        postedBefore: postedBefore2024,
+      },
+    };
+  }
+
+  /**
    * List order items for the org (most recent first). Fee totals use stored `amazonFeesTotal` (Finances
-   * convention: negative = cost). Referral/FBA/digital: Finances breakdown when present; otherwise batched
-   * Product Fees API estimates at **the line’s sold unit price** (not last listing / last order); capped
-   * unique price/SKU jobs per request; falls back to stored product estimates if the API batch fails.
+   * convention: negative = cost). Referral/FBA/digital: Finances breakdown when present; for `feesSource`
+   * `estimate` / `estimate_sold` prefer frozen **at-sale** snapshot columns when set (sync), else **pre-sale**
+   * per-unit columns on `products`. For other non-finances rows, optional batched Product Fees at **sold unit
+   * price** may still refine splits.
    * Settled lines whose fee/revenue is implausible vs a **prior same-ASIN/SKU** sale with sane Finances data
    * get Ref/FBA/Dig (and the shown fee total) re-shaped using that sale’s fee % of revenue, scaled by
    * current unit price vs the reference (same price → qty-only scale).
@@ -5488,7 +6929,7 @@ export class AmazonService {
     const marketplaceFilter = this.resolveMarketplaceFilter(marketplaceId);
     let userIds: string[];
     try {
-      userIds = await this.getOrgMemberUserIds(orgId);
+      userIds = await this.getOrgAmazonAggregateUserIds(orgId);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.logger.warn(`[listOrders] getOrgMemberUserIds failed (orgId=${orgId}): ${msg}`);
@@ -5499,48 +6940,7 @@ export class AmazonService {
       this.logger.log(`[listOrders] returning []: no org members for orgId=${orgId}`);
       return [];
     }
-    let items: Awaited<
-      ReturnType<
-        typeof this.prisma.orderItem.findMany<{
-          where: { userId: { in: string[] }; marketplace: string };
-          orderBy: [{ orderDate: 'desc' }];
-          select: {
-            id: true;
-            orderId: true;
-            orderItemId: true;
-            orderDate: true;
-            updatedAt: true;
-            sku: true;
-            asin: true;
-            quantity: true;
-            orderDbId: true;
-            revenueTotal: true;
-            taxChargedTotal: true;
-            amazonFeesTotal: true;
-            feesSource: true;
-            settledReferralFeeTotal: true;
-            settledFbaFeeTotal: true;
-            settledDigitalServiceFeeTotal: true;
-            profit: true;
-            cogsTotal: true;
-            productId: true;
-            userId: true;
-            product: {
-              select: {
-                title: true;
-                imageUrl: true;
-                id: true;
-                currentListedPrice: true;
-                estimatedReferralFeePerUnit: true;
-                estimatedFbaFeePerUnit: true;
-                estimatedDigitalServiceFeePerUnit: true;
-                estimatedAmazonFeePerUnit: true;
-              };
-            };
-          };
-        }>
-      >
-    >;
+    let items: any[] = [];
     try {
       items = await this.prisma.orderItem.findMany({
         where: { userId: { in: userIds }, marketplace: marketplaceFilter as any },
@@ -5551,6 +6951,7 @@ export class AmazonService {
           orderItemId: true,
           orderDate: true,
           updatedAt: true,
+          marketplace: true,
           sku: true,
           asin: true,
           quantity: true,
@@ -5563,6 +6964,10 @@ export class AmazonService {
             settledReferralFeeTotal: true,
             settledFbaFeeTotal: true,
             settledDigitalServiceFeeTotal: true,
+            atSaleEstimateReferralFeeTotal: true,
+            atSaleEstimateFbaFeeTotal: true,
+            atSaleEstimateDigitalServiceFeeTotal: true,
+            amazonFeesVatAmount: true,
             profit: true,
             cogsTotal: true,
             productId: true,
@@ -5577,9 +6982,10 @@ export class AmazonService {
                 estimatedFbaFeePerUnit: true,
                 estimatedDigitalServiceFeePerUnit: true,
                 estimatedAmazonFeePerUnit: true,
+                feeEstimateRawJson: true,
               },
             },
-            order: { select: { orderDate: true } },
+            order: { select: { orderDate: true, amazonOrderStatus: true, rawResponse: true } },
           },
         });
     } catch (err) {
@@ -5604,6 +7010,16 @@ export class AmazonService {
     ) as typeof items;
 
     this.logger.log(`[listOrders] orgId=${orgId} orderItemCount=${items.length}`);
+    let listOrdersVatSettings: Awaited<
+      ReturnType<AmazonService['getVatSettingsForUser']>
+    > = null;
+    if (userIds.length > 0) {
+      try {
+        listOrdersVatSettings = await this.getVatSettingsForUser(userIds[0]);
+      } catch {
+        listOrdersVatSettings = null;
+      }
+    }
     const productIds = [...new Set(items.map((i) => i.productId).filter(Boolean))];
     const orderDbIds = [
       ...new Set(
@@ -5735,6 +7151,10 @@ export class AmazonService {
     };
 
     try {
+      const fbaUkVatSplitByProductId = new Map<
+        string,
+        { rawCoreMag: number; rawAddonMag: number; rawTaxMag: number } | null
+      >();
       const mappedRows = items.map((it) => {
       const productRaw = (it as any).product ?? null;
       const product = productRaw as {
@@ -5745,6 +7165,7 @@ export class AmazonService {
         estimatedFbaFeePerUnit?: unknown;
         estimatedDigitalServiceFeePerUnit?: unknown;
         estimatedAmazonFeePerUnit?: unknown;
+        feeEstimateRawJson?: unknown;
       } | null;
       const inv = inventoryByProductId.get(it.productId) ?? null;
       const fees = productFeesById.get(it.productId) ?? null;
@@ -5753,7 +7174,19 @@ export class AmazonService {
       const exclusionKind = orderDbId
         ? orderSalesExclusionByDbId.get(orderDbId) ?? null
         : null;
-      let revenueTotal = this.resolveOrderLineRevenueTotal(
+      const ord = (it as any).order as
+        | { amazonOrderStatus?: string | null; rawResponse?: unknown }
+        | undefined;
+      const orderCtx = ord
+        ? { amazonOrderStatus: ord.amazonOrderStatus, rawOrder: ord.rawResponse }
+        : undefined;
+      const allowRecon =
+        orderCtx == null ||
+        this.orderParentStatusAllowsReconstructedRevenueForZeroStoredLine(
+          orderCtx.amazonOrderStatus,
+          orderCtx.rawOrder,
+        );
+      const signedRev = this.resolveOrderLineRevenueSigned(
         it as {
           revenueTotal?: unknown;
           quantity?: unknown;
@@ -5764,18 +7197,30 @@ export class AmazonService {
         orderPriceByDbId,
         skuUnitPriceFallback,
         orderLineQtySumByOrderDbId,
+        orderCtx,
       );
-      if (revenueTotal <= 0 && !exclusionKind) {
+      let revenueTotal = signedRev;
+      if (!exclusionKind && allowRecon && signedRev === 0) {
         const listPx = safeNum(product?.currentListedPrice);
         if (listPx > 0) revenueTotal = listPx * qty;
       }
       const taxChargedTotal = safeNum(it.taxChargedTotal);
       const feesSource = (it as any).feesSource ?? null;
+      const orderDateForVat =
+        (it as { order?: { orderDate?: unknown } }).order?.orderDate instanceof Date
+          ? ((it as any).order.orderDate as Date)
+          : (it as any).order?.orderDate != null && String((it as any).order.orderDate) !== ''
+            ? new Date((it as any).order.orderDate as string | number)
+            : it.orderDate instanceof Date
+              ? (it.orderDate as Date)
+              : new Date(String((it as any).orderDate ?? Date.now()));
       let settledFees = safeNum(it.amazonFeesTotal);
       // Line totals and Finances breakdown components are stored ≤ 0. Legacy rows (and bad estimate writes)
       // sometimes have positive magnitudes; using them as-is makes `revenue - tax - cogs + fees` ADD fees → impossible profit.
       if (
-        (feesSource === 'finances' || feesSource === 'estimate') &&
+        (feesSource === 'finances' ||
+          feesSource === 'estimate' ||
+          feesSource === 'estimate_sold') &&
         settledFees > 0
       ) {
         settledFees = -Math.abs(settledFees);
@@ -5837,8 +7282,54 @@ export class AmazonService {
           digitalServiceFeeTotal = null;
         }
       }
+      const snapReferralEst = normStoredAmazonFeeComponent(
+        toNum((it as any).atSaleEstimateReferralFeeTotal),
+      );
+      const snapFbaEst = normStoredAmazonFeeComponent(
+        toNum((it as any).atSaleEstimateFbaFeeTotal),
+      );
+      const snapDigEst = normStoredAmazonFeeComponent(
+        toNum((it as any).atSaleEstimateDigitalServiceFeeTotal),
+      );
+      const hasSaleEstimateSnap =
+        (feesSource === 'estimate' || feesSource === 'estimate_sold') &&
+        (snapReferralEst != null || snapFbaEst != null || snapDigEst != null);
+      if (!hasSettledBreakdown && hasSaleEstimateSnap) {
+        referralFeeTotal = snapReferralEst;
+        fbaFeeTotal = snapFbaEst;
+        digitalServiceFeeTotal = snapDigEst;
+        if (
+          digitalServiceFeeTotal == null &&
+          (referralFeeTotal != null || fbaFeeTotal != null)
+        ) {
+          const sumRf = Math.abs(referralFeeTotal ?? 0) + Math.abs(fbaFeeTotal ?? 0);
+          if (sumRf > 0) {
+            digitalServiceFeeTotal = Math.round(-sumRf * 0.02 * 100) / 100;
+          }
+        }
+        if (Math.abs(settledFees) > 1e-4) {
+          const scaled = this.scaleSignedFeeTripToTarget(
+            referralFeeTotal ?? 0,
+            fbaFeeTotal ?? 0,
+            digitalServiceFeeTotal ?? 0,
+            settledFees,
+          );
+          if (scaled) {
+            referralFeeTotal = scaled.r !== 0 ? scaled.r : null;
+            fbaFeeTotal = scaled.f !== 0 ? scaled.f : null;
+            digitalServiceFeeTotal = scaled.d !== 0 ? scaled.d : null;
+          }
+        }
+      }
       const atBd = atPriceBreakdownByItemId.get(String(it.id));
-      if (atBd) {
+      // Product Fees "at sold price" batch is not used for `estimate` / `estimate_sold` rows — those use
+      // pre-sale `products` per-unit columns (same as sync). Never replace Finances-settled lines.
+      if (
+        atBd &&
+        feesSource !== 'finances' &&
+        feesSource !== 'estimate' &&
+        feesSource !== 'estimate_sold'
+      ) {
         referralFeeTotal = atBd.r !== 0 ? atBd.r : null;
         fbaFeeTotal = atBd.f !== 0 ? atBd.f : null;
         digitalServiceFeeTotal = atBd.d !== 0 ? atBd.d : null;
@@ -5929,22 +7420,230 @@ export class AmazonService {
               settledFees = targetCap;
               feesForDisplay = settledFees;
             }
+          } else {
+            // Every recent finances line for this ASIN/SKU was already bad (ratio > cap), so the peer map
+            // is empty. Re-shape from Product Fees estimates, capped at LIST_ORDERS_MAX_FEE_TO_REVENUE_RATIO.
+            const capMag = revenueTotal * AmazonService.LIST_ORDERS_MAX_FEE_TO_REVENUE_RATIO;
+            let r =
+              estReferral != null && Number.isFinite(estReferral)
+                ? -Math.abs(estReferral * qty)
+                : 0;
+            let f = estFba != null && Number.isFinite(estFba) ? -Math.abs(estFba * qty) : 0;
+            let d =
+              estDigital != null && Number.isFinite(estDigital)
+                ? -Math.abs(estDigital * qty)
+                : 0;
+            if (d === 0 && (r !== 0 || f !== 0)) {
+              const sumRf = Math.abs(r) + Math.abs(f);
+              if (sumRf > 0) {
+                d = Math.round(-sumRf * 0.02 * 100) / 100;
+              }
+            }
+            let mag = Math.abs(r) + Math.abs(f) + Math.abs(d);
+            if (mag < 1e-4) {
+              r = -capMag * 0.72;
+              f = -capMag * 0.23;
+              d = Math.round(-(capMag - Math.abs(r) - Math.abs(f)) * 100) / 100;
+              mag = capMag;
+            }
+            const targetCap = -Math.min(capMag, mag);
+            const scaled = this.scaleSignedFeeTripToTarget(r, f, d, targetCap);
+            if (scaled) {
+              referralFeeTotal = scaled.r !== 0 ? scaled.r : null;
+              fbaFeeTotal = scaled.f !== 0 ? scaled.f : null;
+              digitalServiceFeeTotal = scaled.d !== 0 ? scaled.d : null;
+              settledFees = targetCap;
+              feesForDisplay = settledFees;
+            }
           }
         }
       }
-      // Total Amazon fee must include referral + FBA + digital; when we have a breakdown, use that sum.
+      if (feesSource === 'finances' && Math.abs(feesForDisplay) > 1e-4) {
+        const tr = referralFeeTotal ?? 0;
+        const tf = fbaFeeTotal ?? 0;
+        const td = digitalServiceFeeTotal ?? 0;
+        const sumB = tr + tf + td;
+        if (
+          (referralFeeTotal != null || fbaFeeTotal != null || digitalServiceFeeTotal != null) &&
+          Math.abs(sumB) > 1e-4 &&
+          Math.abs(sumB - feesForDisplay) > 0.02
+        ) {
+          // If breakdown is *more negative* than the persisted line total, do not adopt it (double-counted VAT).
+          if (sumB < feesForDisplay - 0.02) {
+            feesForDisplay = settledFees;
+          } else {
+            feesForDisplay = sumB;
+          }
+        }
+      }
+      // Prefer the sum of Ref+FBA+Dig whenever those components exist — including Finances — so the
+      // headline fee always matches the three lines the user reads.
       const totalFromBreakdown =
         (referralFeeTotal ?? 0) + (fbaFeeTotal ?? 0) + (digitalServiceFeeTotal ?? 0);
-      const finalFeesForDisplay =
+      const useBreakdownSum =
         (referralFeeTotal != null || fbaFeeTotal != null || digitalServiceFeeTotal != null) &&
-        totalFromBreakdown !== 0
-          ? Math.round(totalFromBreakdown * 100) / 100
-          : feesForDisplay;
+        Math.abs(totalFromBreakdown) > 1e-6;
+      const finalFeesForDisplay = useBreakdownSum
+        ? Math.round(totalFromBreakdown * 100) / 100
+        : Math.round(feesForDisplay * 100) / 100;
+      const showFeesIncVat = this.shouldShowAmazonFeesWithVatIncluded(
+        listOrdersVatSettings,
+        orderDateForVat,
+      );
+      const feeVatRatePct = listOrdersVatSettings?.vatRatePct ?? 20;
+      const grossUpSignedFeeExVat = (exSigned: number): number => {
+        if (!Number.isFinite(exSigned) || exSigned === 0) return exSigned;
+        const incMag = amountInclVatFromEx(Math.abs(exSigned), feeVatRatePct);
+        return exSigned < 0 ? -incMag : incMag;
+      };
+      const grossUpNullable = (x: number | null): number | null => {
+        if (x == null || !Number.isFinite(x)) return x;
+        if (x === 0) return 0;
+        return grossUpSignedFeeExVat(x);
+      };
+      let displayRef = referralFeeTotal;
+      let displayFba = fbaFeeTotal;
+      let displayDig = digitalServiceFeeTotal;
+      let displayFeesTotal = finalFeesForDisplay;
+      let displayAmazonFeesVat: number | null = null;
+      // Seller Central–style inc-VAT display for non–VAT-registered orgs (and pre-registration dates).
+      // **FBA** (and headline total from components): apply UK rules for `finances` too — Finances stores ex-VAT FBA
+      // while SC shows inc-VAT. **Referral / digital**: only gross up ex→inc for `estimate` / `estimate_sold`
+      // (Product Fees); settled Finances referral already reflects SC-style commission + fee VAT — do not ×1.2 again.
+      if (showFeesIncVat) {
+        const grossUpReferralAndDigitalForDisplay =
+          feesSource === 'estimate' || feesSource === 'estimate_sold';
+        const pid = String((it as any).productId ?? '');
+        const rawFeeJson = product?.feeEstimateRawJson;
+        if (pid && !fbaUkVatSplitByProductId.has(pid)) {
+          fbaUkVatSplitByProductId.set(
+            pid,
+            this.parseProductFeesFbaUkVatSplitMags(rawFeeJson),
+          );
+        }
+        const fbaSplit = pid ? fbaUkVatSplitByProductId.get(pid) ?? null : null;
+        // UK FBA inc-VAT display (core vs fuel vs Product Fees tax line).
+        if (
+          fbaFeeTotal != null &&
+          Number.isFinite(fbaFeeTotal) &&
+          fbaSplit &&
+          Math.abs(fbaFeeTotal) > 1e-6
+        ) {
+          const mag = Math.abs(fbaFeeTotal);
+          const rc = fbaSplit.rawCoreMag;
+          const ra = fbaSplit.rawAddonMag;
+          const rt = fbaSplit.rawTaxMag;
+          const rawNoTax = rc + ra;
+          const rawFull = rc + ra + rt;
+          const eps = Math.max(0.02 * Math.max(mag, rawFull, rawNoTax), 0.01);
+          const close = (a: number, b: number) =>
+            b > 1e-9 && Math.abs(a - b) <= Math.max(eps, 0.02 * b);
+          /** Only treat DB magnitude as all-in when it actually carries ~VAT+core+add-ons, not a false `close` to a noisy rawFull. */
+          const storedLineLooksTaxInclusive =
+            rt > 1e-6 &&
+            rawFull > 1e-9 &&
+            close(mag, rawFull) &&
+            mag + eps >= rawNoTax + rt * 0.72;
+          let incMag: number;
+          if (rawNoTax < 1e-9) {
+            incMag = amountInclVatFromEx(mag, feeVatRatePct);
+          } else if (rt < 1e-6) {
+            const coreFrac = rc / rawNoTax;
+            const addonFrac = ra / rawNoTax;
+            incMag = amountInclVatFromEx(mag * coreFrac, feeVatRatePct) + mag * addonFrac;
+          } else if (storedLineLooksTaxInclusive) {
+            // Line total already matches Product Fees tree including FulfillmentFeeTax (all-in).
+            incMag = mag;
+          } else if (close(mag, rawNoTax) || mag < rawFull - eps) {
+            // Common: DB line is core+add-ons ex-VAT only while API lists VAT separately — do not shrink the VAT base.
+            const coreFrac = rc / rawNoTax;
+            const addonFrac = ra / rawNoTax;
+            incMag = amountInclVatFromEx(mag * coreFrac, feeVatRatePct) + mag * addonFrac;
+          } else {
+            // Fallback: same VAT-on-core split (avoids double-counting API tax + computed VAT).
+            const coreFrac = rc / rawNoTax;
+            const addonFrac = ra / rawNoTax;
+            incMag = amountInclVatFromEx(mag * coreFrac, feeVatRatePct) + mag * addonFrac;
+          }
+          const rounded = Math.round(incMag * 100) / 100;
+          displayFba = fbaFeeTotal <= 0 ? -rounded : rounded;
+        } else {
+          displayFba = grossUpNullable(fbaFeeTotal);
+        }
+
+        if (grossUpReferralAndDigitalForDisplay) {
+          displayRef = grossUpNullable(referralFeeTotal);
+          displayDig = grossUpNullable(digitalServiceFeeTotal);
+        } else {
+          displayRef = referralFeeTotal;
+          displayDig = digitalServiceFeeTotal;
+        }
+
+        const sumIncComponents =
+          (displayRef ?? 0) + (displayFba ?? 0) + (displayDig ?? 0);
+        const hadAnyExVatComponent =
+          referralFeeTotal != null ||
+          fbaFeeTotal != null ||
+          digitalServiceFeeTotal != null;
+        if (hadAnyExVatComponent && Math.abs(sumIncComponents) > 1e-6) {
+          displayFeesTotal = Math.round(sumIncComponents * 100) / 100;
+        } else {
+          displayFeesTotal = grossUpSignedFeeExVat(finalFeesForDisplay);
+        }
+
+        const refExMag = referralFeeTotal != null ? Math.abs(referralFeeTotal) : 0;
+        const digExMag = digitalServiceFeeTotal != null ? Math.abs(digitalServiceFeeTotal) : 0;
+        const fbaExMag = fbaFeeTotal != null ? Math.abs(fbaFeeTotal) : 0;
+        const rc = fbaSplit?.rawCoreMag ?? 0;
+        const ra = fbaSplit?.rawAddonMag ?? 0;
+        const rt = fbaSplit?.rawTaxMag ?? 0;
+        const rawNoTax = rc + ra;
+        const rawFull = rc + ra + rt;
+        const epsV =
+          fbaExMag > 1e-6
+            ? Math.max(0.02 * Math.max(fbaExMag, rawFull, rawNoTax), 0.01)
+            : 0;
+        const closeV = (a: number, b: number) =>
+          b > 1e-9 && Math.abs(a - b) <= Math.max(epsV, 0.02 * b);
+        let fbaVatForDisplay = 0;
+        if (fbaExMag > 1e-6 && fbaSplit && rawNoTax > 1e-9) {
+          if (rt < 1e-6) {
+            const coreFrac = rc / rawNoTax;
+            fbaVatForDisplay = vatAmountFromEx(fbaExMag * coreFrac, feeVatRatePct);
+          } else if (
+            rt > 1e-6 &&
+            rawFull > 1e-9 &&
+            closeV(fbaExMag, rawFull) &&
+            fbaExMag + epsV >= rawNoTax + rt * 0.72
+          ) {
+            fbaVatForDisplay = fbaExMag * (rt / rawFull);
+          } else if (closeV(fbaExMag, rawNoTax) || fbaExMag < rawFull - epsV) {
+            const coreFrac = rc / rawNoTax;
+            fbaVatForDisplay = vatAmountFromEx(fbaExMag * coreFrac, feeVatRatePct);
+          } else {
+            const coreFrac = rc / rawNoTax;
+            fbaVatForDisplay = vatAmountFromEx(fbaExMag * coreFrac, feeVatRatePct);
+          }
+        } else if (fbaExMag > 1e-6) {
+          fbaVatForDisplay = vatAmountFromEx(fbaExMag, feeVatRatePct);
+        }
+        const vatSum =
+          (grossUpReferralAndDigitalForDisplay && refExMag > 1e-6
+            ? vatAmountFromEx(refExMag, feeVatRatePct)
+            : 0) +
+          (grossUpReferralAndDigitalForDisplay && digExMag > 1e-6
+            ? vatAmountFromEx(digExMag, feeVatRatePct)
+            : 0) +
+          (fbaVatForDisplay > 1e-6 ? fbaVatForDisplay : 0);
+        displayAmazonFeesVat =
+          vatSum > 1e-6 ? Math.round(vatSum * 100) / 100 : null;
+      }
       const cogsTotal = it.cogsTotal != null ? safeNum(it.cogsTotal) : null;
+      const profitFeesBasis = showFeesIncVat ? displayFeesTotal : finalFeesForDisplay;
       // Profit = revenue - tax - COGS + fees (fees are negative, so + fees subtracts the cost)
       const profit =
         cogsTotal != null
-          ? revenueTotal - taxChargedTotal - cogsTotal + finalFeesForDisplay
+          ? revenueTotal - taxChargedTotal - cogsTotal + profitFeesBasis
           : null;
       const salePrice = qty > 0 ? revenueTotal / qty : revenueTotal;
       const roiPct =
@@ -5960,22 +7659,37 @@ export class AmazonService {
             : it.orderDate instanceof Date
               ? it.orderDate.toISOString()
               : String(it.orderDate ?? '');
-      const excludedFromSales = exclusionKind != null;
+      const isRefundLine = !exclusionKind && revenueTotal < 0;
+      const isClearedNotPending =
+        !exclusionKind && Math.abs(revenueTotal) < 1e-9 && !allowRecon;
+      const excludedFromSales =
+        exclusionKind != null || isRefundLine || isClearedNotPending;
       /** Seller Central–style “orders” count: exclude cancelled only; Pending, Shipped, PendingReturn, returns, etc. still count as an order. */
       const excludedFromOrderCount = exclusionKind === 'cancelled';
+      const excludedFromProfitMetrics = exclusionKind != null;
       const orderStatusLabel = exclusionKind
         ? this.orderSalesExclusionDisplayLabel(exclusionKind)
-        : null;
+        : isRefundLine
+          ? 'Refund'
+          : null;
       let outSalePrice = Math.round(salePrice * 100) / 100;
       let outProfit = profit != null ? Math.round(profit * 100) / 100 : null;
       let outRoi = roiPct != null ? Math.round(roiPct * 10) / 10 : null;
-      let outFees = Number.isFinite(finalFeesForDisplay)
-        ? Math.round(finalFeesForDisplay * 100) / 100
+      let outFees = Number.isFinite(
+        showFeesIncVat ? displayFeesTotal : finalFeesForDisplay,
+      )
+        ? Math.round(
+            (showFeesIncVat ? displayFeesTotal : finalFeesForDisplay) * 100,
+          ) / 100
         : 0;
-      let outRef = referralFeeTotal ?? null;
-      let outFba = fbaFeeTotal ?? null;
-      let outDig = digitalServiceFeeTotal ?? null;
-      if (excludedFromSales) {
+      // Referral: Product-fee estimates get ex→inc gross-up; settled Finances values stay as stored (already SC-shaped).
+      let outRef =
+        (showFeesIncVat ? displayRef : referralFeeTotal) ?? null;
+      let outFba =
+        (showFeesIncVat ? displayFba : fbaFeeTotal) ?? null;
+      let outDig =
+        (showFeesIncVat ? displayDig : digitalServiceFeeTotal) ?? null;
+      if (exclusionKind != null) {
         outSalePrice = 0;
         outProfit = null;
         outRoi = null;
@@ -5983,10 +7697,14 @@ export class AmazonService {
         outRef = null;
         outFba = null;
         outDig = null;
+      } else if (isRefundLine) {
+        outSalePrice = 0;
+        outRoi = null;
       }
-      const fulfillmentType = excludedFromSales
-        ? null
-        : this.parseOrderLineFulfillmentLabel((it as { rawResponse?: unknown }).rawResponse);
+      const fulfillmentType =
+        exclusionKind != null
+          ? null
+          : this.parseOrderLineFulfillmentLabel((it as { rawResponse?: unknown }).rawResponse);
       return {
         id: String(it.id),
         __productId: String(it.productId ?? ''),
@@ -6005,12 +7723,19 @@ export class AmazonService {
         fbaFeeTotal: outFba,
         digitalServiceFeeTotal: outDig,
         feesSource: feesSource != null ? String(feesSource) : null,
+        amazonFeesVatAmount:
+          excludedFromSales
+            ? null
+            : showFeesIncVat
+              ? displayAmazonFeesVat
+              : null,
         /** AFN → FBA, MFN → FBM from SP-API line payload when present. */
         fulfillmentType,
         availableStock: inv?.availableQty ?? null,
         totalStock: inv?.totalQty ?? null,
         orderStatusLabel,
         excludedFromSales,
+        excludedFromProfitMetrics,
         excludedFromOrderCount,
       };
     });
@@ -6039,7 +7764,7 @@ export class AmazonService {
   }
 
   async listInventory(orgId: string, marketplaceId?: string) {
-    const userIds = await this.getOrgMemberUserIds(orgId);
+    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
     type InventoryProductRow = {
       id: string;
       sku: string;
@@ -6336,7 +8061,7 @@ export class AmazonService {
     shipmentId: string,
     checkedInDateIso: string,
   ): Promise<{ ok: boolean; error?: string }> {
-    const userIds = await this.getOrgMemberUserIds(orgId);
+    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
     const shipment = await this.prisma.shipment.findFirst({
       where: { shipmentId, userId: { in: userIds } },
       select: { id: true, userId: true, createdDate: true },
@@ -6369,7 +8094,7 @@ export class AmazonService {
    * since those were likely stored as "today" at sync time rather than real API dates.
    */
   async listShipments(orgId: string, marketplaceId?: string) {
-    const userIds = await this.getOrgMemberUserIds(orgId);
+    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
     const rows = await this.prisma.shipment.findMany({
       where: { userId: { in: userIds } },
       orderBy: [{ createdDate: 'desc' }, { updatedAt: 'desc' }],
@@ -6430,7 +8155,7 @@ export class AmazonService {
       shipmentName: string | null;
     }>;
   }> {
-    const userIds = await this.getOrgMemberUserIds(orgId);
+    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
     const rows = await this.prisma.shipment.findMany({
       where: {
         userId: { in: userIds },
@@ -6478,7 +8203,7 @@ export class AmazonService {
     rawResponses?: unknown[];
   }> {
     const credentials = await this.getAmazonCredentialsForOrg(orgId, preferredUserId);
-    const userIds = await this.getOrgMemberUserIds(orgId);
+    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
     const account =
       preferredUserId && userIds.includes(preferredUserId)
         ? await this.prisma.sellerAccount.findUnique({
@@ -6897,7 +8622,7 @@ export class AmazonService {
       preferredUserId,
     );
 
-    const userIds = await this.getOrgMemberUserIds(orgId);
+    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
     
     // Get the userId from the account used for credentials
     const account = preferredUserId && userIds.includes(preferredUserId)
@@ -7463,7 +9188,7 @@ try {
    * Dashboard stock value uses currentListedPrice × qty (0 when null), so missing rows skew totals.
    */
   async countInventoryProductsMissingFeeSnapshot(orgId: string): Promise<number> {
-    const userIds = await this.getOrgMemberUserIds(orgId);
+    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
     if (userIds.length === 0) return 0;
     return this.prisma.product.count({
       where: {
@@ -7512,7 +9237,7 @@ try {
     // }
 
     const credentials = await this.getAmazonCredentialsForOrg(orgId);
-    const userIds = await this.getOrgMemberUserIds(orgId);
+    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
     const regionMarketplaceIds: Record<string, string[]> = {
       eu: ['A1F83G8C2ARO7P', 'A1PA6795UKMFR9', 'A13V1IB3VIYZZH'],
       na: ['ATVPDKIKX0DER'],
@@ -7917,7 +9642,7 @@ try {
     processed: number;
   }> {
     const credentials = await this.getAmazonCredentialsForOrg(orgId);
-    const userIds = await this.getOrgMemberUserIds(orgId);
+    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
     const listingMarketplaceTryOrder = this.spApiClient.marketplaceIdsForListingPriceRefresh(
       credentials.region,
     );
@@ -8147,68 +9872,92 @@ try {
     };
 
     const list = fees.FeeDetailList ?? fees.feeDetailList;
-    let total: number | null = null;
     let referralFee: number | null = null;
     let fbaFee: number | null = null;
     let digitalServiceFee: number | null = null;
 
-    if (Array.isArray(list) && list.length > 0) {
-      let sum = 0;
-      let fbaFromNested = 0;
-      let referralSum = 0;
-      let fbaSum = 0;
-      let digitalSum = 0;
-      let sawReferral = false;
-      let sawFba = false;
-      let sawDigital = false;
+    const normType = (t: unknown) => String(t ?? '').replace(/\s+/g, '').toUpperCase();
+    const isReferralType = (t: string) => t === 'REFERRALFEE' || t.endsWith('REFERRALFEE');
+    const isDigitalType = (t: string) =>
+      t === 'VARIABLECLOSINGFEE' || t === 'DIGITALSERVICEFEE' || t.includes('DIGITALSERVICE');
+    const isFbaLeafType = (t: string) => t === 'FBAFEES' || t.startsWith('FBA');
 
-      const normType = (t: unknown) => String(t ?? '').replace(/\s+/g, '').toUpperCase();
-      const isReferralType = (t: string) => t === 'REFERRALFEE' || t.endsWith('REFERRALFEE');
-      const isFbaTopType = (t: string) => t === 'FBAFEES' || t.startsWith('FBA');
-      const isDigitalType = (t: string) =>
-        t === 'VARIABLECLOSINGFEE' || t === 'DIGITALSERVICEFEE' || t.includes('DIGITALSERVICE');
-
-      for (const item of list) {
-        const feeTypeRaw = item.FeeType ?? item.feeType ?? '';
-        const feeType = normType(feeTypeRaw);
-        // Prefer FeeAmount over FinalFee: when there's a promotion, FinalFee can be 0 but FeeAmount has the actual fee (e.g. FBA 3.14).
-        const amount = moneyToNum(item.FeeAmount ?? item.feeAmount ?? item.FinalFee ?? item.finalFee);
-        if (Number.isFinite(amount)) sum += amount;
-        if (isReferralType(feeType)) {
-          referralSum += amount;
-          sawReferral = true;
-        } else if (isFbaTopType(feeType)) {
-          fbaSum += amount;
-          sawFba = true;
-        } else if (isDigitalType(feeType)) {
-          digitalSum += amount;
-          sawDigital = true;
-        }
-        // Some responses put FBA only under IncludedFeeDetailList (e.g. FBAPickAndPack); use it when top-level FBAFees is missing.
+    /** Classify only leaf rows so we never add parent + IncludedFeeDetailList (avoids double-counting totals). */
+    let referralSum = 0;
+    let fbaSum = 0;
+    let digitalSum = 0;
+    let otherLeafSum = 0;
+    const visitFeeLeaves = (nodes: any[] | undefined) => {
+      if (!Array.isArray(nodes)) return;
+      for (const item of nodes) {
         const included = item.IncludedFeeDetailList ?? item.includedFeeDetailList;
-        if (Array.isArray(included)) {
-          for (const sub of included) {
-            const subType = normType(sub.FeeType ?? sub.feeType ?? '');
-            const subAmt = moneyToNum(sub.FeeAmount ?? sub.feeAmount ?? sub.FinalFee ?? sub.finalFee);
-            if (Number.isFinite(subAmt) && subType.startsWith('FBA')) fbaFromNested += subAmt;
-          }
+        if (Array.isArray(included) && included.length > 0) {
+          visitFeeLeaves(included);
+          continue;
         }
+        const feeType = normType(item.FeeType ?? item.feeType ?? '');
+        const amount = moneyToNum(item.FeeAmount ?? item.feeAmount ?? item.FinalFee ?? item.finalFee);
+        if (!Number.isFinite(amount)) continue;
+        if (isReferralType(feeType)) referralSum += amount;
+        else if (isDigitalType(feeType)) digitalSum += amount;
+        else if (isFbaLeafType(feeType)) fbaSum += amount;
+        else otherLeafSum += amount;
       }
-      total = sum;
-      if (sawReferral) referralFee = referralSum;
-      if (sawFba) fbaFee = fbaSum;
-      else if (fbaFromNested !== 0) fbaFee = fbaFromNested;
-      if (sawDigital) digitalServiceFee = digitalSum;
-    } else {
-      const totalEst = fees.TotalFeesEstimate ?? fees.totalFeesEstimate;
-      if (totalEst != null) total = moneyToNum(totalEst);
+    };
+
+    if (Array.isArray(list) && list.length > 0) {
+      visitFeeLeaves(list);
     }
 
-    // Product Fees API / FeeDetailList can return amounts with mixed signs; `total` must be a positive
-    // magnitude for storage as `estimatedAmazonFeePerUnit`. (Inventory UI does price - fee - cogs; if fee
-    // were negative, profit would exceed price.)
+    // Authoritative total: Amazon's rollup first (matches Seller Central), then leaf-sum helper, then sum of classified leaves.
+    let authoritativeTotal: number | null = null;
+    const totalEst = fees.TotalFeesEstimate ?? fees.totalFeesEstimate;
+    if (totalEst != null) {
+      const t = Math.abs(moneyToNum(totalEst));
+      if (Number.isFinite(t) && t > 0) authoritativeTotal = t;
+    }
+    if (authoritativeTotal == null || authoritativeTotal < 1e-9) {
+      const fromApiSum = this.parseFeesEstimateAmount(res);
+      if (fromApiSum != null && Number.isFinite(fromApiSum)) {
+        const t = Math.abs(fromApiSum);
+        if (t > 0) authoritativeTotal = t;
+      }
+    }
+    const leafPartsAbs =
+      Math.abs(referralSum) + Math.abs(fbaSum) + Math.abs(digitalSum) + Math.abs(otherLeafSum);
+    if (authoritativeTotal == null || authoritativeTotal < 1e-9) {
+      if (leafPartsAbs > 0) authoritativeTotal = leafPartsAbs;
+    }
+
+    // Scale classified buckets to match authoritative total (handles aggregate rows we skipped on leaves).
+    let refM = Math.abs(referralSum);
+    let fbaM = Math.abs(fbaSum);
+    let digM = Math.abs(digitalSum);
+    let othM = Math.abs(otherLeafSum);
+    const parts = refM + fbaM + digM + othM;
+    if (authoritativeTotal != null && parts > 1e-9) {
+      const diff = Math.abs(authoritativeTotal - parts);
+      if (diff > 0.02) {
+        const scale = authoritativeTotal / parts;
+        refM *= scale;
+        fbaM *= scale;
+        digM *= scale;
+        othM *= scale;
+      }
+    }
+    // Bucket uncategorized Amazon line fees with FBA for storage (no separate column).
+    fbaM += othM;
+
+    if (refM > 1e-6) referralFee = refM;
+    if (fbaM > 1e-6) fbaFee = fbaM;
+    if (digM > 1e-6) digitalServiceFee = digM;
+
     const totalMag =
-      total != null && Number.isFinite(total) ? Math.abs(total) : null;
+      authoritativeTotal != null && Number.isFinite(authoritativeTotal) && authoritativeTotal > 0
+        ? authoritativeTotal
+        : parts > 0
+          ? parts
+          : null;
 
     return {
       total: totalMag,
@@ -8219,6 +9968,104 @@ try {
         digitalServiceFee != null && Number.isFinite(digitalServiceFee)
           ? Math.abs(digitalServiceFee)
           : digitalServiceFee,
+    };
+  }
+
+  /**
+   * From Product Fees `feeEstimateRawJson`, read absolute magnitudes for **FBA core** (VATable),
+   * **fuel / logistics add-ons** (ex-VAT on top in UK SC), and **fulfillment tax lines** (e.g. FulfillmentFeeTax).
+   * Returns null if FeeDetailList is missing.
+   */
+  private parseProductFeesFbaUkVatSplitMags(
+    res: unknown,
+  ): { rawCoreMag: number; rawAddonMag: number; rawTaxMag: number } | null {
+    const result =
+      (res as any)?.payload?.FeesEstimateResult ??
+      (res as any)?.FeesEstimateResult ??
+      res;
+    if (!result || typeof result !== 'object') return null;
+    const fees = (result as any).FeesEstimate ?? (result as any).feesEstimate;
+    if (!fees) return null;
+    const list = fees.FeeDetailList ?? fees.feeDetailList;
+    if (!Array.isArray(list) || list.length === 0) return null;
+
+    const moneyToNum = (m: any): number => {
+      if (m == null) return 0;
+      const a =
+        m.Amount ??
+        m.amount ??
+        m.CurrencyAmount ??
+        (typeof m.CurrencyAmount === 'object' ? m.CurrencyAmount?.Amount : null);
+      if (typeof a === 'number' && Number.isFinite(a)) return a;
+      if (typeof a === 'string') return parseFloat(a) || 0;
+      return 0;
+    };
+    const normType = (t: unknown) => String(t ?? '').replace(/\s+/g, '').toUpperCase();
+    const isReferralType = (t: string) => t === 'REFERRALFEE' || t.endsWith('REFERRALFEE');
+    const isDigitalType = (t: string) =>
+      t === 'VARIABLECLOSINGFEE' || t === 'DIGITALSERVICEFEE' || t.includes('DIGITALSERVICE');
+    const isFbaLeafType = (t: string) => t === 'FBAFEES' || t.startsWith('FBA');
+    const isFbaFuelLogisticsAddonType = (t: string) => {
+      const u = normType(t);
+      return (
+        u.includes('FUEL') ||
+        u.includes('INFLATION') ||
+        u.includes('LOWCARBON') ||
+        (u.includes('SURCHARGE') && !u.includes('REFERRAL')) ||
+        u.includes('LOGISTICS')
+      );
+    };
+    /** Product Fees may list VAT on fulfillment separately (e.g. FulfillmentFeeTax) — do not gross that up again. */
+    const isFbaProductTaxLine = (t: string) => {
+      const u = normType(t);
+      if (u.includes('REFERRAL') || u.includes('COMMISSION')) return false;
+      if (u.includes('DIGITAL')) return false;
+      if (u.includes('SHIPPING')) return false;
+      return (
+        u === 'FULFILLMENTFEETAX' ||
+        u.endsWith('FULFILLMENTFEETAX') ||
+        (u.includes('FULFILLMENT') && u.includes('TAX')) ||
+        (u.startsWith('FBA') && u.includes('TAX'))
+      );
+    };
+
+    let fbaCoreMag = 0;
+    let fbaAddonMag = 0;
+    let fbaTaxMag = 0;
+    const visit = (nodes: any[] | undefined) => {
+      if (!Array.isArray(nodes)) return;
+      for (const item of nodes) {
+        const included = item.IncludedFeeDetailList ?? item.includedFeeDetailList;
+        if (Array.isArray(included) && included.length > 0) {
+          visit(included);
+          continue;
+        }
+        const feeType = normType(item.FeeType ?? item.feeType ?? '');
+        const rawAmt = moneyToNum(
+          item.FeeAmount ?? item.feeAmount ?? item.FinalFee ?? item.finalFee,
+        );
+        if (!Number.isFinite(rawAmt)) continue;
+        const mag = Math.abs(rawAmt);
+        if (mag < 1e-9) continue;
+        if (isReferralType(feeType) || isDigitalType(feeType)) continue;
+        if (isFbaLeafType(feeType)) {
+          if (isFbaProductTaxLine(feeType)) fbaTaxMag += mag;
+          else if (isFbaFuelLogisticsAddonType(feeType)) fbaAddonMag += mag;
+          else fbaCoreMag += mag;
+        } else if (isFbaProductTaxLine(feeType)) {
+          fbaTaxMag += mag;
+        } else {
+          // Same as `parseFeesEstimateBreakdown`: other leaves roll into FBA — treat as VATable core.
+          fbaCoreMag += mag;
+        }
+      }
+    };
+    visit(list);
+    if (fbaCoreMag + fbaAddonMag + fbaTaxMag < 1e-9) return null;
+    return {
+      rawCoreMag: fbaCoreMag,
+      rawAddonMag: fbaAddonMag,
+      rawTaxMag: fbaTaxMag,
     };
   }
 
@@ -8333,26 +10180,67 @@ try {
     return out;
   }
 
-  async backfillOrderItems(userId: string, days = 30) {
+  async backfillOrderItems(
+    userId: string,
+    days = 30,
+    opts?: { amazonOrderId?: string },
+  ) {
     const credentials = await this.getAmazonCredentialsForUser(userId);
 
     const nowSafe = new Date(Date.now() - 5 * 60 * 1000);
     const startDate = new Date(nowSafe.getTime() - days * 24 * 60 * 60 * 1000);
+    /** Same knob as order sync — long backfills hammer Finances quotas without a pause. */
+    const backfillFinancesPauseMs = Math.max(
+      400,
+      Number(this.configService.get<string>('AMAZON_ORDER_FINANCES_PAUSE_MS')) || 2200,
+    );
 
-    const orders = await this.prisma.order.findMany({
-      where: {
-        userId,
-        marketplace: 'amazon',
-        orderDate: { gte: startDate, lte: nowSafe },
-      },
-      select: {
-        id: true, // DB id
-        orderId: true, // marketplace order id
-        orderDate: true,
-        rawResponse: true,
-      },
-      orderBy: { orderDate: 'desc' },
-    });
+    const targetOrderId = opts?.amazonOrderId?.trim() ?? '';
+    let orders: Array<{
+      id: string;
+      orderId: string;
+      orderDate: Date;
+      rawResponse: unknown;
+    }>;
+    if (targetOrderId) {
+      const one = await this.prisma.order.findFirst({
+        where: { userId, marketplace: 'amazon', orderId: targetOrderId },
+        select: {
+          id: true,
+          orderId: true,
+          orderDate: true,
+          rawResponse: true,
+        },
+      });
+      if (!one) {
+        throw new NotFoundException(
+          `No order row for amazonOrderId=${targetOrderId} (user scope).`,
+        );
+      }
+      orders = [one];
+      this.logger.log(
+        `[backfillOrderItems] single-order mode userId=${userId.slice(0, 8)}… amazonOrderId=${targetOrderId} (ignores days=…; one Finances pull)`,
+      );
+    } else {
+      orders = await this.prisma.order.findMany({
+        where: {
+          userId,
+          marketplace: 'amazon',
+          orderDate: { gte: startDate, lte: nowSafe },
+        },
+        select: {
+          id: true,
+          orderId: true,
+          orderDate: true,
+          rawResponse: true,
+        },
+        orderBy: { orderDate: 'desc' },
+      });
+      this.logger.log(
+        `[backfillOrderItems] userId=${userId.slice(0, 8)}… days=${days} orders=${orders.length}; ` +
+          `Finances pacing ~${backfillFinancesPauseMs}ms between orders (min ~${((orders.length * backfillFinancesPauseMs) / 60000).toFixed(1)} min from pauses alone, plus SP-API latency)`,
+      );
+    }
 
     let processedOrders = 0;
     let upsertedItems = 0;
@@ -8392,54 +10280,16 @@ try {
       type FeeBreakdownBackfill = { referral: number; fba: number; digital: number };
       const breakdownByOrderItemId = new Map<string, FeeBreakdownBackfill>();
       const breakdownBySku = new Map<string, FeeBreakdownBackfill>();
+      // Match syncRecentOrdersToDb: first non-zero fee; last non-zero breakdown (see shipmentLists order).
       const addFee = (
         map: Map<string, number>,
         key: string,
         amount: number,
       ) => {
-        if (!key) return;
-        map.set(key, (map.get(key) ?? 0) + amount);
-      };
-      const sumFeeOrChargeList = (list: any[] | undefined): number => {
-        if (!Array.isArray(list)) return 0;
-        return list.reduce((sum, fc) => {
-          const feeAmt = fc?.FeeAmount?.CurrencyAmount ?? fc?.FeeAmount?.Amount;
-          const chargeAmt = fc?.ChargeAmount?.CurrencyAmount ?? fc?.ChargeAmount?.Amount ?? fc?.ChargeAmount;
-          const n = Number(feeAmt ?? chargeAmt ?? 0);
-          return Number.isNaN(n) ? sum : sum + n;
-        }, 0);
-      };
-      const parseFeeBreakdownBackfill = (list: any[] | undefined): FeeBreakdownBackfill => {
-        const out = { referral: 0, fba: 0, digital: 0 };
-        const readAmt = (obj: any): number => {
-          if (!obj) return 0;
-          const a = obj?.FeeAmount ?? obj?.feeAmount ?? obj;
-          const n = a?.CurrencyAmount ?? a?.currencyAmount ?? a?.Amount ?? a?.amount;
-          const num = Number(n);
-          return Number.isNaN(num) ? 0 : num;
-        };
-        const addFee = (feeType: string, amt: number) => {
-          if (amt === 0) return;
-          const t = (feeType || '').toLowerCase();
-          if (t === 'referralfee' || t.includes('referral') || t === 'commission') out.referral += amt;
-          else if (t === 'fbafees' || t.startsWith('fba') || t.includes('fulfillment')) out.fba += amt;
-          else if (t === 'variableclosingfee' || t === 'digitalservicefee' || t.includes('digital')) out.digital += amt;
-        };
-        if (!Array.isArray(list)) return out;
-        for (const fc of list) {
-          const feeType = (fc?.FeeType ?? fc?.feeType ?? fc?.Type ?? '') as string;
-          const amt = readAmt(fc);
-          if (amt !== 0) addFee(feeType, amt);
-          const components = fc?.FeeComponent ?? fc?.feeComponent ?? fc?.FeeDetailList;
-          if (Array.isArray(components)) {
-            for (const comp of components) {
-              const ct = (comp?.FeeType ?? comp?.feeType ?? comp?.Type ?? '') as string;
-              const ca = readAmt(comp);
-              if (ca !== 0) addFee(ct, ca);
-            }
-          }
-        }
-        return out;
+        if (!key || amount === 0 || !Number.isFinite(amount)) return;
+        const prev = map.get(key) ?? 0;
+        if (prev !== 0) return;
+        map.set(key, amount);
       };
       const addFeeBreakdownBackfill = (
         map: Map<string, FeeBreakdownBackfill>,
@@ -8449,8 +10299,9 @@ try {
         d: number,
       ) => {
         if (!key) return;
-        const cur = map.get(key) ?? { referral: 0, fba: 0, digital: 0 };
-        map.set(key, { referral: cur.referral + r, fba: cur.fba + f, digital: cur.digital + d });
+        const mag = Math.abs(r) + Math.abs(f) + Math.abs(d);
+        if (mag < 1e-9) return;
+        map.set(key, { referral: r, fba: f, digital: d });
       };
 
       try {
@@ -8489,15 +10340,17 @@ try {
           return total;
         };
 
-        amazonFeesTotal = sumCurrencyAmountsByKey(finRes, 'FeeAmount');
+        const recursiveSignedBf = sumCurrencyAmountsByKey(finRes, 'FeeAmount');
+        amazonFeesTotal = recursiveSignedBf;
 
         const events =
           finRes?.payload?.FinancialEvents ??
           finRes?.payload?.financialEvents ??
           {};
         const shipmentLists = [
-          ...(events?.ShipmentSettleEventList ?? events?.shipmentSettleEventList ?? []),
           ...(events?.ShipmentEventList ?? events?.shipmentEventList ?? []),
+          ...(events?.ShipmentSettleEventList ?? events?.shipmentSettleEventList ?? []),
+          ...(events?.DeferredTransactionEventList ?? events?.deferredTransactionEventList ?? []),
           ...(events?.RefundEventList ?? events?.refundEventList ?? []),
           ...(events?.ChargebackEventList ?? events?.chargebackEventList ?? []),
           ...(events?.GuaranteeClaimEventList ?? events?.guaranteeClaimEventList ?? []),
@@ -8505,10 +10358,7 @@ try {
         for (const ev of shipmentLists) {
           const items = ev?.ShipmentItemList ?? ev?.shipmentItemList ?? [];
           for (const si of items) {
-            const fee =
-              sumFeeOrChargeList(si?.ItemFeeList ?? si?.itemFeeList) +
-              sumFeeOrChargeList(si?.ItemFeeAdjustmentList ?? si?.itemFeeAdjustmentList) +
-              sumFeeOrChargeList(si?.ItemChargeList ?? si?.itemChargeList);
+            const fee = parseFinancesShipmentItemFeesSignedTotal(si);
             const orderItemIdRaw = si?.OrderItemId ?? si?.orderItemId;
             const orderItemId = orderItemIdRaw != null ? String(orderItemIdRaw) : '';
             const sku = (si?.SellerSKU ?? si?.sellerSKU) as string | undefined;
@@ -8516,12 +10366,18 @@ try {
               if (orderItemId) addFee(feeByOrderItemId, orderItemId, fee);
               if (sku) addFee(feeBySku, sku, fee);
             }
-            const b1 = parseFeeBreakdownBackfill(si?.ItemFeeList ?? si?.itemFeeList);
-            const b2 = parseFeeBreakdownBackfill(si?.ItemFeeAdjustmentList ?? si?.itemFeeAdjustmentList);
-            const r = b1.referral + b2.referral, f = b1.fba + b2.fba, d = b1.digital + b2.digital;
+            const shipBd = parseFinancesShipmentItemFeesBreakdown(si);
+            const { referral: r, fba: f, digital: d } = shipBd;
             if (orderItemId) addFeeBreakdownBackfill(breakdownByOrderItemId, orderItemId, r, f, d);
             if (sku) addFeeBreakdownBackfill(breakdownBySku, sku, r, f, d);
           }
+        }
+        const itemizedSignedSumBf =
+          feeByOrderItemId.size > 0
+            ? [...feeByOrderItemId.values()].reduce((a, b) => a + b, 0)
+            : [...feeBySku.values()].reduce((a, b) => a + b, 0);
+        if (Math.abs(itemizedSignedSumBf) > 1e-6) {
+          amazonFeesTotal = itemizedSignedSumBf;
         }
       } catch (err) {
         console.warn(
@@ -8539,6 +10395,22 @@ try {
       }
       const lineRevenues = this.computeLineRevenueTotals(orderItems, orderTotalAmt);
       const totalLineRevenue = lineRevenues.reduce((a, b) => a + b, 0);
+
+      if (
+        orderTotalAmt > 0.01 &&
+        Math.abs(amazonFeesTotal) > orderTotalAmt * 0.35
+      ) {
+        const itemizedPost =
+          feeByOrderItemId.size > 0
+            ? [...feeByOrderItemId.values()].reduce((a, b) => a + b, 0)
+            : [...feeBySku.values()].reduce((a, b) => a + b, 0);
+        if (Math.abs(itemizedPost) < 1e-4) {
+          amazonFeesTotal = -Math.min(
+            Math.abs(amazonFeesTotal),
+            orderTotalAmt * AmazonService.LIST_ORDERS_MAX_FEE_TO_REVENUE_RATIO,
+          );
+        }
+      }
 
       for (let idx = 0; idx < orderItems.length; idx++) {
         const it = orderItems[idx];
@@ -8559,12 +10431,14 @@ try {
         const taxCharged = Number(it?.ItemTax?.Amount ?? 0);
 
         let itemFees = 0;
+        let usedOrderLevelFinancesBf = false;
         if (orderItemId && feeByOrderItemId.has(orderItemId)) {
           itemFees = feeByOrderItemId.get(orderItemId) ?? 0;
         } else if (sku && feeBySku.has(sku)) {
           itemFees = feeBySku.get(sku) ?? 0;
         } else if (totalLineRevenue > 0 && amazonFeesTotal !== 0) {
           itemFees = (revenueTotal / totalLineRevenue) * amazonFeesTotal;
+          usedOrderLevelFinancesBf = true;
         }
         // If we don't have this order's settled fees, prefer settled from another order with the same ASIN (overwrites estimates).
         let usedSameAsinSettled = false;
@@ -8597,19 +10471,6 @@ try {
             usedSameAsinSettled = true;
           }
         }
-        // If no settled (this order or same ASIN), use product's estimated fee (per unit × qty).
-        if (itemFees === 0 && sku) {
-          const productWithEst = await this.prisma.product.findUnique({
-            where: { userId_sku: { userId, sku } },
-            select: { estimatedAmazonFeePerUnit: true },
-          });
-          const estPerUnit = productWithEst?.estimatedAmazonFeePerUnit != null
-            ? Number(productWithEst.estimatedAmazonFeePerUnit)
-            : null;
-          if (estPerUnit != null && !Number.isNaN(estPerUnit)) {
-            itemFees = -Math.abs(estPerUnit * quantityOrdered);
-          }
-        }
 
         const itemProduct = sku
           ? await this.prisma.product.upsert({
@@ -8638,15 +10499,86 @@ try {
           }
         }
 
+        const existingItem = await this.prisma.orderItem.findUnique({
+          where: {
+            orderDbId_orderItemId: { orderDbId: ord.id, orderItemId },
+          },
+          select: {
+            amazonFeesTotal: true,
+            profit: true,
+            feesSource: true,
+            atSaleEstimateReferralFeeTotal: true,
+            atSaleEstimateFbaFeeTotal: true,
+            atSaleEstimateDigitalServiceFeeTotal: true,
+          },
+        });
+
+        const feesFromFinancesForLineBf =
+          (orderItemId && feeByOrderItemId.has(orderItemId)) ||
+          (sku && feeBySku.has(sku)) ||
+          usedSameAsinSettled ||
+          usedOrderLevelFinancesBf;
+
+        const preserveFrozenEstimateBf =
+          !feesFromFinancesForLineBf &&
+          existingItem != null &&
+          this.isPersistedAmazonFeeEstimateSource(existingItem.feesSource as string) &&
+          existingItem.amazonFeesTotal != null &&
+          Math.abs(Number(existingItem.amazonFeesTotal)) > 1e-9;
+
+        let estimateSnapRefBf: number | null = null;
+        let estimateSnapFbaBf: number | null = null;
+        let estimateSnapDigBf: number | null = null;
+
+        if (preserveFrozenEstimateBf) {
+          let preserved = Number(existingItem!.amazonFeesTotal);
+          if (preserved > 0) preserved = -Math.abs(preserved);
+          itemFees = preserved;
+        } else if (itemFees === 0 && !usedSameAsinSettled) {
+          const fromProd = this.orderItemFeeEstimateFromPreSaleProduct(
+            itemProduct as {
+              estimatedReferralFeePerUnit?: unknown;
+              estimatedFbaFeePerUnit?: unknown;
+              estimatedDigitalServiceFeePerUnit?: unknown;
+              estimatedAmazonFeePerUnit?: unknown;
+            },
+            quantityOrdered,
+          );
+          if (fromProd != null) {
+            itemFees = fromProd.itemFees;
+            estimateSnapRefBf = fromProd.referralLine;
+            estimateSnapFbaBf = fromProd.fbaLine;
+            estimateSnapDigBf = fromProd.digitalLine;
+          } else if (sku) {
+            const productWithEst = await this.prisma.product.findUnique({
+              where: { userId_sku: { userId, sku } },
+              select: {
+                estimatedReferralFeePerUnit: true,
+                estimatedFbaFeePerUnit: true,
+                estimatedDigitalServiceFeePerUnit: true,
+                estimatedAmazonFeePerUnit: true,
+              },
+            });
+            const fromDb = this.orderItemFeeEstimateFromPreSaleProduct(
+              productWithEst,
+              quantityOrdered,
+            );
+            if (fromDb != null) {
+              itemFees = fromDb.itemFees;
+              estimateSnapRefBf = fromDb.referralLine;
+              estimateSnapFbaBf = fromDb.fbaLine;
+              estimateSnapDigBf = fromDb.digitalLine;
+            }
+          }
+        }
+
         const cogsPerUnit = itemProduct.costOfGoods
           ? Number(itemProduct.costOfGoods)
           : null;
         const cogsTotal =
           cogsPerUnit != null ? cogsPerUnit * quantityOrdered : null;
-        const feesFromFinances =
-          (orderItemId && feeByOrderItemId.has(orderItemId)) ||
-          (sku && feeBySku.has(sku)) ||
-          usedSameAsinSettled;
+        const feesFromFinances = feesFromFinancesForLineBf;
+        const orderLineFeesSource = feesFromFinances ? 'finances' : 'estimate';
         // Same convention as sync: Finances fees are negative; estimates must not be positive here.
         if (!feesFromFinances && itemFees > 0) {
           itemFees = -Math.abs(itemFees);
@@ -8659,12 +10591,6 @@ try {
           (orderItemId && breakdownByOrderItemId.get(orderItemId)) ??
           (sku && breakdownBySku.get(sku)) ??
           null;
-        const existingItem = await this.prisma.orderItem.findUnique({
-          where: {
-            orderDbId_orderItemId: { orderDbId: ord.id, orderItemId },
-          },
-          select: { amazonFeesTotal: true, profit: true, feesSource: true },
-        });
         let finalFees = Number.isNaN(itemFees) ? 0 : Number(itemFees.toFixed(2));
         let finalProfit = profit != null ? Number(profit.toFixed(2)) : null;
         // Never overwrite a saved estimate with 0: keep existing until settled fees arrive.
@@ -8673,10 +10599,10 @@ try {
           existingItem &&
           existingItem.amazonFeesTotal != null &&
           Number(existingItem.amazonFeesTotal) !== 0 &&
-          (existingItem.feesSource as string) === 'estimate'
+          this.isPersistedAmazonFeeEstimateSource(existingItem.feesSource as string)
         ) {
           let reused = Number(existingItem.amazonFeesTotal);
-          if ((existingItem.feesSource as string) === 'estimate' && reused > 0) {
+          if (this.isPersistedAmazonFeeEstimateSource(existingItem.feesSource as string) && reused > 0) {
             reused = -Math.abs(reused);
           }
           finalFees = reused;
@@ -8685,8 +10611,29 @@ try {
               ? Number((revenueTotal - taxCharged - cogsTotal + finalFees).toFixed(2))
               : null;
         }
-        const updateFeesAndProfit =
+        if (
+          feesFromFinances &&
+          settledBreakdown &&
+          Math.abs(
+            settledBreakdown.referral +
+              settledBreakdown.fba +
+              settledBreakdown.digital,
+          ) > 1e-6
+        ) {
+          const sumBd =
+            settledBreakdown.referral +
+            settledBreakdown.fba +
+            settledBreakdown.digital;
+          finalFees = Number(sumBd.toFixed(2));
+          finalProfit =
+            cogsTotal != null
+              ? Number((revenueTotal - taxCharged - cogsTotal + finalFees).toFixed(2))
+              : null;
+        }
+        const updateFeeColumnsBf =
           feesFromFinances || (existingItem?.feesSource as string) !== 'finances';
+        const shouldUpdateFeeColumnsBf =
+          updateFeeColumnsBf && !preserveFrozenEstimateBf;
         const settledFeeFields =
           feesFromFinances && settledBreakdown
             ? {
@@ -8694,7 +10641,43 @@ try {
                 settledFbaFeeTotal: Number(settledBreakdown.fba.toFixed(2)),
                 settledDigitalServiceFeeTotal: Number(settledBreakdown.digital.toFixed(2)),
               }
-            : {};
+            : feesFromFinances
+              ? {
+                  settledReferralFeeTotal: null,
+                  settledFbaFeeTotal: null,
+                  settledDigitalServiceFeeTotal: null,
+                }
+              : {};
+        let estimateSnapshotPayloadBf: Record<string, number | null> = {};
+        if (shouldUpdateFeeColumnsBf) {
+          if (feesFromFinancesForLineBf) {
+            estimateSnapshotPayloadBf = {
+              atSaleEstimateReferralFeeTotal: null,
+              atSaleEstimateFbaFeeTotal: null,
+              atSaleEstimateDigitalServiceFeeTotal: null,
+            };
+          } else if (orderLineFeesSource === 'estimate') {
+            estimateSnapshotPayloadBf = {
+              atSaleEstimateReferralFeeTotal: estimateSnapRefBf,
+              atSaleEstimateFbaFeeTotal: estimateSnapFbaBf,
+              atSaleEstimateDigitalServiceFeeTotal: estimateSnapDigBf,
+            };
+          }
+        }
+        const createEstimateSnapshotsBf =
+          orderLineFeesSource === 'estimate' && !feesFromFinancesForLineBf
+            ? {
+                atSaleEstimateReferralFeeTotal: estimateSnapRefBf,
+                atSaleEstimateFbaFeeTotal: estimateSnapFbaBf,
+                atSaleEstimateDigitalServiceFeeTotal: estimateSnapDigBf,
+              }
+            : feesFromFinancesForLineBf
+              ? {
+                  atSaleEstimateReferralFeeTotal: null,
+                  atSaleEstimateFbaFeeTotal: null,
+                  atSaleEstimateDigitalServiceFeeTotal: null,
+                }
+              : {};
         const updatePayload = {
           userId,
           productId: itemProduct.id,
@@ -8706,12 +10689,13 @@ try {
           revenueTotal,
           shippingChargedTotal: Number.isNaN(shippingCharged) ? 0 : shippingCharged,
           taxChargedTotal: Number.isNaN(taxCharged) ? 0 : taxCharged,
-          ...(updateFeesAndProfit
+          profit: finalProfit,
+          ...(shouldUpdateFeeColumnsBf
             ? {
                 amazonFeesTotal: finalFees,
-                profit: finalProfit,
-                feesSource: feesFromFinances ? 'finances' : 'estimate',
+                feesSource: orderLineFeesSource,
                 ...settledFeeFields,
+                ...estimateSnapshotPayloadBf,
               }
             : {}),
           cogsTotal,
@@ -8737,8 +10721,9 @@ try {
             shippingChargedTotal: Number.isNaN(shippingCharged) ? 0 : shippingCharged,
             taxChargedTotal: Number.isNaN(taxCharged) ? 0 : taxCharged,
             amazonFeesTotal: finalFees,
-            feesSource: feesFromFinances ? 'finances' : 'estimate',
+            feesSource: orderLineFeesSource,
             ...settledFeeFields,
+            ...createEstimateSnapshotsBf,
             cogsTotal,
             profit: finalProfit,
             rawResponse: it,
@@ -8749,16 +10734,32 @@ try {
       }
 
       processedOrders += 1;
+      if (processedOrders < orders.length) {
+        await new Promise<void>((resolve) =>
+          setTimeout(resolve, backfillFinancesPauseMs),
+        );
+      }
+    }
+
+    try {
+      await this.recomputeDailyKpiSummary(userId);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.warn(
+        `[AmazonService.backfillOrderItems] recomputeDailyKpiSummary failed (non-fatal): ${msg}`,
+      );
     }
 
     return {
-      days,
-      startDate: startDate.toISOString(),
-      endDate: nowSafe.toISOString(),
+      days: targetOrderId ? null : days,
+      amazonOrderId: targetOrderId || null,
+      startDate: targetOrderId ? null : startDate.toISOString(),
+      endDate: targetOrderId ? null : nowSafe.toISOString(),
       processedOrders,
       upsertedItems,
       skippedNoItems,
       totalOrders: orders.length,
+      approxFinancesPauseMsPerOrder: backfillFinancesPauseMs,
     };
   }
 
@@ -8848,7 +10849,7 @@ try {
       Number(this.configService.get<string>('SPAPI_CATALOG_THROTTLE_MS')) ||
       1000;
 
-    const userIds = await this.getOrgMemberUserIds(orgId);
+    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
     const needsBackfill = {
       userId: { in: userIds },
       asin: { not: null },
@@ -9358,7 +11359,7 @@ try {
     asin: string,
   ): Promise<{ productType: string | null; displayGroup: string | null; updated: number }> {
     const out = { productType: null as string | null, displayGroup: null as string | null, updated: 0 };
-    const userIds = await this.getOrgMemberUserIds(orgId);
+    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
     if (userIds.length === 0) return out;
 
     let credentials: any;
@@ -9488,7 +11489,7 @@ try {
     errors: Array<{ asin: string; error: string }>;
     hint?: string;
   }> {
-    const userIds = await this.getOrgMemberUserIds(orgId);
+    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
     if (userIds.length === 0) {
       return { requested: 0, processed: 0, updated: 0, noDataCount: 0, noDataSample: [], errors: [] };
     }
@@ -9624,7 +11625,7 @@ try {
     opts?: { query?: string; take?: number; skip?: number },
     marketplaceId?: string,
   ) {
-    const userIds = await this.getOrgMemberUserIds(orgId);
+    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
     const q = (opts?.query ?? '').trim();
     const take = opts?.take ?? 50;
     const skip = opts?.skip ?? 0;
@@ -9745,9 +11746,11 @@ try {
       unitCostIncVat: number;
       deliveryCostIncVat: number;
       prepCostIncVat: number;
+      /** When true (e.g. spreadsheet bulk upload), skip updating `Product.costOfGoods`; caller syncs once per product after all rows. */
+      skipSyncProductCostOfGoods?: boolean;
     },
   ) {
-    const userIds = await this.getOrgMemberUserIds(orgId);
+    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
 
     const product = await this.prisma.product.findFirst({
       where: { id: dto.productId, userId: { in: userIds } },
@@ -9828,19 +11831,21 @@ try {
     // Derive per-unit COGS for profit calculations:
     // Use per-unit total (unit + delivery + prep), convert to ex-VAT when vatRatePct > 0.
     // This keeps dashboard profit working while COGS is managed via the ledger.
-    try {
-      const vatFactor = 1 + (vatRatePct > 0 ? vatRatePct / 100 : 0);
-      const derivedCogs =
-        vatFactor > 0 ? totalCostIncVat / vatFactor : totalCostIncVat;
-      const rounded = Number.isFinite(derivedCogs)
-        ? Number(derivedCogs.toFixed(2))
-        : null;
-      await this.updateProductCostOfGoods(orgId, dto.productId, rounded);
-    } catch (e) {
-      // Non-fatal; purchase entry is still saved.
-      console.warn('[AmazonService.createPurchase] failed to derive COGS', {
-        err: e,
-      });
+    if (!dto.skipSyncProductCostOfGoods) {
+      try {
+        const vatFactor = 1 + (vatRatePct > 0 ? vatRatePct / 100 : 0);
+        const derivedCogs =
+          vatFactor > 0 ? totalCostIncVat / vatFactor : totalCostIncVat;
+        const rounded = Number.isFinite(derivedCogs)
+          ? Number(derivedCogs.toFixed(2))
+          : null;
+        await this.updateProductCostOfGoods(orgId, dto.productId, rounded);
+      } catch (e) {
+        // Non-fatal; purchase entry is still saved.
+        console.warn('[AmazonService.createPurchase] failed to derive COGS', {
+          err: e,
+        });
+      }
     }
 
     return {
@@ -9875,7 +11880,7 @@ try {
       prepCostIncVat?: number;
     },
   ) {
-    const userIds = await this.getOrgMemberUserIds(orgId);
+    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
 
     const existing = await (this.prisma as any).purchase.findFirst({
       where: { id: purchaseId, userId: { in: userIds } },
@@ -10007,8 +12012,9 @@ try {
   }
 
   /**
-   * Bulk-create COGS ledger rows from client-parsed spreadsheet rows (ASIN → product lookup).
-   * Each row becomes one Purchase; partial success returns per-row errors.
+   * Bulk-create COGS ledger rows from client-parsed spreadsheet rows (ASIN and/or SKU → product lookup).
+   * Each row becomes one Purchase. `Product.costOfGoods` is synced **once per product after all rows**,
+   * using the **last** successful row for that product, so listings not present in the file keep their costs.
    */
   async bulkUploadCostOfGoodsRows(
     orgId: string,
@@ -10029,7 +12035,7 @@ try {
       throw new BadRequestException(`At most ${MAX} rows per upload`);
     }
 
-    const userIds = await this.getOrgMemberUserIds(orgId);
+    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
     const errors: Array<{ rowIndex: number; asin?: string; message: string }> =
       [];
     let created = 0;
@@ -10106,6 +12112,9 @@ try {
     const normalizeAsin = (raw: string): string =>
       raw.replace(/\s/g, '').toUpperCase();
 
+    /** Last successful row per product sets `Product.costOfGoods` after the upload loop. */
+    const bulkDerivedCogsByProductId = new Map<string, number>();
+
     for (let i = 0; i < rows.length; i++) {
       const rowIndex = i + 1;
       const row = rows[i];
@@ -10115,12 +12124,17 @@ try {
       }
       const o = row as Record<string, unknown>;
       const asinRaw = str(o.asin);
-      if (!asinRaw) {
-        errors.push({ rowIndex, message: 'Missing ASIN' });
+      const skuRaw = str(o.sku);
+      const skuNorm = skuRaw ? skuRaw.trim() : '';
+      if (!asinRaw && !skuNorm) {
+        errors.push({
+          rowIndex,
+          message: 'Missing ASIN or SKU (map at least one)',
+        });
         continue;
       }
-      const asin = normalizeAsin(asinRaw);
-      if (!asin) {
+      const asin = asinRaw ? normalizeAsin(asinRaw) : '';
+      if (asinRaw && !asin) {
         errors.push({ rowIndex, message: 'Invalid ASIN' });
         continue;
       }
@@ -10129,25 +12143,54 @@ try {
       if (unitCostIncVat === undefined || unitCostIncVat <= 0) {
         errors.push({
           rowIndex,
-          asin,
+          asin: asin || undefined,
           message: 'unitCostIncVat must be a positive number',
         });
         continue;
       }
 
-      const product = await this.prisma.product.findFirst({
-        where: {
-          userId: { in: userIds },
-          asin: { equals: asin, mode: 'insensitive' },
-        },
-        select: { id: true, userId: true },
-      });
+      let product: { id: string; userId: string } | null = null;
+      if (skuNorm) {
+        if (asin) {
+          product = await this.prisma.product.findFirst({
+            where: {
+              userId: { in: userIds },
+              sku: { equals: skuNorm, mode: 'insensitive' },
+              asin: { equals: asin, mode: 'insensitive' },
+            },
+            select: { id: true, userId: true },
+          });
+        }
+        if (!product) {
+          product = await this.prisma.product.findFirst({
+            where: {
+              userId: { in: userIds },
+              sku: { equals: skuNorm, mode: 'insensitive' },
+            },
+            select: { id: true, userId: true },
+          });
+        }
+      }
+      if (!product && asin) {
+        product = await this.prisma.product.findFirst({
+          where: {
+            userId: { in: userIds },
+            asin: { equals: asin, mode: 'insensitive' },
+          },
+          select: { id: true, userId: true },
+        });
+      }
 
       if (!product) {
         errors.push({
           rowIndex,
-          asin,
-          message: 'No product with this ASIN in your account',
+          asin: asin || undefined,
+          message:
+            skuNorm && asin
+              ? 'No product with this SKU + ASIN in your account'
+              : skuNorm
+                ? 'No product with this SKU in your account'
+                : 'No product with this ASIN in your account',
         });
         continue;
       }
@@ -10169,6 +12212,17 @@ try {
       const prepCostIncVat = Math.max(0, num(o.prepCostIncVat, 0) ?? 0);
       const vatRatePct = Math.max(0, num(o.vatRatePct, 0) ?? 0);
 
+      const totalLineIncVat =
+        unitCostIncVat + deliveryCostIncVat + prepCostIncVat;
+      const vatFactor = 1 + (vatRatePct > 0 ? vatRatePct / 100 : 0);
+      const derivedRounded = Number.isFinite(totalLineIncVat)
+        ? Number(
+            (vatFactor > 0 ? totalLineIncVat / vatFactor : totalLineIncVat).toFixed(
+              2,
+            ),
+          )
+        : null;
+
       try {
         await this.createPurchase(orgId, product.userId, {
           productId: product.id,
@@ -10186,8 +12240,12 @@ try {
           unitCostIncVat,
           deliveryCostIncVat,
           prepCostIncVat,
+          skipSyncProductCostOfGoods: true,
         });
         created += 1;
+        if (derivedRounded != null) {
+          bulkDerivedCogsByProductId.set(product.id, derivedRounded);
+        }
       } catch (e: unknown) {
         const msg =
           e instanceof Error
@@ -10195,7 +12253,18 @@ try {
             : typeof e === 'string'
               ? e
               : 'Failed to create entry';
-        errors.push({ rowIndex, asin, message: msg });
+        errors.push({ rowIndex, asin: asin || undefined, message: msg });
+      }
+    }
+
+    for (const [productId, rounded] of bulkDerivedCogsByProductId) {
+      try {
+        await this.updateProductCostOfGoods(orgId, productId, rounded);
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        this.logger.warn(
+          `[bulkUploadCostOfGoodsRows] updateProductCostOfGoods failed productId=${productId}: ${msg}`,
+        );
       }
     }
 
@@ -10203,7 +12272,7 @@ try {
   }
 
   async seedCostOfGoodsEntriesFromProducts(orgId: string) {
-    const userIds = await this.getOrgMemberUserIds(orgId);
+    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
 
     const products = await this.prisma.product.findMany({
       where: {
@@ -10286,7 +12355,7 @@ try {
     opts?: { start?: string; end?: string; take?: number; skip?: number },
     marketplaceId?: string,
   ) {
-    const userIds = await this.getOrgMemberUserIds(orgId);
+    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
     const take = Math.max(1, Math.min(100, opts?.take ?? 10));
     const skip = Math.max(0, opts?.skip ?? 0);
 

@@ -45,4 +45,14 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     const result = await this.client.exists(key);
     return result === 1;
   }
+
+  /** SET key NX with EX — returns true if the key was set (first caller wins). */
+  async setIfNotExistsWithExpiry(
+    key: string,
+    value: string,
+    ttlSeconds: number,
+  ): Promise<boolean> {
+    const r = await this.client.set(key, value, 'EX', ttlSeconds, 'NX');
+    return r === 'OK';
+  }
 }

@@ -8,6 +8,7 @@ import {
   useEffect,
   useLayoutEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import { useAuth } from "@clerk/nextjs";
@@ -16,45 +17,15 @@ import { useDisplaySettings } from "@/contexts/display-settings-context";
 import { useMarketplace } from "@/contexts/marketplace-context";
 import {
   aggregateOrderRows,
+  DASHBOARD_RANGE_PERIOD_SELECT_OPTIONS,
   filterOrderRowsForDashboardPreset,
   type DashboardRangePreset,
 } from "@/lib/orders-period-metrics";
-import {
-  formatDateOnlyInTimeZone,
-  getMarketplaceIanaTimeZone,
-  parseYmdParts,
-  subtractCivilDays,
-} from "@/lib/marketplace-timezone";
+import { marketplaceLocalDateAnchors } from "@/lib/marketplace-date-anchors";
+import { parseYmdParts, subtractCivilDays } from "@/lib/marketplace-timezone";
 import { StripeCheckoutButton } from "@/components/stripe-checkout-button";
 import { DISCORD_INVITE_URL } from "@/lib/discord-invite";
 import { getDevImpersonationHeaders } from "@/lib/impersonation";
-
-/** Calendar “today” / N-day starts in the selected marketplace timezone (Seller Central parity). */
-function marketplaceLocalDateAnchors(selectedMarketplaceId: string | null) {
-  const marketplaceTz = getMarketplaceIanaTimeZone(selectedMarketplaceId);
-  const nowMs = Date.now();
-  const defaultEnd = formatDateOnlyInTimeZone(nowMs, marketplaceTz);
-  const todayYmd = parseYmdParts(defaultEnd);
-  const pad2 = (n: number) => String(n).padStart(2, "0");
-  const fmtYmd = (y: { y: number; m: number; d: number }) =>
-    `${y.y}-${pad2(y.m)}-${pad2(y.d)}`;
-  return {
-    marketplaceTz,
-    defaultEnd,
-    defaultStart30: fmtYmd(
-      subtractCivilDays(todayYmd.y, todayYmd.m, todayYmd.d, 29),
-    ),
-    defaultStart14: fmtYmd(
-      subtractCivilDays(todayYmd.y, todayYmd.m, todayYmd.d, 13),
-    ),
-    defaultStart7: fmtYmd(
-      subtractCivilDays(todayYmd.y, todayYmd.m, todayYmd.d, 6),
-    ),
-    yesterday: fmtYmd(
-      subtractCivilDays(todayYmd.y, todayYmd.m, todayYmd.d, 1),
-    ),
-  };
-}
 
 type AccountSummary = {
   marketplace: string;
@@ -62,6 +33,8 @@ type AccountSummary = {
   currency: string;
   period: string;
   revenue: number;
+  /** Sum of negative line revenues in period (≤ 0). */
+  refundsRevenue?: number;
   profitMargin: number;
   unitsSold: number;
   totalOrders: number;
@@ -105,6 +78,7 @@ type RecentOrderRow = {
   totalStock: number | null;
   orderStatusLabel?: string | null;
   excludedFromSales?: boolean;
+  excludedFromProfitMetrics?: boolean;
   excludedFromOrderCount?: boolean;
 };
 
@@ -133,12 +107,8 @@ function HomeInner() {
   const startParam = searchParams.get("start");
   const endParam = searchParams.get("end");
 
-  const [rangePreset, setRangePreset] = useState<
-    "today" | "7d" | "14d" | "30d" | "yesterday" | "all" | "custom"
-  >("today");
-  const [trendPreset, setTrendPreset] = useState<
-    "today" | "7d" | "14d" | "30d" | "yesterday" | "all" | "custom"
-  >("30d");
+  const [rangePreset, setRangePreset] = useState<DashboardRangePreset>("today");
+  const [trendPreset, setTrendPreset] = useState<DashboardRangePreset>("30d");
   const [customStart, setCustomStart] = useState<string>("");
   const [customEnd, setCustomEnd] = useState<string>("");
   const [trendCustomStart, setTrendCustomStart] = useState<string>("");
@@ -283,6 +253,8 @@ function HomeInner() {
     marketplaceTz,
     defaultEnd,
     defaultStart30,
+    defaultStart183,
+    defaultStart365,
     defaultStart14,
     defaultStart7,
     yesterday,
@@ -298,16 +270,22 @@ function HomeInner() {
           ? defaultStart14
           : rangePreset === "30d"
             ? defaultStart30
-            : rangePreset === "yesterday"
-              ? yesterday
-              : rangePreset === "all"
-                ? allTimeStart
-                : (startParam ?? defaultStart30);
+            : rangePreset === "6m"
+              ? defaultStart183
+              : rangePreset === "12m"
+                ? defaultStart365
+                : rangePreset === "yesterday"
+                  ? yesterday
+                  : rangePreset === "all"
+                    ? allTimeStart
+                    : (startParam ?? defaultStart30);
   const effectiveEnd =
     rangePreset === "today" ||
     rangePreset === "7d" ||
     rangePreset === "14d" ||
-    rangePreset === "30d"
+    rangePreset === "30d" ||
+    rangePreset === "6m" ||
+    rangePreset === "12m"
       ? defaultEnd
       : rangePreset === "yesterday"
         ? yesterday
@@ -364,25 +342,28 @@ function HomeInner() {
           ? defaultStart14
           : trendPreset === "30d"
             ? defaultStart30
-            : trendPreset === "yesterday"
-              ? yesterday
-              : trendPreset === "all"
-                ? allTimeStart
-                : (trendCustomStart || defaultStart30);
+            : trendPreset === "6m"
+              ? defaultStart183
+              : trendPreset === "12m"
+                ? defaultStart365
+                : trendPreset === "yesterday"
+                  ? yesterday
+                  : trendPreset === "all"
+                    ? allTimeStart
+                    : (trendCustomStart || defaultStart30);
   const trendEnd =
-    trendPreset === "today"
+    trendPreset === "today" ||
+    trendPreset === "7d" ||
+    trendPreset === "14d" ||
+    trendPreset === "30d" ||
+    trendPreset === "6m" ||
+    trendPreset === "12m"
       ? defaultEnd
-      : trendPreset === "7d"
-        ? defaultEnd
-        : trendPreset === "14d"
+      : trendPreset === "yesterday"
+        ? yesterday
+        : trendPreset === "all"
           ? defaultEnd
-          : trendPreset === "30d"
-            ? defaultEnd
-            : trendPreset === "yesterday"
-              ? yesterday
-              : trendPreset === "all"
-                ? defaultEnd
-                : (trendCustomEnd || defaultEnd);
+          : (trendCustomEnd || defaultEnd);
 
   const trendRangeForApi = useMemo(() => {
     if (trendPreset === "custom") {
@@ -413,9 +394,13 @@ function HomeInner() {
             ? "Two weeks"
             : rangePreset === "30d"
               ? "30 days"
-              : rangePreset === "all"
-                ? "All time"
-                : "Custom";
+              : rangePreset === "6m"
+                ? "Last 6 months"
+                : rangePreset === "12m"
+                  ? "Last 12 months"
+                  : rangePreset === "all"
+                    ? "Lifetime (all time)"
+                    : "Custom";
   const trendLabel =
     trendPreset === "today"
       ? "Today"
@@ -427,9 +412,13 @@ function HomeInner() {
             ? "Two weeks"
             : trendPreset === "30d"
               ? "30 days"
-              : trendPreset === "all"
-                ? "All time"
-                : "Custom";
+              : trendPreset === "6m"
+                ? "Last 6 months"
+                : trendPreset === "12m"
+                  ? "Last 12 months"
+                  : trendPreset === "all"
+                    ? "Lifetime (all time)"
+                    : "Custom";
 
   useEffect(() => {
     // Initialize preset based on URL (or defaults)
@@ -442,6 +431,8 @@ function HomeInner() {
     const startIs7 = isSame(start, defaultStart7);
     const startIs14 = isSame(start, defaultStart14);
     const startIs30 = isSame(start, defaultStart30);
+    const startIs183 = isSame(start, defaultStart183);
+    const startIs365 = isSame(start, defaultStart365);
 
     if (startParam || endParam) {
       const startIsYesterday = isSame(start, yesterday);
@@ -452,6 +443,8 @@ function HomeInner() {
       else if (startIs7 && endIsToday) setRangePreset("7d");
       else if (startIs14 && endIsToday) setRangePreset("14d");
       else if (startIs30 && endIsToday) setRangePreset("30d");
+      else if (startIs183 && endIsToday) setRangePreset("6m");
+      else if (startIs365 && endIsToday) setRangePreset("12m");
       else if (startIsYesterday && endIsYesterday)
         setRangePreset("yesterday");
       else if (startIsAll && endIsTodayForAll) setRangePreset("all");
@@ -746,27 +739,12 @@ function HomeInner() {
     };
   }, [ordersLoadedForRings, orderRowsForRings, prevSummaryRangeForApi, marketplaceTz]);
 
-  const ratioPct = useCallback((current: number, prev: number) => {
-    if (!Number.isFinite(current) || !Number.isFinite(prev) || prev <= 0) return null;
-    return Math.round((current / prev) * 100);
-  }, []);
-
   const deltaPct = useCallback((current: number, prev: number) => {
     if (!Number.isFinite(current) || !Number.isFinite(prev) || prev === 0) return null;
     const d = ((current - prev) / Math.abs(prev)) * 100;
     if (!Number.isFinite(d)) return null;
     return Math.round(d);
   }, []);
-
-  const salesVsPrevPct = useMemo(() => {
-    if (!displaySummary || !prevDisplaySummary) return null;
-    return ratioPct(displaySummary.revenue, prevDisplaySummary.revenue);
-  }, [displaySummary, prevDisplaySummary, ratioPct]);
-
-  const unitsVsPrevPct = useMemo(() => {
-    if (!displaySummary || !prevDisplaySummary) return null;
-    return ratioPct(displaySummary.unitsSold, prevDisplaySummary.unitsSold);
-  }, [displaySummary, prevDisplaySummary, ratioPct]);
 
   const roiVsPrevPct = useMemo(() => {
     const cur = summary?.roiPct != null ? Number(summary.roiPct) : null;
@@ -793,21 +771,40 @@ function HomeInner() {
       ? summary.roiPct
       : 0;
 
-  const compareWindowLabel = useMemo(() => {
-    const d = prevSummaryRangeForApi?.days;
-    if (d == null || !Number.isFinite(d) || d <= 0) return "prev";
-    return `~${d} day${d === 1 ? "" : "s"}`;
-  }, [prevSummaryRangeForApi?.days]);
+  /** Human label for the comparison window (matches ring prior-period logic). */
+  const compareWindowLabelHuman = useMemo(() => {
+    if (!prevSummaryRangeForApi) return null;
+    const d = prevSummaryRangeForApi.days;
+    if (!Number.isFinite(d) || d <= 0) return null;
+    if (d === 1) {
+      if (rangePreset === "today") return "yesterday";
+      if (rangePreset === "yesterday") return "prior day";
+      return "past day";
+    }
+    if (d >= 178 && d <= 188) return "past 6 months";
+    if (d >= 360 && d <= 366) return "past 12 months";
+    return `past ${d} days`;
+  }, [prevSummaryRangeForApi, rangePreset]);
 
   const salesComparePctLabel =
-    salesVsPrevPct != null ? `${salesVsPrevPct}%` : null;
+    displaySummary && prevDisplaySummary
+      ? pctOfPriorTotalLabel(
+          displaySummary.revenue,
+          prevDisplaySummary.revenue,
+        )
+      : null;
   const unitsComparePctLabel =
-    unitsVsPrevPct != null ? `${unitsVsPrevPct}%` : null;
+    displaySummary && prevDisplaySummary
+      ? pctOfPriorTotalLabel(
+          displaySummary.unitsSold,
+          prevDisplaySummary.unitsSold,
+        )
+      : null;
   const roiComparePctLabel =
     roiVsPrevPct != null ? `${roiVsPrevPct > 0 ? "+" : ""}${roiVsPrevPct}%` : null;
   const compareWindowLine =
-    (salesVsPrevPct != null || unitsVsPrevPct != null || roiVsPrevPct != null)
-      ? `vs ${compareWindowLabel}`
+    ordersLoadedForRings && prevSummaryRangeForApi && compareWindowLabelHuman
+      ? `vs ${compareWindowLabelHuman}`
       : null;
 
   const cards = displaySummary
@@ -855,7 +852,11 @@ function HomeInner() {
           fullRing: true,
           hidePercentage: !hasCostData,
           centerLine1: hasCostData ? `${Math.round(roiPct)}%` : "—",
-          centerLine2: hasCostData ? (roiComparePctLabel ?? "") : "",
+          centerLine2: hasCostData
+            ? compareWindowLine
+              ? (roiComparePctLabel ?? "—")
+              : (roiComparePctLabel ?? "")
+            : "",
           centerLine3: "",
           centerCompareLine: hasCostData ? (compareWindowLine ?? undefined) : undefined,
         },
@@ -1008,14 +1009,7 @@ function HomeInner() {
                     <select
                       value={rangePreset}
                       onChange={(e) => {
-                        const v = e.target.value as
-                          | "today"
-                          | "7d"
-                          | "14d"
-                          | "30d"
-                          | "yesterday"
-                          | "all"
-                          | "custom";
+                        const v = e.target.value as DashboardRangePreset;
                         setRangePreset(v);
                         if (v === "custom") return;
                         const end =
@@ -1033,20 +1027,22 @@ function HomeInner() {
                                 ? defaultStart14
                                 : v === "30d"
                                   ? defaultStart30
-                                  : v === "yesterday"
-                                    ? yesterday
-                                    : allTimeStart;
+                                  : v === "6m"
+                                    ? defaultStart183
+                                    : v === "12m"
+                                      ? defaultStart365
+                                      : v === "yesterday"
+                                        ? yesterday
+                                        : allTimeStart;
                         setRangeInUrl(start, end);
                       }}
                       className={FILTER_SELECT_CLASS}
                     >
-                      <option className="bg-black text-white" value="today">Today</option>
-                      <option className="bg-black text-white" value="yesterday">Yesterday</option>
-                      <option className="bg-black text-white" value="7d">7 days</option>
-                      <option className="bg-black text-white" value="14d">Two weeks</option>
-                      <option className="bg-black text-white" value="30d">30 days</option>
-                      <option className="bg-black text-white" value="all">All time</option>
-                      <option className="bg-black text-white" value="custom">Custom</option>
+                      {DASHBOARD_RANGE_PERIOD_SELECT_OPTIONS.map(({ value, label }) => (
+                        <option key={value} className="bg-black text-white" value={value}>
+                          {label}
+                        </option>
+                      ))}
                     </select>
                     {rangePreset === "custom" ? (
                       <>
@@ -1156,7 +1152,7 @@ function HomeInner() {
               {/* Right column: Sales v Profit + Inventory Summary + Category Pie Charts + Profit & Loss */}
               <div className={`flex min-w-0 flex-col gap-3 ${isLocked ? "blur-sm pointer-events-none select-none" : ""}`}>
               <div className="flex min-w-0 w-full flex-col overflow-hidden rounded-xl bg-[var(--surface)] p-4 ring-1 ring-[var(--surface-border)]">
-                <div className="mb-3 flex w-full items-center justify-between gap-2">
+                <div className="mb-2 flex w-full items-center justify-between gap-2">
                   <h2 className="text-sm font-medium uppercase tracking-[0.2em] text-[var(--foreground)]">
                     Sales v Profit
                   </h2>
@@ -1164,14 +1160,7 @@ function HomeInner() {
                     <select
                       value={trendPreset}
                       onChange={(e) => {
-                        const v = e.target.value as
-                          | "today"
-                          | "7d"
-                          | "14d"
-                          | "30d"
-                          | "yesterday"
-                          | "all"
-                          | "custom";
+                        const v = e.target.value as DashboardRangePreset;
                         setTrendPreset(v);
                         if (v === "custom") return;
                         const end =
@@ -1189,21 +1178,23 @@ function HomeInner() {
                                 ? defaultStart14
                                 : v === "30d"
                                   ? defaultStart30
-                                  : v === "yesterday"
-                                    ? yesterday
-                                    : allTimeStart;
+                                  : v === "6m"
+                                    ? defaultStart183
+                                    : v === "12m"
+                                      ? defaultStart365
+                                      : v === "yesterday"
+                                        ? yesterday
+                                        : allTimeStart;
                         setTrendCustomStart(start);
                         setTrendCustomEnd(end);
                       }}
                       className={FILTER_SELECT_CLASS}
                     >
-                      <option className="bg-black text-white" value="today">Today</option>
-                      <option className="bg-black text-white" value="yesterday">Yesterday</option>
-                      <option className="bg-black text-white" value="7d">7 days</option>
-                      <option className="bg-black text-white" value="14d">Two weeks</option>
-                      <option className="bg-black text-white" value="30d">30 days</option>
-                      <option className="bg-black text-white" value="all">All time</option>
-                      <option className="bg-black text-white" value="custom">Custom</option>
+                      {DASHBOARD_RANGE_PERIOD_SELECT_OPTIONS.map(({ value, label }) => (
+                        <option key={value} className="bg-black text-white" value={value}>
+                          {label}
+                        </option>
+                      ))}
                     </select>
                     {trendPreset === "custom" ? (
                       <>
@@ -1629,8 +1620,6 @@ type CostBreakdownProps = {
   currency: string;
 };
 
-type CostBreakdownPreset = "yesterday" | "today" | "7d" | "14d" | "30d" | "all" | "custom";
-
 function CostBreakdown({
   baseUrl,
   isSignedIn,
@@ -1642,30 +1631,46 @@ function CostBreakdown({
   const devImpersonate = searchParams.get("impersonate");
   const [data, setData] = useState<CostBreakdownData | null>(null);
   const [loading, setLoading] = useState(false);
-  const [periodPreset, setPeriodPreset] = useState<CostBreakdownPreset>("30d");
+  const [periodPreset, setPeriodPreset] = useState<DashboardRangePreset>("30d");
   const [customStart, setCustomStart] = useState("");
   const [customEnd, setCustomEnd] = useState("");
 
-  const { defaultEnd, defaultStart30, defaultStart14, defaultStart7, yesterday } =
-    marketplaceLocalDateAnchors(selectedMarketplaceId);
+  const {
+    defaultEnd,
+    defaultStart30,
+    defaultStart183,
+    defaultStart365,
+    defaultStart14,
+    defaultStart7,
+    yesterday,
+  } = marketplaceLocalDateAnchors(selectedMarketplaceId);
   const allTimeStart = "2020-01-01";
 
   const effectiveStart =
     periodPreset === "today"
       ? defaultEnd
-      : periodPreset === "yesterday"
-        ? yesterday
-        : periodPreset === "7d"
-          ? defaultStart7
-          : periodPreset === "14d"
-            ? defaultStart14
-            : periodPreset === "30d"
-              ? defaultStart30
-              : periodPreset === "all"
-                ? allTimeStart
-                : customStart || defaultStart30;
+      : periodPreset === "7d"
+        ? defaultStart7
+        : periodPreset === "14d"
+          ? defaultStart14
+          : periodPreset === "30d"
+            ? defaultStart30
+            : periodPreset === "6m"
+              ? defaultStart183
+              : periodPreset === "12m"
+                ? defaultStart365
+                : periodPreset === "yesterday"
+                  ? yesterday
+                  : periodPreset === "all"
+                    ? allTimeStart
+                    : customStart || defaultStart30;
   const effectiveEnd =
-    periodPreset === "today" || periodPreset === "7d" || periodPreset === "14d" || periodPreset === "30d"
+    periodPreset === "today" ||
+    periodPreset === "7d" ||
+    periodPreset === "14d" ||
+    periodPreset === "30d" ||
+    periodPreset === "6m" ||
+    periodPreset === "12m"
       ? defaultEnd
       : periodPreset === "yesterday"
         ? yesterday
@@ -1738,16 +1743,14 @@ function CostBreakdown({
         <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--muted-foreground)]">
           <select
             value={periodPreset}
-            onChange={(e) => setPeriodPreset(e.target.value as CostBreakdownPreset)}
+            onChange={(e) => setPeriodPreset(e.target.value as DashboardRangePreset)}
             className={FILTER_SELECT_CLASS}
           >
-            <option className="bg-black text-white" value="yesterday">Yesterday</option>
-            <option className="bg-black text-white" value="today">Today</option>
-            <option className="bg-black text-white" value="7d">7 days</option>
-            <option className="bg-black text-white" value="14d">Two weeks</option>
-            <option className="bg-black text-white" value="30d">30 days</option>
-            <option className="bg-black text-white" value="all">All time</option>
-            <option className="bg-black text-white" value="custom">Custom</option>
+            {DASHBOARD_RANGE_PERIOD_SELECT_OPTIONS.map(({ value, label }) => (
+              <option key={value} className="bg-black text-white" value={value}>
+                {label}
+              </option>
+            ))}
           </select>
           {periodPreset === "custom" && (
             <>
@@ -1818,6 +1821,7 @@ function CostBreakdown({
 
 type ProfitAndLossData = {
   revenue: number;
+  refundsRevenue?: number;
   promotionalAdjustments: number;
   reimbursementAdjustments: number;
   otherAdjustments: number;
@@ -1860,30 +1864,46 @@ function ProfitAndLoss({
   const devImpersonate = searchParams.get("impersonate");
   const [data, setData] = useState<ProfitAndLossData | null>(null);
   const [loading, setLoading] = useState(false);
-  const [periodPreset, setPeriodPreset] = useState<CostBreakdownPreset>("30d");
+  const [periodPreset, setPeriodPreset] = useState<DashboardRangePreset>("30d");
   const [customStart, setCustomStart] = useState("");
   const [customEnd, setCustomEnd] = useState("");
 
-  const { defaultEnd, defaultStart30, defaultStart14, defaultStart7, yesterday } =
-    marketplaceLocalDateAnchors(selectedMarketplaceId);
+  const {
+    defaultEnd,
+    defaultStart30,
+    defaultStart183,
+    defaultStart365,
+    defaultStart14,
+    defaultStart7,
+    yesterday,
+  } = marketplaceLocalDateAnchors(selectedMarketplaceId);
   const allTimeStart = "2020-01-01";
 
   const effectiveStart =
     periodPreset === "today"
       ? defaultEnd
-      : periodPreset === "yesterday"
-        ? yesterday
-        : periodPreset === "7d"
-          ? defaultStart7
-          : periodPreset === "14d"
-            ? defaultStart14
-            : periodPreset === "30d"
-              ? defaultStart30
-              : periodPreset === "all"
-                ? allTimeStart
-                : customStart || defaultStart30;
+      : periodPreset === "7d"
+        ? defaultStart7
+        : periodPreset === "14d"
+          ? defaultStart14
+          : periodPreset === "30d"
+            ? defaultStart30
+            : periodPreset === "6m"
+              ? defaultStart183
+              : periodPreset === "12m"
+                ? defaultStart365
+                : periodPreset === "yesterday"
+                  ? yesterday
+                  : periodPreset === "all"
+                    ? allTimeStart
+                    : customStart || defaultStart30;
   const effectiveEnd =
-    periodPreset === "today" || periodPreset === "7d" || periodPreset === "14d" || periodPreset === "30d"
+    periodPreset === "today" ||
+    periodPreset === "7d" ||
+    periodPreset === "14d" ||
+    periodPreset === "30d" ||
+    periodPreset === "6m" ||
+    periodPreset === "12m"
       ? defaultEnd
       : periodPreset === "yesterday"
         ? yesterday
@@ -1941,16 +1961,14 @@ function ProfitAndLoss({
         <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--muted-foreground)]">
           <select
             value={periodPreset}
-            onChange={(e) => setPeriodPreset(e.target.value as CostBreakdownPreset)}
+            onChange={(e) => setPeriodPreset(e.target.value as DashboardRangePreset)}
             className={FILTER_SELECT_CLASS}
           >
-            <option className="bg-black text-white" value="yesterday">Yesterday</option>
-            <option className="bg-black text-white" value="today">Today</option>
-            <option className="bg-black text-white" value="7d">7 days</option>
-            <option className="bg-black text-white" value="14d">Two weeks</option>
-            <option className="bg-black text-white" value="30d">30 days</option>
-            <option className="bg-black text-white" value="all">All time</option>
-            <option className="bg-black text-white" value="custom">Custom</option>
+            {DASHBOARD_RANGE_PERIOD_SELECT_OPTIONS.map(({ value, label }) => (
+              <option key={value} className="bg-black text-white" value={value}>
+                {label}
+              </option>
+            ))}
           </select>
           {periodPreset === "custom" && (
             <>
@@ -1989,6 +2007,18 @@ function ProfitAndLoss({
                   {fmt(data.revenue)}
                 </td>
               </tr>
+              {(data.refundsRevenue ?? 0) !== 0 && (
+                <tr className="border-b border-[var(--surface-border)]">
+                  <td className="py-1 pr-2 pl-2 text-[var(--foreground)]">Refunds</td>
+                  <td
+                    className={`py-1 pl-2 text-right tabular-nums ${
+                      (data.refundsRevenue ?? 0) < 0 ? "text-red-500" : "text-[var(--foreground)]"
+                    }`}
+                  >
+                    {fmt(data.refundsRevenue ?? 0)}
+                  </td>
+                </tr>
+              )}
               <tr className="text-[10px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
                 <td colSpan={2} className="pt-2 pb-0.5">Selling unit costs</td>
               </tr>
@@ -2066,37 +2096,39 @@ function ProfitAndLoss({
               </tr>
               <tr className="border-t-2 border-[var(--surface-border)] bg-[var(--surface)]/50 font-semibold">
                 <td className="py-1.5 pr-2 text-[var(--foreground)]">Total profit</td>
-                <td className={`py-1.5 pl-2 text-right tabular-nums ${data.totalProfit >= 0 ? "text-[var(--foreground)]" : "text-red-500"}`}>
+                <td
+                  className={`py-1.5 pl-2 text-right tabular-nums ${
+                    data.totalProfit > 0
+                      ? "text-green-600"
+                      : data.totalProfit < 0
+                        ? "text-red-500"
+                        : "text-[var(--foreground)]"
+                  }`}
+                >
                   {fmt(data.totalProfit)}
                 </td>
               </tr>
             </tbody>
           </table>
-          <div className="mt-3 border-t border-[var(--surface-border)] pt-3">
-            <p className="mb-1.5 text-[9px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
-              VAT adjustment
-            </p>
-            <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[10px] text-[var(--muted-foreground)]">
-              <span>Output VAT</span>
-              <span className="text-right tabular-nums text-[var(--foreground)]">{fmt(data.outputVat)}</span>
-              <span>Input VAT</span>
-              <span className="text-right tabular-nums text-[var(--foreground)]">{fmt(data.inputVat)}</span>
-              <span className="font-medium text-[var(--foreground)]">VAT balance</span>
-              <span className="flex items-center justify-end gap-1">
-                <span className={`tabular-nums font-medium ${(data.vatRegistered ? data.vatBalance : 0) >= 0 ? "text-[var(--foreground)]" : "text-red-500"}`}>
-                  {fmt(data.vatRegistered ? data.vatBalance : 0)}
+          {data.vatRegistered === true && (
+            <div className="mt-3 border-t border-[var(--surface-border)] pt-3">
+              <p className="mb-1.5 text-[9px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
+                VAT adjustment
+              </p>
+              <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[10px] text-[var(--muted-foreground)]">
+                <span>Output VAT</span>
+                <span className="text-right tabular-nums text-[var(--foreground)]">{fmt(data.outputVat)}</span>
+                <span>Input VAT</span>
+                <span className="text-right tabular-nums text-[var(--foreground)]">{fmt(data.inputVat)}</span>
+                <span className="font-medium text-[var(--foreground)]">VAT balance</span>
+                <span
+                  className={`text-right tabular-nums font-medium ${data.vatBalance >= 0 ? "text-[var(--foreground)]" : "text-red-500"}`}
+                >
+                  {fmt(data.vatBalance)}
                 </span>
-                {!data.vatRegistered && (
-                  <span
-                    className="inline-flex h-3.5 w-3.5 shrink-0 cursor-help items-center justify-center rounded-full bg-[var(--muted-foreground)]/20 text-[8px] font-semibold text-[var(--muted-foreground)]"
-                    title="VAT balance shows as zero for non VAT registered users"
-                  >
-                    i
-                  </span>
-                )}
-              </span>
+              </div>
             </div>
-          </div>
+          )}
         </div>
       )}
       {!loading && !data && (
@@ -2481,10 +2513,6 @@ function SalesTrend({
     fetchSales();
   }, [isSignedIn, getToken, baseUrl, start, end, selectedMarketplaceId]);
 
-  if (!sales && !loading && !error) {
-    return null;
-  }
-
   const points = sales?.points ?? [];
   const maxValue =
     points.length > 0
@@ -2494,13 +2522,39 @@ function SalesTrend({
         )
       : 0;
   const allZero = points.length > 0 && maxValue === 0;
+  const showChart = points.length > 0 && !allZero && !error;
+
+  const chartWrapRef = useRef<HTMLDivElement>(null);
+  const [plotWidth, setPlotWidth] = useState(400);
+
+  useLayoutEffect(() => {
+    if (!showChart) return;
+    const el = chartWrapRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const applyWidth = (raw: number) => {
+      if (!Number.isFinite(raw) || raw < 8) return;
+      const next = Math.round(Math.min(2400, Math.max(220, raw)));
+      setPlotWidth((prev) => (Math.abs(prev - next) < 3 ? prev : next));
+    };
+    applyWidth(el.getBoundingClientRect().width);
+    const ro = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect?.width;
+      if (w != null) applyWidth(w);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [showChart, start, end]);
+
+  if (!sales && !loading && !error) {
+    return null;
+  }
 
   const height = 250;
   const paddingX = 12; // room for y-axis labels (right-aligned so they donÔÇÖt overlap bars)
   const paddingBottom = 48; // room for x-axis line + rotated date labels underneath
   const paddingTop = 12; // room for hover labels
 
-  const width = 400;
+  const width = plotWidth;
   const barAreaHeight = height - paddingTop - paddingBottom;
   const barAreaWidth = width - paddingX * 2;
   const numPoints = Math.max(1, points.length);
@@ -2516,10 +2570,16 @@ function SalesTrend({
   const minBarH =
     barAreaHeight > 0 ? Math.min(4, barAreaHeight * 0.02) : 0;
 
+  const metaLegendRowClass = noWrapper
+    ? "mb-2 flex items-center justify-between gap-2"
+    : "mb-3 flex items-center justify-between";
+  const chartSvgMargin = noWrapper ? "mt-1" : "mt-2";
+  const viewBoxWidth = width + 50;
+
   const content = (
     <>
-      <div className="mb-3 flex items-center justify-between">
-        <div>
+      <div className={metaLegendRowClass}>
+        <div className="min-w-0">
           {!noWrapper && (
             <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
               Sales v Profit
@@ -2529,7 +2589,7 @@ function SalesTrend({
             {label} · Revenue vs profit ({currency})
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
           <span className="inline-flex items-center gap-1.5 text-[10px] text-[var(--muted-foreground)]">
             <span className="inline-block h-2 w-2 rounded-sm" style={{ backgroundColor: revenueColor }} />
             Revenue
@@ -2554,11 +2614,12 @@ function SalesTrend({
         </p>
       )}
       {points.length > 0 && !allZero && (
-        <div className="w-full">
+        <div ref={chartWrapRef} className="w-full min-w-0">
         <svg
-          viewBox={`-50 0 ${width + 50} ${height}`}
-          className="mt-2 h-[18rem] min-h-[12rem] w-full"
+          viewBox={`-50 0 ${viewBoxWidth} ${height}`}
+          className={`${chartSvgMargin} block w-full max-w-full text-[var(--foreground)]`}
           preserveAspectRatio="xMidYMid meet"
+          style={{ aspectRatio: `${viewBoxWidth} / ${height}` }}
         >
           {/* X-axis line */}
           <line
@@ -2971,6 +3032,13 @@ function formatCurrency(amount: number, currency: string, decimals = 0) {
   }
 }
 
+/** Ring snapshot: % of prior-period total; "—" when prior is zero (still show vs-label). */
+function pctOfPriorTotalLabel(current: number, prev: number): string {
+  if (!Number.isFinite(current) || !Number.isFinite(prev)) return "—";
+  if (prev > 0) return `${Math.round((current / prev) * 100)}%`;
+  return "—";
+}
+
 function DonutCard({
   label,
   value,
@@ -2995,10 +3063,49 @@ function DonutCard({
     centerLine1 != null && centerLine2 != null && centerLine3 != null;
   const valueOnly = hidePercentage === true;
 
+  const shellRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const [centerScale, setCenterScale] = useState(1);
+
+  const fitCenter = useCallback(() => {
+    const shell = shellRef.current;
+    const node = contentRef.current;
+    if (!shell || !node) return;
+    const cs = getComputedStyle(shell);
+    const padX = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
+    const padY = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
+    const availW = Math.max(1, shell.clientWidth - padX);
+    const availH = Math.max(1, shell.clientHeight - padY);
+    const w = node.offsetWidth;
+    const h = node.offsetHeight;
+    const s = Math.min(1, availW / Math.max(w, 1), availH / Math.max(h, 1));
+    setCenterScale(Number.isFinite(s) ? s : 1);
+  }, []);
+
+  useLayoutEffect(() => {
+    fitCenter();
+    const shell = shellRef.current;
+    if (!shell || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => fitCenter());
+    ro.observe(shell);
+    return () => ro.disconnect();
+  }, [
+    fitCenter,
+    centerTitle,
+    centerLine1,
+    centerLine2,
+    centerLine3,
+    centerCompareLine,
+    value,
+    useCustomCenter,
+    valueOnly,
+    clamped,
+  ]);
+
   const trackColor = "var(--surface-border)";
   return (
     <div className="flex flex-col items-center gap-3">
-      <div className="relative flex h-28 w-28 items-center justify-center">
+      <div className="relative mx-auto flex aspect-square w-full min-w-[7.75rem] max-w-[11rem] items-center justify-center sm:max-w-[11.5rem]">
         <svg
           viewBox="0 0 120 120"
           className="h-full w-full -rotate-90"
@@ -3028,47 +3135,59 @@ function DonutCard({
             }}
           />
         </svg>
-        <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-start pt-10 text-center">
-          {centerTitle && (
-            <span className="text-[9px] font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
-              {centerTitle}
-            </span>
-          )}
-          {useCustomCenter ? (
-            <>
-              <span className="text-lg font-bold tabular-nums leading-none text-[var(--foreground)]">
-                {centerLine1}
+        <div
+          ref={shellRef}
+          className="pointer-events-none absolute inset-0 flex items-center justify-center p-[7%]"
+        >
+          <div
+            ref={contentRef}
+            className="flex min-w-0 w-full max-w-full flex-col items-center justify-center gap-0.5 text-center"
+            style={{
+              transform: `scale(${centerScale})`,
+              transformOrigin: "center center",
+            }}
+          >
+            {centerTitle && (
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
+                {centerTitle}
               </span>
-              {centerLine2 ? (
-                <span className="text-[10px] text-[var(--muted-foreground)]">
-                  {centerLine2}
+            )}
+            {useCustomCenter ? (
+              <>
+                <span className="w-full break-words text-base font-bold tabular-nums leading-tight text-[var(--foreground)]">
+                  {centerLine1}
                 </span>
-              ) : null}
-              {centerCompareLine ? (
-                <span
-                  className={`${centerLine2 ? "mt-0.5" : "mt-1"} text-[8px] font-medium uppercase tracking-wide text-[var(--muted-foreground)]`}
-                >
-                  {centerCompareLine}
+                {centerLine2 ? (
+                  <span className="w-full break-words text-xs leading-tight text-[var(--muted-foreground)]">
+                    {centerLine2}
+                  </span>
+                ) : null}
+                {centerCompareLine ? (
+                  <span
+                    className={`w-full break-words ${centerLine2 ? "mt-0" : "mt-0.5"} text-[10px] font-medium leading-tight tracking-tight text-[var(--muted-foreground)]`}
+                  >
+                    {centerCompareLine}
+                  </span>
+                ) : null}
+                {centerLine3 ? (
+                  <span className="mt-0.5 inline-flex w-full max-w-full items-center justify-center rounded-full bg-[var(--surface)] px-2 py-0.5 text-[10px] font-medium uppercase leading-tight tracking-tight text-[var(--muted-foreground)]">
+                    {centerLine3}
+                  </span>
+                ) : null}
+              </>
+            ) : (
+              <>
+                <span className="w-full break-words text-base font-bold tabular-nums leading-tight text-[var(--foreground)]">
+                  {value}
                 </span>
-              ) : null}
-              {centerLine3 ? (
-                <span className="mt-1.5 inline-flex items-center rounded-full bg-[var(--surface)] px-2 py-0.5 text-[9px] font-medium uppercase tracking-normal text-[var(--muted-foreground)]">
-                  {centerLine3}
-                </span>
-              ) : null}
-            </>
-          ) : (
-            <>
-              <span className="text-lg font-bold tabular-nums leading-none text-[var(--foreground)]">
-                {value}
-              </span>
-              {!valueOnly && (
-                <span className="mt-1.5 text-[9px] font-medium uppercase tracking-[0.12em] text-[var(--muted-foreground)]">
-                  {clamped.toFixed(0)}%
-                </span>
-              )}
-            </>
-          )}
+                {!valueOnly && (
+                  <span className="mt-0.5 text-[10px] font-medium uppercase tracking-[0.1em] text-[var(--muted-foreground)]">
+                    {clamped.toFixed(0)}%
+                  </span>
+                )}
+              </>
+            )}
+          </div>
         </div>
       </div>
       <div className="flex flex-col items-center gap-0.5 text-center">

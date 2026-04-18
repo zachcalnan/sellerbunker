@@ -288,6 +288,10 @@ model OrderItem {
   settledReferralFeeTotal    Decimal? @map("settled_referral_fee_total") @db.Decimal(14, 2)
   settledFbaFeeTotal         Decimal? @map("settled_fba_fee_total") @db.Decimal(14, 2)
   settledDigitalServiceFeeTotal Decimal? @map("settled_digital_service_fee_total") @db.Decimal(14, 2)
+  /// Fee estimate line totals (≤0) captured at first sync when `fees_source=estimate`; frozen when listing price changes.
+  atSaleEstimateReferralFeeTotal    Decimal? @map("at_sale_estimate_referral_fee_total") @db.Decimal(14, 2)
+  atSaleEstimateFbaFeeTotal         Decimal? @map("at_sale_estimate_fba_fee_total") @db.Decimal(14, 2)
+  atSaleEstimateDigitalServiceFeeTotal Decimal? @map("at_sale_estimate_digital_service_fee_total") @db.Decimal(14, 2)
   cogsTotal            Decimal? @map("cogs_total") @db.Decimal(14, 2)
   profit               Decimal? @map("profit") @db.Decimal(14, 2)
   rawResponse          Json?    @map("raw_response")

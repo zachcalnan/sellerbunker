@@ -383,6 +383,55 @@ ping() {
   }
 
   /**
+   * Dev-only: compare DB `order_items` fee fields vs `listOrders` for one Amazon order id (same path as UI).
+   * GET /api/amazon/dev/order-fee-sanity?amazonOrderId=204-9599325-7606713
+   * Use while logged in (browser session or same auth as the app). No manual “does it look right?” — read `summary.ok` and `checks`.
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Get('dev/order-fee-sanity')
+  async orderFeeSanity(
+    @Req() req: { user: { orgId: string; marketplaceId?: string } },
+    @Query('amazonOrderId') amazonOrderId?: string,
+  ) {
+    const raw = amazonOrderId?.trim();
+    if (!raw) {
+      throw new BadRequestException(
+        'Query amazonOrderId is required (Amazon order id, e.g. 204-9599325-7606713)',
+      );
+    }
+    return this.amazonService.getOrderFeeSanityDebug(
+      req.user.orgId,
+      raw,
+      req.user.marketplaceId,
+    );
+  }
+
+  /**
+   * Dev-only: Finances JSON — `listFinancialEventsByOrderId` with **NextToken** pages merged + `__debugFigure`.
+   * If by-order returns **zero** events, automatically calls `listFinancialEvents` (posted range around DB
+   * `orderDate`), merges pages, filters to the order id → `financesPostedRangeFilteredResponse` + `amazonNote`.
+   * Always calls **Finances 2024-06-19** `GET /finances/2024-06-19/transactions` with `ORDER_ID`: sweeps **DEFERRED**,
+   * **DEFERRED_RELEASED**, **RELEASED**, then once **without** `transactionStatus`, using Amazon’s max safe **179-day**
+   * posted window (see `finances2024ListTransactionsPostedWindow`, `finances2024ListTransactionsSweeps`, merged `transactions`
+   * in `finances2024ListTransactionsDeferred`). `marketplaceId` prefers `getOrderItems` line `MarketplaceId` when present.
+   * GET /api/amazon/dev/order-finances-raw
+   * GET /api/amazon/dev/order-finances-raw?amazonOrderId=204-9599325-7606713
+   * Omit `amazonOrderId` to use the latest DB row with `feesSource=finances` (same org aggregate users).
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Get('dev/order-finances-raw')
+  async orderFinancesRaw(
+    @Req() req: { user: { orgId: string; userId: string } },
+    @Query('amazonOrderId') amazonOrderId?: string,
+  ) {
+    return this.amazonService.getOrderFinancesRawDebug(
+      req.user.orgId,
+      { amazonOrderId },
+      req.user.userId,
+    );
+  }
+
+  /**
    * Dev-only: call SP-API getOrders (no persist), return order count. Verifies API returns data.
    * GET /api/amazon/dev/orders-test-fetch
    */
@@ -432,16 +481,70 @@ ping() {
   /**
    * Dev-only: backfill OrderItem rows from existing Order rows.
    * This does NOT rely on ordersLastSyncedAt and is safe to run repeatedly.
+   *
+   * Query `amazonOrderId=204-…`: refresh **that order only** (one Finances call + DB upsert; ignores `days`).
+   * Query `async=1`: run on the server in the background (returns immediately). Use for large `days`
+   * so the browser does not time out.
    */
   @UseGuards(ClerkAuthGuard)
   @Post('dev/backfill-order-items')
   async devBackfillOrderItems(
     @Req() req: { user: { userId: string } },
     @Query('days') days?: string,
+    @Query('async') asyncFlag?: string,
+    @Query('amazonOrderId') amazonOrderId?: string,
   ) {
     const n = Number(days ?? 30);
     const safeDays = Number.isFinite(n) ? Math.max(1, Math.min(365, n)) : 30;
-    return this.amazonService.backfillOrderItems(req.user.userId, safeDays);
+    const aid =
+      typeof amazonOrderId === 'string' && amazonOrderId.trim()
+        ? amazonOrderId.trim()
+        : undefined;
+    const singleOpts = aid ? { amazonOrderId: aid } : undefined;
+    const runAsync =
+      asyncFlag === '1' || asyncFlag === 'true' || asyncFlag === 'yes';
+    if (runAsync) {
+      const uid = req.user.userId;
+      void this.amazonService
+        .backfillOrderItems(uid, safeDays, singleOpts)
+        .then((r) =>
+          this.logger.log(
+            `[dev/backfill-order-items:async] done userId=${uid.slice(0, 8)}… processed=${r.processedOrders} upserted=${r.upsertedItems} days=${r.days} amazonOrderId=${r.amazonOrderId ?? 'n/a'}`,
+          ),
+        )
+        .catch((e) => {
+          const msg = e instanceof Error ? e.message : String(e);
+          this.logger.error(
+            `[dev/backfill-order-items:async] failed userId=${uid.slice(0, 8)}…: ${msg}`,
+          );
+        });
+      return {
+        status: 'started',
+        days: aid ? null : safeDays,
+        amazonOrderId: aid ?? null,
+        async: true,
+        message: aid
+          ? `Finances refresh started for order ${aid} only.`
+          : 'Finances fee backfill is running on the server. Reload the Orders page over the next several minutes to see rows update (most recent orders first).',
+      };
+    }
+    return this.amazonService.backfillOrderItems(req.user.userId, safeDays, singleOpts);
+  }
+
+  /**
+   * Same as POST `dev/backfill-order-items` (browser-friendly).
+   * Example: GET /api/amazon/dev/backfill-order-items?days=365&async=1
+   * Example: GET /api/amazon/dev/backfill-order-items?amazonOrderId=204-1234567-7654321
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Get('dev/backfill-order-items')
+  devBackfillOrderItemsGet(
+    @Req() req: { user: { userId: string } },
+    @Query('days') days?: string,
+    @Query('async') asyncFlag?: string,
+    @Query('amazonOrderId') amazonOrderId?: string,
+  ) {
+    return this.devBackfillOrderItems(req, days, asyncFlag, amazonOrderId);
   }
 
   /**
@@ -894,8 +997,9 @@ ping() {
   }
 
   /**
-   * Bulk COGS upload: body { rows: [{ asin, unitCostIncVat, ... }] } — one ledger entry per row.
-   * ASIN must match a product already in the account.
+   * Bulk COGS upload: body { rows: [{ asin?, sku?, unitCostIncVat, ... }] } — one ledger entry per row.
+   * Each row must match a product by ASIN and/or SKU. `Product.costOfGoods` is updated only for products
+   * that appear in this upload (last row per product wins); other listings keep their existing costs.
    */
   @UseGuards(ClerkAuthGuard)
   @Post('cost-of-goods/bulk-upload')

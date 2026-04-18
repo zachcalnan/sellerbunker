@@ -8,10 +8,11 @@
   "scripts": {
     "redis:up": "docker compose -f ../docker-compose.yml up -d redis",
     "build": "prisma generate && nest build",
+    "prisma:generate": "prisma generate",
     "db:deploy": "prisma migrate deploy",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "start": "nest start",
-    "prestart:dev": "npm run build",
+    "prestart:dev": "nest build",
     "start:dev": "nest start --watch",
     "start:debug": "nest start --debug --watch",
     "start:prod": "node dist/main",
@@ -20,7 +21,8 @@
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
-    "test:e2e": "jest --config ./test/jest-e2e.json"
+    "test:e2e": "jest --config ./test/jest-e2e.json",
+    "fee-backfill": "node -r tsconfig-paths/register -r ts-node/register src/scripts/run-order-fee-backfill.ts"
   },
   "dependencies": {
     "@api/sp-api": "file:.api/apis/sp-api",

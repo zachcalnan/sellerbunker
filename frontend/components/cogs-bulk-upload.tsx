@@ -90,13 +90,15 @@ export function CogsBulkUpload({ onUpload, onFinished }: Props) {
   const submit = async () => {
     setLocalError(null);
     setResult(null);
-    if (!mapping.asin || !mapping.unitCostIncVat) {
-      setLocalError('Map both "ASIN" and "Unit cost (inc VAT)" to columns.');
+    if (!(mapping.asin || mapping.sku) || !mapping.unitCostIncVat) {
+      setLocalError(
+        'Map "Unit cost (inc VAT)" and at least one of "ASIN" or "SKU" to columns.',
+      );
       return;
     }
     const payload = buildBulkApiRows(rawRows, mapping);
     if (payload.length === 0) {
-      setLocalError("No data rows with an ASIN.");
+      setLocalError("No data rows with an ASIN or SKU in the mapped columns.");
       return;
     }
     setBusy(true);
@@ -233,7 +235,7 @@ export function CogsBulkUpload({ onUpload, onFinished }: Props) {
                 <p className="text-xs leading-relaxed text-[var(--muted-foreground)]">
                   Your file uses its own header names (e.g. &quot;£/Unit&quot;). For each
                   SellerBunker field below, choose which <strong>column from your file</strong>{" "}
-                  supplies that value. Required: ASIN and unit cost. Leave others as — if empty.
+                  supplies that value. Required: unit cost, plus ASIN and/or SKU per row. Leave others as — if empty.
                 </p>
                 <div className="grid max-h-56 gap-2 overflow-y-auto pr-1 sm:grid-cols-2">
                   {COGS_BULK_FIELD_META.map((f) => (

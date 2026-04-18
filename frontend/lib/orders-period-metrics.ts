@@ -1,6 +1,7 @@
 /**
- * Single source of truth for “sales in period” — same rules as the Orders page
+ * Single source of truth for “sales in period” in a dashboard range preset
  * (marketplace-local “today”, calendar N-day windows to match Seller Central, etc.).
+ * The Orders page and dashboard widgets use `filterOrderRowsForDashboardPreset` with these presets.
  */
 
 import {
@@ -18,8 +19,13 @@ export type OrderRowLike = {
   profit: number | null;
   /** Amazon order id — used for distinct order counts (SC-style). */
   orderId?: string;
-  /** When true, line is excluded from revenue / units / profit (cancelled, returned, etc.). */
+  /** When true, line is excluded from revenue / units (cancelled, returned, refunds, etc.). */
   excludedFromSales?: boolean;
+  /**
+   * When true, line is excluded from profit rollup. Refund lines set `excludedFromSales` but keep this false
+   * so clawback profit still counts toward period profit.
+   */
+  excludedFromProfitMetrics?: boolean;
   /**
    * When true, line does not count toward “orders” (Seller Central headline). Only cancelled parents
    * set this; Pending, Shipped, PendingReturn, returns, etc. still count as an order.
@@ -33,8 +39,26 @@ export type DashboardRangePreset =
   | "7d"
   | "14d"
   | "30d"
+  | "6m"
+  | "12m"
   | "all"
   | "custom";
+
+/** Same presets/labels as the dashboard Performance Snapshot — use for any matching period dropdown. */
+export const DASHBOARD_RANGE_PERIOD_SELECT_OPTIONS: {
+  value: DashboardRangePreset;
+  label: string;
+}[] = [
+  { value: "today", label: "Today" },
+  { value: "yesterday", label: "Yesterday" },
+  { value: "7d", label: "7 days" },
+  { value: "14d", label: "Two weeks" },
+  { value: "30d", label: "30 days" },
+  { value: "6m", label: "Last 6 months" },
+  { value: "12m", label: "Last 12 months" },
+  { value: "all", label: "Lifetime (all time)" },
+  { value: "custom", label: "Custom" },
+];
 
 /** Orders tab period keys (rolling days except today). */
 export type OrdersTabPeriod = "today" | "7" | "14" | "30";
@@ -76,8 +100,17 @@ export function filterOrderRowsForDashboardPreset(
     });
   }
 
-  if (preset === "7d" || preset === "14d" || preset === "30d") {
-    const days = preset === "7d" ? 7 : preset === "14d" ? 14 : 30;
+  if (preset === "7d" || preset === "14d" || preset === "30d" || preset === "6m" || preset === "12m") {
+    const days =
+      preset === "7d"
+        ? 7
+        : preset === "14d"
+          ? 14
+          : preset === "30d"
+            ? 30
+            : preset === "6m"
+              ? 183
+              : 365;
     const todayYmd = getLocalYmdFromUtcMs(now, tz);
     const startYmd = subtractCivilDays(todayYmd.y, todayYmd.m, todayYmd.d, days - 1);
     const startMs = startOfLocalDayUtcMs(startYmd, tz);
@@ -108,7 +141,7 @@ export function filterOrderRowsForDashboardPreset(
   });
 }
 
-/** Used by the Orders page period dropdown (same marketplace-local rules). */
+/** Legacy helper for older “N-day” keys; prefer `filterOrderRowsForDashboardPreset` + `DashboardRangePreset`. */
 export function filterOrderRowsForOrdersTabPeriod(
   rows: OrderRowLike[],
   period: OrdersTabPeriod,
@@ -138,8 +171,20 @@ export function filterOrderRowsForOrdersTabPeriod(
   });
 }
 
+function isProfitExcluded(r: OrderRowLike): boolean {
+  if (r.excludedFromProfitMetrics === true) return true;
+  if (r.excludedFromProfitMetrics === false) return false;
+  return Boolean(r.excludedFromSales);
+}
+
 export function aggregateOrderRows(rows: OrderRowLike[]) {
-  const forRevenue = rows.filter((r) => !r.excludedFromSales);
+  const forRevenue = rows.filter(
+    (r) =>
+      !r.excludedFromSales &&
+      Number.isFinite(r.salePrice) &&
+      r.salePrice > 0,
+  );
+  const forProfit = rows.filter((r) => !isProfitExcluded(r));
   const forOrderCount = rows.filter((r) => {
     if (r.excludedFromOrderCount === true) return false;
     if (r.excludedFromOrderCount === false) return true;
@@ -164,6 +209,6 @@ export function aggregateOrderRows(rows: OrderRowLike[]) {
     (sum, r) => sum + (Number.isFinite(r.quantity) ? r.quantity : 0),
     0,
   );
-  const totalProfit = forRevenue.reduce((sum, r) => sum + (r.profit ?? 0), 0);
+  const totalProfit = forProfit.reduce((sum, r) => sum + (r.profit ?? 0), 0);
   return { orderCount, totalSales, totalUnits, totalProfit };
 }

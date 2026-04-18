@@ -120,10 +120,14 @@ export class AmazonSpApiClient {
     if (nextToken) {
       query.NextToken = nextToken;
     } else {
-      // Orders API: MarketplaceIds as comma-separated. For EU use UK-only.
-      const ids = Array.isArray(marketplaceIds) ? marketplaceIds : [String(marketplaceIds ?? '')];
-      const euUkOnly = credentials.region === 'eu' ? ['A1F83G8C2ARO7P'] : ids;
-      const marketplaceIdsStr = euUkOnly.join(',');
+      // Orders API: comma-separated MarketplaceIds, max 50 (same as SP-API getOrders).
+      const ids = (Array.isArray(marketplaceIds) ? marketplaceIds : [String(marketplaceIds ?? '')])
+        .filter((id): id is string => typeof id === 'string' && id.length > 0);
+      const deduped = Array.from(new Set(ids)).slice(0, 50);
+      const marketplaceIdsStr =
+        deduped.length > 0
+          ? deduped.join(',')
+          : this.defaultMarketplaceIdsForRegion(credentials.region).slice(0, 50).join(',');
       if (isSandbox && !createdAfter && !createdBefore && !orderStatuses) {
         query.CreatedAfter = 'TEST_CASE_200';
         query.MarketplaceIds = 'A1F83G8C2ARO7P';
@@ -192,6 +196,72 @@ export class AmazonSpApiClient {
     return this.signedSpApiRequest(credentials, {
       method: 'GET',
       path: `/finances/v0/orders/${encodeURIComponent(orderId)}/financialEvents`,
+      query,
+    });
+  }
+
+  /**
+   * Finances API v0: listFinancialEvents (by **posted** date range, not order id).
+   * Use when `listFinancialEventsByOrderId` returns empty event lists — Amazon often posts fees here first.
+   * @see https://developer-docs.amazon.com/sp-api/reference/listfinancialevents
+   */
+  async listFinancialEvents(
+    credentials: SpApiCredentials,
+    params: {
+      postedAfter: string;
+      postedBefore: string;
+      maxResultsPerPage?: number;
+      nextToken?: string;
+    },
+  ) {
+    const query: Record<string, unknown> = {
+      PostedAfter: params.postedAfter,
+      PostedBefore: params.postedBefore,
+    };
+    if (params.maxResultsPerPage) {
+      query.MaxResultsPerPage = params.maxResultsPerPage;
+    }
+    if (params.nextToken) {
+      query.NextToken = params.nextToken;
+    }
+    return this.signedSpApiRequest(credentials, {
+      method: 'GET',
+      path: '/finances/v0/financialEvents',
+      query,
+    });
+  }
+
+  /**
+   * Finances API **2024-06-19**: `listTransactions` — includes **DEFERRED** rows Seller Central shows before v0
+   * `listFinancialEventsByOrderId` is empty. Requires app role **Finance and Accounting** when Amazon enforces it.
+   * @see https://developer-docs.amazon.com/sp-api/reference/listtransactions
+   */
+  async listFinancesTransactions20240619(
+    credentials: SpApiCredentials,
+    params: {
+      marketplaceId: string;
+      postedAfter: string;
+      postedBefore: string;
+      transactionStatus?: 'DEFERRED' | 'RELEASED' | 'DEFERRED_RELEASED';
+      relatedIdentifierName?: 'ORDER_ID' | 'FINANCIAL_EVENT_GROUP_ID';
+      relatedIdentifierValue?: string;
+      nextToken?: string;
+    },
+  ) {
+    const query: Record<string, unknown> = {
+      marketplaceId: params.marketplaceId,
+      postedAfter: params.postedAfter,
+      postedBefore: params.postedBefore,
+    };
+    if (params.transactionStatus !== undefined && params.transactionStatus !== null) {
+      query.transactionStatus = params.transactionStatus;
+    }
+    if (params.relatedIdentifierName) query.relatedIdentifierName = params.relatedIdentifierName;
+    if (params.relatedIdentifierValue) query.relatedIdentifierValue = params.relatedIdentifierValue;
+    if (params.nextToken) query.nextToken = params.nextToken;
+    return this.signedSpApiRequest(credentials, {
+      method: 'GET',
+      path: '/finances/2024-06-19/transactions',
       query,
     });
   }
@@ -653,7 +723,11 @@ export class AmazonSpApiClient {
       this.logger.log(`[SP-API] ${options.method} ${canonicalUri}`);
     }
 
-    const max429Retries = 3;
+    const financesPath = options.path.includes('/finances/');
+    const ordersListPath =
+      options.path.includes('/orders/v0/orders') && options.method === 'GET';
+    const max429Retries = financesPath ? 8 : ordersListPath ? 12 : 3;
+    const base429WaitMs = financesPath ? 3500 : ordersListPath ? 6000 : 2000;
     let response = await this.httpRequest({
       hostname: host,
       path: pathWithQuery,
@@ -669,11 +743,12 @@ export class AmazonSpApiClient {
 
     for (let attempt = 0; attempt < max429Retries && response.statusCode === 429; attempt++) {
       const retryAfterHeader = response.headers?.['retry-after'] ?? response.headers?.['Retry-After'];
-      let waitMs = 2000 * Math.pow(2, attempt);
+      let waitMs = base429WaitMs * Math.pow(2, attempt);
       if (retryAfterHeader) {
         const parsed = parseInt(String(retryAfterHeader), 10);
-        if (Number.isFinite(parsed)) waitMs = parsed * 1000;
+        if (Number.isFinite(parsed)) waitMs = Math.max(waitMs, parsed * 1000);
       }
+      waitMs = Math.min(waitMs, ordersListPath ? 300_000 : 120_000);
       this.logger.warn(
         `[SP-API] 429 QuotaExceeded for ${options.method} ${options.path}; waiting ${waitMs / 1000}s before retry (${attempt + 1}/${max429Retries})`,
       );

@@ -11,6 +11,8 @@ type CandidateSku = {
   title: string | null;
   imageUrl: string | null;
   totalQty: number;
+  /** Fulfillable / sellable quantity when synced from Amazon */
+  availableQty?: number;
   activeUnits30d: number;
   currentListedPrice: number | null;
   currentListedPriceUpdatedAt: string | null;
@@ -731,11 +733,11 @@ export default function RepricerPage() {
     return [...new Set(list)];
   }, [selected, pinnedProductId]);
 
+  /** SKUs currently in the repricer cohort (up to 10) — removing deletes the row and frees a slot. */
   const removableRuleProductIds = useMemo(() => {
-    return selectedOrPinnedProductIds.filter((pid) => {
-      const a = assignmentsByProductId.get(pid);
-      return Boolean(a?.ruleSetId || a?.ruleSetName);
-    });
+    return selectedOrPinnedProductIds.filter((pid) =>
+      assignmentsByProductId.has(pid),
+    );
   }, [selectedOrPinnedProductIds, assignmentsByProductId]);
   const candidatePageCount = Math.max(
     1,
@@ -751,23 +753,28 @@ export default function RepricerPage() {
     (c: CandidateSku) => {
       setSelected((prev) => {
         const exists = prev.some((p) => p.productId === c.productId);
-        const next = exists
-          ? prev.filter((p) => p.productId !== c.productId)
-          : prev.length >= 10
-            ? prev
-            : [...prev, { productId: c.productId }];
-
-        // UX: if the user unselects the last SKU, also clear any pinned SKU so action buttons revert.
         if (exists) {
+          const next = prev.filter((p) => p.productId !== c.productId);
           const willBeEmpty = next.length === 0;
           if (willBeEmpty) setPinnedProductId(null);
           else if (pinnedProductId === c.productId) setPinnedProductId(null);
+          return next;
         }
 
-        return next;
+        const cohortIds = new Set(assignments.map((a) => a.productId));
+        const unionIds = new Set([...prev.map((p) => p.productId), c.productId]);
+        let newToCohort = 0;
+        for (const id of unionIds) {
+          if (!cohortIds.has(id)) newToCohort += 1;
+        }
+        if (cohortIds.size + newToCohort > 10) {
+          return prev;
+        }
+
+        return [...prev, { productId: c.productId }];
       });
     },
-    [pinnedProductId],
+    [pinnedProductId, assignments],
   );
 
   const saveSelected = useCallback(async () => {
@@ -874,12 +881,12 @@ export default function RepricerPage() {
   const removeRuleFromSelected = useCallback(async () => {
     if (selectedOrPinnedProductIds.length === 0) {
       setErr(
-        "Select one or more SKUs (checkboxes) or pin a SKU row, then click Remove rule.",
+        "Select one or more SKUs (checkboxes) or pin a SKU row, then click Remove from repricer.",
       );
       return;
     }
     if (removableRuleProductIds.length === 0) {
-      setErr("None of the selected SKUs have a pricing rule assigned.");
+      setErr("None of the selected SKUs are in the repricer (10 SKU) list.");
       return;
     }
     setAssigningPresetId("remove-rule");
@@ -894,7 +901,7 @@ export default function RepricerPage() {
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
-          throw new Error((data as any)?.message ?? "Could not remove rule");
+          throw new Error((data as any)?.message ?? "Could not remove SKU");
         }
       }
       await load();
@@ -902,7 +909,7 @@ export default function RepricerPage() {
       setSelected([]);
       setPinnedProductId(null);
     } catch (e) {
-      setErr(e instanceof Error ? e.message : "Could not remove rule");
+      setErr(e instanceof Error ? e.message : "Could not remove SKU");
     } finally {
       setAssigningPresetId(null);
     }
@@ -1396,9 +1403,10 @@ export default function RepricerPage() {
           <div>
             <h1 className="text-xl font-semibold">Repricer</h1>
             <p className="mt-1 text-sm text-[var(--muted-foreground)]">
-              Testing mode: browse all SKUs, pick up to{" "}
-              <span className="font-semibold text-[var(--foreground)]">10</span>
-              .
+              Testing mode: up to{" "}
+              <span className="font-semibold text-[var(--foreground)]">10</span>{" "}
+              SKUs with sellable inventory. Remove a SKU from the repricer to
+              swap in another.
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -1416,7 +1424,11 @@ export default function RepricerPage() {
           Tick one or more SKUs below, then click{" "}
           <span className="font-medium text-[var(--foreground)]">Apply</span>{" "}
           next to a rule to assign that pricing rule to all checked SKUs. (If
-          none are checked, you can still pin a single SKU row and apply.)
+          none are checked, you can still pin a single SKU row and apply.) Use{" "}
+          <span className="font-medium text-[var(--foreground)]">
+            Remove from repricer
+          </span>{" "}
+          to free a slot.
         </p>
 
         <div className="rounded-2xl border border-[var(--surface-border)] bg-[var(--surface)] p-4">
@@ -1496,9 +1508,9 @@ export default function RepricerPage() {
                         }
                         title={
                           removableRuleProductIds.length > 0
-                            ? "Remove pricing rule from the selected SKU(s)"
+                            ? "Remove selected SKU(s) from the repricer (frees a slot)"
                             : selected.length > 0 || pinnedProductId
-                              ? "Selected SKU(s) have no pricing rule assigned"
+                              ? "Selected SKU(s) are not in the repricer list"
                               : "Tick SKUs (checkboxes) or pin a SKU row first"
                         }
                         onClick={() => void removeRuleFromSelected()}
@@ -1508,7 +1520,9 @@ export default function RepricerPage() {
                             : "border border-[var(--surface-border)] bg-transparent text-[var(--muted-foreground)] opacity-40"
                         }`}
                       >
-                        {assigningPresetId === "remove-rule" ? "Removing…" : "Remove rule"}
+                        {assigningPresetId === "remove-rule"
+                          ? "Removing…"
+                          : "Remove from repricer"}
                       </button>
                       <button
                         type="button"
@@ -1629,7 +1643,9 @@ export default function RepricerPage() {
                             </span>
                           )}
                           <span className="select-none text-xs text-[var(--muted-foreground)]">
-                            In stock {c.totalQty}
+                            {c.availableQty != null && c.availableQty > 0
+                              ? `Available ${c.availableQty}`
+                              : `In stock ${c.totalQty}`}
                           </span>
                           <span className="select-none text-xs text-[var(--muted-foreground)]">
                             Sales (30d) {c.activeUnits30d}
@@ -1682,7 +1698,7 @@ export default function RepricerPage() {
               })}
               {candidates.length === 0 ? (
                 <div className="text-sm text-[var(--muted-foreground)]">
-                  No SKUs found.
+                  No SKUs with available inventory match your search.
                 </div>
               ) : null}
             </div>

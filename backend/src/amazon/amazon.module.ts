@@ -9,6 +9,8 @@ import { ClerkModule } from '../clerk/clerk.module';
 import { UsersModule } from '../users/users.module';
 import { AmazonSyncService } from './amazon-sync.service';
 import { AmazonSyncProcessor } from './amazon-sync.processor';
+import { AmazonExtendedHistoryBootstrap } from './amazon-extended-history.bootstrap';
+import { AmazonOrderLineFeeBackfillBootstrap } from './amazon-order-line-fee-backfill.bootstrap';
 
 @Module({
   imports: [
@@ -26,6 +28,8 @@ import { AmazonSyncProcessor } from './amazon-sync.processor';
     AmazonSpApiClient,
     AmazonSyncService,
     AmazonSyncProcessor,
+    AmazonExtendedHistoryBootstrap,
+    AmazonOrderLineFeeBackfillBootstrap,
   ],
   exports: [AmazonService, AmazonSpApiClient, AmazonSyncService],
 })

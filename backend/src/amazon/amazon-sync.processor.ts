@@ -94,8 +94,8 @@ export class AmazonSyncProcessor extends WorkerHost {
       const msg = shipErr instanceof Error ? shipErr.message : String(shipErr);
       this.logger.warn(`[post-initial-sync] shipments failed (non-fatal): ${msg}`);
     }
-    // Mini sync only pulled a handful of orders (capped). Pull full 30-day window here so Recent Orders
-    // isn’t empty until the next orders-batch-sync tick (~10 min). Idempotent with batch job.
+    // Mini sync only pulled a handful of orders (capped). Pull 30d here for everyone; the
+    // allowlisted account gets a one-time 365d ignoreCursor job on app boot (see bootstrap).
     try {
       await this.amazonService.syncRecentOrdersToDb(userId, { days: 30 });
       this.logger.log(

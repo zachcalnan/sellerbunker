@@ -1,5 +1,6 @@
 export type CogsBulkField =
   | "asin"
+  | "sku"
   | "unitCostIncVat"
   | "purchaseDate"
   | "supplier"
@@ -24,7 +25,7 @@ export const COGS_BULK_FIELD_META: {
   {
     id: "asin",
     label: "ASIN",
-    required: true,
+    required: false,
     aliases: [
       "asin",
       "asin1",
@@ -32,6 +33,19 @@ export const COGS_BULK_FIELD_META: {
       "product asin",
       "asin code",
       "asincode",
+    ],
+  },
+  {
+    id: "sku",
+    label: "SKU (optional)",
+    required: false,
+    aliases: [
+      "sku",
+      "seller sku",
+      "merchant sku",
+      "amazon sku",
+      "msku",
+      "seller-sku",
     ],
   },
   {
@@ -183,7 +197,7 @@ export const COGS_BULK_INFO =
   "Short dates like 4/2/2026 are read as day/month/year when both parts are ≤12 (UK-style). " +
   "Excel: if row 1 is a title, we look at the next rows to find the real column headers and map them automatically. " +
   "Product, Notes, Final, Min relsale $ are not imported unless you map them to a supported field. " +
-  "Each row creates one ledger entry; ASIN must already exist in SellerBunker.";
+  "Each row creates one ledger entry; ASIN/SKU must already exist in SellerBunker.";
 
 function normHeader(s: string): string {
   return s
@@ -268,6 +282,7 @@ function scoreHeaderRowCells(cells: string[]): number {
   const g = guessMapping(syntheticHeaders);
   let s = 0;
   if (g.asin) s += 100;
+  if (g.sku) s += 40;
   if (g.unitCostIncVat) s += 100;
   if (g.purchaseDate) s += 15;
   if (g.qtyPurchased) s += 10;
@@ -494,8 +509,11 @@ export function buildBulkApiRows(
   const out: Record<string, unknown>[] = [];
   for (const row of rawRows) {
     const asin = pick(row, "asin");
-    if (asin === undefined) continue;
-    const o: Record<string, unknown> = { asin };
+    const sku = pick(row, "sku");
+    if (asin === undefined && sku === undefined) continue;
+    const o: Record<string, unknown> = {};
+    if (asin !== undefined) o.asin = asin;
+    if (sku !== undefined) o.sku = sku;
     const cost = pick(row, "unitCostIncVat");
     if (cost !== undefined) o.unitCostIncVat = cost;
     const pd = pick(row, "purchaseDate");
