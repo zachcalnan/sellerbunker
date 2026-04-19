@@ -146,6 +146,126 @@ export class AmazonService {
     }
   }
 
+  /**
+   * User ids whose historical `orders` / `order_items` rows should be **read** together for org dashboards.
+   * When several org members linked the **same** Amazon `seller_id`, {@link getOrgAmazonAggregateUserIds} keeps
+   * only one “canonical” writer for sync (avoids double-counting live SP-API pulls). Your DB can still contain
+   * months of rows under **another** member’s `user_id` from a laptop sync — include every such user here so
+   * Orders / P&L / charts see them; duplicate Amazon lines are merged via {@link dedupeOrderItemsByOrderLine}.
+   * Prefer {@link getOrgAmazonAggregateUserIds} for sync/repair paths that must not fan out to duplicate sellers.
+   */
+  private async getOrgAmazonOrderReadUserIds(orgId: string): Promise<string[]> {
+    const members = await this.getOrgMemberUserIds(orgId);
+    if (members.length === 0) return [];
+    if (members.length === 1) return members;
+
+    const accounts = await this.prisma.sellerAccount.findMany({
+      where: {
+        userId: { in: members },
+        marketplace: 'amazon',
+        isActive: true,
+      },
+      select: { userId: true, sellerId: true },
+    });
+    const bySid = new Map<string, string[]>();
+    const noSidUserIds = new Set<string>();
+    for (const a of accounts) {
+      const sid = a.sellerId != null ? String(a.sellerId).trim().toUpperCase() : '';
+      if (!sid) {
+        noSidUserIds.add(a.userId);
+        continue;
+      }
+      const arr = bySid.get(sid) ?? [];
+      arr.push(a.userId);
+      bySid.set(sid, arr);
+    }
+    const out = new Set<string>();
+    for (const uids of bySid.values()) {
+      for (const u of [...new Set(uids)]) out.add(u);
+    }
+    for (const u of noSidUserIds) out.add(u);
+    for (const m of members) {
+      if (!out.has(m)) out.add(m);
+    }
+    return [...out];
+  }
+
+  /**
+   * Dev: explain which user ids are used for Amazon order reads vs sync canonicalization (same-org mystery data).
+   */
+  async getOrgAmazonOrdersScopeDiagnostics(orgId: string): Promise<{
+    orgId: string;
+    memberUserIds: string[];
+    memberEmails: Array<{ userId: string; email: string }>;
+    sellerAccounts: Array<{
+      userId: string;
+      sellerId: string | null;
+      ordersLastSyncedAt: string | null;
+    }>;
+    canonicalAggregateUserIds: string[];
+    orderReadUserIds: string[];
+    orderRowCountsByUserId: Array<{ userId: string; orders: number; orderItems: number }>;
+  }> {
+    const memberUserIds = await this.getOrgMemberUserIds(orgId);
+    const users = await this.prisma.user.findMany({
+      where: { id: { in: memberUserIds } },
+      select: { id: true, email: true },
+    });
+    const memberEmails = users.map((u) => ({
+      userId: u.id,
+      email: String(u.email ?? ''),
+    }));
+    const accounts = await this.prisma.sellerAccount.findMany({
+      where: {
+        userId: { in: memberUserIds },
+        marketplace: 'amazon',
+        isActive: true,
+      },
+      select: {
+        userId: true,
+        sellerId: true,
+        ordersLastSyncedAt: true,
+      },
+    });
+    const sellerAccounts = accounts.map((a) => ({
+      userId: a.userId,
+      sellerId: a.sellerId != null ? String(a.sellerId) : null,
+      ordersLastSyncedAt:
+        a.ordersLastSyncedAt instanceof Date
+          ? a.ordersLastSyncedAt.toISOString()
+          : a.ordersLastSyncedAt != null
+            ? String(a.ordersLastSyncedAt)
+            : null,
+    }));
+    const canonicalAggregateUserIds = await this.getOrgAmazonAggregateUserIds(orgId);
+    const orderReadUserIds = await this.getOrgAmazonOrderReadUserIds(orgId);
+
+    const orderRowCountsByUserId: Array<{
+      userId: string;
+      orders: number;
+      orderItems: number;
+    }> = [];
+    for (const uid of memberUserIds) {
+      const [orders, orderItems] = await Promise.all([
+        this.prisma.order.count({ where: { userId: uid } }),
+        (this.prisma as any).orderItem.count({ where: { userId: uid } }),
+      ]);
+      if (orders > 0 || orderItems > 0) {
+        orderRowCountsByUserId.push({ userId: uid, orders, orderItems });
+      }
+    }
+
+    return {
+      orgId,
+      memberUserIds,
+      memberEmails,
+      sellerAccounts,
+      canonicalAggregateUserIds,
+      orderReadUserIds,
+      orderRowCountsByUserId,
+    };
+  }
+
   private resolveCurrencyFromMarketplace(
     defaultCurrency: string,
     marketplaceId?: string,
@@ -1186,20 +1306,14 @@ export class AmazonService {
     }
   }
 
-  /** Load org VAT settings for a user (uses user's active org). Returns null if no org or no VAT settings. */
-  private async getVatSettingsForUser(userId: string): Promise<{
+  /** Load org VAT settings by organization id (source of truth for API routes scoped with `orgId`). */
+  private async getVatSettingsForOrg(orgId: string): Promise<{
     vatRegistrationType: string;
     vatEffectiveDate: Date | null;
     vatRatePct: number;
     vatFlatRatePct: number;
     vatCostsIncludeVat: boolean;
   } | null> {
-    const user = await this.prisma.user.findUnique({
-      where: { id: userId },
-      select: { activeOrgId: true },
-    });
-    const orgId = user?.activeOrgId;
-    if (!orgId) return null;
     const org = await (this.prisma as any).organization.findUnique({
       where: { id: orgId },
       select: {
@@ -1219,6 +1333,23 @@ export class AmazonService {
       vatFlatRatePct: org.vatFlatRatePct != null ? Number(org.vatFlatRatePct) : 0,
       vatCostsIncludeVat: org.vatCostsIncludeVat !== false,
     };
+  }
+
+  /** Load org VAT settings for a user (uses user's active org). Returns null if no org or no VAT settings. */
+  private async getVatSettingsForUser(userId: string): Promise<{
+    vatRegistrationType: string;
+    vatEffectiveDate: Date | null;
+    vatRatePct: number;
+    vatFlatRatePct: number;
+    vatCostsIncludeVat: boolean;
+  } | null> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { activeOrgId: true },
+    });
+    const orgId = user?.activeOrgId;
+    if (!orgId) return null;
+    return this.getVatSettingsForOrg(orgId);
   }
 
   /** SP-API Money / Decimal-like object → number. */
@@ -2355,7 +2486,7 @@ export class AmazonService {
       nowSafe,
     );
 
-    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
+    const userIds = await this.getOrgAmazonOrderReadUserIds(orgId);
     if (userIds.length === 0) return defaultRes;
 
     const rawCategoryItems = await (this.prisma as any).orderItem.findMany({
@@ -2516,7 +2647,7 @@ export class AmazonService {
       nowSafe,
     );
 
-    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
+    const userIds = await this.getOrgAmazonOrderReadUserIds(orgId);
     if (userIds.length === 0) {
       return {
         totalCogs: 0,
@@ -2733,6 +2864,7 @@ export class AmazonService {
 
     const allMemberUserIds = await this.getOrgMemberUserIds(orgId);
     const amazonAggUserIds = await this.getOrgAmazonAggregateUserIds(orgId);
+    const amazonOrderReadUserIds = await this.getOrgAmazonOrderReadUserIds(orgId);
     const toNum = (v: unknown): number => {
       if (v == null) return 0;
       if (typeof v === 'number' && Number.isFinite(v)) return v;
@@ -2748,19 +2880,17 @@ export class AmazonService {
     let inputVat = 0;
 
     // VAT settings for computing VAT when not stored on order items
-    let vatSettings: Awaited<ReturnType<AmazonService['getVatSettingsForUser']>> = null;
-    if (allMemberUserIds.length > 0) {
-      try {
-        vatSettings = await this.getVatSettingsForUser(allMemberUserIds[0]);
-      } catch {
-        // ignore
-      }
+    let vatSettings: Awaited<ReturnType<AmazonService['getVatSettingsForOrg']>> = null;
+    try {
+      vatSettings = await this.getVatSettingsForOrg(orgId);
+    } catch {
+      // ignore
     }
 
-    if (amazonAggUserIds.length > 0) {
+    if (amazonOrderReadUserIds.length > 0) {
       const rawPnlItems = await (this.prisma as any).orderItem.findMany({
         where: {
-          userId: { in: amazonAggUserIds },
+          userId: { in: amazonOrderReadUserIds },
           marketplace: marketplaceFilter,
           ...this.whereOrderItemInUtcDashboardRange(safeStart, safeEnd),
         },
@@ -3051,7 +3181,7 @@ export class AmazonService {
     const startDate = range?.start ? new Date(range.start) : defaultStart;
     const endDate = range?.end ? new Date(range.end) : nowSafe;
 
-    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
+    const userIds = await this.getOrgAmazonOrderReadUserIds(orgId);
     const rawTsItems = await (this.prisma as any).orderItem.findMany({
       where: {
         userId: { in: userIds },
@@ -6929,7 +7059,7 @@ export class AmazonService {
     const marketplaceFilter = this.resolveMarketplaceFilter(marketplaceId);
     let userIds: string[];
     try {
-      userIds = await this.getOrgAmazonAggregateUserIds(orgId);
+      userIds = await this.getOrgAmazonOrderReadUserIds(orgId);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.logger.warn(`[listOrders] getOrgMemberUserIds failed (orgId=${orgId}): ${msg}`);
@@ -7011,14 +7141,12 @@ export class AmazonService {
 
     this.logger.log(`[listOrders] orgId=${orgId} orderItemCount=${items.length}`);
     let listOrdersVatSettings: Awaited<
-      ReturnType<AmazonService['getVatSettingsForUser']>
+      ReturnType<AmazonService['getVatSettingsForOrg']>
     > = null;
-    if (userIds.length > 0) {
-      try {
-        listOrdersVatSettings = await this.getVatSettingsForUser(userIds[0]);
-      } catch {
-        listOrdersVatSettings = null;
-      }
+    try {
+      listOrdersVatSettings = await this.getVatSettingsForOrg(orgId);
+    } catch {
+      listOrdersVatSettings = null;
     }
     const productIds = [...new Set(items.map((i) => i.productId).filter(Boolean))];
     const orderDbIds = [

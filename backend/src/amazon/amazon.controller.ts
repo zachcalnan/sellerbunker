@@ -383,6 +383,16 @@ ping() {
   }
 
   /**
+   * Dev-only: which user ids are canonical for sync vs expanded for order reads (same `seller_id` members).
+   * GET /api/amazon/dev/orders-scope-debug
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Get('dev/orders-scope-debug')
+  async ordersScopeDebug(@Req() req: { user: { orgId: string } }) {
+    return this.amazonService.getOrgAmazonOrdersScopeDiagnostics(req.user.orgId);
+  }
+
+  /**
    * Dev-only: compare DB `order_items` fee fields vs `listOrders` for one Amazon order id (same path as UI).
    * GET /api/amazon/dev/order-fee-sanity?amazonOrderId=204-9599325-7606713
    * Use while logged in (browser session or same auth as the app). No manual “does it look right?” — read `summary.ok` and `checks`.
