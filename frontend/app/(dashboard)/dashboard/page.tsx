@@ -1835,6 +1835,9 @@ type ProfitAndLossData = {
   totalAmazonFees: number;
   softwareSubsTotal: number;
   otherSubsTotal: number;
+  amazonSubscriptionFees?: number;
+  amazonStorageFees?: number;
+  amazonInboundShippingFees?: number;
   totalFixedCosts: number;
   totalProfit: number;
   outputVat: number;
@@ -2053,6 +2056,14 @@ function ProfitAndLoss({
                 <td className="py-0.5 pr-2 pl-2 text-[var(--foreground)]">Software subscriptions</td>
                 <td className="py-0.5 pl-2 text-right tabular-nums text-[var(--foreground)]">{fmt(data.softwareSubsTotal)}</td>
               </tr>
+              {(data.amazonSubscriptionFees ?? 0) !== 0 && (
+                <tr className="border-b border-[var(--surface-border)]">
+                  <td className="py-0.5 pr-2 pl-2 text-[var(--foreground)]">Amazon subscription</td>
+                  <td className="py-0.5 pl-2 text-right tabular-nums text-[var(--foreground)]">
+                    {fmt(data.amazonSubscriptionFees ?? 0)}
+                  </td>
+                </tr>
+              )}
               <tr className="border-b border-[var(--surface-border)]">
                 <td className="py-0.5 pr-2 pl-2 text-[var(--foreground)]">Other subscriptions</td>
                 <td className="py-0.5 pl-2 text-right tabular-nums text-[var(--foreground)]">{fmt(data.otherSubsTotal)}</td>
@@ -2088,6 +2099,22 @@ function ProfitAndLoss({
                   {fmt(data.otherAdjustments)}
                 </td>
               </tr>
+              {(data.amazonStorageFees ?? 0) !== 0 && (
+                <tr className="border-b border-[var(--surface-border)]">
+                  <td className="py-0.5 pr-2 pl-2 text-[var(--foreground)]">Storage fees</td>
+                  <td className="py-0.5 pl-2 text-right tabular-nums text-[var(--foreground)]">
+                    {fmt(data.amazonStorageFees ?? 0)}
+                  </td>
+                </tr>
+              )}
+              {(data.amazonInboundShippingFees ?? 0) !== 0 && (
+                <tr className="border-b border-[var(--surface-border)]">
+                  <td className="py-0.5 pr-2 pl-2 text-[var(--foreground)]">Inbound shipping</td>
+                  <td className="py-0.5 pl-2 text-right tabular-nums text-[var(--foreground)]">
+                    {fmt(data.amazonInboundShippingFees ?? 0)}
+                  </td>
+                </tr>
+              )}
               <tr className="border-b border-[var(--surface-border)] font-medium">
                 <td className="py-1 pr-2 pl-2 text-[var(--foreground)]">Total adjustments</td>
                 <td className="py-1 pl-2 text-right tabular-nums text-[var(--foreground)]">
@@ -2146,6 +2173,9 @@ type InventorySummaryRow = {
   totalQty: number | null;
   currentListedPrice?: number | null;
   costOfGoods?: number | null;
+  estimatedAmazonFeePerUnit?: number | null;
+  estimatedReferralFeePerUnit?: number | null;
+  estimatedFbaFeePerUnit?: number | null;
   byMarketplace?: Array<{
     fulfillableQty: number;
     inboundQty: number;
@@ -2220,65 +2250,102 @@ function InventorySummary({
   const total = rows.reduce((sum, r) => sum + n(r.totalQty), 0);
   const price = (r: InventorySummaryRow) => n(r.currentListedPrice);
   const cogs = (r: InventorySummaryRow) => n(r.costOfGoods);
+  const feePerUnit = (r: InventorySummaryRow) => {
+    const px = price(r);
+    const totalFee =
+      r.estimatedAmazonFeePerUnit != null && Number.isFinite(Number(r.estimatedAmazonFeePerUnit))
+        ? Math.abs(Number(r.estimatedAmazonFeePerUnit))
+        : null;
+    const ref =
+      r.estimatedReferralFeePerUnit != null && Number.isFinite(Number(r.estimatedReferralFeePerUnit))
+        ? Math.abs(Number(r.estimatedReferralFeePerUnit))
+        : null;
+    const fba =
+      r.estimatedFbaFeePerUnit != null && Number.isFinite(Number(r.estimatedFbaFeePerUnit))
+        ? Math.abs(Number(r.estimatedFbaFeePerUnit))
+        : null;
+    const parts = ref != null || fba != null ? (ref ?? 0) + (fba ?? 0) : null;
+    const fallback =
+      px > 0 ? Math.round(px * 0.35 * 100) / 100 : 0;
+    return totalFee ?? parts ?? fallback;
+  };
 
   let fulfillable = 0;
   let fulfillableValue = 0;
   let fulfillableCost = 0;
+  let fulfillableFees = 0;
   let reserved = 0;
   let reservedValue = 0;
   let reservedCost = 0;
+  let reservedFees = 0;
   let inbound = 0;
   let inboundValue = 0;
   let inboundCost = 0;
+  let inboundFees = 0;
   let researching = 0;
   let researchingValue = 0;
   let researchingCost = 0;
+  let researchingFees = 0;
   let unfulfillable = 0;
   let unfulfillableValue = 0;
   let unfulfillableCost = 0;
+  let unfulfillableFees = 0;
   let current = 0;
   let currentValue = 0;
   let currentCost = 0;
+  let currentFees = 0;
   let fcProcessing = 0;
   let fcProcessingValue = 0;
   let fcProcessingCost = 0;
+  let fcProcessingFees = 0;
   let customerOrders = 0;
   let customerOrdersValue = 0;
   let customerOrdersCost = 0;
+  let customerOrdersFees = 0;
   let transshipment = 0;
   let transshipmentValue = 0;
   let transshipmentCost = 0;
+  let transshipmentFees = 0;
   let inboundWorking = 0;
   let inboundWorkingValue = 0;
   let inboundWorkingCost = 0;
+  let inboundWorkingFees = 0;
   let inboundShipped = 0;
   let inboundShippedValue = 0;
   let inboundShippedCost = 0;
+  let inboundShippedFees = 0;
   let inboundReceiving = 0;
   let inboundReceivingValue = 0;
   let inboundReceivingCost = 0;
+  let inboundReceivingFees = 0;
   let warehouseDamaged = 0;
   let warehouseDamagedValue = 0;
   let warehouseDamagedCost = 0;
+  let warehouseDamagedFees = 0;
   let expired = 0;
   let expiredValue = 0;
   let expiredCost = 0;
+  let expiredFees = 0;
 
   rows.forEach((r) => {
     const p = price(r);
     const c = cogs(r);
+    const fee = feePerUnit(r);
     const av = n(r.availableQty);
     const rv = n(r.reservedQty);
     const inv = n(r.inboundQty);
     fulfillable += av;
     fulfillableValue += p * av;
     fulfillableCost += c * av;
+    fulfillableFees += fee * av;
     reserved += rv;
     reservedValue += p * rv;
     reservedCost += c * rv;
+    reservedFees += fee * rv;
     inbound += inv;
     inboundValue += p * inv;
     inboundCost += c * inv;
+    inboundFees += fee * inv;
 
     r.byMarketplace?.forEach((m) => {
       const rq = n(m.researchingQty);
@@ -2296,70 +2363,89 @@ function InventorySummary({
       researching += rq;
       researchingValue += p * rq;
       researchingCost += c * rq;
+      researchingFees += fee * rq;
       unfulfillable += uq;
       unfulfillableValue += p * uq;
       unfulfillableCost += c * uq;
+      unfulfillableFees += fee * uq;
       current += cq;
       currentValue += p * cq;
       currentCost += c * cq;
+      currentFees += fee * cq;
       fcProcessing += fcp;
       fcProcessingValue += p * fcp;
       fcProcessingCost += c * fcp;
+      fcProcessingFees += fee * fcp;
       customerOrders += co;
       customerOrdersValue += p * co;
       customerOrdersCost += c * co;
+      customerOrdersFees += fee * co;
       transshipment += ts;
       transshipmentValue += p * ts;
       transshipmentCost += c * ts;
+      transshipmentFees += fee * ts;
       inboundWorking += iw;
       inboundWorkingValue += p * iw;
       inboundWorkingCost += c * iw;
+      inboundWorkingFees += fee * iw;
       inboundShipped += ish;
       inboundShippedValue += p * ish;
       inboundShippedCost += c * ish;
+      inboundShippedFees += fee * ish;
       inboundReceiving += ir;
       inboundReceivingValue += p * ir;
       inboundReceivingCost += c * ir;
+      inboundReceivingFees += fee * ir;
       warehouseDamaged += wd;
       warehouseDamagedValue += p * wd;
       warehouseDamagedCost += c * wd;
+      warehouseDamagedFees += fee * wd;
       expired += ex;
       expiredValue += p * ex;
       expiredCost += c * ex;
+      expiredFees += fee * ex;
     });
   });
 
-  // Total value/cost from product-level totalQty to avoid double-counting
+  // Total value/cost from product-level totalQty to avoid double-counting.
+  // "Potential profit" must subtract COGS *and* estimated selling fees (Amazon always has costs).
   const totalValue = rows.reduce((sum, r) => sum + price(r) * n(r.totalQty), 0);
   const totalCost = rows.reduce((sum, r) => sum + cogs(r) * n(r.totalQty), 0);
-  const totalProfit = totalValue - totalCost;
+  const totalFees = rows.reduce((sum, r) => sum + feePerUnit(r) * n(r.totalQty), 0);
+  const totalProfit = totalValue - totalCost - totalFees;
   const totalRoiPct = totalCost > 0 ? (totalProfit / totalCost) * 100 : null;
 
-  // Granular statuses from FBA API (details=true): show all breakdowns we store; profit = value - cost, ROI = profit/cost
+  // Granular statuses from FBA API (details=true): profit subtracts COGS + estimated Amazon selling fees.
   type StatusRow = { label: string; value: number; stockValue: number; unitCost: number; profit: number; roiPct: number | null };
-  const toStatusRow = (label: string, value: number, stockValue: number, unitCost: number): StatusRow => ({
+  const toStatusRow = (label: string, value: number, stockValue: number, unitCost: number, feeCost: number): StatusRow => ({
     label,
     value,
     stockValue,
     unitCost,
-    profit: stockValue - unitCost,
-    roiPct: unitCost > 0 ? ((stockValue - unitCost) / unitCost) * 100 : null,
+    profit: stockValue - unitCost - feeCost,
+    roiPct: unitCost > 0 ? ((stockValue - unitCost - feeCost) / unitCost) * 100 : null,
   });
   const statuses: StatusRow[] = [
-    toStatusRow("FBA Available", fulfillable, fulfillableValue, fulfillableCost),
-    toStatusRow("FC Processing", fcProcessing, fcProcessingValue, fcProcessingCost),
-    toStatusRow("Customer Orders", customerOrders, customerOrdersValue, customerOrdersCost),
-    toStatusRow("Transshipment", transshipment, transshipmentValue, transshipmentCost),
-    toStatusRow("Reserved", reserved, reservedValue, reservedCost),
-    toStatusRow("Inbound Working", inboundWorking, inboundWorkingValue, inboundWorkingCost),
-    toStatusRow("Inbound Shipped", inboundShipped, inboundShippedValue, inboundShippedCost),
-    toStatusRow("Inbound Receiving", inboundReceiving, inboundReceivingValue, inboundReceivingCost),
-    toStatusRow("Inbound", inbound, inboundValue, inboundCost),
-    toStatusRow("Researching", researching, researchingValue, researchingCost),
-    toStatusRow("Unfulfillable", unfulfillable, unfulfillableValue, unfulfillableCost),
-    toStatusRow("Warehouse Damaged", warehouseDamaged, warehouseDamagedValue, warehouseDamagedCost),
-    toStatusRow("Expired", expired, expiredValue, expiredCost),
-    toStatusRow("Current", current > 0 ? current : total, current > 0 ? currentValue : totalValue, current > 0 ? currentCost : totalCost),
+    toStatusRow("FBA Available", fulfillable, fulfillableValue, fulfillableCost, fulfillableFees),
+    toStatusRow("FC Processing", fcProcessing, fcProcessingValue, fcProcessingCost, fcProcessingFees),
+    toStatusRow("Customer Orders", customerOrders, customerOrdersValue, customerOrdersCost, customerOrdersFees),
+    toStatusRow("Transshipment", transshipment, transshipmentValue, transshipmentCost, transshipmentFees),
+    toStatusRow("Reserved", reserved, reservedValue, reservedCost, reservedFees),
+    toStatusRow("Inbound Working", inboundWorking, inboundWorkingValue, inboundWorkingCost, inboundWorkingFees),
+    toStatusRow("Inbound Shipped", inboundShipped, inboundShippedValue, inboundShippedCost, inboundShippedFees),
+    toStatusRow("Inbound Receiving", inboundReceiving, inboundReceivingValue, inboundReceivingCost, inboundReceivingFees),
+    toStatusRow("Inbound", inbound, inboundValue, inboundCost, inboundFees),
+    toStatusRow("Researching", researching, researchingValue, researchingCost, researchingFees),
+    toStatusRow("Unfulfillable", unfulfillable, unfulfillableValue, unfulfillableCost, unfulfillableFees),
+    toStatusRow("Warehouse Damaged", warehouseDamaged, warehouseDamagedValue, warehouseDamagedCost, warehouseDamagedFees),
+    toStatusRow("Expired", expired, expiredValue, expiredCost, expiredFees),
+    toStatusRow(
+      "Current",
+      current > 0 ? current : total,
+      current > 0 ? currentValue : totalValue,
+      current > 0 ? currentCost : totalCost,
+      current > 0 ? currentFees : totalFees,
+    ),
   ];
 
   return (

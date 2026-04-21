@@ -46,6 +46,8 @@ type InventoryRow = {
 
 const SYSTEM_SKUS = new Set(["AMAZON_GENERIC", "AMAZON_MULTI"]);
 const PAGE_SIZE = 20;
+// When we have no fee estimate at all, use a conservative blended rate so we never show fee-less profit.
+const DEFAULT_AMAZON_FEE_RATE_WHEN_UNKNOWN = 0.35;
 
 function formatInventoryMoney(amount: number | null | undefined, currency: string) {
   if (amount == null || !Number.isFinite(amount)) return "—";
@@ -62,7 +64,14 @@ function inventoryProfitContext(r: InventoryRow) {
   const referral =
     r.estimatedReferralFeePerUnit != null ? Math.abs(Number(r.estimatedReferralFeePerUnit)) : null;
   const fba = r.estimatedFbaFeePerUnit != null ? Math.abs(Number(r.estimatedFbaFeePerUnit)) : null;
-  const amazonFeeForCalc = amazonTotal ?? 0;
+  const fallbackFromParts =
+    referral != null || fba != null ? (referral ?? 0) + (fba ?? 0) : null;
+  const amazonFeeForCalc =
+    amazonTotal ??
+    fallbackFromParts ??
+    (price != null && Number.isFinite(price) && price > 0
+      ? Math.round(price * DEFAULT_AMAZON_FEE_RATE_WHEN_UNKNOWN * 100) / 100
+      : 0);
   const potentialPerUnit =
     price != null && cogs != null
       ? Math.round((price - amazonFeeForCalc - cogs) * 100) / 100

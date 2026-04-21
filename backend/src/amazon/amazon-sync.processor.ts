@@ -684,10 +684,17 @@ export class AmazonSyncProcessor extends WorkerHost {
           );
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e);
-          errors.push({ orgId: org.id, error: msg });
-          this.logger.error(
-            `[AmazonSync] Titles backfill failed for org ${org.id}: ${msg}`,
-          );
+          // Not linked is an expected state for many orgs; don't spam errors or fail the batch.
+          if (typeof msg === 'string' && msg.toLowerCase().includes('amazon account not linked')) {
+            this.logger.log(
+              `[AmazonSync] Titles backfill skipped for org ${org.id}: Amazon account not linked`,
+            );
+          } else {
+            errors.push({ orgId: org.id, error: msg });
+            this.logger.error(
+              `[AmazonSync] Titles backfill failed for org ${org.id}: ${msg}`,
+            );
+          }
         }
       }
 

@@ -22,7 +22,9 @@
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json",
-    "fee-backfill": "node -r tsconfig-paths/register -r ts-node/register src/scripts/run-order-fee-backfill.ts"
+    "fee-backfill": "node -r tsconfig-paths/register -r ts-node/register src/scripts/run-order-fee-backfill.ts",
+    "merge-user-data": "node -r tsconfig-paths/register -r ts-node/register src/scripts/merge-user-data.ts",
+    "align-prod-clerk": "node -r dotenv/config -r tsconfig-paths/register -r ts-node/register src/scripts/align-user-clerk-from-prod.ts"
   },
   "dependencies": {
     "@api/sp-api": "file:.api/apis/sp-api",

@@ -452,6 +452,86 @@ ping() {
   }
 
   /**
+   * Dev-only: live SP-API getOrders revenue sum vs DB revenue sum.
+   * GET /api/amazon/dev/revenue-compare?months=13
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Get('dev/revenue-compare')
+  async revenueCompare(
+    @Req() req: { user: { orgId: string; userId: string } },
+    @Query('months') months?: string,
+  ) {
+    const m = months != null ? Number(months) : 13;
+    return this.amazonService.getAmazonRevenueComparisonLive(
+      req.user.orgId,
+      req.user.userId,
+      Number.isFinite(m) ? m : 13,
+    );
+  }
+
+  /**
+   * Dev-only (LOCALHOST ONLY): live SP-API revenue sum vs DB without auth headers.
+   * GET /api/amazon/dev/revenue-compare-local?orgId=<orgId>&months=13
+   */
+  @Get('dev/revenue-compare-local')
+  async revenueCompareLocal(
+    @Req() req: { ip?: string; headers?: Record<string, unknown> },
+    @Query('orgId') orgId?: string,
+    @Query('months') months?: string,
+    @Query('userId') userId?: string,
+  ) {
+    const nodeEnv = String(process.env.NODE_ENV ?? '').toLowerCase();
+    if (nodeEnv === 'production') {
+      throw new BadRequestException('This endpoint is disabled in production.');
+    }
+    const ip = String((req as any)?.ip ?? '').trim();
+    const xf = String((req as any)?.headers?.['x-forwarded-for'] ?? '').trim();
+    const originIp = (xf || ip).split(',')[0]?.trim() ?? '';
+    const okLocal =
+      originIp === '127.0.0.1' ||
+      originIp === '::1' ||
+      originIp === '::ffff:127.0.0.1' ||
+      originIp === '';
+    if (!okLocal) {
+      throw new BadRequestException('This endpoint is only available from localhost.');
+    }
+    const oid = String(orgId ?? '').trim();
+    if (!oid) {
+      throw new BadRequestException('Query orgId is required.');
+    }
+    const m = months != null ? Number(months) : 13;
+    return this.amazonService.getAmazonRevenueComparisonLiveForOrg(
+      oid,
+      Number.isFinite(m) ? m : 13,
+      userId != null ? String(userId).trim() : undefined,
+    );
+  }
+
+  /**
+   * Dev-only (LOCALHOST ONLY): list orgs + users that have an active linked Amazon seller account.
+   * GET /api/amazon/dev/linked-amazon-local
+   */
+  @Get('dev/linked-amazon-local')
+  async linkedAmazonLocal(@Req() req: { ip?: string; headers?: Record<string, unknown> }) {
+    const nodeEnv = String(process.env.NODE_ENV ?? '').toLowerCase();
+    if (nodeEnv === 'production') {
+      throw new BadRequestException('This endpoint is disabled in production.');
+    }
+    const ip = String((req as any)?.ip ?? '').trim();
+    const xf = String((req as any)?.headers?.['x-forwarded-for'] ?? '').trim();
+    const originIp = (xf || ip).split(',')[0]?.trim() ?? '';
+    const okLocal =
+      originIp === '127.0.0.1' ||
+      originIp === '::1' ||
+      originIp === '::ffff:127.0.0.1' ||
+      originIp === '';
+    if (!okLocal) {
+      throw new BadRequestException('This endpoint is only available from localhost.');
+    }
+    return this.amazonService.getLinkedAmazonAccountsLocal();
+  }
+
+  /**
    * Dev-only helper: recompute the last 30 days of daily KPI aggregates
    * for the authenticated user from existing Order rows.
    */
