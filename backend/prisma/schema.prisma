@@ -34,6 +34,7 @@ model User {
   marketplaceSettings UserMarketplaceSetting[]
   initialSyncProgress InitialSyncProgress?
   activeOrg      Organization?            @relation("ActiveOrg", fields: [activeOrgId], references: [id])
+  asinSellingEligibilities AsinSellingEligibility[]
 
   @@map("users")
 }
@@ -203,6 +204,27 @@ model SellerAccount {
   @@unique([userId, marketplace])
   @@index([userId])
   @@map("seller_accounts")
+}
+
+/// SP-API Listings Restrictions snapshot per ASIN (restock / gating). Buyer bots should require `canRestock` and a fresh `checkedAt`.
+model AsinSellingEligibility {
+  id             String   @id @default(uuid())
+  userId         String   @map("user_id")
+  marketplaceId  String   @map("marketplace_id")
+  asin           String
+  canRestock     Boolean  @default(false) @map("can_restock")
+  checkedAt      DateTime @map("checked_at")
+  source         String
+  rawJson        Json?    @map("raw_json")
+  notes          String?
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, marketplaceId, asin])
+  @@index([userId, checkedAt])
+  @@index([userId, canRestock])
+  @@map("asin_selling_eligibility")
 }
 
 model Product {

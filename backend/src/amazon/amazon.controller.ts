@@ -532,6 +532,55 @@ ping() {
   }
 
   /**
+   * Dev-only (LOCALHOST ONLY): resolve user by email, optionally refresh Listings Restrictions (**UK only**) for distinct ASINs, return stored rows.
+   * Example: GET /api/amazon/dev/selling-eligibility-local?email=rugby.4.lif3@hotmail.com&limit=5000
+   * Add listOnly=1 to skip SP-API calls and only read the DB. Omit listOnly to run refresh first (can take many minutes at default 5000 ASINs).
+   */
+  @Get('dev/selling-eligibility-local')
+  async sellingEligibilityLocal(
+    @Req() req: { ip?: string; headers?: Record<string, unknown> },
+    @Query('email') email?: string,
+    @Query('limit') limit?: string,
+    @Query('delayMs') delayMs?: string,
+    @Query('listOnly') listOnly?: string,
+  ) {
+    const nodeEnv = String(process.env.NODE_ENV ?? '').toLowerCase();
+    if (nodeEnv === 'production') {
+      throw new BadRequestException('This endpoint is disabled in production.');
+    }
+    const ip = String((req as any)?.ip ?? '').trim();
+    const xf = String((req as any)?.headers?.['x-forwarded-for'] ?? '').trim();
+    const originIp = (xf || ip).split(',')[0]?.trim() ?? '';
+    const okLocal =
+      originIp === '127.0.0.1' ||
+      originIp === '::1' ||
+      originIp === '::ffff:127.0.0.1' ||
+      originIp === '';
+    if (!okLocal) {
+      throw new BadRequestException('This endpoint is only available from localhost.');
+    }
+    const em = String(email ?? '').trim();
+    if (!em) {
+      throw new BadRequestException('Query email is required.');
+    }
+    const userId = await this.amazonService.findUserIdByEmailForLocal(em);
+    if (!userId) {
+      throw new BadRequestException(`No user found for email: ${em}`);
+    }
+    const lim = limit != null ? Number(limit) : undefined;
+    const dm = delayMs != null ? Number(delayMs) : undefined;
+    let refresh: unknown = null;
+    if (listOnly !== '1' && listOnly !== 'true') {
+      refresh = await this.amazonService.refreshAsinSellingEligibilityForUser(userId, {
+        limit: Number.isFinite(lim) ? lim : undefined,
+        delayMs: Number.isFinite(dm) ? dm : undefined,
+      });
+    }
+    const rows = await this.amazonService.listAsinSellingEligibilityForUser(userId, { take: 5000 });
+    return { email: em, userId, refresh, rows };
+  }
+
+  /**
    * Dev-only helper: recompute the last 30 days of daily KPI aggregates
    * for the authenticated user from existing Order rows.
    */
@@ -834,6 +883,59 @@ ping() {
     const n = Number(limit ?? 5000);
     const safeLimit = Number.isFinite(n) ? Math.max(1, Math.min(10000, n)) : 5000;
     return this.amazonService.getReplenishProducts(req.user.orgId, safeLimit, req.user.marketplaceId);
+  }
+
+  /**
+   * ASIN selling eligibility (SP-API Listings Restrictions): stored rows for restock / gating.
+   * Example: GET /api/amazon/selling-eligibility?take=500  (defaults to UK `A1F83G8C2ARO7P`; pass `marketplaceId` to override)
+   * Optional: canRestock=true|false, maxAgeHours=168 (only rows checked within the last N hours), marketplaceId (UK default in data after refresh)
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Get('selling-eligibility')
+  async listSellingEligibility(
+    @Req() req: { user: { userId: string } },
+    @Query('canRestock') canRestock?: string,
+    @Query('maxAgeHours') maxAgeHours?: string,
+    @Query('take') take?: string,
+    @Query('marketplaceId') marketplaceId?: string,
+  ) {
+    const cr =
+      canRestock === '1' || canRestock === 'true'
+        ? true
+        : canRestock === '0' || canRestock === 'false'
+          ? false
+          : undefined;
+    const mh = maxAgeHours != null ? Number(maxAgeHours) : undefined;
+    const t = take != null ? Number(take) : undefined;
+    const mid = marketplaceId?.trim();
+    return this.amazonService.listAsinSellingEligibilityForUser(req.user.userId, {
+      canRestock: cr,
+      maxAgeHours: Number.isFinite(mh) ? mh : undefined,
+      take: Number.isFinite(t) ? t : undefined,
+      ...(mid ? { marketplaceId: mid } : {}),
+    });
+  }
+
+  /**
+   * Refresh ASIN selling eligibility from Amazon (Listings Restrictions) for the logged-in user's SKUs.
+   * **UK marketplace only** (`A1F83G8C2ARO7P`), one call per distinct ASIN (from your products + inventory-backed SKUs). Body optional: { "limit": 5000, "delayMs": 250, "conditionType": "new_new" }
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Post('selling-eligibility/refresh')
+  async refreshSellingEligibility(
+    @Req() req: { user: { userId: string } },
+    @Body()
+    body?: {
+      limit?: number;
+      delayMs?: number;
+      conditionType?: string;
+    },
+  ) {
+    return this.amazonService.refreshAsinSellingEligibilityForUser(req.user.userId, {
+      limit: body?.limit,
+      delayMs: body?.delayMs,
+      conditionType: body?.conditionType,
+    });
   }
 
   /**

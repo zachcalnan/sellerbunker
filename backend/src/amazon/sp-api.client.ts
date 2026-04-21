@@ -415,6 +415,39 @@ export class AmazonSpApiClient {
   }
 
   /**
+   * Listings Restrictions API v2021-08-01: getListingsRestrictions
+   * GET /listings/2021-08-01/restrictions
+   *
+   * Returns catalog listing restrictions for this seller + ASIN (gating / approvals). Empty restrictions
+   * generally means the seller may list (subject to Amazon policy changes).
+   * @see https://developer-docs.amazon.com/sp-api/reference/getlistingsrestrictions
+   */
+  async getListingsRestrictions(
+    credentials: SpApiCredentials,
+    params: {
+      asin: string;
+      sellerId: string;
+      marketplaceIds: string[];
+      conditionType?: string;
+      reasonLocale?: string;
+    },
+  ): Promise<unknown> {
+    const ids = (params.marketplaceIds ?? []).map((id) => String(id).trim()).filter(Boolean);
+    const query: Record<string, unknown> = {
+      asin: String(params.asin ?? '').trim(),
+      sellerId: String(params.sellerId ?? '').trim(),
+      marketplaceIds: ids.join(','),
+    };
+    if (params.conditionType) query.conditionType = params.conditionType;
+    if (params.reasonLocale) query.reasonLocale = params.reasonLocale;
+    return this.signedSpApiRequest(credentials, {
+      method: 'GET',
+      path: '/listings/2021-08-01/restrictions',
+      query,
+    });
+  }
+
+  /**
    * Product Pricing API v0: getCompetitivePricing
    * GET /products/pricing/v0/competitivePrice
    *

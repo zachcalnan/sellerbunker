@@ -30,6 +30,7 @@ import {
   parseFinancesShipmentItemFeesBreakdown,
   parseFinancesShipmentItemFeesSignedTotal,
 } from './finances-item-fee-parse.util';
+import { eligibilityFromListingsRestrictionsBody } from './asin-selling-eligibility.util';
 
 /** When we have no settled fees and no product fee estimate, use this share of revenue as fee so profit/ROI are not overstated. */
 const DEFAULT_AMAZON_FEE_RATE_WHEN_UNKNOWN = 0.35;
@@ -40,6 +41,9 @@ const DEFAULT_AMAZON_FEE_RATE_WHEN_UNKNOWN = 0.35;
  * @@unique([userId, orderId, marketplace]) and creates duplicate order rows for one Amazon order.
  */
 const ORDER_MARKETPLACE_CANONICAL = 'amazon';
+
+/** Listings Restrictions checks: UK marketplace only, one row per distinct product ASIN. */
+const AMAZON_UK_MARKETPLACE_ID_FOR_LISTINGS_RESTRICTIONS = 'A1F83G8C2ARO7P';
 
 /** Parent `orders.amazon_order_status` values we exclude from Prisma aggregates (exact SP-API spellings + variants). */
 const PRISMA_EXCLUDED_AMAZON_ORDER_STATUSES: string[] = [
@@ -5570,6 +5574,226 @@ export class AmazonService {
     });
 
     return combined.slice(0, limit);
+  }
+
+  /**
+   * UK-only (`A1F83G8C2ARO7P`): one Listings Restrictions call per **distinct ASIN** for this user.
+   * ASINs come from `products` and from `inventory_by_marketplace` → product (same ASIN deduped).
+   * Does not change inventory, pricing, or fees — eligibility refresh only.
+   */
+  private async collectUkSellingEligibilityPairsFromUserListings(
+    userId: string,
+  ): Promise<Array<{ asin: string; marketplaceId: string }>> {
+    const uk = AMAZON_UK_MARKETPLACE_ID_FOR_LISTINGS_RESTRICTIONS;
+    const normAsin = (a: string | null | undefined) => {
+      const t = String(a ?? '').trim().toUpperCase();
+      return t.length > 0 ? t : null;
+    };
+    const byAsin = new Map<string, { asin: string; marketplaceId: string }>();
+    const add = (asinRaw: string | null | undefined) => {
+      const asin = normAsin(asinRaw);
+      if (!asin) return;
+      if (!byAsin.has(asin)) byAsin.set(asin, { asin, marketplaceId: uk });
+    };
+
+    const productRows = await this.prisma.product.findMany({
+      where: { userId, asin: { not: null } },
+      select: { asin: true },
+    });
+    for (const r of productRows) {
+      add(r.asin);
+    }
+
+    const ibmRows = await this.prisma.inventoryByMarketplace.findMany({
+      where: { userId },
+      include: { product: { select: { asin: true } } },
+    });
+    for (const r of ibmRows) {
+      add(r.product?.asin ?? null);
+    }
+
+    return [...byAsin.values()].sort((a, b) => a.asin.localeCompare(b.asin));
+  }
+
+  /**
+   * Stored ASIN selling eligibility (Listings Restrictions). Optional filters for buyer bots (TTL, canRestock).
+   */
+  async listAsinSellingEligibilityForUser(
+    userId: string,
+    opts?: {
+      canRestock?: boolean;
+      maxAgeHours?: number;
+      take?: number;
+      /** When set, only rows for this marketplace id (e.g. UK `A1F83G8C2ARO7P`). */
+      marketplaceId?: string;
+    },
+  ) {
+    const take = Math.max(1, Math.min(5000, opts?.take ?? 2000));
+    const where: Prisma.AsinSellingEligibilityWhereInput = { userId };
+    const mpRaw = opts?.marketplaceId?.trim();
+    where.marketplaceId =
+      mpRaw && mpRaw.length > 0 ? mpRaw : AMAZON_UK_MARKETPLACE_ID_FOR_LISTINGS_RESTRICTIONS;
+    if (opts?.canRestock === true) where.canRestock = true;
+    if (opts?.canRestock === false) where.canRestock = false;
+    if (opts?.maxAgeHours != null && Number.isFinite(opts.maxAgeHours)) {
+      const minDate = new Date(Date.now() - Math.max(1, opts.maxAgeHours) * 3600000);
+      where.checkedAt = { gte: minDate };
+    }
+    const rows = await this.prisma.asinSellingEligibility.findMany({
+      where,
+      orderBy: [{ checkedAt: 'desc' }, { asin: 'asc' }],
+      take,
+    });
+    return rows.map((r) => ({
+      id: r.id,
+      asin: r.asin,
+      marketplaceId: r.marketplaceId,
+      canRestock: r.canRestock,
+      checkedAt: r.checkedAt.toISOString(),
+      source: r.source,
+      notes: r.notes,
+      hasRawJson: r.rawJson != null,
+    }));
+  }
+
+  /**
+   * Calls SP-API `getListingsRestrictions` per **distinct ASIN** on **Amazon.co.uk only**
+   * (`A1F83G8C2ARO7P`), then upserts `asin_selling_eligibility`. Drops non-UK rows previously stored for this user.
+   * Rate-limit friendly: uses a small delay between calls (override with `delayMs`).
+   */
+  async refreshAsinSellingEligibilityForUser(
+    userId: string,
+    opts?: {
+      /** Max ASINs to refresh this run (default 5000, max 5000). If you have more distinct ASINs, run again after we add paging. */
+      limit?: number;
+      delayMs?: number;
+      conditionType?: string;
+    },
+  ): Promise<{
+    sellerId: string | null;
+    pairsConsidered: number;
+    successCount: number;
+    errorCount: number;
+    canRestockCount: number;
+    blockedCount: number;
+    samples: Array<{ asin: string; marketplaceId: string; canRestock: boolean; notes: string | null }>;
+  }> {
+    const limit = Math.max(1, Math.min(5000, opts?.limit ?? 5000));
+    const delayMs = Math.max(0, Math.min(5000, opts?.delayMs ?? 250));
+    const conditionType = opts?.conditionType ?? 'new_new';
+    const uk = AMAZON_UK_MARKETPLACE_ID_FOR_LISTINGS_RESTRICTIONS;
+
+    const account = await this.prisma.sellerAccount.findUnique({
+      where: { userId_marketplace: { userId, marketplace: 'amazon' } },
+      select: { sellerId: true },
+    });
+    if (!account?.sellerId?.trim()) {
+      throw new NotFoundException('Amazon seller id missing; complete Amazon link first.');
+    }
+    const credentials = await this.getAmazonCredentialsForUser(userId);
+
+    await this.prisma.asinSellingEligibility.deleteMany({
+      where: { userId, marketplaceId: { not: uk } },
+    });
+
+    let pairs = await this.collectUkSellingEligibilityPairsFromUserListings(userId);
+    pairs = pairs.slice(0, limit);
+
+    const source = 'spapi_listings_restrictions_v2021_08_01';
+    let errorCount = 0;
+    let canRestockCount = 0;
+    let blockedCount = 0;
+    const samples: Array<{ asin: string; marketplaceId: string; canRestock: boolean; notes: string | null }> =
+      [];
+
+    for (let i = 0; i < pairs.length; i++) {
+      const { asin, marketplaceId } = pairs[i];
+      if (delayMs > 0 && i > 0) {
+        await new Promise((r) => setTimeout(r, delayMs));
+      }
+      try {
+        const raw = await this.spApiClient.getListingsRestrictions(credentials, {
+          asin,
+          sellerId: account.sellerId,
+          marketplaceIds: [marketplaceId],
+          conditionType,
+        });
+        const { canRestock, notes } = eligibilityFromListingsRestrictionsBody(raw);
+        if (canRestock) canRestockCount++;
+        else blockedCount++;
+        await this.prisma.asinSellingEligibility.upsert({
+          where: {
+            userId_marketplaceId_asin: { userId, marketplaceId, asin },
+          },
+          create: {
+            userId,
+            marketplaceId,
+            asin,
+            canRestock,
+            checkedAt: new Date(),
+            source,
+            rawJson: raw as Prisma.InputJsonValue,
+            notes,
+          },
+          update: {
+            canRestock,
+            checkedAt: new Date(),
+            source,
+            rawJson: raw as Prisma.InputJsonValue,
+            notes,
+          },
+        });
+        if (samples.length < 25) {
+          samples.push({ asin, marketplaceId, canRestock, notes });
+        }
+      } catch (e) {
+        errorCount++;
+        const msg = e instanceof Error ? e.message : String(e);
+        await this.prisma.asinSellingEligibility.upsert({
+          where: {
+            userId_marketplaceId_asin: { userId, marketplaceId, asin },
+          },
+          create: {
+            userId,
+            marketplaceId,
+            asin,
+            canRestock: false,
+            checkedAt: new Date(),
+            source: 'spapi_error',
+            notes: `API error: ${msg.slice(0, 900)}`,
+          },
+          update: {
+            canRestock: false,
+            checkedAt: new Date(),
+            source: 'spapi_error',
+            notes: `API error: ${msg.slice(0, 900)}`,
+          },
+        });
+        if (samples.length < 25) {
+          samples.push({ asin, marketplaceId, canRestock: false, notes: `error: ${msg.slice(0, 120)}` });
+        }
+      }
+    }
+
+    return {
+      sellerId: account.sellerId,
+      pairsConsidered: pairs.length,
+      successCount: pairs.length - errorCount,
+      errorCount,
+      canRestockCount,
+      blockedCount,
+      samples,
+    };
+  }
+
+  async findUserIdByEmailForLocal(email: string): Promise<string | null> {
+    const normalized = email.trim().toLowerCase();
+    if (!normalized) return null;
+    const u = await this.prisma.user.findFirst({
+      where: { email: { equals: normalized, mode: 'insensitive' } },
+      select: { id: true },
+    });
+    return u?.id ?? null;
   }
 
   async listProducts(orgId: string) {

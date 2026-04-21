@@ -131,6 +131,25 @@ export class AmazonSyncService implements OnModuleInit {
       },
     );
 
+    // Listings Restrictions → `asin_selling_eligibility` for one dedicated account (see `AMAZON_EXTENDED_ORDER_HISTORY_EMAIL`).
+    const sellingEligibilityCron =
+      process.env.SELLING_ELIGIBILITY_REFRESH_CRON ?? '30 6 * * *';
+    const sellingEligibilityEnabled = (
+      process.env.ENABLE_SELLING_ELIGIBILITY_DAILY ?? 'true'
+    ).toLowerCase();
+    if (['1', 'true', 'yes'].includes(sellingEligibilityEnabled)) {
+      await this.queue.add(
+        'selling-eligibility-daily',
+        {},
+        {
+          repeat: {
+            pattern: sellingEligibilityCron,
+          },
+          jobId: 'selling-eligibility-daily',
+        },
+      );
+    }
+
     // Listed price only: Listings API (no Product Fees)
     // - Hot SKUs (in-stock or recently sold): every 5 minutes
     // - Cold SKUs: every 60 minutes
@@ -167,7 +186,7 @@ export class AmazonSyncService implements OnModuleInit {
     );
 
     this.logger.log(
-      `Scheduled Amazon sync jobs (orders=${ordersEveryMs}ms, inventory=${inventoryEveryMs}ms, shipments=${shipmentsEveryMs}ms, feeCron=${feeEstimateCron}, listingHot=${listingPriceHotEveryMs}ms, listingCold=${listingPriceColdEveryMs}ms, titlesBackfill=${titlesBackfillEveryMs}ms)`,
+      `Scheduled Amazon sync jobs (orders=${ordersEveryMs}ms, inventory=${inventoryEveryMs}ms, shipments=${shipmentsEveryMs}ms, feeCron=${feeEstimateCron}, sellingEligibility=${['1', 'true', 'yes'].includes(sellingEligibilityEnabled) ? sellingEligibilityCron : 'off'}, listingHot=${listingPriceHotEveryMs}ms, listingCold=${listingPriceColdEveryMs}ms, titlesBackfill=${titlesBackfillEveryMs}ms)`,
     );
   }
 

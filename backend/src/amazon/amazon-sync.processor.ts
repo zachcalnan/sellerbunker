@@ -5,6 +5,7 @@ import { AmazonService } from './amazon.service';
 import { AmazonSyncService } from './amazon-sync.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
+import { AMAZON_EXTENDED_ORDER_HISTORY_EMAIL } from './amazon-extended-sync.constants';
 
 const SYNC_PROGRESS_TTL = 24 * 60 * 60; // 24h
 
@@ -520,6 +521,41 @@ export class AmazonSyncProcessor extends WorkerHost {
         throw new Error(
           `[AmazonSync] fee-estimate-refresh completed with ${errors.length} errors`,
         );
+      }
+    }
+
+    if (job.name === 'selling-eligibility-daily') {
+      const email = AMAZON_EXTENDED_ORDER_HISTORY_EMAIL;
+      const user = await this.prisma.user.findFirst({
+        where: { email: { equals: email, mode: 'insensitive' } },
+        select: { id: true },
+      });
+      if (!user) {
+        this.logger.log(
+          `[AmazonSync] selling-eligibility-daily: no user row for ${email} — skipping`,
+        );
+        return;
+      }
+      if (!(await this.isInitialSyncComplete(user.id))) {
+        this.logger.log(
+          `[AmazonSync] selling-eligibility-daily: initial sync not complete for userId=${user.id.slice(0, 8)}… — skipping`,
+        );
+        return;
+      }
+      const limit = Math.max(1, Math.min(5000, Number(process.env.AMAZON_SELLING_ELIGIBILITY_REFRESH_LIMIT) || 5000));
+      const delayParsed = Number(process.env.AMAZON_SELLING_ELIGIBILITY_REFRESH_DELAY_MS);
+      const delayMs = Number.isFinite(delayParsed) ? Math.max(0, Math.min(5000, delayParsed)) : 250;
+      try {
+        const out = await this.amazonService.refreshAsinSellingEligibilityForUser(user.id, {
+          limit,
+          delayMs,
+        });
+        this.logger.log(
+          `[AmazonSync] selling-eligibility-daily done (email=${email}): pairs=${out.pairsConsidered} ok=${out.successCount} err=${out.errorCount} canRestock=${out.canRestockCount} blocked=${out.blockedCount}`,
+        );
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        this.logger.warn(`[AmazonSync] selling-eligibility-daily failed: ${msg}`);
       }
     }
 
