@@ -6,12 +6,14 @@ import {
 import { UsersService } from '../users/users.service';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
+import { EmailService } from '../email/email.service';
 
 @Injectable()
 export class AuthService {
   constructor(
     private readonly usersService: UsersService,
     private readonly jwtService: JwtService,
+    private readonly emailService: EmailService,
   ) {}
 
   async register(email: string, password: string, name?: string) {
@@ -26,6 +28,16 @@ export class AuthService {
       passwordHash,
       name,
     });
+
+    // Fire-and-forget; registration should succeed even if email fails.
+    this.emailService
+      .sendWelcomeEmail(user.email, user.name ?? name)
+      .catch(() => undefined);
+
+    // Fire-and-forget Brevo contact upsert.
+    this.emailService
+      .addToBrevoList(user.email, user.name ?? name)
+      .catch(() => undefined);
 
     return this.buildAuthResponse(user.id, user.email);
   }

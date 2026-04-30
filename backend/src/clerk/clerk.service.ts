@@ -51,6 +51,40 @@ export class ClerkService {
     }
   }
 
+  async getPrimaryEmailAndNameFromClerkUser(clerkUserId: string): Promise<{
+    email: string | null;
+    name: string | null;
+  }> {
+    if (!clerkUserId) return { email: null, name: null };
+    try {
+      const client = createClerkClient({ secretKey: this.secretKey });
+      const u: any = await client.users.getUser(clerkUserId);
+      const emails: Array<{ id?: string; emailAddress?: string }> = Array.isArray(
+        u?.emailAddresses,
+      )
+        ? u.emailAddresses
+        : [];
+      const primaryId: string | null = u?.primaryEmailAddressId ?? null;
+      const primary =
+        primaryId != null
+          ? emails.find((e) => e?.id === primaryId)?.emailAddress
+          : undefined;
+      const fallback = emails[0]?.emailAddress;
+      const emailRaw = String(primary ?? fallback ?? '').trim();
+      const email = emailRaw && emailRaw.includes('@') ? emailRaw : null;
+
+      const first = String(u?.firstName ?? '').trim();
+      const last = String(u?.lastName ?? '').trim();
+      const fullName = `${first} ${last}`.trim();
+      const name = fullName ? fullName : null;
+
+      return { email, name };
+    } catch (err) {
+      console.warn('[ClerkService] getUser for email/name failed', err);
+      return { email: null, name: null };
+    }
+  }
+
   /**
    * Referral code from SignUp unsafeMetadata (set from ?ref= cookie on the client).
    */

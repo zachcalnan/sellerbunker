@@ -29,7 +29,10 @@
   },
   "dependencies": {
     "@api/sp-api": "file:.api/apis/sp-api",
+    "@azure/identity": "^4.13.1",
     "@clerk/backend": "^2.29.0",
+    "@getbrevo/brevo": "^5.0.4",
+    "@microsoft/microsoft-graph-client": "^3.0.7",
     "@nestjs/bullmq": "^11.0.4",
     "@nestjs/common": "^11.0.1",
     "@nestjs/config": "^4.0.2",

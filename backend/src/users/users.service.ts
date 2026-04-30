@@ -12,6 +12,15 @@ export class UsersService {
     private readonly affiliateService: AffiliateService,
   ) {}
 
+  async listAllUserEmails(): Promise<string[]> {
+    const rows = await this.prisma.user.findMany({
+      select: { email: true },
+    });
+    return (rows ?? [])
+      .map((r) => String(r.email ?? '').trim())
+      .filter((e) => e.includes('@'));
+  }
+
   async findByEmail(email: string): Promise<User | null> {
     return this.prisma.user.findUnique({
       where: { email },
@@ -67,9 +76,28 @@ export class UsersService {
     if (!clerkId || typeof clerkId !== 'string') {
       throw new Error('createFromClerk requires a non-empty clerkId');
     }
-    // Fallback email if Clerk token doesn't include one yet.
-    const emailToUse =
-      email && email.length > 0 ? email : `${clerkId}@placeholder.local`;
+    const isProd = process.env.NODE_ENV === 'production';
+
+    // Prefer the email from the token, but if missing fetch from Clerk API
+    // (avoids creating placeholder users when token payload lacks email).
+    let emailToUse = (email ?? '').trim();
+    let nameFromClerk: string | null = null;
+    if (!emailToUse) {
+      const fromClerk =
+        await this.clerkService.getPrimaryEmailAndNameFromClerkUser(clerkId);
+      if (fromClerk.email) emailToUse = fromClerk.email;
+      nameFromClerk = fromClerk.name;
+    }
+
+    if (!emailToUse) {
+      if (isProd) {
+        // In production, do not create junk placeholder accounts.
+        throw new Error(
+          `Clerk user (${clerkId}) has no email available yet; refusing to create placeholder user`,
+        );
+      }
+      emailToUse = `${clerkId}@placeholder.local`;
+    }
 
     // 1) Already have a user with this clerkId -> return them
     const byClerk = await this.prisma.user.findUnique({
@@ -106,6 +134,7 @@ export class UsersService {
         clerkId,
         email: emailToUse,
         passwordHash: '',
+        name: nameFromClerk || undefined,
         referredBy: referral.referredBy,
         referredAffiliateId: referral.referredAffiliateId,
       },
