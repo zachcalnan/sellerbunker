@@ -33,7 +33,7 @@ type SelectedSku = {
 type RuleForm = {
   label: string;
   /** buy_box = featured buy box price; best_offer = lowest competitive offer from pricing API */
-  priceReference: "buy_box" | "best_offer";
+  priceReference: "buy_box" | "best_offer" | "next_best_offer";
   minProfit: string;
   /** Optional listing-currency floor (combined with profit/ROI bounds). */
   minListPrice: string;
@@ -292,6 +292,9 @@ function mapApiRuleToForm(
       typeof r.priceReference === "string" &&
       r.priceReference.trim().toLowerCase() === "best_offer"
         ? "best_offer"
+        : typeof r.priceReference === "string" &&
+            r.priceReference.trim().toLowerCase() === "next_best_offer"
+          ? "next_best_offer"
         : "buy_box",
     minProfit: r.minProfit != null ? String(r.minProfit) : "",
     minListPrice: r.minListPrice != null ? String(r.minListPrice) : "",
@@ -330,7 +333,11 @@ function ruleFormToPayload(r: RuleForm, durationDays: string) {
   return {
     label: r.label.trim() || undefined,
     priceReference:
-      r.priceReference === "best_offer" ? "best_offer" : "buy_box",
+      r.priceReference === "best_offer"
+        ? "best_offer"
+        : r.priceReference === "next_best_offer"
+          ? "next_best_offer"
+          : "buy_box",
     minProfit: clampNum(r.minProfit),
     minListPrice: clampNum(r.minListPrice),
     maxListPrice: clampNum(r.maxListPrice),
@@ -363,10 +370,6 @@ export default function RepricerPage() {
   const baseUrl = publicApiBaseUrl();
   const { isSignedIn, getToken } = useAuth();
   const { selectedMarketplaceId, selectedCurrency } = useMarketplace();
-
-  const [pw, setPw] = useState<string>("");
-  const [pwOk, setPwOk] = useState(false);
-  const [pwErr, setPwErr] = useState<string | null>(null);
 
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -433,36 +436,16 @@ export default function RepricerPage() {
 
   const authHeaders = useCallback(async () => {
     const token = await getToken({ template: "backend" });
-    const repricerPw =
-      pw ||
-      (typeof window !== "undefined"
-        ? (sessionStorage.getItem("sellerbunker_repricer_pw") ?? "")
-        : "");
     return {
       Authorization: `Bearer ${token}`,
-      "x-repricer-password": repricerPw,
       ...(selectedMarketplaceId
         ? { "x-marketplace-id": selectedMarketplaceId }
         : {}),
     } as Record<string, string>;
-  }, [getToken, pw, selectedMarketplaceId]);
-
-  const ping = useCallback(async () => {
-    const headers = await authHeaders();
-    let res: Response;
-    try {
-      res = await fetch(`${baseUrl}/api/repricer/ping`, { headers });
-    } catch {
-      throw new Error(
-        "Could not reach the API. Is the backend running, and does NEXT_PUBLIC_API_URL match it? (After a CORS change, restart the backend.)",
-      );
-    }
-    if (!res.ok) throw new Error("Invalid repricer password");
-    return true;
-  }, [authHeaders, baseUrl]);
+  }, [getToken, selectedMarketplaceId]);
 
   const loadRuleLibrary = useCallback(async () => {
-    if (!isSignedIn || !pwOk) return;
+    if (!isSignedIn) return;
     try {
       const headers = await authHeaders();
       const res = await fetch(`${baseUrl}/api/repricer/rules`, { headers });
@@ -481,7 +464,7 @@ export default function RepricerPage() {
     } catch {
       setRuleLibrary({ presets: [], activePresetId: null });
     }
-  }, [isSignedIn, pwOk, authHeaders, baseUrl]);
+  }, [isSignedIn, authHeaders, baseUrl]);
 
   const load = useCallback(async () => {
     if (!isSignedIn) return;
@@ -604,40 +587,17 @@ export default function RepricerPage() {
   }, [isSignedIn, authHeaders, baseUrl]);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    const stored = sessionStorage.getItem("sellerbunker_repricer_pw");
-    if (stored) setPw(stored);
-  }, []);
-
-  useEffect(() => {
     if (!isSignedIn) return;
-    if (!pw) return;
-    (async () => {
-      try {
-        await ping();
-        setPwOk(true);
-        setPwErr(null);
-      } catch (e) {
-        setPwOk(false);
-        setPwErr(e instanceof Error ? e.message : "Invalid password");
-      }
-    })();
-  }, [isSignedIn, pw, ping]);
-
-  useEffect(() => {
-    if (!pwOk) return;
     void load();
-  }, [pwOk, load]);
+  }, [isSignedIn, load]);
 
   useEffect(() => {
-    if (!pwOk) return;
     void loadLogs();
-  }, [pwOk, loadLogs]);
+  }, [loadLogs]);
 
   useEffect(() => {
-    if (!pwOk) return;
     void loadRuleLibrary();
-  }, [pwOk, loadRuleLibrary]);
+  }, [loadRuleLibrary]);
 
   const resetRuleModal = useCallback(() => {
     setEditingPresetId(null);
@@ -1045,17 +1005,24 @@ export default function RepricerPage() {
             setR((p) => ({
               ...p,
               priceReference:
-                e.target.value === "best_offer" ? "best_offer" : "buy_box",
+                e.target.value === "best_offer"
+                  ? "best_offer"
+                  : e.target.value === "next_best_offer"
+                    ? "next_best_offer"
+                    : "buy_box",
             }))
           }
           className="sb-select rounded-lg border border-[var(--surface-border)] px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-sb-accent/40"
         >
           <option value="buy_box">Buy box (featured offer)</option>
           <option value="best_offer">Lowest competitive offer</option>
+          <option value="next_best_offer">
+            Lowest offer — increase if best offer
+          </option>
         </select>
         <p className="text-[10px] text-[var(--muted-foreground)]">
           Choose whether match/beat/stay rules use the buy box price or the
-          lowest offer returned in competitive pricing.
+          offer(s) returned in competitive pricing.
         </p>
       </label>
 
@@ -1338,50 +1305,6 @@ export default function RepricerPage() {
             Sign in
           </button>
         </SignInButton>
-      </div>
-    );
-  }
-
-  if (!pwOk) {
-    return (
-      <div className="flex min-h-[70vh] items-center justify-center p-6">
-        <div className="w-full max-w-md rounded-2xl border border-[var(--surface-border)] bg-[var(--surface)] p-5 shadow-xl">
-          <h1 className="text-lg font-semibold text-[var(--foreground)]">
-            Repricer (testing)
-          </h1>
-          <p className="mt-2 text-sm text-[var(--muted-foreground)]">
-            Enter the repricer password to continue.
-          </p>
-          <div className="mt-4">
-            <input
-              type="password"
-              value={pw}
-              onChange={(e) => setPw(e.target.value)}
-              placeholder="Password"
-              className="w-full rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--foreground)] outline-none focus:ring-2 focus:ring-sb-accent/40"
-            />
-            {pwErr ? (
-              <p className="mt-2 text-xs text-red-400">{pwErr}</p>
-            ) : null}
-            <button
-              type="button"
-              onClick={async () => {
-                try {
-                  await ping();
-                  sessionStorage.setItem("sellerbunker_repricer_pw", pw);
-                  setPwOk(true);
-                  setPwErr(null);
-                } catch (e) {
-                  setPwOk(false);
-                  setPwErr(e instanceof Error ? e.message : "Invalid password");
-                }
-              }}
-              className="mt-3 inline-flex w-full items-center justify-center rounded-lg bg-sb-accent px-4 py-2.5 text-sm font-semibold text-black hover:opacity-90"
-            >
-              Unlock repricer
-            </button>
-          </div>
-        </div>
       </div>
     );
   }

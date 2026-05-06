@@ -259,7 +259,9 @@ export class RepricerService {
         priceReference:
           String(row.rule1PriceReference ?? 'buy_box').toLowerCase() === 'best_offer'
             ? 'best_offer'
-            : 'buy_box',
+            : String(row.rule1PriceReference ?? 'buy_box').toLowerCase() === 'next_best_offer'
+              ? 'next_best_offer'
+              : 'buy_box',
         minProfit: dec(row.rule1MinProfit),
         maxProfit: dec(row.rule1MaxProfit),
         minListPrice: dec(row.rule1MinListPrice),
@@ -286,7 +288,9 @@ export class RepricerService {
         priceReference:
           String(row.rule2PriceReference ?? 'buy_box').toLowerCase() === 'best_offer'
             ? 'best_offer'
-            : 'buy_box',
+            : String(row.rule2PriceReference ?? 'buy_box').toLowerCase() === 'next_best_offer'
+              ? 'next_best_offer'
+              : 'buy_box',
         minProfit: dec(row.rule2MinProfit),
         maxProfit: dec(row.rule2MaxProfit),
         minRoiPct: dec(row.rule2MinRoiPct),
@@ -474,8 +478,8 @@ export class RepricerService {
       throw new Error('Rule end date is invalid');
     }
     const pref = String(r?.priceReference ?? 'buy_box').trim().toLowerCase();
-    if (pref && !['buy_box', 'best_offer'].includes(pref)) {
-      throw new Error('Price reference must be buy_box or best_offer');
+    if (pref && !['buy_box', 'best_offer', 'next_best_offer'].includes(pref)) {
+      throw new Error('Price reference must be buy_box, best_offer, or next_best_offer');
     }
       const strat = (r?.strategy ?? '').trim();
       if (
@@ -597,7 +601,9 @@ export class RepricerService {
     };
     const toPriceRef = (v: unknown) => {
       const s = String(v ?? 'buy_box').trim().toLowerCase();
-      return s === 'best_offer' ? 'best_offer' : 'buy_box';
+      if (s === 'best_offer') return 'best_offer';
+      if (s === 'next_best_offer') return 'next_best_offer';
+      return 'buy_box';
     };
 
     const chainDays = toNumOrNull(data.chainAfterDays);
@@ -1109,8 +1115,8 @@ export class RepricerService {
     }
   }
 
-  /** Buy Box price + lowest competitive offer (from CompetitivePrices), when available. */
-  private parseCompetitivePricingTargets(res: any): { buyBox: number | null; bestOffer: number | null } {
+  /** Buy Box price + lowest and second-lowest competitive offers (from CompetitivePrices), when available. */
+  private parseCompetitivePricingTargets(res: any): { buyBox: number | null; bestOffer: number | null; nextBestOffer: number | null } {
     const root = res?.payload ?? res;
     const payload = root?.payload ?? root;
     const list = Array.isArray(payload) ? payload : Array.isArray(root) ? root : [];
@@ -1170,10 +1176,19 @@ export class RepricerService {
       }
     }
 
-    let bestOffer: number | null = competitiveAmounts.length ? Math.min(...competitiveAmounts) : null;
+    const unique = Array.from(
+      new Set(competitiveAmounts.filter((n) => Number.isFinite(n) && n > 0)),
+    ).sort((a, b) => a - b);
+    let bestOffer: number | null = unique.length ? unique[0] : null;
+    let nextBestOffer: number | null = unique.length > 1 ? unique[1] : null;
     if (bestOffer == null) bestOffer = buyBox;
+    if (nextBestOffer == null) {
+      // Fallback: if buy box is above the lowest competitive offer, treat it as the "next" anchor.
+      nextBestOffer =
+        buyBox != null && buyBox > (bestOffer ?? 0) ? buyBox : null;
+    }
 
-    return { buyBox, bestOffer };
+    return { buyBox, bestOffer, nextBestOffer };
   }
 
   private parseBuyBoxPriceFromCompetitivePricing(res: any): number | null {
@@ -1444,10 +1459,13 @@ export class RepricerService {
       const strategy = String(preset.rule1Strategy ?? '').trim();
       const beatType = String(preset.rule1BeatType ?? '').trim();
       const beatValue = preset.rule1BeatValue != null ? Number(preset.rule1BeatValue) : null;
+      const pr = String(preset.rule1PriceReference ?? 'buy_box').toLowerCase();
       const priceRef =
-        String(preset.rule1PriceReference ?? 'buy_box').toLowerCase() === 'best_offer'
+        pr === 'best_offer'
           ? 'best_offer'
-          : 'buy_box';
+          : pr === 'next_best_offer'
+            ? 'next_best_offer'
+            : 'buy_box';
 
       const p = row.product;
       const sku = String(p?.sku ?? '');
@@ -1501,8 +1519,9 @@ export class RepricerService {
             const buyBoxOk = buyBoxPrice != null && Number.isFinite(buyBoxPrice) && buyBoxPrice > 0;
             // No featured buy box: still reprice when the rule explicitly uses lowest competitive offer.
             if (!buyBoxOk) {
-              if (priceRef === 'best_offer' && bestOk) {
+              if ((priceRef === 'best_offer' || priceRef === 'next_best_offer') && bestOk) {
                 skipNoBuyBox = false;
+                // If we don't have a buy box, we can't reliably infer the "next" anchor; fall back to best offer.
                 refPrice = bestOfferPrice;
               } else {
                 // buy_box reference (or no usable competitive low) → do not infer a target without a buy box.
@@ -1514,14 +1533,34 @@ export class RepricerService {
               // Respect the user's configured reference:
               // - buy_box: use featured buy box price
               // - best_offer: use lowest competitive offer (fallback to buy box only when best-offer is unavailable)
-              const chosenBySetting = priceRef === 'best_offer' ? bestOfferPrice : buyBoxPrice;
+              // - next_best_offer: if the lowest offer equals our current price, anchor to the next offer above (or buy box when available)
+              const chosenBySetting =
+                priceRef === 'best_offer'
+                  ? bestOfferPrice
+                  : priceRef === 'next_best_offer'
+                    ? (() => {
+                        const best = bestOfferPrice;
+                        const next = t.nextBestOffer;
+                        if (
+                          best != null &&
+                          current != null &&
+                          Number.isFinite(current) &&
+                          Math.round(best * 100) === Math.round(Number(current) * 100) &&
+                          next != null &&
+                          next > best
+                        ) {
+                          return next;
+                        }
+                        return bestOfferPrice ?? buyBoxPrice;
+                      })()
+                    : buyBoxPrice;
               refPrice = chosenBySetting ?? buyBoxPrice ?? bestOfferPrice ?? null;
 
               // If "best offer" equals our current price, we can get stuck at the bottom
               // (CompetitivePrices can include our own offer). When the buy box has moved up,
               // allow the reference to follow up so we can raise price too.
               if (
-                priceRef === 'best_offer' &&
+                (priceRef === 'best_offer' || priceRef === 'next_best_offer') &&
                 refPrice != null &&
                 buyBoxOk &&
                 buyBoxPrice != null &&
@@ -1582,7 +1621,12 @@ export class RepricerService {
           message = RepricerService.SKIP_NO_BUY_BOX_UNCHANGED_MSG;
           nextPrice = current;
         } else if (nextPrice != null && nextPrice !== current) {
-          const refLabel = priceRef === 'best_offer' ? 'bestOffer' : 'buyBox';
+          const refLabel =
+            priceRef === 'best_offer'
+              ? 'bestOffer'
+              : priceRef === 'next_best_offer'
+                ? 'nextBest'
+                : 'buyBox';
           const detail = `${strategy || 'bounds-only'}${refPrice != null ? `, ${refLabel}=${refPrice.toFixed(2)}` : ''}`;
           const isLive = opts?.dryRun === false;
           if (isLive) {

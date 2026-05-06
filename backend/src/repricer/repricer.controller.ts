@@ -11,11 +11,10 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { ClerkAuthGuard } from '../auth/clerk-auth.guard';
-import { RepricerPasswordGuard } from './repricer-password.guard';
 import { RepricerService } from './repricer.service';
 
 @Controller('repricer')
-@UseGuards(ClerkAuthGuard, RepricerPasswordGuard)
+@UseGuards(ClerkAuthGuard)
 export class RepricerController {
   constructor(private readonly repricer: RepricerService) {}
 
