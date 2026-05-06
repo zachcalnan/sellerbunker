@@ -149,7 +149,7 @@ export class RepricerService {
     }));
   }
 
-  /** Pin one SKU to a saved pricing preset (max 10 SKUs per org total). */
+  /** Pin one SKU to a saved pricing preset. */
   async assignSkuToPreset(orgId: string, productId: string, ruleSetId: string) {
     const pid = productId.trim();
     const rid = ruleSetId.trim();
@@ -176,10 +176,6 @@ export class RepricerService {
     const existing = await (this.prisma as any).repricerSelectedSku.findUnique({
       where: { orgId_productId: { orgId, productId: pid } },
     });
-    const total = await (this.prisma as any).repricerSelectedSku.count({ where: { orgId } });
-    if (!existing && total >= 10) {
-      throw new BadRequestException('You can only select up to 10 SKUs during testing');
-    }
 
     await (this.prisma as any).repricerSelectedSku.upsert({
       where: { orgId_productId: { orgId, productId: pid } },
@@ -190,7 +186,7 @@ export class RepricerService {
     return { ok: true as const, selected: await this.getSelectedSkus(orgId) };
   }
 
-  /** Remove SKU from the repricer cohort (frees a slot for another SKU; max 10 rows per org). */
+  /** Remove SKU from the repricer cohort. */
   async unassignSkuFromPreset(orgId: string, productId: string) {
     const pid = productId.trim();
     if (!pid) throw new BadRequestException('productId is required');
@@ -219,9 +215,6 @@ export class RepricerService {
 
   async setSelectedSkus(orgId: string, productIds: string[]) {
     const unique = [...new Set(productIds.map((s) => s.trim()).filter(Boolean))];
-    if (unique.length > 10) {
-      throw new Error('You can only select up to 10 SKUs during testing');
-    }
     await (this.prisma as any).repricerSelectedSku.deleteMany({
       where: { orgId, ruleSetId: null },
     });
@@ -1367,6 +1360,11 @@ export class RepricerService {
   }
 
   async runEngineForOrg(orgId: string, opts?: { dryRun?: boolean }) {
+    const maxPerTickRaw = Number(process.env.REPRICER_MAX_SKUS_PER_TICK ?? 0);
+    const maxPerTick =
+      Number.isFinite(maxPerTickRaw) && maxPerTickRaw > 0
+        ? Math.max(1, Math.min(50_000, Math.floor(maxPerTickRaw)))
+        : 50_000;
     const selected = await (this.prisma as any).repricerSelectedSku.findMany({
       where: { orgId, enabled: true, ruleSetId: { not: null } },
       include: {
@@ -1384,7 +1382,7 @@ export class RepricerService {
         ruleSet: true,
       },
       orderBy: { createdAt: 'asc' },
-      take: 10,
+      take: maxPerTick,
     });
 
     if (!selected?.length) {

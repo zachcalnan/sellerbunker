@@ -5576,6 +5576,494 @@ export class AmazonService {
     return combined.slice(0, limit);
   }
 
+  async getSmartReplenishmentSuggestions(
+    orgId: string,
+    opts: {
+      take: number;
+      marketplaceId?: string;
+      velocityShortDays?: number;
+      velocityLongDays?: number;
+      profitDays?: number;
+      targetDaysOfCover?: number;
+      safetyDays?: number;
+      minGrossProfitPerUnit?: number;
+      minRoi?: number;
+      casePack?: number;
+      minOrderQty?: number;
+      maxBuyUnits?: number;
+      unknownDemandFloorPerDay?: number;
+    },
+  ): Promise<
+    Array<{
+      productId: string;
+      sku: string;
+      asin: string | null;
+      title: string | null;
+      imageUrl: string | null;
+      fulfillableQty: number;
+      inboundQty: number;
+      effectiveStock: number;
+      avgDailyUnitsShort: number;
+      avgDailyUnitsLong: number;
+      avgDailyUnits: number;
+      daysOfCover: number | null;
+      avgGrossProfitPerUnit: number | null;
+      avgCogsPerUnit: number | null;
+      roi: number | null;
+      suggestedBuyQty: number;
+      score: number;
+      lastSold: string | null;
+      /** Break-even max unit buy cost (sell - amazon fees). */
+      maxBuyPriceBreakEvenPerUnit: number | null;
+      /** Max unit buy cost to still satisfy profit+ROI gates. */
+      maxBuyPriceForTargetsPerUnit: number | null;
+      supplier: string | null;
+      supplierLink: string | null;
+      latestCogsEntry:
+        | {
+            purchaseDate: string;
+            currency: string;
+            vatRatePct: number;
+            bundleSize: number;
+            qtyPurchased: number;
+            qtyDelivered: number;
+            unitCostIncVat: number;
+            deliveryCostIncVat: number;
+            prepCostIncVat: number;
+            totalCostIncVat: number;
+          }
+        | null;
+      lastBuyUnitCostIncVat: number | null;
+      expectedProfitPerUnitAtLastBuy: number | null;
+      expectedProfitTotalAtLastBuy: number | null;
+      rationale: string;
+    }>
+  > {
+    const marketplaceFilter = this.resolveMarketplaceFilter(opts.marketplaceId);
+    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
+
+    const take = Math.max(1, Math.min(200, Number(opts.take) || 20));
+    const velocityShortDays = Math.max(
+      7,
+      Math.min(180, Number(opts.velocityShortDays) || 30),
+    );
+    const velocityLongDays = Math.max(
+      30,
+      Math.min(730, Number(opts.velocityLongDays) || 365),
+    );
+    const profitDays = Math.max(7, Math.min(730, Number(opts.profitDays) || 365));
+    const targetDaysOfCover = Math.max(
+      7,
+      Math.min(180, Number(opts.targetDaysOfCover) || 45),
+    );
+    const safetyDays = Math.max(0, Math.min(60, Number(opts.safetyDays) || 7));
+    const minGrossProfitPerUnit = Number.isFinite(opts.minGrossProfitPerUnit)
+      ? Number(opts.minGrossProfitPerUnit)
+      : 0;
+    const minRoi = Number.isFinite(opts.minRoi) ? Number(opts.minRoi) : 0;
+    const casePack = Math.max(1, Number(opts.casePack) || 1);
+    const minOrderQty = Math.max(1, Number(opts.minOrderQty) || 1);
+    const maxBuyUnits = Math.max(1, Math.min(5000, Number(opts.maxBuyUnits) || 60));
+    const unknownDemandFloorPerDay = Math.max(
+      0,
+      Number(opts.unknownDemandFloorPerDay) || 0.05,
+    );
+
+    const sinceShort = new Date(Date.now() - velocityShortDays * 24 * 60 * 60 * 1000);
+    const sinceLong = new Date(Date.now() - velocityLongDays * 24 * 60 * 60 * 1000);
+    const sinceProfit = new Date(Date.now() - profitDays * 24 * 60 * 60 * 1000);
+
+    const [shortStats, longStats, profitStats] = await Promise.all([
+      (this.prisma as any).orderItem.groupBy({
+        by: ['asin'],
+        where: {
+          userId: { in: userIds },
+          marketplace: marketplaceFilter,
+          orderDate: { gte: sinceShort },
+          asin: { not: null },
+        },
+        _sum: { quantity: true },
+      }),
+      (this.prisma as any).orderItem.groupBy({
+        by: ['asin'],
+        where: {
+          userId: { in: userIds },
+          marketplace: marketplaceFilter,
+          orderDate: { gte: sinceLong },
+          asin: { not: null },
+        },
+        _sum: { quantity: true },
+      }),
+      (this.prisma as any).orderItem.groupBy({
+        by: ['asin'],
+        where: {
+          userId: { in: userIds },
+          marketplace: marketplaceFilter,
+          orderDate: { gte: sinceProfit },
+          asin: { not: null },
+        },
+        _max: { orderDate: true },
+        _sum: {
+          quantity: true,
+          profit: true,
+          cogsTotal: true,
+          revenueTotal: true,
+          amazonFeesTotal: true,
+        },
+      }),
+    ]);
+
+    const mapSum = (rows: any[], field: string) => {
+      const m = new Map<string, number>();
+      for (const r of rows ?? []) {
+        const asin = String(r.asin ?? '').trim();
+        if (!asin) continue;
+        m.set(asin, Number(r._sum?.[field] ?? 0));
+      }
+      return m;
+    };
+    const unitsShortByAsin = mapSum(shortStats, 'quantity');
+    const unitsLongByAsin = mapSum(longStats, 'quantity');
+
+    const profitByAsin = new Map<
+      string,
+      {
+        units: number;
+        profit: number;
+        cogs: number;
+        revenue: number;
+        fees: number;
+        lastSold: Date | null;
+      }
+    >();
+    for (const r of profitStats ?? []) {
+      const asin = String(r.asin ?? '').trim();
+      if (!asin) continue;
+      profitByAsin.set(asin, {
+        units: Number(r._sum?.quantity ?? 0),
+        profit: Number(r._sum?.profit ?? 0),
+        cogs: Number(r._sum?.cogsTotal ?? 0),
+        revenue: Number(r._sum?.revenueTotal ?? 0),
+        fees: Number(r._sum?.amazonFeesTotal ?? 0),
+        lastSold: (r as any)._max?.orderDate ?? null,
+      });
+    }
+
+    const allAsins = new Set<string>();
+    for (const a of unitsShortByAsin.keys()) allAsins.add(a);
+    for (const a of unitsLongByAsin.keys()) allAsins.add(a);
+    for (const a of profitByAsin.keys()) allAsins.add(a);
+    if (allAsins.size === 0) return [];
+
+    const asins = [...allAsins.values()];
+
+    const products = await this.prisma.product.findMany({
+      where: { userId: { in: userIds }, asin: { in: asins } },
+      select: {
+        id: true,
+        sku: true,
+        asin: true,
+        title: true,
+        imageUrl: true,
+        costOfGoods: true,
+      },
+    });
+
+    const productByAsin = new Map<
+      string,
+      { id: string; sku: string; asin: string; title: string | null; imageUrl: string | null; costOfGoods: number | null }
+    >();
+    for (const p of products) {
+      const asin = String(p.asin ?? '').trim();
+      if (!asin) continue;
+      if (!productByAsin.has(asin)) {
+        productByAsin.set(asin, {
+          id: p.id,
+          sku: p.sku,
+          asin,
+          title: p.title ?? null,
+          imageUrl: p.imageUrl ?? null,
+          costOfGoods: p.costOfGoods != null ? Number(p.costOfGoods) : null,
+        });
+      }
+    }
+
+    const ibmRows = await this.prisma.inventoryByMarketplace.findMany({
+      where: {
+        userId: { in: userIds },
+        marketplaceId: opts.marketplaceId ?? undefined,
+      },
+      include: { product: { select: { asin: true } } },
+    });
+    const invByAsin = new Map<
+      string,
+      { fulfillable: number; inboundWorking: number; inboundShipped: number; inboundReceiving: number; inboundStored: number }
+    >();
+    for (const r of ibmRows ?? []) {
+      const asin = String(r.product?.asin ?? '').trim();
+      if (!asin) continue;
+      const prev = invByAsin.get(asin) ?? {
+        fulfillable: 0,
+        inboundWorking: 0,
+        inboundShipped: 0,
+        inboundReceiving: 0,
+        inboundStored: 0,
+      };
+      invByAsin.set(asin, {
+        fulfillable: prev.fulfillable + Number((r as any).fulfillableQty ?? 0),
+        inboundWorking: prev.inboundWorking + Number((r as any).inboundWorkingQty ?? 0),
+        inboundShipped: prev.inboundShipped + Number((r as any).inboundShippedQty ?? 0),
+        inboundReceiving: prev.inboundReceiving + Number((r as any).inboundReceivingQty ?? 0),
+        inboundStored: prev.inboundStored + Number((r as any).inboundQty ?? 0),
+      });
+    }
+
+    // Latest purchase per ASIN (supplier + unit cost).
+    const purchaseRows = await this.prisma.purchase.findMany({
+      where: {
+        userId: { in: userIds },
+        product: { asin: { in: asins } },
+      },
+      orderBy: [{ purchaseDate: 'desc' }, { updatedAt: 'desc' }],
+      select: {
+        supplier: true,
+        supplierLink: true,
+        bundleSize: true,
+        qtyPurchased: true,
+        qtyDelivered: true,
+        currency: true,
+        vatRatePct: true,
+        unitCostIncVat: true,
+        deliveryCostIncVat: true,
+        prepCostIncVat: true,
+        totalCostIncVat: true,
+        purchaseDate: true,
+        product: { select: { asin: true } },
+      },
+      take: 5000,
+    });
+    const latestPurchaseByAsin = new Map<
+      string,
+      {
+        supplier: string | null;
+        supplierLink: string | null;
+        bundleSize: number;
+        qtyPurchased: number;
+        qtyDelivered: number;
+        currency: string;
+        vatRatePct: number;
+        unitCostIncVat: number;
+        deliveryCostIncVat: number;
+        prepCostIncVat: number;
+        totalCostIncVat: number;
+        purchaseDateIso: string;
+      }
+    >();
+    for (const pr of purchaseRows ?? []) {
+      const asin = String(pr.product?.asin ?? '').trim();
+      if (!asin) continue;
+      if (latestPurchaseByAsin.has(asin)) continue;
+      latestPurchaseByAsin.set(asin, {
+        supplier: pr.supplier ? String(pr.supplier) : null,
+        supplierLink: pr.supplierLink ? String(pr.supplierLink) : null,
+        bundleSize: Math.max(1, Number(pr.bundleSize ?? 1)),
+        qtyPurchased: Math.max(0, Number(pr.qtyPurchased ?? 0)),
+        qtyDelivered: Math.max(0, Number(pr.qtyDelivered ?? 0)),
+        currency: String(pr.currency ?? 'GBP'),
+        vatRatePct: Number(pr.vatRatePct ?? 0),
+        unitCostIncVat: Number(pr.unitCostIncVat ?? 0),
+        deliveryCostIncVat: Number(pr.deliveryCostIncVat ?? 0),
+        prepCostIncVat: Number(pr.prepCostIncVat ?? 0),
+        totalCostIncVat: Number(pr.totalCostIncVat ?? 0),
+        purchaseDateIso:
+          pr.purchaseDate instanceof Date
+            ? pr.purchaseDate.toISOString()
+            : new Date(pr.purchaseDate as any).toISOString(),
+      });
+    }
+
+    const out: Array<any> = [];
+    for (const asin of asins) {
+      const prod = productByAsin.get(asin);
+      if (!prod) continue;
+
+      const unitsVShort = Number(unitsShortByAsin.get(asin) ?? 0);
+      const unitsVLong = Number(unitsLongByAsin.get(asin) ?? 0);
+      const avgDailyShort = unitsVShort / Math.max(1, velocityShortDays);
+      const avgDailyLong = unitsVLong / Math.max(1, velocityLongDays);
+      let avgDaily = Math.max(avgDailyShort, avgDailyLong);
+      if (avgDaily === 0) avgDaily = unknownDemandFloorPerDay;
+
+      const inv = invByAsin.get(asin) ?? {
+        fulfillable: 0,
+        inboundWorking: 0,
+        inboundShipped: 0,
+        inboundReceiving: 0,
+        inboundStored: 0,
+      };
+      const inboundStages =
+        inv.inboundWorking + inv.inboundShipped + inv.inboundReceiving;
+      const inboundQty = inboundStages > 0 ? inboundStages : inv.inboundStored;
+      const effectiveStock = Math.max(0, inv.fulfillable + inboundQty);
+      const coverDays = avgDaily > 0 ? effectiveStock / avgDaily : null;
+
+      const p = (profitByAsin.get(asin) ?? {
+        units: 0,
+        profit: 0,
+        cogs: 0,
+        revenue: 0,
+        fees: 0,
+        lastSold: null as Date | null,
+      }) as {
+        units: number;
+        profit: number;
+        cogs: number;
+        revenue: number;
+        fees: number;
+        lastSold: Date | null;
+      };
+      const unitsP = Number(p.units ?? 0);
+      const avgProfitPerUnit = unitsP > 0 ? Number(p.profit ?? 0) / unitsP : 0;
+      const avgCogsPerUnit = unitsP > 0 ? Number(p.cogs ?? 0) / unitsP : 0;
+      const roi = avgCogsPerUnit > 0 ? avgProfitPerUnit / avgCogsPerUnit : null;
+
+      const passesProfit = avgProfitPerUnit >= minGrossProfitPerUnit;
+      const passesRoi = roi == null ? true : roi >= minRoi;
+      if (!passesProfit || !passesRoi) continue;
+
+      const targetStockUnits = avgDaily * (targetDaysOfCover + safetyDays);
+      const netNeed = Math.max(0, targetStockUnits - effectiveStock);
+      const rawBuy = Math.ceil(netNeed);
+      let buyQty = 0;
+      if (rawBuy > 0) {
+        buyQty = Math.ceil(rawBuy / casePack) * casePack;
+        buyQty = Math.max(minOrderQty, Math.min(maxBuyUnits, Math.round(buyQty)));
+      }
+      if (buyQty <= 0) continue;
+
+      const coverScore = coverDays == null ? 0 : 1 / (1 + coverDays);
+      const score = avgDaily * (1 + 3 * coverScore) * Math.max(0.01, avgProfitPerUnit);
+
+      const avgRevenuePerUnit = unitsP > 0 ? Number(p.revenue ?? 0) / unitsP : null;
+      const avgFeesPerUnitRaw = unitsP > 0 ? Number(p.fees ?? 0) / unitsP : null;
+      // Some historical rows store amazonFeesTotal as NEGATIVE (common) while others store it POSITIVE.
+      // Normalize to a signed "fees" value where fees are negative, so:
+      // netAfterFees = revenue + feesSigned
+      const feesSignedPerUnit =
+        avgFeesPerUnitRaw == null
+          ? null
+          : avgFeesPerUnitRaw > 0
+            ? -Math.abs(avgFeesPerUnitRaw)
+            : avgFeesPerUnitRaw;
+      const netAfterAmazonFeesPerUnit =
+        avgRevenuePerUnit != null && feesSignedPerUnit != null
+          ? avgRevenuePerUnit + feesSignedPerUnit
+          : null;
+      const maxBuyPriceBreakEvenPerUnit =
+        netAfterAmazonFeesPerUnit != null
+          ? Math.max(0, netAfterAmazonFeesPerUnit)
+          : null;
+      const maxBuyForMinProfit =
+        netAfterAmazonFeesPerUnit != null
+          ? netAfterAmazonFeesPerUnit - minGrossProfitPerUnit
+          : null;
+      const maxBuyForRoi =
+        netAfterAmazonFeesPerUnit != null
+          ? netAfterAmazonFeesPerUnit / (1 + Math.max(0, minRoi))
+          : null;
+      const maxBuyPriceForTargetsPerUnit =
+        netAfterAmazonFeesPerUnit == null
+          ? null
+          : Math.max(
+              0,
+              Math.min(
+                maxBuyForMinProfit ?? Infinity,
+                maxBuyForRoi ?? Infinity,
+              ),
+            );
+
+      const purchase = latestPurchaseByAsin.get(asin) ?? null;
+      const lastBuyUnitCostIncVat =
+        purchase && purchase.unitCostIncVat > 0
+          ? purchase.unitCostIncVat + purchase.deliveryCostIncVat + purchase.prepCostIncVat
+          : null;
+      const expectedProfitPerUnitAtLastBuy =
+        netAfterAmazonFeesPerUnit != null && lastBuyUnitCostIncVat != null
+          ? netAfterAmazonFeesPerUnit - lastBuyUnitCostIncVat
+          : null;
+      const expectedProfitTotalAtLastBuy =
+        expectedProfitPerUnitAtLastBuy != null
+          ? Math.round(expectedProfitPerUnitAtLastBuy * buyQty * 100) / 100
+          : null;
+
+      const rationaleParts: string[] = [];
+      rationaleParts.push(
+        `demand=${(Math.round(avgDaily * 100) / 100).toFixed(2)}/day`,
+      );
+      rationaleParts.push(`stock=${inv.fulfillable} fulfillable + ${inboundQty} inbound`);
+      if (coverDays != null) rationaleParts.push(`cover≈${Math.round(coverDays)}d`);
+
+      out.push({
+        productId: prod.id,
+        sku: prod.sku,
+        asin,
+        title: prod.title,
+        imageUrl: prod.imageUrl,
+        fulfillableQty: inv.fulfillable,
+        inboundQty,
+        effectiveStock,
+        avgDailyUnitsShort: Math.round(avgDailyShort * 1000) / 1000,
+        avgDailyUnitsLong: Math.round(avgDailyLong * 1000) / 1000,
+        avgDailyUnits: Math.round(avgDaily * 1000) / 1000,
+        daysOfCover: coverDays != null ? Math.round(coverDays * 10) / 10 : null,
+        avgGrossProfitPerUnit: unitsP > 0 ? Math.round(avgProfitPerUnit * 100) / 100 : null,
+        avgCogsPerUnit:
+          avgCogsPerUnit > 0 ? Math.round(avgCogsPerUnit * 100) / 100 : (prod.costOfGoods ?? null),
+        roi: roi != null && Number.isFinite(roi) ? Math.round(roi * 100) / 100 : null,
+        suggestedBuyQty: buyQty,
+        score,
+        lastSold: p.lastSold ? (p.lastSold as Date).toISOString() : null,
+        maxBuyPriceBreakEvenPerUnit:
+          maxBuyPriceBreakEvenPerUnit != null && Number.isFinite(maxBuyPriceBreakEvenPerUnit)
+            ? Math.round(maxBuyPriceBreakEvenPerUnit * 100) / 100
+            : null,
+        maxBuyPriceForTargetsPerUnit:
+          maxBuyPriceForTargetsPerUnit != null && Number.isFinite(maxBuyPriceForTargetsPerUnit)
+            ? Math.round(maxBuyPriceForTargetsPerUnit * 100) / 100
+            : null,
+        supplier: purchase?.supplier ?? null,
+        supplierLink: purchase?.supplierLink ?? null,
+        latestCogsEntry: purchase
+          ? {
+              purchaseDate: purchase.purchaseDateIso,
+              currency: purchase.currency,
+              vatRatePct: purchase.vatRatePct,
+              bundleSize: purchase.bundleSize,
+              qtyPurchased: purchase.qtyPurchased,
+              qtyDelivered: purchase.qtyDelivered,
+              unitCostIncVat: purchase.unitCostIncVat,
+              deliveryCostIncVat: purchase.deliveryCostIncVat,
+              prepCostIncVat: purchase.prepCostIncVat,
+              totalCostIncVat: purchase.totalCostIncVat,
+            }
+          : null,
+        lastBuyUnitCostIncVat:
+          lastBuyUnitCostIncVat != null && Number.isFinite(lastBuyUnitCostIncVat)
+            ? Math.round(lastBuyUnitCostIncVat * 100) / 100
+            : null,
+        expectedProfitPerUnitAtLastBuy:
+          expectedProfitPerUnitAtLastBuy != null && Number.isFinite(expectedProfitPerUnitAtLastBuy)
+            ? Math.round(expectedProfitPerUnitAtLastBuy * 100) / 100
+            : null,
+        expectedProfitTotalAtLastBuy,
+        rationale: rationaleParts.join(' • '),
+      });
+    }
+
+    out.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+    return out.slice(0, take);
+  }
+
   /**
    * UK-only (`A1F83G8C2ARO7P`): one Listings Restrictions call per **distinct ASIN** for this user.
    * ASINs come from `products` and from `inventory_by_marketplace` → product (same ASIN deduped).

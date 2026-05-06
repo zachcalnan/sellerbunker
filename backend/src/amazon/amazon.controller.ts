@@ -886,6 +886,37 @@ ping() {
   }
 
   /**
+   * Smart replenishment: recommends what to reorder and how many using recent sales velocity,
+   * inbound pipeline + current stock, and historical profit/ROI from OrderItem rows.
+   *
+   * Example: GET /api/amazon/replenish/smart?take=20&periodDays=30&targetCoverDays=45&minProfitPerUnit=1&minRoi=0.25
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Get('replenish/smart')
+  async getSmartReplenish(
+    @Req() req: { user: { orgId: string; marketplaceId?: string } },
+    @Query('take') take?: string,
+    @Query('periodDays') periodDays?: string,
+    @Query('targetCoverDays') targetCoverDays?: string,
+    @Query('minProfitPerUnit') minProfitPerUnit?: string,
+    @Query('minRoi') minRoi?: string,
+  ) {
+    const t = Number(take ?? 20);
+    const pd = Number(periodDays ?? 30);
+    const cd = Number(targetCoverDays ?? 45);
+    const mp = Number(minProfitPerUnit ?? 0);
+    const mr = Number(minRoi ?? 0);
+    return this.amazonService.getSmartReplenishmentSuggestions(req.user.orgId, {
+      take: Number.isFinite(t) ? Math.max(1, Math.min(200, t)) : 20,
+      marketplaceId: req.user.marketplaceId,
+      velocityShortDays: Number.isFinite(pd) ? Math.max(7, Math.min(180, pd)) : 30,
+      targetDaysOfCover: Number.isFinite(cd) ? Math.max(7, Math.min(180, cd)) : 45,
+      minGrossProfitPerUnit: Number.isFinite(mp) ? mp : 0,
+      minRoi: Number.isFinite(mr) ? mr : 0,
+    });
+  }
+
+  /**
    * ASIN selling eligibility (SP-API Listings Restrictions): stored rows for restock / gating.
    * Example: GET /api/amazon/selling-eligibility?take=500  (defaults to UK `A1F83G8C2ARO7P`; pass `marketplaceId` to override)
    * Optional: canRestock=true|false, maxAgeHours=168 (only rows checked within the last N hours), marketplaceId (UK default in data after refresh)

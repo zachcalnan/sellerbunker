@@ -95,7 +95,7 @@ export class RepricerController {
     }
   }
 
-  /** Assign one SKU to a saved pricing preset (max 10 SKUs per org). */
+  /** Assign one SKU to a saved pricing preset. */
   @Post('assign-sku')
   async assignSku(
     @Req() req: { user: { orgId: string } },

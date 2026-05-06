@@ -733,7 +733,7 @@ export default function RepricerPage() {
     return [...new Set(list)];
   }, [selected, pinnedProductId]);
 
-  /** SKUs currently in the repricer cohort (up to 10) — removing deletes the row and frees a slot. */
+  /** SKUs currently in the repricer cohort — removing deletes the row. */
   const removableRuleProductIds = useMemo(() => {
     return selectedOrPinnedProductIds.filter((pid) =>
       assignmentsByProductId.has(pid),
@@ -759,16 +759,6 @@ export default function RepricerPage() {
           if (willBeEmpty) setPinnedProductId(null);
           else if (pinnedProductId === c.productId) setPinnedProductId(null);
           return next;
-        }
-
-        const cohortIds = new Set(assignments.map((a) => a.productId));
-        const unionIds = new Set([...prev.map((p) => p.productId), c.productId]);
-        let newToCohort = 0;
-        for (const id of unionIds) {
-          if (!cohortIds.has(id)) newToCohort += 1;
-        }
-        if (cohortIds.size + newToCohort > 10) {
-          return prev;
         }
 
         return [...prev, { productId: c.productId }];
@@ -1403,10 +1393,7 @@ export default function RepricerPage() {
           <div>
             <h1 className="text-xl font-semibold">Repricer</h1>
             <p className="mt-1 text-sm text-[var(--muted-foreground)]">
-              Testing mode: up to{" "}
-              <span className="font-semibold text-[var(--foreground)]">10</span>{" "}
-              SKUs with sellable inventory. Remove a SKU from the repricer to
-              swap in another.
+              &nbsp;
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -1431,7 +1418,7 @@ export default function RepricerPage() {
           to free a slot.
         </p>
 
-        <div className="rounded-2xl border border-[var(--surface-border)] bg-[var(--surface)] p-4">
+        <div className="max-w-3xl rounded-2xl border border-[var(--surface-border)] bg-[var(--surface)] p-4">
           <h2 className="text-sm font-semibold text-[var(--foreground)]">
             Saved pricing rules
           </h2>
@@ -1452,10 +1439,10 @@ export default function RepricerPage() {
                 return (
                   <li
                     key={p.id}
-                    className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[var(--surface-border)] bg-[var(--background)]/40 px-3 py-2"
+                    className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[var(--surface-border)] bg-[var(--background)]/40 px-2 py-2"
                   >
-                    <div className="flex min-w-0 flex-1 items-center gap-3">
-                      <div className="w-20 shrink-0">
+                    <div className="flex min-w-0 flex-1 items-center gap-2">
+                      <div className="w-14 shrink-0">
                         {showActiveBadge ? (
                           <span className="inline-flex rounded-lg bg-sb-accent/20 px-3 py-1.5 text-xs font-semibold text-[var(--foreground)]">
                             Active
@@ -1477,7 +1464,7 @@ export default function RepricerPage() {
                         </div>
                       </div>
                     </div>
-                    <div className="flex flex-wrap gap-2">
+                      <div className="flex flex-wrap gap-1.5">
                       <button
                         type="button"
                         disabled={
@@ -1492,7 +1479,7 @@ export default function RepricerPage() {
                               : "Tick SKUs (checkboxes) or pin a SKU row first"
                         }
                         onClick={() => void assignSelectedToPreset(p.id)}
-                        className={`rounded-lg px-3 py-1.5 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-40 ${
+                        className={`rounded-lg px-2.5 py-1.5 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-40 ${
                           selected.length > 0 || pinnedProductId
                             ? "bg-emerald-500 text-black hover:bg-emerald-400"
                             : "border border-[var(--surface-border)] text-[var(--foreground)] hover:bg-[var(--foreground)]/5"
@@ -1514,7 +1501,7 @@ export default function RepricerPage() {
                               : "Tick SKUs (checkboxes) or pin a SKU row first"
                         }
                         onClick={() => void removeRuleFromSelected()}
-                        className={`rounded-lg px-3 py-1.5 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-40 ${
+                        className={`rounded-lg px-2.5 py-1.5 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-40 ${
                           removableRuleProductIds.length > 0
                             ? "border border-amber-400/50 bg-amber-400/5 text-amber-200/90 hover:bg-amber-400/10"
                             : "border border-[var(--surface-border)] bg-transparent text-[var(--muted-foreground)] opacity-40"
@@ -1527,14 +1514,14 @@ export default function RepricerPage() {
                       <button
                         type="button"
                         onClick={() => openEditPreset(p.id)}
-                        className="rounded-lg border border-[var(--surface-border)] px-3 py-1.5 text-xs font-semibold text-[var(--foreground)] hover:bg-[var(--foreground)]/5"
+                        className="rounded-lg border border-[var(--surface-border)] px-2.5 py-1.5 text-xs font-semibold text-[var(--foreground)] hover:bg-[var(--foreground)]/5"
                       >
                         Edit
                       </button>
                       <button
                         type="button"
                         onClick={() => void deleteRulePreset(p.id, p.name)}
-                        className="rounded-lg border border-red-500/40 bg-transparent px-3 py-1.5 text-xs font-semibold text-red-200 hover:bg-red-500/10"
+                        className="rounded-lg border border-red-500/40 bg-transparent px-2.5 py-1.5 text-xs font-semibold text-red-200 hover:bg-red-500/10"
                         title="Delete this pricing rule"
                       >
                         Delete rule
@@ -1660,7 +1647,7 @@ export default function RepricerPage() {
                         {assigned?.ruleSetName ? (
                           <div className="mt-1 text-[10px] text-[var(--muted-foreground)]">
                             Pricing rule:{" "}
-                            <span className="font-medium text-[var(--foreground)]">
+                            <span className="font-semibold text-emerald-400">
                               {assigned.ruleSetName}
                             </span>
                           </div>
