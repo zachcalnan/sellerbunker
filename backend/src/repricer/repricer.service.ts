@@ -3,6 +3,7 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { UsersService } from '../users/users.service';
 import { AmazonSpApiClient, SpApiCredentials } from '../amazon/sp-api.client';
+import { AmazonService } from '../amazon/amazon.service';
 
 @Injectable()
 export class RepricerService {
@@ -12,6 +13,7 @@ export class RepricerService {
     private readonly prisma: PrismaService,
     private readonly usersService: UsersService,
     private readonly spApiClient: AmazonSpApiClient,
+    private readonly amazonService: AmazonService,
   ) {}
 
   private async getOrgMemberUserIds(orgId: string): Promise<string[]> {
@@ -34,7 +36,10 @@ export class RepricerService {
       currentListedPrice: number | null;
       currentListedPriceUpdatedAt: Date | null;
       costOfGoods: number | null;
-      estimatedAmazonFeePerUnit: number | null;
+      /** Order-aligned fee for margin (Finances-preferred + split-estimate fallback). */
+      amazonFeePerUnit: number | null;
+      /** Raw Product Fees API rollup stored on `products` (optional diagnostics). */
+      estimatedAmazonFeeRollup: number | null;
     }>;
     total: number;
     page: number;
@@ -71,15 +76,39 @@ export class RepricerService {
         currentListedPriceUpdatedAt: true,
         costOfGoods: true,
         estimatedAmazonFeePerUnit: true,
+        estimatedReferralFeePerUnit: true,
+        estimatedFbaFeePerUnit: true,
+        estimatedDigitalServiceFeePerUnit: true,
         inventory: { select: { totalQty: true, availableQty: true } },
       },
     });
+
+    const productIds = products.map((p) => p.id);
+    const financesSnap =
+      productIds.length > 0
+        ? await this.amazonService.getLatestFinancesFeeSnapshotsForProducts(
+            userIds,
+            productIds,
+          )
+        : new Map();
 
     const mapped = products
       .map((p) => {
         const totalQty = Number((p as any)?.inventory?.totalQty ?? 0);
         const availableQty = Number((p as any)?.inventory?.availableQty ?? 0);
         const activeUnits30d = unitsByProductId.get(p.id) ?? 0;
+        const rollup =
+          p.estimatedAmazonFeePerUnit != null ? Number(p.estimatedAmazonFeePerUnit) : null;
+        const aligned = this.amazonService.repricerAmazonFeePerUnitFromProduct(
+          {
+            currentListedPrice: p.currentListedPrice,
+            estimatedReferralFeePerUnit: (p as any).estimatedReferralFeePerUnit,
+            estimatedFbaFeePerUnit: (p as any).estimatedFbaFeePerUnit,
+            estimatedDigitalServiceFeePerUnit: (p as any).estimatedDigitalServiceFeePerUnit,
+            estimatedAmazonFeePerUnit: p.estimatedAmazonFeePerUnit,
+          },
+          financesSnap.get(p.id) ?? null,
+        );
         return {
           productId: p.id,
           sku: p.sku,
@@ -92,7 +121,8 @@ export class RepricerService {
           currentListedPrice: p.currentListedPrice != null ? Number(p.currentListedPrice) : null,
           currentListedPriceUpdatedAt: (p as any).currentListedPriceUpdatedAt ?? null,
           costOfGoods: p.costOfGoods != null ? Number(p.costOfGoods) : null,
-          estimatedAmazonFeePerUnit: p.estimatedAmazonFeePerUnit != null ? Number(p.estimatedAmazonFeePerUnit) : null,
+          amazonFeePerUnit: aligned,
+          estimatedAmazonFeeRollup: rollup != null && Number.isFinite(rollup) ? rollup : null,
         };
       })
       .filter((r) => r.availableQty > 0);
@@ -1391,6 +1421,9 @@ export class RepricerService {
             productType: true,
             costOfGoods: true,
             estimatedAmazonFeePerUnit: true,
+            estimatedReferralFeePerUnit: true,
+            estimatedFbaFeePerUnit: true,
+            estimatedDigitalServiceFeePerUnit: true,
             currentListedPrice: true,
           },
         },
@@ -1404,6 +1437,18 @@ export class RepricerService {
       await this.touchRepricerEngineAt(orgId);
       return { ok: true, orgId, processed: 0 };
     }
+
+    const userIdsForFees = await this.getOrgMemberUserIds(orgId);
+    const engineProductIds = selected
+      .map((r: any) => String(r.product?.id ?? ''))
+      .filter((id: string) => id.length > 0);
+    const financesSnapEngine =
+      engineProductIds.length > 0
+        ? await this.amazonService.getLatestFinancesFeeSnapshotsForProducts(
+            userIdsForFees,
+            engineProductIds,
+          )
+        : new Map<string, { quantity: number; revenueTotal: number; amazonFeesTotal: number }>();
 
     const activeFallback = await (this.prisma as any).repricerRuleSet.findFirst({
       where: { orgId, isActive: true },
@@ -1471,7 +1516,16 @@ export class RepricerService {
       const sku = String(p?.sku ?? '');
       const asin = p?.asin ? String(p.asin) : null;
       const cost = p?.costOfGoods != null ? Number(p.costOfGoods) : null;
-      const fee = p?.estimatedAmazonFeePerUnit != null ? Number(p.estimatedAmazonFeePerUnit) : null;
+      const fee = this.amazonService.repricerAmazonFeePerUnitFromProduct(
+        {
+          currentListedPrice: p?.currentListedPrice,
+          estimatedReferralFeePerUnit: (p as any)?.estimatedReferralFeePerUnit,
+          estimatedFbaFeePerUnit: (p as any)?.estimatedFbaFeePerUnit,
+          estimatedDigitalServiceFeePerUnit: (p as any)?.estimatedDigitalServiceFeePerUnit,
+          estimatedAmazonFeePerUnit: p?.estimatedAmazonFeePerUnit,
+        },
+        financesSnapEngine.get(p.id) ?? null,
+      );
       const current = p?.currentListedPrice != null ? Number(p.currentListedPrice) : null;
       // External listing price drift logging is noisy during normal operation (syncs/manual edits/etc).
       // Keep disabled by default; enable only when debugging with REPRICER_LOG_EXTERNAL_DRIFT=true.

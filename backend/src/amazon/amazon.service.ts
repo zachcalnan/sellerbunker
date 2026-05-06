@@ -4048,6 +4048,40 @@ export class AmazonService {
         }
       }
 
+      // Deferred Order Payment: Seller Central shows fees while Finances v0 has **no** Shipment/Deferred item rows yet.
+      // Same fees appear under Finances 2024 `listTransactions` (DEFERRED). Without this, first sync writes estimates only.
+      if (
+        !financesUnauthorized &&
+        orderItems.length > 0 &&
+        feeByOrderItemId.size === 0 &&
+        feeBySku.size === 0
+      ) {
+        try {
+          await this.mergeFinances2024DeferredTransactionsIntoFeeMaps(
+            credentials,
+            amazonOrderId,
+            feeByOrderItemId,
+            breakdownByOrderItemId,
+            feeBySku,
+            breakdownBySku,
+            addFee,
+            addFeeBreakdown,
+          );
+          const itemizedSignedSum2024 =
+            feeByOrderItemId.size > 0
+              ? [...feeByOrderItemId.values()].reduce((a, b) => a + b, 0)
+              : [...feeBySku.values()].reduce((a, b) => a + b, 0);
+          if (Math.abs(itemizedSignedSum2024) > 1e-6) {
+            amazonFeesTotal = itemizedSignedSum2024;
+          }
+        } catch (e) {
+          this.logger.warn(
+            `[syncRecentOrdersToDb] Finances2024 deferred merge (primary) failed order=${amazonOrderId}`,
+            e instanceof Error ? e.message : e,
+          );
+        }
+      }
+
       // When we already have OrderItems for this order, fetch Finances if not yet done and backfill settled fee breakdown.
       if (!financesUnauthorized && existingOrderItemOrderIds.has(amazonOrderId)) {
         if (!finRes) {
@@ -4108,156 +4142,20 @@ export class AmazonService {
               }
             }
 
-            // Some deferred orders have **zero** Finances v0 events but do appear in Finances 2024-06-19
-            // `GET /finances/2024-06-19/transactions` with ORDER_ID. Fill fee maps from that payload so we
-            // don't incorrectly copy from a prior same-ASIN sale.
+            // Same Finances 2024 deferred sweep as primary sync (see above).
             if (feeByOrderItemId.size === 0 && feeBySku.size === 0) {
               try {
-                const mp =
-                  credentials.region === 'eu'
-                    ? 'A1F83G8C2ARO7P'
-                    : credentials.region === 'fe'
-                      ? 'A1VC38T7YXB528'
-                      : 'ATVPDKIKX0DER';
-                const { postedAfter, postedBefore } =
-                  this.finances2024ListTransactionsMaxPostedWindowIso();
-                const sweepStatuses = ['DEFERRED', 'DEFERRED_RELEASED', 'RELEASED'] as const;
-                const txAgg: any[] = [];
-                const seen = new Set<string>();
-                const push = (arr: any[]) => {
-                  for (const t of arr) {
-                    const id = String(t?.transactionId ?? t?.TransactionId ?? '');
-                    const key = id || JSON.stringify(t).slice(0, 400);
-                    if (seen.has(key)) continue;
-                    seen.add(key);
-                    txAgg.push(t);
-                  }
-                };
-                for (const st of sweepStatuses) {
-                  const r = await this.finances2024ListTransactionsFetchAllPages(credentials, {
-                    marketplaceId: mp,
-                    postedAfter,
-                    postedBefore,
-                    transactionStatus: st,
-                    relatedIdentifierName: 'ORDER_ID',
-                    relatedIdentifierValue: amazonOrderId,
-                  });
-                  push(r.transactions as any[]);
-                  await new Promise<void>((r2) => setTimeout(r2, 250));
-                }
-                {
-                  const r = await this.finances2024ListTransactionsFetchAllPages(credentials, {
-                    marketplaceId: mp,
-                    postedAfter,
-                    postedBefore,
-                    transactionStatus: null,
-                    relatedIdentifierName: 'ORDER_ID',
-                    relatedIdentifierValue: amazonOrderId,
-                  });
-                  push(r.transactions as any[]);
-                }
-
-                const readAmt = (node: any): number => {
-                  const amtRaw =
-                    node?.breakdownAmount?.currencyAmount ??
-                    node?.breakdownAmount?.CurrencyAmount ??
-                    node?.breakdownAmount?.Amount ??
-                    node?.breakdownAmount?.amount ??
-                    node?.breakdownAmount ??
-                    node?.BreakdownAmount;
-                  const amt = Number(amtRaw);
-                  return Number.isFinite(amt) ? amt : 0;
-                };
-                // Avoid double-counting nested breakdown trees: for target types, take the node total and do not
-                // descend into its children (the children usually sum to the same total).
-                const sumTargetBreakdownTypes = (
-                  node: any,
-                  targetTypes: Set<string>,
-                  out: Record<string, number>,
-                ) => {
-                  if (!node) return;
-                  const t = String(node.breakdownType ?? node.BreakdownType ?? '').trim();
-                  if (t && targetTypes.has(t)) {
-                    const amt = readAmt(node);
-                    if (Math.abs(amt) > 1e-9) out[t] = (out[t] ?? 0) + amt;
-                    return;
-                  }
-                  const kids = node.breakdowns ?? node.Breakdowns;
-                  if (Array.isArray(kids)) {
-                    for (const k of kids) sumTargetBreakdownTypes(k, targetTypes, out);
-                  }
-                };
-
-                for (const tx of txAgg) {
-                  const items = Array.isArray(tx?.items) ? tx.items : Array.isArray(tx?.Items) ? tx.Items : [];
-                  for (const it of items) {
-                    const rel = Array.isArray(it?.relatedIdentifiers)
-                      ? it.relatedIdentifiers
-                      : Array.isArray(it?.RelatedIdentifiers)
-                        ? it.RelatedIdentifiers
-                        : [];
-                    const idRow = rel.find(
-                      (r: any) =>
-                        String(r?.itemRelatedIdentifierName ?? r?.ItemRelatedIdentifierName ?? '') ===
-                        'ORDER_ADJUSTMENT_ITEM_ID',
-                    );
-                    const orderItemId =
-                      idRow?.itemRelatedIdentifierValue ?? idRow?.ItemRelatedIdentifierValue;
-                    const ctx0 = Array.isArray(it?.contexts)
-                      ? it.contexts[0]
-                      : Array.isArray(it?.Contexts)
-                        ? it.Contexts[0]
-                        : null;
-                    const sku = ctx0?.sku ?? ctx0?.Sku ?? null;
-                    const breakdowns = Array.isArray(it?.breakdowns)
-                      ? it.breakdowns
-                      : Array.isArray(it?.Breakdowns)
-                        ? it.Breakdowns
-                        : [];
-                    const targetTypes = new Set<string>([
-                      'Commission',
-                      'ReferralFee',
-                      'FixedClosingFee',
-                      'VariableClosingFee',
-                      'PerItemFee',
-                      'DigitalServicesFee',
-                      'FBAPerUnitFulfillmentFee',
-                      'FBAWeightBasedFee',
-                      'FBAFulfillmentFee',
-                    ]);
-                    const sums: Record<string, number> = {};
-                    for (const b of breakdowns) sumTargetBreakdownTypes(b, targetTypes, sums);
-                    const digital = sums.DigitalServicesFee ?? 0;
-                    const closing =
-                      (sums.FixedClosingFee ?? 0) +
-                      (sums.VariableClosingFee ?? 0) +
-                      (sums.PerItemFee ?? 0);
-                    const referral =
-                      (sums.Commission ?? 0) + (sums.ReferralFee ?? 0) + closing;
-                    const fba =
-                      (sums.FBAPerUnitFulfillmentFee ?? 0) +
-                      (sums.FBAWeightBasedFee ?? 0) +
-                      (sums.FBAFulfillmentFee ?? 0);
-                    const feeTotal = Number((digital + referral + fba).toFixed(2));
-                    if (feeTotal === 0) continue;
-                    const bid = { referral: Number(referral.toFixed(2)), fba: Number(fba.toFixed(2)), digital: Number(digital.toFixed(2)) };
-                    if (orderItemId) {
-                      addFee(feeByOrderItemId, String(orderItemId), feeTotal);
-                      addFeeBreakdown(
-                        breakdownByOrderItemId,
-                        String(orderItemId),
-                        bid.referral,
-                        bid.fba,
-                        bid.digital,
-                      );
-                    }
-                    if (sku) {
-                      addFee(feeBySku, String(sku), feeTotal);
-                      addFeeBreakdown(breakdownBySku, String(sku), bid.referral, bid.fba, bid.digital);
-                    }
-                  }
-                }
-              } catch (e) {
+                await this.mergeFinances2024DeferredTransactionsIntoFeeMaps(
+                  credentials,
+                  amazonOrderId,
+                  feeByOrderItemId,
+                  breakdownByOrderItemId,
+                  feeBySku,
+                  breakdownBySku,
+                  addFee,
+                  addFeeBreakdown,
+                );
+              } catch {
                 // ignore; we'll fall back to same-ASIN settled below if needed
               }
             }
@@ -7899,6 +7797,168 @@ export class AmazonService {
   }
 
   /**
+   * Finances v0 `listFinancialEventsByOrderId` often returns **empty** `FinancialEvents` for deferred Order Payment
+   * rows that Seller Central already shows with full fees. Those fees usually appear under Finances 2024
+   * `GET /finances/2024-06-19/transactions` (DEFERRED / RELEASED sweeps). Merge into the same per-line maps as v0
+   * so `syncRecentOrdersToDb` persists `feesSource=finances` on first write — not pre-sale estimates.
+   */
+  private async mergeFinances2024DeferredTransactionsIntoFeeMaps(
+    credentials: SpApiCredentials,
+    amazonOrderId: string,
+    feeByOrderItemId: Map<string, number>,
+    breakdownByOrderItemId: Map<string, { referral: number; fba: number; digital: number }>,
+    feeBySku: Map<string, number>,
+    breakdownBySku: Map<string, { referral: number; fba: number; digital: number }>,
+    addFee: (map: Map<string, number>, key: string, amount: number) => void,
+    addFeeBreakdown: (
+      map: Map<string, { referral: number; fba: number; digital: number }>,
+      key: string,
+      r: number,
+      f: number,
+      d: number,
+    ) => void,
+  ): Promise<void> {
+    const mp =
+      credentials.region === 'eu'
+        ? 'A1F83G8C2ARO7P'
+        : credentials.region === 'fe'
+          ? 'A1VC38T7YXB528'
+          : 'ATVPDKIKX0DER';
+    const { postedAfter, postedBefore } = this.finances2024ListTransactionsMaxPostedWindowIso();
+    const sweepStatuses = ['DEFERRED', 'DEFERRED_RELEASED', 'RELEASED'] as const;
+    const txAgg: any[] = [];
+    const seen = new Set<string>();
+    const push = (arr: any[]) => {
+      for (const t of arr) {
+        const id = String(t?.transactionId ?? t?.TransactionId ?? '');
+        const key = id || JSON.stringify(t).slice(0, 400);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        txAgg.push(t);
+      }
+    };
+    for (const st of sweepStatuses) {
+      const r = await this.finances2024ListTransactionsFetchAllPages(credentials, {
+        marketplaceId: mp,
+        postedAfter,
+        postedBefore,
+        transactionStatus: st,
+        relatedIdentifierName: 'ORDER_ID',
+        relatedIdentifierValue: amazonOrderId,
+      });
+      push(r.transactions as any[]);
+      await new Promise<void>((r2) => setTimeout(r2, 250));
+    }
+    {
+      const r = await this.finances2024ListTransactionsFetchAllPages(credentials, {
+        marketplaceId: mp,
+        postedAfter,
+        postedBefore,
+        transactionStatus: null,
+        relatedIdentifierName: 'ORDER_ID',
+        relatedIdentifierValue: amazonOrderId,
+      });
+      push(r.transactions as any[]);
+    }
+
+    const readAmt = (node: any): number => {
+      const amtRaw =
+        node?.breakdownAmount?.currencyAmount ??
+        node?.breakdownAmount?.CurrencyAmount ??
+        node?.breakdownAmount?.Amount ??
+        node?.breakdownAmount?.amount ??
+        node?.breakdownAmount ??
+        node?.BreakdownAmount;
+      const amt = Number(amtRaw);
+      return Number.isFinite(amt) ? amt : 0;
+    };
+    const sumTargetBreakdownTypes = (
+      node: any,
+      targetTypes: Set<string>,
+      out: Record<string, number>,
+    ) => {
+      if (!node) return;
+      const t = String(node.breakdownType ?? node.BreakdownType ?? '').trim();
+      if (t && targetTypes.has(t)) {
+        const amt = readAmt(node);
+        if (Math.abs(amt) > 1e-9) out[t] = (out[t] ?? 0) + amt;
+        return;
+      }
+      const kids = node.breakdowns ?? node.Breakdowns;
+      if (Array.isArray(kids)) {
+        for (const k of kids) sumTargetBreakdownTypes(k, targetTypes, out);
+      }
+    };
+
+    for (const tx of txAgg) {
+      const items = Array.isArray(tx?.items) ? tx.items : Array.isArray(tx?.Items) ? tx.Items : [];
+      for (const it of items) {
+        const rel = Array.isArray(it?.relatedIdentifiers)
+          ? it.relatedIdentifiers
+          : Array.isArray(it?.RelatedIdentifiers)
+            ? it.RelatedIdentifiers
+            : [];
+        const idRow = rel.find(
+          (r: any) =>
+            String(r?.itemRelatedIdentifierName ?? r?.ItemRelatedIdentifierName ?? '') ===
+            'ORDER_ADJUSTMENT_ITEM_ID',
+        );
+        const orderItemId = idRow?.itemRelatedIdentifierValue ?? idRow?.ItemRelatedIdentifierValue;
+        const ctx0 = Array.isArray(it?.contexts)
+          ? it.contexts[0]
+          : Array.isArray(it?.Contexts)
+            ? it.Contexts[0]
+            : null;
+        const sku = ctx0?.sku ?? ctx0?.Sku ?? null;
+        const breakdowns = Array.isArray(it?.breakdowns)
+          ? it.breakdowns
+          : Array.isArray(it?.Breakdowns)
+            ? it.Breakdowns
+            : [];
+        const targetTypes = new Set<string>([
+          'Commission',
+          'ReferralFee',
+          'FixedClosingFee',
+          'VariableClosingFee',
+          'PerItemFee',
+          'DigitalServicesFee',
+          'FBAPerUnitFulfillmentFee',
+          'FBAWeightBasedFee',
+          'FBAFulfillmentFee',
+        ]);
+        const sums: Record<string, number> = {};
+        for (const b of breakdowns) sumTargetBreakdownTypes(b, targetTypes, sums);
+        const digital = sums.DigitalServicesFee ?? 0;
+        const closing =
+          (sums.FixedClosingFee ?? 0) +
+          (sums.VariableClosingFee ?? 0) +
+          (sums.PerItemFee ?? 0);
+        const referral =
+          (sums.Commission ?? 0) + (sums.ReferralFee ?? 0) + closing;
+        const fba =
+          (sums.FBAPerUnitFulfillmentFee ?? 0) +
+          (sums.FBAWeightBasedFee ?? 0) +
+          (sums.FBAFulfillmentFee ?? 0);
+        const feeTotal = Number((digital + referral + fba).toFixed(2));
+        if (feeTotal === 0) continue;
+        const bid = {
+          referral: Number(referral.toFixed(2)),
+          fba: Number(fba.toFixed(2)),
+          digital: Number(digital.toFixed(2)),
+        };
+        if (orderItemId) {
+          addFee(feeByOrderItemId, String(orderItemId), feeTotal);
+          addFeeBreakdown(breakdownByOrderItemId, String(orderItemId), bid.referral, bid.fba, bid.digital);
+        }
+        if (sku) {
+          addFee(feeBySku, String(sku), feeTotal);
+          addFeeBreakdown(breakdownBySku, String(sku), bid.referral, bid.fba, bid.digital);
+        }
+      }
+    }
+  }
+
+  /**
    * Amazon: if postedAfter/postedBefore are **more than 180 days** apart, `listTransactions` returns **empty**.
    * Use the widest safe window ending shortly before "now" so deferred rows posted months ago still match.
    */
@@ -11307,6 +11367,109 @@ try {
           ? Math.abs(digitalServiceFee)
           : digitalServiceFee,
     };
+  }
+
+  /**
+   * Latest Finances-backed order line per product (for repricer margin alignment with Orders).
+   */
+  async getLatestFinancesFeeSnapshotsForProducts(
+    userIds: string[],
+    productIds: string[],
+  ): Promise<
+    Map<string, { quantity: number; revenueTotal: number; amazonFeesTotal: number }>
+  > {
+    const out = new Map<
+      string,
+      { quantity: number; revenueTotal: number; amazonFeesTotal: number }
+    >();
+    if (!userIds.length || !productIds.length) return out;
+
+    const rows = await this.prisma.$queryRaw<
+      Array<{
+        product_id: string;
+        quantity: number;
+        revenue_total: unknown;
+        amazon_fees_total: unknown;
+      }>
+    >(Prisma.sql`
+      SELECT DISTINCT ON ("product_id")
+        "product_id",
+        "quantity",
+        "revenue_total",
+        "amazon_fees_total"
+      FROM "order_items"
+      WHERE "user_id" IN (${Prisma.join(userIds)})
+        AND "product_id" IN (${Prisma.join(productIds)})
+        AND "fees_source" = 'finances'
+      ORDER BY "product_id", "order_date" DESC
+    `);
+
+    for (const r of rows ?? []) {
+      const pid = String(r.product_id);
+      const qtyRaw = Number(r.quantity);
+      const qty = Number.isFinite(qtyRaw) && qtyRaw > 0 ? Math.floor(qtyRaw) : 1;
+      const rev = Number(r.revenue_total);
+      const fees = Number(r.amazon_fees_total);
+      if (!Number.isFinite(rev) || !Number.isFinite(fees)) continue;
+      out.set(pid, {
+        quantity: qty,
+        revenueTotal: rev,
+        amazonFeesTotal: fees,
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Per-unit Amazon fees for repricer preview + bounds: match Orders list behaviour.
+   * - Prefer latest settled (Finances) line per SKU; scale fee magnitude to **current list price** vs that sale’s unit price.
+   * - Else sum referral + FBA + digital from `products`, with UK/EU-style 2% digital fallback when digital is missing (same as unsettled order lines).
+   * - Else fall back to `estimatedAmazonFeePerUnit` rollup from Product Fees API.
+   */
+  repricerAmazonFeePerUnitFromProduct(
+    product: {
+      currentListedPrice?: unknown;
+      estimatedReferralFeePerUnit?: unknown;
+      estimatedFbaFeePerUnit?: unknown;
+      estimatedDigitalServiceFeePerUnit?: unknown;
+      estimatedAmazonFeePerUnit?: unknown;
+    },
+    financesSnapshot?: { quantity: number; revenueTotal: number; amazonFeesTotal: number } | null,
+  ): number | null {
+    const toNum = (v: unknown): number | null => {
+      if (v == null) return null;
+      const n = typeof v === 'number' ? v : Number(String(v));
+      return Number.isFinite(n) ? n : null;
+    };
+
+    const listPx = toNum(product.currentListedPrice);
+
+    if (financesSnapshot && financesSnapshot.quantity > 0) {
+      const qty = Math.max(1, financesSnapshot.quantity);
+      const revMag = Math.abs(financesSnapshot.revenueTotal);
+      const feeMag = Math.abs(financesSnapshot.amazonFeesTotal);
+      const unitPrice = revMag / qty;
+      let feePu = feeMag / qty;
+      if (listPx != null && listPx > 0 && unitPrice > 1e-6 && Number.isFinite(feePu)) {
+        feePu = feePu * (listPx / unitPrice);
+      }
+      if (Number.isFinite(feePu) && feePu >= 0) return feePu;
+    }
+
+    const r = toNum(product.estimatedReferralFeePerUnit);
+    const f = toNum(product.estimatedFbaFeePerUnit);
+    const d = toNum(product.estimatedDigitalServiceFeePerUnit);
+    const rollup = toNum(product.estimatedAmazonFeePerUnit);
+
+    const ref = r != null ? Math.abs(r) : 0;
+    const fba = f != null ? Math.abs(f) : 0;
+    let dig = d != null ? Math.abs(d) : 0;
+    if (dig < 1e-9 && (ref > 1e-9 || fba > 1e-9)) {
+      dig = Math.round((ref + fba) * 0.02 * 100) / 100;
+    }
+    const sum = ref + fba + dig;
+    if (sum > 1e-9) return sum;
+    return rollup != null ? Math.abs(rollup) : null;
   }
 
   /**

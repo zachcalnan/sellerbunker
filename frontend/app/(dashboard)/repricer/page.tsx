@@ -17,6 +17,10 @@ type CandidateSku = {
   currentListedPrice: number | null;
   currentListedPriceUpdatedAt: string | null;
   costOfGoods?: number | null;
+  /** Same basis as Orders (Finances-preferred + split estimates); prefer over rollup. */
+  amazonFeePerUnit?: number | null;
+  /** Legacy Product Fees API rollup from DB (diagnostic). */
+  estimatedAmazonFeeRollup?: number | null;
   estimatedAmazonFeePerUnit?: number | null;
 };
 
@@ -969,10 +973,14 @@ export default function RepricerPage() {
         c.costOfGoods != null && Number.isFinite(Number(c.costOfGoods)) && Number(c.costOfGoods) > 0
           ? Number(c.costOfGoods)
           : null;
-      const fee =
-        c.estimatedAmazonFeePerUnit != null && Number.isFinite(Number(c.estimatedAmazonFeePerUnit))
-          ? Math.abs(Number(c.estimatedAmazonFeePerUnit))
-          : null;
+      const feeRaw =
+        c.amazonFeePerUnit != null && Number.isFinite(Number(c.amazonFeePerUnit))
+          ? Number(c.amazonFeePerUnit)
+          : c.estimatedAmazonFeePerUnit != null &&
+              Number.isFinite(Number(c.estimatedAmazonFeePerUnit))
+            ? Number(c.estimatedAmazonFeePerUnit)
+            : null;
+      const fee = feeRaw != null ? Math.abs(feeRaw) : null;
       if (price == null || cogs == null) return { profit: null, roiPct: null };
       const profit = price - (fee ?? 0) - cogs;
       const roiPct = cogs > 0 ? (profit / cogs) * 100 : null;
