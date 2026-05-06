@@ -27,6 +27,13 @@ export class EmailService {
     return key ? key : null;
   }
 
+  private getBrevoSignupListId(): number | null {
+    const raw = this.config.get<string>('BREVO_SIGNUP_LIST_ID')?.trim();
+    if (!raw) return null;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+  }
+
   private getSenderEmail(): string | null {
     const sender = this.config.get<string>('SENDER_EMAIL')?.trim();
     return sender && sender.includes('@') ? sender : null;
@@ -117,15 +124,19 @@ export class EmailService {
         this.logger.warn('BREVO_API_KEY not configured; skipping addToBrevoList');
         return;
       }
+      const listId = this.getBrevoSignupListId();
       await brevo.contacts.createContact({
         email,
         attributes: {
           FIRSTNAME: (firstName ?? '').trim(),
           LASTNAME: (lastName ?? '').trim(),
         },
+        ...(listId ? { listIds: [listId] } : {}),
         updateEnabled: true,
       });
-      this.logger.log(`Added/updated ${email} in Brevo contacts`);
+      this.logger.log(
+        `Added/updated ${email} in Brevo contacts${listId ? ` (listId=${listId})` : ''}`,
+      );
     } catch (err) {
       this.logger.error(`Failed to add ${email} to Brevo`, err as any);
     }

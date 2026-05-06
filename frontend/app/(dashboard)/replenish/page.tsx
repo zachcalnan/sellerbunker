@@ -60,6 +60,7 @@ type SmartReplenishRow = {
 };
 
 const PAGE_SIZE = 12;
+const SMART_PAGE_SIZE = 12;
 
 function formatDate(iso: string | null): string {
   if (!iso) return "—";
@@ -88,6 +89,7 @@ export default function ReplenishPage() {
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
+  const [smartPage, setSmartPage] = useState(1);
 
   const [smartTargetCoverDays, setSmartTargetCoverDays] = useState(45);
   const [smartTargetProfitPerUnit, setSmartTargetProfitPerUnit] = useState(1);
@@ -109,7 +111,8 @@ export default function ReplenishPage() {
       url.searchParams.set("limit", "10000");
       if (devImpersonate) url.searchParams.set("impersonate", devImpersonate);
       const smartUrl = new URL(`${baseUrl}/api/amazon/replenish/smart`);
-      smartUrl.searchParams.set("take", "12");
+      // Fetch a larger pool and paginate client-side so Smart and Standard pages are independent.
+      smartUrl.searchParams.set("take", "200");
       smartUrl.searchParams.set("periodDays", String(SMART_PERIOD_DAYS));
       smartUrl.searchParams.set("targetCoverDays", String(smartTargetCoverDays));
       smartUrl.searchParams.set("minProfitPerUnit", String(smartTargetProfitPerUnit));
@@ -181,6 +184,17 @@ export default function ReplenishPage() {
     );
   }, [rows, query]);
 
+  const smartFiltered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return smart;
+    return smart.filter(
+      (r) =>
+        r.sku.toLowerCase().includes(q) ||
+        (r.asin ?? "").toLowerCase().includes(q) ||
+        (r.title ?? "").toLowerCase().includes(q)
+    );
+  }, [smart, query]);
+
   const smartNow = Date.now();
   const smartStatusActiveByProductId = useMemo(() => {
     const out: Record<string, { status: "replenished" | "unavailable"; untilMs: number }> = {};
@@ -228,8 +242,20 @@ export default function ReplenishPage() {
     [filtered, safePage]
   );
 
+  const smartTotalPages = Math.max(1, Math.ceil(smartFiltered.length / SMART_PAGE_SIZE));
+  const smartSafePage = Math.min(smartPage, smartTotalPages);
+  const smartPaginated = useMemo(
+    () =>
+      smartFiltered.slice(
+        (smartSafePage - 1) * SMART_PAGE_SIZE,
+        smartSafePage * SMART_PAGE_SIZE
+      ),
+    [smartFiltered, smartSafePage],
+  );
+
   useEffect(() => {
     setPage(1);
+    setSmartPage(1);
   }, [query]);
 
   const { backgroundClass } = useDisplaySettings();
@@ -396,7 +422,7 @@ export default function ReplenishPage() {
             )}
 
             <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {smart.slice(0, 12).map((s) => {
+              {smartPaginated.map((s) => {
                 const active = smartStatusActiveByProductId[s.productId];
                 const isRepl = active?.status === "replenished";
                 const isUnav = active?.status === "unavailable";
@@ -579,6 +605,43 @@ export default function ReplenishPage() {
               })}
             </div>
 
+            {smartTotalPages > 1 && (
+              <div className="mt-4 flex items-center justify-between gap-4 border-t border-[var(--surface-border)] pt-4">
+                <div className="text-sm text-[var(--muted-foreground)]">
+                  Page {smartSafePage} of {smartTotalPages}
+                  <span className="ml-2">
+                    ({(smartSafePage - 1) * SMART_PAGE_SIZE + 1}–
+                    {Math.min(smartSafePage * SMART_PAGE_SIZE, smartFiltered.length)} of{" "}
+                    {smartFiltered.length})
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setSmartPage((p) => Math.max(1, p - 1))}
+                    disabled={smartSafePage <= 1}
+                    className="flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--surface-border)] bg-transparent text-[var(--foreground)] hover:bg-[var(--foreground)]/5 disabled:pointer-events-none disabled:opacity-40"
+                    aria-label="Previous smart page"
+                  >
+                    <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                    </svg>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSmartPage((p) => Math.min(smartTotalPages, p + 1))}
+                    disabled={smartSafePage >= smartTotalPages}
+                    className="flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--surface-border)] bg-transparent text-[var(--foreground)] hover:bg-[var(--foreground)]/5 disabled:pointer-events-none disabled:opacity-40"
+                    aria-label="Next smart page"
+                  >
+                    <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+            )}
+
             {detailsOpen && detailsItem && (
               <div
                 className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
@@ -753,54 +816,63 @@ export default function ReplenishPage() {
           </div>
         ) : (
           <>
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {paginated.map((r) => (
-              <div
-                key={r.productId}
-                className="flex flex-col overflow-hidden rounded-lg border border-[var(--surface-border)] bg-[var(--surface)]"
-              >
-                <div className="relative flex h-40 shrink-0 items-center justify-center bg-[var(--background)] p-3">
-                  {r.imageUrl ? (
-                    <img
-                      src={r.imageUrl}
-                      alt=""
-                      className="max-h-full w-auto max-w-full object-contain"
-                    />
-                  ) : (
-                    <span className="text-xs text-[var(--muted-foreground)]">
-                      No image
-                    </span>
-                  )}
-                  {r.outOfStock && (
-                    <span className="absolute right-2 top-2 rounded bg-red-500/90 px-2 py-0.5 text-[10px] font-medium text-white">
-                      Out of stock
-                    </span>
-                  )}
-                </div>
-                <div className="flex flex-1 flex-col gap-1.5 p-3">
-                  <div className="line-clamp-2 min-h-[2.5rem] text-sm font-medium text-[var(--foreground)]">
-                    {r.title ?? r.sku}
-                  </div>
-                  <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-[var(--muted-foreground)]">
-                    <span>SKU: <span className="font-mono text-[var(--foreground)]">{r.sku}</span></span>
-                    {r.asin && (
-                      <span>ASIN: <span className="font-mono text-[var(--foreground)]">{r.asin}</span></span>
+          <div className="rounded-xl border border-[var(--surface-border)] bg-[var(--surface)] px-4 py-3">
+            <h2 className="text-sm font-semibold text-[var(--foreground)]">
+              Standard replenishment
+            </h2>
+            <p className="mt-0.5 text-xs text-[var(--muted-foreground)]">
+              Out-of-stock SKUs ranked by recent sales (from your order history).
+            </p>
+
+            <div className="mt-3 grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+              {paginated.map((r) => (
+                <div
+                  key={r.productId}
+                  className="flex flex-col overflow-hidden rounded-lg border border-[var(--surface-border)] bg-[var(--surface)]"
+                >
+                  <div className="relative flex h-40 shrink-0 items-center justify-center bg-[var(--background)] p-3">
+                    {r.imageUrl ? (
+                      <img
+                        src={r.imageUrl}
+                        alt=""
+                        className="max-h-full w-auto max-w-full object-contain"
+                      />
+                    ) : (
+                      <span className="text-xs text-[var(--muted-foreground)]">
+                        No image
+                      </span>
+                    )}
+                    {r.outOfStock && (
+                      <span className="absolute right-2 top-2 rounded bg-red-500/90 px-2 py-0.5 text-[10px] font-medium text-white">
+                        Out of stock
+                      </span>
                     )}
                   </div>
-                  <div className="mt-1 text-xs text-[var(--muted-foreground)]">
-                    Last sold: {formatDate(r.lastSold)}
-                  </div>
-                  <div className="mt-auto flex gap-3 pt-1 text-xs">
-                    <span className="tabular-nums text-[var(--foreground)]">
-                      {r.unitsSold} sold
-                    </span>
-                    <span className="tabular-nums text-[var(--muted-foreground)]">
-                      Profit: {new Intl.NumberFormat(undefined, { style: "currency", currency: selectedCurrency }).format(r.estimatedProfit)}
-                    </span>
+                  <div className="flex flex-1 flex-col gap-1.5 p-3">
+                    <div className="line-clamp-2 min-h-[2.5rem] text-sm font-medium text-[var(--foreground)]">
+                      {r.title ?? r.sku}
+                    </div>
+                    <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-[var(--muted-foreground)]">
+                      <span>SKU: <span className="font-mono text-[var(--foreground)]">{r.sku}</span></span>
+                      {r.asin && (
+                        <span>ASIN: <span className="font-mono text-[var(--foreground)]">{r.asin}</span></span>
+                      )}
+                    </div>
+                    <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                      Last sold: {formatDate(r.lastSold)}
+                    </div>
+                    <div className="mt-auto flex gap-3 pt-1 text-xs">
+                      <span className="tabular-nums text-[var(--foreground)]">
+                        {r.unitsSold} sold
+                      </span>
+                      <span className="tabular-nums text-[var(--muted-foreground)]">
+                        Profit: {new Intl.NumberFormat(undefined, { style: "currency", currency: selectedCurrency }).format(r.estimatedProfit)}
+                      </span>
+                    </div>
                   </div>
                 </div>
-              </div>
-            ))}
+              ))}
+            </div>
           </div>
           {totalPages > 1 && (
             <div className="flex items-center justify-between gap-4 border-t border-[var(--surface-border)] pt-4">
