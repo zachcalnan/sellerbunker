@@ -422,7 +422,7 @@ export default function ReplenishPage() {
             )}
 
             <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {smartPaginated.map((s) => {
+              {smartPaginated.map((s, idx) => {
                 const active = smartStatusActiveByProductId[s.productId];
                 const isRepl = active?.status === "replenished";
                 const isUnav = active?.status === "unavailable";
@@ -451,8 +451,13 @@ export default function ReplenishPage() {
                     )}
                   </div>
                   <div className="min-w-0 flex-1">
-                    <div className="line-clamp-1 text-xs font-medium text-[var(--foreground)]">
-                      {s.title ?? s.sku}
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="line-clamp-1 text-xs font-medium text-[var(--foreground)]">
+                        {s.title ?? s.sku}
+                      </div>
+                      <span className="shrink-0 rounded-md border border-[var(--surface-border)] bg-[var(--surface)] px-2 py-0.5 text-[10px] font-semibold text-[var(--muted-foreground)]">
+                        Rank #{(smartSafePage - 1) * SMART_PAGE_SIZE + idx + 1}
+                      </span>
                     </div>
                     {s.asin && (
                       <div className="mt-0.5 text-[11px] text-[var(--muted-foreground)]">
