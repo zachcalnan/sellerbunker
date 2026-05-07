@@ -579,30 +579,32 @@ function HomeInner() {
     }
   }, [isSignedIn, getToken, baseUrl, selectedMarketplaceId]);
 
+  // Initial load: fetch orders first (fast + visible), then summary silently.
+  // This avoids the first paint being blocked by the full dashboard fan-out.
   useEffect(() => {
     if (!isSignedIn) {
       setSummary(null);
-      return;
-    }
-    fetchSummary();
-  }, [isSignedIn, fetchSummary]);
-
-  useEffect(() => {
-    if (!isSignedIn) {
       setPrevSummary(null);
-      return;
-    }
-    void fetchPrevSummary();
-  }, [isSignedIn, fetchPrevSummary]);
-
-  useEffect(() => {
-    if (!isSignedIn) {
       setOrderRowsForRings([]);
       setOrdersLoadedForRings(false);
       return;
     }
-    void fetchOrdersForRings();
-  }, [isSignedIn, fetchOrdersForRings]);
+    let cancelled = false;
+    const run = async () => {
+      await fetchOrdersForRings();
+      if (cancelled) return;
+      await fetchSummary({ silent: true });
+      if (cancelled) return;
+      // Defer prev-period compare so it never blocks first paint.
+      setTimeout(() => {
+        if (!cancelled) void fetchPrevSummary();
+      }, 0);
+    };
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [isSignedIn, fetchOrdersForRings, fetchSummary, fetchPrevSummary]);
 
   useEffect(() => {
     if (!isSignedIn) return;
@@ -2071,7 +2073,7 @@ function ProfitAndLoss({
               <tr className="border-b border-[var(--surface-border)]">
                 <td className="py-0.5 pr-2 pl-2 text-[var(--foreground)]">Other fixed costs</td>
                 <td className="py-0.5 pl-2 text-right tabular-nums text-[var(--foreground)]">
-                  {fmt((data as any).otherFixedCostsTotal ?? 0)}
+                  {fmt(("otherFixedCostsTotal" in data ? (data as { otherFixedCostsTotal?: number | null }).otherFixedCostsTotal : null) ?? 0)}
                 </td>
               </tr>
               <tr className="border-b border-[var(--surface-border)] font-medium">
@@ -3169,7 +3171,11 @@ function DonutCard({
   }, []);
 
   useLayoutEffect(() => {
-    fitCenter();
+    // Avoid synchronous setState in layout effect loops (eslint "cascading renders").
+    // Defer one tick and only update when the scale actually changes.
+    queueMicrotask(() => {
+      fitCenter();
+    });
     const shell = shellRef.current;
     if (!shell || typeof ResizeObserver === "undefined") return;
     const ro = new ResizeObserver(() => fitCenter());

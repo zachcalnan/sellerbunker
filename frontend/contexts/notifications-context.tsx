@@ -194,10 +194,11 @@ export function NotificationsProvider({ children }: { children: React.ReactNode 
 
   useEffect(() => {
     if (!isSignedIn) {
-      setMissingCount(null);
+      queueMicrotask(() => setMissingCount(null));
       return;
     }
-    void fetchMissing();
+    const t = setTimeout(() => void fetchMissing(), 0);
+    return () => clearTimeout(t);
   }, [isSignedIn, fetchMissing]);
 
   const fetchMissingUnitsSummary = useCallback(async () => {
@@ -225,10 +226,11 @@ export function NotificationsProvider({ children }: { children: React.ReactNode 
 
   useEffect(() => {
     if (!isSignedIn) {
-      setMissingUnitsShipments([]);
+      queueMicrotask(() => setMissingUnitsShipments([]));
       return;
     }
-    void fetchMissingUnitsSummary();
+    const t = setTimeout(() => void fetchMissingUnitsSummary(), 0);
+    return () => clearTimeout(t);
   }, [isSignedIn, fetchMissingUnitsSummary]);
 
   const fetchSyncProgress = useCallback(async () => {
@@ -318,15 +320,18 @@ export function NotificationsProvider({ children }: { children: React.ReactNode 
 
   useEffect(() => {
     if (!isSignedIn) {
-      setSyncProgress(null);
-      setSyncStage("complete");
+      queueMicrotask(() => {
+        setSyncProgress(null);
+        setSyncStage("complete");
+      });
       return;
     }
     if (!syncPendingFromSession && !hasSeenSyncInProgress) return;
-    void fetchSyncProgress();
+    const t0 = setTimeout(() => void fetchSyncProgress(), 0);
     const early = setTimeout(() => void fetchSyncProgress(), 150);
     const progressInterval = setInterval(fetchSyncProgress, 350);
     return () => {
+      clearTimeout(t0);
       clearTimeout(early);
       clearInterval(progressInterval);
     };

@@ -51,13 +51,10 @@ type DisplaySettingsContextValue = {
 const DisplaySettingsContext = createContext<DisplaySettingsContextValue | null>(null);
 
 export function DisplaySettingsProvider({ children }: { children: ReactNode }) {
-  const [backgroundTheme, setBackgroundThemeState] = useState<BackgroundTheme>("dark");
-  const [ringColor, setRingColorState] = useState<string>(DEFAULT_RING_COLOR);
-
-  useEffect(() => {
-    setBackgroundThemeState(readBackground());
-    setRingColorState(readRingColor());
-  }, []);
+  const [backgroundTheme, setBackgroundThemeState] = useState<BackgroundTheme>(() =>
+    readBackground(),
+  );
+  const [ringColor, setRingColorState] = useState<string>(() => readRingColor());
 
   const backgroundClass = useMemo(
     () => BACKGROUND_CLASSES[backgroundTheme],

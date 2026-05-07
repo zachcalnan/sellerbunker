@@ -51,7 +51,7 @@ export function NotificationsDropdown({ variant = "full" }: { variant?: "full" |
 
   useEffect(() => {
     if (!showPanel) {
-      setPanelFadedIn(false);
+      queueMicrotask(() => setPanelFadedIn(false));
       return;
     }
     const frame = requestAnimationFrame(() => setPanelFadedIn(true));

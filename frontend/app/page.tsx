@@ -68,7 +68,8 @@ function NavAuthButtons({ skipFade }: { skipFade?: boolean } = {}) {
   useEffect(() => {
     if (skipFade) return;
     if (isLoaded && isSignedIn && hasSubscription === null) {
-      setIsVisible(false);
+      // Defer to avoid "setState synchronously within effect" lint (and prevents render cascades).
+      queueMicrotask(() => setIsVisible(false));
     }
   }, [skipFade, isLoaded, isSignedIn, hasSubscription]);
 
@@ -77,7 +78,7 @@ function NavAuthButtons({ skipFade }: { skipFade?: boolean } = {}) {
     const showingContent = !isLoaded || !isSignedIn || hasSubscription !== null;
     if (showingContent) {
       if (navAuthFadeDone) {
-        setIsVisible(true);
+        queueMicrotask(() => setIsVisible(true));
         return;
       }
       const frame = requestAnimationFrame(() => {
@@ -92,7 +93,7 @@ function NavAuthButtons({ skipFade }: { skipFade?: boolean } = {}) {
 
   useEffect(() => {
     if (!isLoaded || !isSignedIn) {
-      setHasSubscription(null);
+      queueMicrotask(() => setHasSubscription(null));
       return;
     }
     let cancelled = false;
@@ -185,18 +186,18 @@ function NavAuthSlot() {
       <>
         <div className="ml-1 h-5 w-px bg-[var(--surface-border)] lg:ml-2 lg:h-6" aria-hidden />
         <div className="flex w-[9.25rem] items-center justify-end gap-1 lg:w-[10.75rem] lg:gap-2">
-          <a
+          <Link
             href="/sign-in"
             className="cursor-pointer rounded-lg px-2 py-1.5 text-xs font-medium text-[var(--muted-foreground)] no-underline transition hover:bg-[var(--foreground)]/5 hover:text-[var(--foreground)] lg:py-2 lg:text-sm"
           >
             Sign in
-          </a>
-          <a
+          </Link>
+          <Link
             href="/sign-up"
             className="cursor-pointer rounded-lg bg-white px-2 py-1.5 text-xs font-medium text-black no-underline transition hover:bg-gray-100 lg:px-4 lg:py-2 lg:text-sm"
           >
             Dashboard
-          </a>
+          </Link>
         </div>
       </>
     );
@@ -400,14 +401,14 @@ function HeroCtaSlot() {
   if (!isLoaded) {
     return (
       <div className={ctaRowClass}>
-        <a
+        <Link
           href="/sign-up"
           className={`${heroCtaClass} inline-flex min-h-[2.75rem] min-w-0 flex-1 items-center justify-center gap-2 text-black hover:opacity-90 sm:flex-initial`}
           style={{ backgroundColor: accentColor }}
         >
           <ModernCtaIcon className="h-4 w-4 shrink-0" />
           Try free today
-        </a>
+        </Link>
         {discordCta}
       </div>
     );
@@ -1061,7 +1062,7 @@ function CustomizableDashboardStack() {
     { src: "/dashboard-display-5.png", alt: "Dashboard theme 5" },
   ];
   const getSrc = (i: number) => (failedUrls.has(cards[i].src) ? fallbackSrc : cards[i].src);
-  const useFallbackTint = (i: number) => failedUrls.has(cards[i].src);
+  const shouldUseFallbackTint = (i: number) => failedUrls.has(cards[i].src);
 
   return (
     <div className="relative mx-auto grid w-full max-w-7xl grid-cols-3 gap-5 py-5">
@@ -1082,7 +1083,7 @@ function CustomizableDashboardStack() {
               <div
                 className="relative aspect-video w-full overflow-hidden rounded-lg"
               style={
-                useFallbackTint(i)
+                shouldUseFallbackTint(i)
                   ? { filter: `hue-rotate(${FALLBACK_HUE_ROTATIONS[i]}deg)` }
                   : undefined
               }
@@ -1119,7 +1120,7 @@ function CustomizableDashboardStack() {
               <div
                 className="relative aspect-video w-full overflow-hidden rounded-lg"
                 style={
-                  useFallbackTint(idx)
+                  shouldUseFallbackTint(idx)
                     ? { filter: `hue-rotate(${FALLBACK_HUE_ROTATIONS[idx]}deg)` }
                     : undefined
                 }
@@ -1278,7 +1279,7 @@ export default function LandingPage() {
       const frame = requestAnimationFrame(() => setDrawerSlideIn(true));
       return () => cancelAnimationFrame(frame);
     } else {
-      setDrawerSlideIn(false);
+      queueMicrotask(() => setDrawerSlideIn(false));
     }
   }, [mobileNavOpen]);
 

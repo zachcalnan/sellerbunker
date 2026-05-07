@@ -950,7 +950,8 @@ export class RepricerService {
   }) {
     const { cost, fee, minProfit, maxProfit, minRoiPct, maxRoiPct, minListPrice, maxListPrice } = params;
     if (cost == null || !Number.isFinite(cost) || cost <= 0) return null;
-    const f = fee != null && Number.isFinite(fee) && fee >= 0 ? fee : 0;
+    // Fees can be stored as negative (common in orders/finances). Bounds should use absolute fee cost.
+    const f = fee != null && Number.isFinite(fee) ? Math.abs(fee) : 0;
     const minProfitAbs = minProfit != null && Number.isFinite(minProfit) ? minProfit : null;
     const maxProfitAbs = maxProfit != null && Number.isFinite(maxProfit) ? maxProfit : null;
     const minRoi = minRoiPct != null && Number.isFinite(minRoiPct) ? minRoiPct / 100 : null;
@@ -1669,7 +1670,93 @@ export class RepricerService {
         if (minP != null && clamped < minP) clamped = minP;
         if (maxP != null && clamped > maxP) clamped = maxP;
         if (clamped < 0.01) clamped = 0.01;
-        nextPrice = Number.isFinite(clamped) ? Math.round(clamped * 100) / 100 : null;
+        if (!Number.isFinite(clamped)) {
+          nextPrice = null;
+        } else {
+          // Rounding matters for ROI/profit bounds. If we are at the minimum bound, rounding down
+          // can put us just below min ROI/profit. So:
+          // - min bound: round UP to the nearest penny
+          // - max bound: round DOWN to the nearest penny
+          // - otherwise: normal rounding
+          const nearMin = minP != null && clamped <= minP + 1e-9;
+          const nearMax = maxP != null && clamped >= maxP - 1e-9;
+          if (nearMin && minP != null) nextPrice = Math.ceil(minP * 100) / 100;
+          else if (nearMax && maxP != null) nextPrice = Math.floor(maxP * 100) / 100;
+          else nextPrice = Math.round(clamped * 100) / 100;
+
+          // Safety: keep within bounds after rounding.
+          if (minP != null && nextPrice < minP) nextPrice = Math.ceil(minP * 100) / 100;
+          if (maxP != null && nextPrice > maxP) nextPrice = Math.floor(maxP * 100) / 100;
+        }
+
+        // Hard safety: min ROI/profit must hold at the chosen nextPrice.
+        // Fees can be price-dependent (Finances snapshot scaling), so recompute at the candidate price
+        // and bump upward until the constraints are satisfied (or hit max bound).
+        if (
+          nextPrice != null &&
+          bounds &&
+          (minRoiPct != null || minProfit != null) &&
+          cost != null &&
+          Number.isFinite(cost) &&
+          cost > 0
+        ) {
+          const feeAt = (price: number): number => {
+            const outFee = this.amazonService.repricerAmazonFeePerUnitFromProduct(
+              {
+                currentListedPrice: price,
+                estimatedReferralFeePerUnit: (p as any)?.estimatedReferralFeePerUnit,
+                estimatedFbaFeePerUnit: (p as any)?.estimatedFbaFeePerUnit,
+                estimatedDigitalServiceFeePerUnit: (p as any)?.estimatedDigitalServiceFeePerUnit,
+                estimatedAmazonFeePerUnit: p?.estimatedAmazonFeePerUnit,
+              },
+              financesSnapEngine.get(p.id) ?? null,
+            );
+            return outFee != null && Number.isFinite(outFee) ? Math.abs(Number(outFee)) : 0;
+          };
+          const meets = (price: number) => {
+            const feeAbs = feeAt(price);
+            const profitAbs = price - feeAbs - Number(cost);
+            const roiPctNow = (profitAbs / Number(cost)) * 100;
+            const okProfit = minProfit == null || !Number.isFinite(minProfit) ? true : profitAbs >= Number(minProfit) - 1e-9;
+            const okRoi = minRoiPct == null || !Number.isFinite(minRoiPct) ? true : roiPctNow >= Number(minRoiPct) - 1e-9;
+            return okProfit && okRoi;
+          };
+
+          if (!meets(nextPrice)) {
+            const maxAllowed = maxP != null ? Math.floor(maxP * 100) / 100 : null;
+            let lo = nextPrice;
+            let hi =
+              maxAllowed != null
+                ? maxAllowed
+                : Math.max(nextPrice, Number(cost) * 5); // loose cap when no explicit max
+
+            // If even the max cannot satisfy, we'll keep the computed price but mark it as error in logs later.
+            if (maxAllowed != null && !meets(maxAllowed)) {
+              // leave nextPrice as-is; message will reflect ROI and bounds.
+            } else {
+              // Binary search in pennies for the smallest price that satisfies constraints.
+              // Work in integer pennies to avoid floating drift.
+              let loP = Math.round(lo * 100);
+              let hiP = Math.round(hi * 100);
+              // Ensure hi satisfies; if not and no max bound, expand a bit.
+              if (maxAllowed == null) {
+                let expansions = 0;
+                while (expansions < 10 && !meets(hiP / 100)) {
+                  hiP = Math.min(hiP * 2, Math.round(Number(cost) * 1000)); // hard stop
+                  expansions += 1;
+                }
+              }
+              if (meets(hiP / 100)) {
+                while (loP + 1 < hiP) {
+                  const mid = Math.floor((loP + hiP) / 2);
+                  if (meets(mid / 100)) hiP = mid;
+                  else loP = mid;
+                }
+                nextPrice = hiP / 100;
+              }
+            }
+          }
+        }
 
         if (skipNoBuyBox) {
           message = RepricerService.SKIP_NO_BUY_BOX_UNCHANGED_MSG;
@@ -1697,7 +1784,19 @@ export class RepricerService {
                   nextPrice,
                   p?.productType != null ? String(p.productType) : null,
                 );
-                message = `Amazon listing price updated ${current.toFixed(2)} → ${nextPrice.toFixed(2)} (${detail}).`;
+                const feeAbs =
+                  fee != null && Number.isFinite(Number(fee)) ? Math.abs(Number(fee)) : null;
+                const roiPct =
+                  cost != null &&
+                  Number.isFinite(Number(cost)) &&
+                  Number(cost) > 0 &&
+                  feeAbs != null &&
+                  Number.isFinite(nextPrice)
+                    ? ((Number(nextPrice) - feeAbs - Number(cost)) / Number(cost)) * 100
+                    : null;
+                message = `Amazon listing price updated ${current.toFixed(2)} → ${nextPrice.toFixed(2)} (${detail})${
+                  roiPct != null && Number.isFinite(roiPct) ? ` • roi≈${(Math.round(roiPct * 10) / 10).toFixed(1)}%` : ''
+                }.`;
                 const now = new Date();
                 await this.prisma.product.update({
                   where: { id: p.id },
@@ -1709,7 +1808,19 @@ export class RepricerService {
               }
             }
           } else {
-            message = `DRY-RUN: would update price from ${current.toFixed(2)} → ${nextPrice.toFixed(2)} (${detail}).`;
+            const feeAbs =
+              fee != null && Number.isFinite(Number(fee)) ? Math.abs(Number(fee)) : null;
+            const roiPct =
+              cost != null &&
+              Number.isFinite(Number(cost)) &&
+              Number(cost) > 0 &&
+              feeAbs != null &&
+              Number.isFinite(nextPrice)
+                ? ((Number(nextPrice) - feeAbs - Number(cost)) / Number(cost)) * 100
+                : null;
+            message = `DRY-RUN: would update price from ${current.toFixed(2)} → ${nextPrice.toFixed(2)} (${detail})${
+              roiPct != null && Number.isFinite(roiPct) ? ` • roi≈${(Math.round(roiPct * 10) / 10).toFixed(1)}%` : ''
+            }.`;
             // Default false: do not write our DB-only price when not PATCHing Amazon (avoids "SB shows new price, Seller Central doesn't").
             const simulate = (process.env.REPRICER_SIMULATE_PRICE_UPDATE ?? 'false').toLowerCase();
             if (opts?.dryRun !== false && ['1', 'true', 'yes'].includes(simulate)) {

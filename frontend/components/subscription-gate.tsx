@@ -8,17 +8,16 @@ const BILLING_BYPASSED =
 
 export function SubscriptionGate({ children }: { children: React.ReactNode }) {
   const { isLoaded } = useAuth();
-  const [allowed, setAllowed] = useState<boolean | null>(null);
+  const [allowed, setAllowed] = useState<boolean | null>(() =>
+    BILLING_BYPASSED ? true : null,
+  );
 
   useEffect(() => {
-    if (BILLING_BYPASSED) {
-      setAllowed(true);
-      return;
-    }
+    if (BILLING_BYPASSED) return;
     if (!isLoaded) return;
     // Dashboard remains accessible without active subscription.
     // Individual pages/components handle locked-state UI.
-    setAllowed(true);
+    queueMicrotask(() => setAllowed(true));
   }, [isLoaded]);
 
   if (!isLoaded || allowed === null) {

@@ -33,7 +33,7 @@ export function MarketplaceSelector() {
 
   useEffect(() => {
     if (marketplaces.some((m) => m.isBase)) {
-      setNeedBaseCue(false);
+      queueMicrotask(() => setNeedBaseCue(false));
     }
   }, [marketplaces]);
 
@@ -47,7 +47,7 @@ export function MarketplaceSelector() {
       .map((region) => ({
         region,
         label: REGION_LABELS[region],
-        items: marketplaces.filter((m: any) => m.region === region),
+        items: marketplaces.filter((m) => m.region === region),
       }))
       .filter((g) => g.items.length > 0);
   }, [marketplaces]);

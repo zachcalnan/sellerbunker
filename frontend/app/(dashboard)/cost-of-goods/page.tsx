@@ -229,13 +229,13 @@ function CostOfGoodsInner() {
 
       const fetchAllPages = async <TItem,>(
         firstUrl: string,
-        parseTotal: (json: any) => number,
-        parseItems: (json: any) => TItem[],
+        parseTotal: (json: unknown) => number,
+        parseItems: (json: unknown) => TItem[],
       ): Promise<{ total: number; items: TItem[] }> => {
         const all: TItem[] = [];
         let total = 0;
         let page = 0;
-        let url = new URL(firstUrl);
+        const url = new URL(firstUrl);
         const takeN =
           Number(url.searchParams.get("take") ?? SKU_FETCH_SIZE) ||
           SKU_FETCH_SIZE;
@@ -285,7 +285,7 @@ function CostOfGoodsInner() {
         | CostEntryRow[]
         | { total?: number; items?: CostEntryRow[] };
       const productsData = (await productsRes.json()) as ProductRow[];
-      const inventoryData = (await inventoryRes.json()) as Array<{
+      type InventoryRow = {
         productId: string;
         id?: string;
         sku: string;
@@ -297,7 +297,8 @@ function CostOfGoodsInner() {
         inventoryByMarketplace?: Array<{ currentQty?: number | null }> | null;
         // Legacy/alternative shapes: tolerate top-level totalQty when present.
         totalQty?: number | null;
-      }>;
+      };
+      const inventoryData = (await inventoryRes.json()) as InventoryRow[];
 
       if (Array.isArray(entriesData)) {
         setEntries(entriesData);
@@ -309,7 +310,7 @@ function CostOfGoodsInner() {
 
       const inventoryAsProducts: ProductRow[] = Array.isArray(inventoryData)
         ? inventoryData.map((r) => ({
-            id: String((r as any).productId ?? (r as any).id ?? r.sku),
+            id: String(r.productId ?? r.id ?? r.sku),
             sku: r.sku,
             asin: r.asin,
             title: r.title,
@@ -320,9 +321,7 @@ function CostOfGoodsInner() {
       // a different productId for the same SKU (multiple users in org). Key stock by SKU to avoid mismatches.
       const inventoryQtyBySku = new Map<string, number>();
       for (const r of inventoryData ?? []) {
-        const skuKey = String((r as any)?.sku ?? "")
-          .trim()
-          .toLowerCase();
+        const skuKey = String(r?.sku ?? "").trim().toLowerCase();
         if (!skuKey) continue;
         const top = r?.totalQty != null ? Number(r.totalQty) : null;
         const nested =
@@ -351,7 +350,7 @@ function CostOfGoodsInner() {
         // eslint-disable-next-line no-console
         console.warn("[cogs] inventoryQtyBySku.size:", inventoryQtyBySku.size);
         // eslint-disable-next-line no-console
-        console.warn("[cogs] inventory sample:", (inventoryData as any)?.[0]);
+        console.warn("[cogs] inventory sample:", inventoryData?.[0]);
       }
       const byId = new Map<string, ProductRow>();
       for (const p of inventoryAsProducts) byId.set(p.id, p);

@@ -7872,13 +7872,38 @@ export class AmazonService {
       const amt = Number(amtRaw);
       return Number.isFinite(amt) ? amt : 0;
     };
+    const normType = (t: unknown) => String(t ?? '').trim();
+    const mapTaxTypeToBase = (tRaw: string): string => {
+      let t = normType(tRaw);
+      if (!t) return '';
+      // Finances 2024 breakdown types often split Base + Tax/VAT lines (e.g. DigitalServicesFee + DigitalServicesFeeTax).
+      // Seller Central totals include both, so we bucket Tax/VAT under the same base type.
+      if (t.endsWith('Tax') && t.length > 3) t = t.slice(0, -3);
+      if (t.endsWith('VAT') && t.length > 3) t = t.slice(0, -3);
+      if (t.endsWith('Vat') && t.length > 3) t = t.slice(0, -3);
+
+      // Finances 2024 uses a wider variety of fee breakdownType strings than our initial allowlist.
+      // Normalize common variants into the same buckets so totals match Seller Central (incl. FBA surcharges).
+      const u = t.toLowerCase();
+      if (u.includes('digital') && u.includes('service')) return 'DigitalServicesFee';
+      if (u.includes('commission')) return 'Commission';
+      if (u.includes('referral')) return 'ReferralFee';
+      if (u.includes('closing')) return 'FixedClosingFee';
+      if (u.includes('peritem')) return 'PerItemFee';
+      if (u.includes('fulfillment') || u.startsWith('fba') || u.includes('fba')) {
+        // Includes: FBAPerUnitFulfillmentFee, FBAFuelSurcharge, FBAInbound/Logistics surcharges, etc.
+        return 'FBAFulfillmentFee';
+      }
+      return t;
+    };
     const sumTargetBreakdownTypes = (
       node: any,
       targetTypes: Set<string>,
       out: Record<string, number>,
     ) => {
       if (!node) return;
-      const t = String(node.breakdownType ?? node.BreakdownType ?? '').trim();
+      const t0 = String(node.breakdownType ?? node.BreakdownType ?? '').trim();
+      const t = mapTaxTypeToBase(t0);
       if (t && targetTypes.has(t)) {
         const amt = readAmt(node);
         if (Math.abs(amt) > 1e-9) out[t] = (out[t] ?? 0) + amt;

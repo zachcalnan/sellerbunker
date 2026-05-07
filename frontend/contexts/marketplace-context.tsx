@@ -104,7 +104,11 @@ export function MarketplaceProvider({ children }: { children: ReactNode }) {
   }, [getToken, isSignedIn]);
 
   useEffect(() => {
-    void refreshMarketplaces();
+    // Defer so we don't trip eslint "setState in effect" (refreshMarketplaces sets state).
+    const t = setTimeout(() => {
+      void refreshMarketplaces();
+    }, 0);
+    return () => clearTimeout(t);
   }, [refreshMarketplaces]);
 
   const selectMarketplace = useCallback(

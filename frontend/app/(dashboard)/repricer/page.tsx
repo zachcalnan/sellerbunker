@@ -153,7 +153,10 @@ function repricerEventLabel(log: {
   message: string;
   context?: unknown;
 }): string {
-  const ctx = log.context && typeof log.context === "object" ? (log.context as any) : null;
+  const ctx =
+    log.context && typeof log.context === "object"
+      ? (log.context as Record<string, unknown>)
+      : null;
   const msg = String(log.message ?? "").trim();
 
   if (msg.startsWith("Skipped: missing COGS")) return "Missing COGS";
@@ -164,18 +167,21 @@ function repricerEventLabel(log: {
   if (msg.startsWith("LIVE: Amazon price update failed")) return "Amazon update failed";
   if (msg.startsWith("LIVE: missing Amazon credentials")) return "Missing Amazon creds";
 
-  const strat = typeof ctx?.strategy === "string" ? ctx.strategy.trim() : "";
-  const refLabel = ctx?.priceReference === "best_offer" ? "lowest offer" : "buy box";
+  const strat = typeof ctx?.["strategy"] === "string" ? String(ctx["strategy"]).trim() : "";
+  const refLabel = ctx?.["priceReference"] === "best_offer" ? "lowest offer" : "buy box";
+  const refPriceRaw = ctx?.["refPrice"];
   const refPrice =
-    typeof ctx?.refPrice === "number" && Number.isFinite(ctx.refPrice) ? Number(ctx.refPrice) : null;
+    typeof refPriceRaw === "number" && Number.isFinite(refPriceRaw) ? Number(refPriceRaw) : null;
+  const bounds =
+    ctx && typeof ctx["bounds"] === "object" && ctx["bounds"] != null
+      ? (ctx["bounds"] as Record<string, unknown>)
+      : null;
+  const minPriceRaw = bounds?.["minPrice"];
+  const maxPriceRaw = bounds?.["maxPrice"];
   const minP =
-    typeof ctx?.bounds?.minPrice === "number" && Number.isFinite(ctx.bounds.minPrice)
-      ? Number(ctx.bounds.minPrice)
-      : null;
+    typeof minPriceRaw === "number" && Number.isFinite(minPriceRaw) ? Number(minPriceRaw) : null;
   const maxP =
-    typeof ctx?.bounds?.maxPrice === "number" && Number.isFinite(ctx.bounds.maxPrice)
-      ? Number(ctx.bounds.maxPrice)
-      : null;
+    typeof maxPriceRaw === "number" && Number.isFinite(maxPriceRaw) ? Number(maxPriceRaw) : null;
 
   const prettyStrat =
     strat === "match_buy_box"
@@ -666,9 +672,9 @@ export default function RepricerPage() {
           headers: { ...headers, "Content-Type": "application/json" },
           body: JSON.stringify({ presetId }),
         });
-        const data = await res.json().catch(() => ({}));
+        const data = (await res.json().catch(() => ({}))) as { message?: string };
         if (!res.ok)
-          throw new Error((data as any)?.message ?? "Could not apply preset");
+          throw new Error(data?.message ?? "Could not apply preset");
         await loadRuleLibrary();
       } catch (e) {
         setErr(e instanceof Error ? e.message : "Could not apply preset");
@@ -740,9 +746,9 @@ export default function RepricerPage() {
         headers: { ...headers, "Content-Type": "application/json" },
         body: JSON.stringify({ productIds: selected.map((s) => s.productId) }),
       });
-      const data = await res.json().catch(() => ({}));
+      const data = (await res.json().catch(() => ({}))) as { message?: string };
       if (!res.ok)
-        throw new Error((data as any)?.message ?? "Failed to save selection");
+        throw new Error(data?.message ?? "Failed to save selection");
       await load();
       await loadRuleLibrary();
     } catch (e) {
@@ -767,10 +773,10 @@ export default function RepricerPage() {
           headers: { ...headers, "Content-Type": "application/json" },
           body: JSON.stringify({ productId: pinnedProductId, ruleSetId }),
         });
-        const data = await res.json().catch(() => ({}));
+        const data = (await res.json().catch(() => ({}))) as { message?: string };
         if (!res.ok)
           throw new Error(
-            (data as any)?.message ?? "Could not assign SKU to this rule",
+            data?.message ?? "Could not assign SKU to this rule",
           );
         await load();
         await loadRuleLibrary();
@@ -810,10 +816,10 @@ export default function RepricerPage() {
             headers: { ...headers, "Content-Type": "application/json" },
             body: JSON.stringify({ productId, ruleSetId }),
           });
-          const data = await res.json().catch(() => ({}));
+          const data = (await res.json().catch(() => ({}))) as { message?: string };
           if (!res.ok) {
             throw new Error(
-              (data as any)?.message ??
+              data?.message ??
                 "Could not assign one or more SKUs to this rule",
             );
           }
@@ -853,9 +859,9 @@ export default function RepricerPage() {
           headers: { ...headers, "Content-Type": "application/json" },
           body: JSON.stringify({ productId }),
         });
-        const data = await res.json().catch(() => ({}));
+        const data = (await res.json().catch(() => ({}))) as { message?: string };
         if (!res.ok) {
-          throw new Error((data as any)?.message ?? "Could not remove SKU");
+          throw new Error(data?.message ?? "Could not remove SKU");
         }
       }
       await load();
@@ -899,9 +905,9 @@ export default function RepricerPage() {
         headers: { ...headers, "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      const data = await res.json().catch(() => ({}));
+      const data = (await res.json().catch(() => ({}))) as { message?: string };
       if (!res.ok)
-        throw new Error((data as any)?.message ?? "Failed to save rules");
+        throw new Error(data?.message ?? "Failed to save rules");
       setRuleModalOpen(false);
       await loadRuleLibrary();
     } catch (e) {
@@ -939,9 +945,9 @@ export default function RepricerPage() {
           method: "DELETE",
           headers,
         });
-        const data = await res.json().catch(() => ({}));
+        const data = (await res.json().catch(() => ({}))) as { message?: string };
         if (!res.ok) {
-          throw new Error((data as any)?.message ?? "Failed to delete rule");
+          throw new Error(data?.message ?? "Failed to delete rule");
         }
         await load();
         await loadRuleLibrary();
@@ -1366,14 +1372,14 @@ export default function RepricerPage() {
             <ul className="mt-3 flex flex-col gap-2">
               {ruleLibrary.presets.map((p) => {
                 const skuCount = p.assignedSkuCount ?? 0;
-                const showActiveBadge = Boolean(p.isActive) && skuCount > 0;
+                const showActiveBadge = skuCount > 0;
                 return (
                   <li
                     key={p.id}
                     className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[var(--surface-border)] bg-[var(--background)]/40 px-2 py-2"
                   >
                     <div className="flex min-w-0 flex-1 items-center gap-2">
-                      <div className="w-14 shrink-0">
+                      <div className="w-20 shrink-0">
                         {showActiveBadge ? (
                           <span className="inline-flex rounded-lg bg-sb-accent/20 px-3 py-1.5 text-xs font-semibold text-[var(--foreground)]">
                             Active
@@ -1385,9 +1391,7 @@ export default function RepricerPage() {
                           {p.name || "Untitled"}
                         </div>
                         <div className="text-[10px] text-[var(--muted-foreground)]">
-                          {showActiveBadge
-                            ? "Active default"
-                            : "Not active"}
+                          {showActiveBadge ? "Active" : "Not active"}
                           {" · "}
                           <span className="text-[var(--foreground)]/90">
                             {skuCount} {skuCount === 1 ? "SKU" : "SKUs"}
