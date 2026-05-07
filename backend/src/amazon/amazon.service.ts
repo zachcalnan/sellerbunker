@@ -5632,6 +5632,7 @@ export class AmazonService {
         revenue: number;
         fees: number;
         lastSold: Date | null;
+        lastSoldPricePerUnit: number | null;
       }
     >();
     for (const r of profitStats ?? []) {
@@ -5644,6 +5645,7 @@ export class AmazonService {
         revenue: Number(r._sum?.revenueTotal ?? 0),
         fees: Number(r._sum?.amazonFeesTotal ?? 0),
         lastSold: (r as any)._max?.orderDate ?? null,
+        lastSoldPricePerUnit: null,
       });
     }
 
@@ -5654,6 +5656,46 @@ export class AmazonService {
     if (allAsins.size === 0) return [];
 
     const asins = [...allAsins.values()];
+
+    // Pull a recent sample of latest sale rows so we can compute last sold unit price per ASIN.
+    // We sort newest-first and pick first occurrence per ASIN in JS.
+    const lastSoldRows = await (this.prisma as any).orderItem.findMany({
+      where: {
+        userId: { in: userIds },
+        marketplace: marketplaceFilter,
+        asin: { in: asins },
+      },
+      orderBy: [{ orderDate: 'desc' }],
+      select: { asin: true, orderDate: true, revenueTotal: true, quantity: true },
+      take: 5000,
+    });
+
+    const lastSoldPriceByAsin = new Map<string, number>();
+    const toNum = (v: unknown): number | null => {
+      if (v == null) return null;
+      if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+      // Prisma Decimal / BigInt-ish / string
+      const n = Number(typeof v === 'bigint' ? v.toString() : String(v));
+      return Number.isFinite(n) ? n : null;
+    };
+    for (const r of (lastSoldRows as any[]) ?? []) {
+      const asin = String(r?.asin ?? '').trim();
+      if (!asin) continue;
+      if (lastSoldPriceByAsin.has(asin)) continue;
+      const qtyRaw = toNum(r?.quantity ?? 0) ?? 0;
+      const qty = Math.max(1, Math.round(qtyRaw));
+      const revRaw = toNum(r?.revenueTotal ?? 0) ?? 0;
+      const revMag = Math.abs(revRaw);
+      const unit = qty > 0 ? revMag / qty : null;
+      if (unit != null && Number.isFinite(unit) && unit > 0) lastSoldPriceByAsin.set(asin, unit);
+    }
+
+    // Backfill last sold unit price into profit map (some ASINs may not have a recent sample row).
+    for (const asin of asins) {
+      const p = profitByAsin.get(asin);
+      if (!p) continue;
+      p.lastSoldPricePerUnit = p.lastSoldPricePerUnit ?? lastSoldPriceByAsin.get(asin) ?? null;
+    }
 
     const products = await this.prisma.product.findMany({
       where: { userId: { in: userIds }, asin: { in: asins } },
@@ -5812,6 +5854,7 @@ export class AmazonService {
         revenue: 0,
         fees: 0,
         lastSold: null as Date | null,
+        lastSoldPricePerUnit: null as number | null,
       }) as {
         units: number;
         profit: number;
@@ -5819,6 +5862,7 @@ export class AmazonService {
         revenue: number;
         fees: number;
         lastSold: Date | null;
+        lastSoldPricePerUnit: number | null;
       };
       const unitsP = Number(p.units ?? 0);
       const avgProfitPerUnit = unitsP > 0 ? Number(p.profit ?? 0) / unitsP : 0;
@@ -5920,7 +5964,9 @@ export class AmazonService {
         roi: roi != null && Number.isFinite(roi) ? Math.round(roi * 100) / 100 : null,
         suggestedBuyQty: buyQty,
         score,
-        lastSold: p.lastSold ? (p.lastSold as Date).toISOString() : null,
+        lastSold: p.lastSoldPricePerUnit != null && Number.isFinite(p.lastSoldPricePerUnit)
+          ? Math.round(p.lastSoldPricePerUnit * 100) / 100
+          : null,
         maxBuyPriceBreakEvenPerUnit:
           maxBuyPriceBreakEvenPerUnit != null && Number.isFinite(maxBuyPriceBreakEvenPerUnit)
             ? Math.round(maxBuyPriceBreakEvenPerUnit * 100) / 100

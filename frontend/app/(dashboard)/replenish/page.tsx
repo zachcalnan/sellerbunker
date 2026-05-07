@@ -26,7 +26,7 @@ type SmartReplenishRow = {
   title: string | null;
   sku: string;
   asin: string | null;
-  lastSold: string | null;
+  lastSold: number | null;
   fulfillableQty: number;
   inboundQty: number;
   effectiveStock: number;
@@ -493,10 +493,12 @@ export default function ReplenishPage() {
                           </span>
                         </span>
                       )}
-                      {s.lastSold && (
+                      {s.lastSold != null && Number.isFinite(s.lastSold) && (
                         <span className="tabular-nums">
                           Last sold{" "}
-                          <span className="text-[var(--foreground)]">{formatDate(s.lastSold)}</span>
+                          <span className="text-[var(--foreground)]">
+                            {new Intl.NumberFormat(undefined, { style: "currency", currency: selectedCurrency }).format(s.lastSold)}
+                          </span>
                         </span>
                       )}
                       {s.maxBuyPriceBreakEvenPerUnit != null && (
