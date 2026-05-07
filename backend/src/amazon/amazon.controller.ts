@@ -20,6 +20,7 @@ import { LinkAmazonAccountDto } from './dto/link-amazon-account.dto';
 import { CreatePurchaseDto } from './dto/create-purchase.dto';
 import { UpdatePurchaseDto } from './dto/update-purchase.dto';
 import { ClerkAuthGuard } from '../auth/clerk-auth.guard';
+import { ApiKeyGuard } from '../auth/api-key.guard';
 import { AmazonSyncService } from './amazon-sync.service';
 import { AmazonSyncProcessor } from './amazon-sync.processor';
 
@@ -909,6 +910,43 @@ ping() {
     return this.amazonService.getSmartReplenishmentSuggestions(req.user.orgId, {
       take: Number.isFinite(t) ? Math.max(1, Math.min(200, t)) : 20,
       marketplaceId: req.user.marketplaceId,
+      velocityShortDays: Number.isFinite(pd) ? Math.max(7, Math.min(180, pd)) : 30,
+      targetDaysOfCover: Number.isFinite(cd) ? Math.max(7, Math.min(180, cd)) : 45,
+      minGrossProfitPerUnit: Number.isFinite(mp) ? mp : 0,
+      minRoi: Number.isFinite(mr) ? mr : 0,
+    });
+  }
+
+  /**
+   * Smart replenishment for server-to-server integrations (no Clerk JWT).
+   * Protect with `x-api-key: ${SELLERBUNKER_API_KEY}`.
+   *
+   * Env required:
+   * - SELLERBUNKER_API_KEY
+   * - SELLERBUNKER_API_ORG_ID
+   */
+  @UseGuards(ApiKeyGuard)
+  @Get('replenish/smart-api-key')
+  async getSmartReplenishApiKey(
+    @Query('take') take?: string,
+    @Query('periodDays') periodDays?: string,
+    @Query('targetCoverDays') targetCoverDays?: string,
+    @Query('minProfitPerUnit') minProfitPerUnit?: string,
+    @Query('minRoi') minRoi?: string,
+    @Query('marketplaceId') marketplaceId?: string,
+  ) {
+    const orgId = (process.env.SELLERBUNKER_API_ORG_ID ?? '').trim();
+    if (!orgId) {
+      throw new BadRequestException('SELLERBUNKER_API_ORG_ID is required');
+    }
+    const t = Number(take ?? 20);
+    const pd = Number(periodDays ?? 30);
+    const cd = Number(targetCoverDays ?? 45);
+    const mp = Number(minProfitPerUnit ?? 0);
+    const mr = Number(minRoi ?? 0);
+    return this.amazonService.getSmartReplenishmentSuggestions(orgId, {
+      take: Number.isFinite(t) ? Math.max(1, Math.min(200, t)) : 20,
+      marketplaceId: marketplaceId?.trim() || undefined,
       velocityShortDays: Number.isFinite(pd) ? Math.max(7, Math.min(180, pd)) : 30,
       targetDaysOfCover: Number.isFinite(cd) ? Math.max(7, Math.min(180, cd)) : 45,
       minGrossProfitPerUnit: Number.isFinite(mp) ? mp : 0,

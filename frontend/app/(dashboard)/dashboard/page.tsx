@@ -3016,14 +3016,17 @@ function CategoryPieCharts({
   const { selectedMarketplaceId } = useMarketplace();
   const [data, setData] = useState<CategoryBreakdown | null>(null);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!isSignedIn) {
       setData(null);
+      setError(null);
       return;
     }
     const fetchData = async () => {
       setLoading(true);
+      setError(null);
       try {
         const token = await getToken({ template: "backend" });
         const res = await fetch(
@@ -3038,11 +3041,15 @@ function CategoryPieCharts({
             },
           },
         );
-        if (!res.ok) throw new Error("Failed to load category breakdown");
+        if (!res.ok) {
+          const text = await res.text().catch(() => "");
+          throw new Error(text || "Failed to load category breakdown");
+        }
         const json = (await res.json()) as CategoryBreakdown;
         setData(json);
       } catch {
         setData(null);
+        setError("Could not load category charts.");
       } finally {
         setLoading(false);
       }
@@ -3057,6 +3064,16 @@ function CategoryPieCharts({
           Top categories by metric
         </h2>
         <p className="text-[10px] text-[var(--muted-foreground)]">Loading…</p>
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <div className="flex w-full flex-col rounded-xl bg-[var(--surface)] p-3 ring-1 ring-[var(--surface-border)]">
+        <h2 className="mb-2 text-xs font-medium uppercase tracking-[0.2em] text-[var(--foreground)]">
+          Top categories by metric
+        </h2>
+        <p className="text-[10px] text-[var(--muted-foreground)]">{error}</p>
       </div>
     );
   }

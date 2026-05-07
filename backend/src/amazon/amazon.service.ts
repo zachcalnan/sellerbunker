@@ -2517,20 +2517,13 @@ export class AmazonService {
         ...this.whereOrderItemInUtcDashboardRange(safeStart, safeEnd),
       },
       select: {
-        id: true,
-        orderId: true,
-        orderItemId: true,
         orderDbId: true,
-        marketplace: true,
         asin: true,
         sku: true,
-        feesSource: true,
-        updatedAt: true,
         revenueTotal: true,
         profit: true,
         cogsTotal: true,
         quantity: true,
-        rawResponse: true,
         product: { select: { displayGroup: true } },
       },
     });
@@ -2560,12 +2553,13 @@ export class AmazonService {
       try {
         const orows = await this.prisma.order.findMany({
           where: { id: { in: catMetaIds } },
-          select: { id: true, amazonOrderStatus: true, rawResponse: true },
+          // rawResponse can be huge; category breakdown only needs status for revenue reconstruction rules.
+          select: { id: true, amazonOrderStatus: true },
         });
         for (const o of orows) {
           catOrderMetaByDbId.set(String(o.id), {
             amazonOrderStatus: o.amazonOrderStatus,
-            rawResponse: o.rawResponse,
+            rawResponse: null,
           });
         }
       } catch {
@@ -5884,7 +5878,8 @@ export class AmazonService {
       if (buyQty <= 0) continue;
 
       const coverScore = coverDays == null ? 0 : 1 / (1 + coverDays);
-      const score = avgDaily * (1 + 3 * coverScore) * Math.max(0.01, avgProfitPerUnit);
+      const baseScore =
+        avgDaily * (1 + 3 * coverScore) * Math.max(0.01, avgProfitPerUnit);
 
       const avgRevenuePerUnit = unitsP > 0 ? Number(p.revenue ?? 0) / unitsP : null;
       const avgFeesPerUnitRaw = unitsP > 0 ? Number(p.fees ?? 0) / unitsP : null;
@@ -5937,6 +5932,17 @@ export class AmazonService {
         expectedProfitPerUnitAtLastBuy != null
           ? Math.round(expectedProfitPerUnitAtLastBuy * buyQty * 100) / 100
           : null;
+
+      // Ranking should prioritize items that are profitable at the last buy cost.
+      // If expected profit is negative at the last buy cost, push it way down the list (but keep it visible).
+      const expectedProfitMultiplier =
+        expectedProfitPerUnitAtLastBuy != null &&
+        Number.isFinite(expectedProfitPerUnitAtLastBuy)
+          ? expectedProfitPerUnitAtLastBuy < 0
+            ? 0.0001
+            : 1 + Math.min(2, expectedProfitPerUnitAtLastBuy / 5)
+          : 1;
+      const score = baseScore * expectedProfitMultiplier;
 
       const rationaleParts: string[] = [];
       rationaleParts.push(
