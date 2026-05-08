@@ -359,19 +359,26 @@ function CostOfGoodsInner() {
 
       if (cogsFilter === "missing") {
         const firstUrl = `${baseUrl}/api/amazon/cost-of-goods/missing?${missingQs.toString()}`;
-        const missingData = await fetchAllPages(
-          firstUrl,
-          (j) =>
-            typeof j?.missingSkusCount === "number" ? j.missingSkusCount : 0,
-          (j) => (Array.isArray(j?.items) ? j.items : []),
-        );
-        const items = missingData.items as Array<{
+        const missingData = await fetchAllPages<{
           productId: string;
           sku: string;
           asin: string | null;
           title: string | null;
           imageUrl: string | null;
-        }>;
+        }>(
+          firstUrl,
+          (j) => {
+            const o = j as { missingSkusCount?: unknown; total?: unknown } | null;
+            const v = o?.missingSkusCount ?? o?.total;
+            const n = typeof v === "number" ? v : Number(v);
+            return Number.isFinite(n) ? n : 0;
+          },
+          (j) => {
+            const o = j as { items?: unknown } | null;
+            return Array.isArray(o?.items) ? (o?.items as any[]) : [];
+          },
+        );
+        const items = missingData.items;
         setSkuItems(
           items.map((m) => ({
             id: m.productId,
@@ -412,17 +419,29 @@ function CostOfGoodsInner() {
                 take: String(SKU_FETCH_SIZE),
                 skip: "0",
               }).toString(),
-            (j) => (typeof j?.total === "number" ? j.total : 0),
-            (j) => (Array.isArray(j?.items) ? j.items : []),
+            (j) => {
+              const o = j as { total?: unknown } | null;
+              const n = typeof o?.total === "number" ? o.total : Number(o?.total);
+              return Number.isFinite(n) ? n : 0;
+            },
+            (j) => {
+              const o = j as { items?: unknown } | null;
+              return Array.isArray(o?.items) ? (o.items as any[]) : [];
+            },
           ),
           cogsFilter === "all"
             ? fetchAllPages<{ productId: string }>(
                 `${baseUrl}/api/amazon/cost-of-goods/missing?${missingQs.toString()}`,
-                (j) =>
-                  typeof j?.missingSkusCount === "number"
-                    ? j.missingSkusCount
-                    : 0,
-                (j) => (Array.isArray(j?.items) ? j.items : []),
+                (j) => {
+                  const o = j as { missingSkusCount?: unknown; total?: unknown } | null;
+                  const v = o?.missingSkusCount ?? o?.total;
+                  const n = typeof v === "number" ? v : Number(v);
+                  return Number.isFinite(n) ? n : 0;
+                },
+                (j) => {
+                  const o = j as { items?: unknown } | null;
+                  return Array.isArray(o?.items) ? (o.items as any[]) : [];
+                },
               )
             : Promise.resolve({
                 total: 0,
