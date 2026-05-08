@@ -11499,8 +11499,9 @@ try {
 
   /**
    * Per-unit Amazon fees for repricer preview + bounds: match Orders list behaviour.
-   * - Prefer latest settled (Finances) line per SKU; scale fee magnitude to **current list price** vs that sale’s unit price.
-   * - Else sum referral + FBA + digital from `products`, with UK/EU-style 2% digital fallback when digital is missing (same as unsettled order lines).
+   * - Prefer estimated referral + FBA + digital from `products` (with UK/EU-style 2% digital fallback when digital is missing).
+   *   This keeps repricer bounds stable and aligned to current list-price fee estimates.
+   * - Else fall back to latest settled (Finances) line per SKU; use per-unit fee magnitude (do NOT scale by current list price).
    * - Else fall back to `estimatedAmazonFeePerUnit` rollup from Product Fees API.
    */
   repricerAmazonFeePerUnitFromProduct(
@@ -11519,20 +11520,6 @@ try {
       return Number.isFinite(n) ? n : null;
     };
 
-    const listPx = toNum(product.currentListedPrice);
-
-    if (financesSnapshot && financesSnapshot.quantity > 0) {
-      const qty = Math.max(1, financesSnapshot.quantity);
-      const revMag = Math.abs(financesSnapshot.revenueTotal);
-      const feeMag = Math.abs(financesSnapshot.amazonFeesTotal);
-      const unitPrice = revMag / qty;
-      let feePu = feeMag / qty;
-      if (listPx != null && listPx > 0 && unitPrice > 1e-6 && Number.isFinite(feePu)) {
-        feePu = feePu * (listPx / unitPrice);
-      }
-      if (Number.isFinite(feePu) && feePu >= 0) return feePu;
-    }
-
     const r = toNum(product.estimatedReferralFeePerUnit);
     const f = toNum(product.estimatedFbaFeePerUnit);
     const d = toNum(product.estimatedDigitalServiceFeePerUnit);
@@ -11544,8 +11531,22 @@ try {
     if (dig < 1e-9 && (ref > 1e-9 || fba > 1e-9)) {
       dig = Math.round((ref + fba) * 0.02 * 100) / 100;
     }
-    const sum = ref + fba + dig;
-    if (sum > 1e-9) return sum;
+    const sumEstimate = ref + fba + dig;
+
+    // Prefer estimated components when available (stable, price-aligned preview).
+    if (sumEstimate > 1e-9) return sumEstimate;
+
+    if (financesSnapshot && financesSnapshot.quantity > 0) {
+      const qty = Math.max(1, financesSnapshot.quantity);
+      const feeMag = Math.abs(financesSnapshot.amazonFeesTotal);
+      const feePu = feeMag / qty;
+      // Some Finances rows can be missing fee detail or store 0; do not let that override
+      // better fee estimates or we will massively overstate ROI/profit.
+      if (Number.isFinite(feePu) && feePu >= 0.01) {
+        return feePu;
+      }
+    }
+
     return rollup != null ? Math.abs(rollup) : null;
   }
 

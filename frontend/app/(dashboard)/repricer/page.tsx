@@ -22,6 +22,10 @@ type CandidateSku = {
   /** Legacy Product Fees API rollup from DB (diagnostic). */
   estimatedAmazonFeeRollup?: number | null;
   estimatedAmazonFeePerUnit?: number | null;
+  expectedProfit?: number | null;
+  expectedRoiPct?: number | null;
+  expectedFeePerUnit?: number | null;
+  expectedCogsPerUnit?: number | null;
 };
 
 type SelectedSku = {
@@ -218,6 +222,17 @@ function logRowImpliesFlatPriceForDisplay(raw: string): boolean {
   );
 }
 
+function parseRoiPctFromRepricerLogMessage(message: string): number | null {
+  const m = String(message ?? "");
+  // Repricer writes "... • roi≈5.1%." but some builds/logs may use roi= / roi: / roi~.
+  const match =
+    /roi(?:≈|=|:|~)\s*([0-9]+(?:\.[0-9]+)?)%/i.exec(m) ??
+    /roi\s*([0-9]+(?:\.[0-9]+)?)%/i.exec(m);
+  if (!match) return null;
+  const n = Number(match[1]);
+  return Number.isFinite(n) ? n : null;
+}
+
 /** Rows the repricer writes every tick when nothing meaningful happened — hide from the activity feed. */
 function isRepricerLogNoise(message: string, kind: string): boolean {
   if (kind === "error") return false;
@@ -386,6 +401,7 @@ export default function RepricerPage() {
   const [candidates, setCandidates] = useState<CandidateSku[]>([]);
   const [candidateTotal, setCandidateTotal] = useState(0);
   const [candidatePage, setCandidatePage] = useState(1);
+  const [repricerBuild, setRepricerBuild] = useState<string | null>(null);
   // Checkbox selection (UI-only); does NOT persist and should clear after Apply/Remove.
   const [selected, setSelected] = useState<Array<{ productId: string }>>([]);
   // Assigned rules for SKUs (from backend /selected); used to show "Pricing rule: X" on rows.
@@ -417,6 +433,7 @@ export default function RepricerPage() {
   const [logs, setLogs] = useState<
     Array<{
       id: string;
+      productId?: string;
       sku: string;
       asin?: string | null;
       context?: unknown;
@@ -438,6 +455,47 @@ export default function RepricerPage() {
     () => logs.filter((l) => !isRepricerLogNoise(l.message, l.kind)),
     [logs],
   );
+  const roiPctByAsinFromLogs = useMemo(() => {
+    // Use the most recent log per ASIN that includes roi≈...%.
+    // This makes the SKU-row ROI match what's shown in the log table.
+    const m = new Map<string, number>();
+    for (const l of logs) {
+      const asin = (l.asin ?? "").trim();
+      if (!asin) continue;
+      if (m.has(asin)) continue; // visibleLogs are already newest-first
+      const roi = parseRoiPctFromRepricerLogMessage(l.message);
+      if (roi == null) continue;
+      m.set(asin, roi);
+    }
+    return m;
+  }, [logs]);
+  const roiPctByProductIdFromLogs = useMemo(() => {
+    // Prefer structured context + price from logs over parsing text.
+    // This should match the repricer's own ROI estimate.
+    const m = new Map<string, number>();
+    for (const l of logs) {
+      const pid = typeof l.productId === "string" ? l.productId.trim() : "";
+      if (!pid) continue;
+      if (m.has(pid)) continue; // logs newest-first
+      const ctx =
+        l.context && typeof l.context === "object"
+          ? (l.context as Record<string, unknown>)
+          : null;
+      const fee = typeof ctx?.["fee"] === "number" ? Number(ctx["fee"]) : null;
+      const cost = typeof ctx?.["cost"] === "number" ? Number(ctx["cost"]) : null;
+      const prev = l.prevPrice != null && Number.isFinite(l.prevPrice) ? Number(l.prevPrice) : null;
+      const next = l.nextPrice != null && Number.isFinite(l.nextPrice) ? Number(l.nextPrice) : null;
+      const implied = next ?? prev;
+      if (fee == null || !Number.isFinite(fee) || cost == null || !Number.isFinite(cost) || cost <= 0)
+        continue;
+      if (implied == null || !Number.isFinite(implied) || implied <= 0) continue;
+      const profit = implied - Math.abs(fee) - Number(cost);
+      const roiPct = (profit / Number(cost)) * 100;
+      if (!Number.isFinite(roiPct)) continue;
+      m.set(pid, Math.round(roiPct * 10) / 10);
+    }
+    return m;
+  }, [logs]);
   /** Last-clicked SKU row — use "Apply" on a saved rule to assign it to that preset. */
   const [pinnedProductId, setPinnedProductId] = useState<string | null>(null);
   const [assigningPresetId, setAssigningPresetId] = useState<string | null>(
@@ -491,24 +549,27 @@ export default function RepricerPage() {
       const [candRes, selRes] = await Promise.all([
         fetch(`${baseUrl}/api/repricer/candidates?${params.toString()}`, {
           headers,
+          cache: "no-store",
         }),
-        fetch(`${baseUrl}/api/repricer/selected`, { headers }),
+        fetch(`${baseUrl}/api/repricer/selected`, { headers, cache: "no-store" }),
       ]);
       if (!candRes.ok || !selRes.ok) {
         throw new Error("Could not load repricer data");
       }
       const candJson = (await candRes.json()) as
         | CandidateSku[]
-        | { items?: CandidateSku[]; total?: number };
+        | { meta?: { build?: string }; items?: CandidateSku[]; total?: number };
       const sel = (await selRes.json()) as SelectedSku[];
       if (Array.isArray(candJson)) {
         setCandidates(candJson);
         setCandidateTotal(candJson.length);
+        setRepricerBuild(null);
       } else {
         setCandidates(Array.isArray(candJson.items) ? candJson.items : []);
         setCandidateTotal(
           typeof candJson.total === "number" ? candJson.total : 0,
         );
+        setRepricerBuild(typeof candJson.meta?.build === "string" ? candJson.meta.build : null);
       }
       setAssignments(Array.isArray(sel) ? sel : []);
     } catch (e) {
@@ -519,6 +580,7 @@ export default function RepricerPage() {
             ? e.message
             : "Failed to load repricer";
       setErr(msg);
+      setRepricerBuild(null);
     } finally {
       setLoading(false);
     }
@@ -551,6 +613,7 @@ export default function RepricerPage() {
       const data = (await res.json()) as
         | Array<{
             id: string;
+            productId?: string;
             sku: string;
             asin?: string | null;
             context?: unknown;
@@ -563,6 +626,7 @@ export default function RepricerPage() {
         | {
             logs?: Array<{
               id: string;
+              productId?: string;
               sku: string;
               asin?: string | null;
               context?: unknown;
@@ -970,7 +1034,17 @@ export default function RepricerPage() {
   );
 
   const expectedProfitAndRoi = useCallback(
-    (c: CandidateSku): { profit: number | null; roiPct: number | null } => {
+    (
+      c: CandidateSku,
+    ): {
+      profit: number | null;
+      roiPct: number | null;
+      marginPct: number | null;
+      feePerUnit: number | null;
+      feeSource: "expectedFeePerUnit" | "amazonFeePerUnit" | "estimatedAmazonFeeRollup" | "none";
+      price: number | null;
+      cogs: number | null;
+    } => {
       const price =
         c.currentListedPrice != null && Number.isFinite(Number(c.currentListedPrice))
           ? Number(c.currentListedPrice)
@@ -979,20 +1053,57 @@ export default function RepricerPage() {
         c.costOfGoods != null && Number.isFinite(Number(c.costOfGoods)) && Number(c.costOfGoods) > 0
           ? Number(c.costOfGoods)
           : null;
-      const feeRaw =
-        c.amazonFeePerUnit != null && Number.isFinite(Number(c.amazonFeePerUnit))
-          ? Number(c.amazonFeePerUnit)
-          : c.estimatedAmazonFeePerUnit != null &&
-              Number.isFinite(Number(c.estimatedAmazonFeePerUnit))
-            ? Number(c.estimatedAmazonFeePerUnit)
-            : null;
-      const fee = feeRaw != null ? Math.abs(feeRaw) : null;
-      if (price == null || cogs == null) return { profit: null, roiPct: null };
-      const profit = price - (fee ?? 0) - cogs;
+      // If an item sells for meaningful money but COGS is tiny, it is usually a bad COGS entry
+      // (wrong unit / divided twice). Avoid showing misleading ROI%.
+      const suspiciousCogs =
+        price != null && price >= 10 && cogs != null && Number.isFinite(cogs) && cogs > 0 && cogs < 1;
+      let feeRaw: number | null = null;
+      let feeSource:
+        | "expectedFeePerUnit"
+        | "amazonFeePerUnit"
+        | "estimatedAmazonFeeRollup"
+        | "none" = "none";
+      if (c.expectedFeePerUnit != null && Number.isFinite(Number(c.expectedFeePerUnit))) {
+        feeRaw = Number(c.expectedFeePerUnit);
+        feeSource = "expectedFeePerUnit";
+      } else if (c.amazonFeePerUnit != null && Number.isFinite(Number(c.amazonFeePerUnit))) {
+        feeRaw = Number(c.amazonFeePerUnit);
+        feeSource = "amazonFeePerUnit";
+      } else if (
+        c.estimatedAmazonFeeRollup != null &&
+        Number.isFinite(Number(c.estimatedAmazonFeeRollup))
+      ) {
+        feeRaw = Number(c.estimatedAmazonFeeRollup);
+        feeSource = "estimatedAmazonFeeRollup";
+      }
+      const fee =
+        feeRaw != null && Number.isFinite(feeRaw) && Math.abs(feeRaw) >= 0.01
+          ? Math.abs(feeRaw)
+          : null;
+      // Never assume fee=0; if fee is missing, ROI/profit preview is not reliable.
+      if (price == null || cogs == null || fee == null || suspiciousCogs) {
+        return {
+          profit: null,
+          roiPct: null,
+          marginPct: null,
+          feePerUnit: fee,
+          feeSource,
+          price,
+          cogs,
+        };
+      }
+      const profit = price - fee - cogs;
       const roiPct = cogs > 0 ? (profit / cogs) * 100 : null;
+      const marginPct = price > 0 ? (profit / price) * 100 : null;
       return {
         profit: Number.isFinite(profit) ? Math.round(profit * 100) / 100 : null,
         roiPct: roiPct != null && Number.isFinite(roiPct) ? Math.round(roiPct * 10) / 10 : null,
+        marginPct:
+          marginPct != null && Number.isFinite(marginPct) ? Math.round(marginPct * 10) / 10 : null,
+        feePerUnit: fee,
+        feeSource,
+        price,
+        cogs,
       };
     },
     [],
@@ -1501,7 +1612,58 @@ export default function RepricerPage() {
                 const isSel = selectedIds.has(c.productId);
                 const isPinned = pinnedProductId === c.productId;
                 const assigned = assignmentsByProductId.get(c.productId);
-                const exp = expectedProfitAndRoi(c);
+                // Prefer backend "expected" preview fields for the SKU-row display.
+                // These are computed server-side alongside fee selection and should match repricer logs.
+                const expServerProfit =
+                  c.expectedProfit != null && Number.isFinite(Number(c.expectedProfit))
+                    ? Number(c.expectedProfit)
+                    : null;
+                const expServerRoiPct =
+                  c.expectedRoiPct != null && Number.isFinite(Number(c.expectedRoiPct))
+                    ? Number(c.expectedRoiPct)
+                    : null;
+                const expLocal = expectedProfitAndRoi(c);
+                const exp = {
+                  profit: expServerProfit,
+                  roiPct: expServerRoiPct,
+                  marginPct: expLocal.marginPct,
+                  feePerUnit: expLocal.feePerUnit,
+                  feeSource: expLocal.feeSource,
+                  price: expLocal.price,
+                  cogs: expLocal.cogs,
+                };
+                const rawDebug = `raw(costOfGoods=${c.costOfGoods ?? "—"}, expectedCogsPerUnit=${
+                  c.expectedCogsPerUnit ?? "—"
+                }, expectedFeePerUnit=${c.expectedFeePerUnit ?? "—"}, amazonFeePerUnit=${
+                  c.amazonFeePerUnit ?? "—"
+                }, estimatedAmazonFeeRollup=${c.estimatedAmazonFeeRollup ?? "—"}, expectedProfit=${
+                  c.expectedProfit ?? "—"
+                }, expectedRoiPct=${c.expectedRoiPct ?? "—"})`;
+                // ROI on the SKU row should reflect the displayed inputs: profit / COGS.
+                // (Logs are diagnostic and can carry different "cost" than the product COGS.)
+                const roiDisplayPct = expLocal.roiPct;
+                const roiFromLog =
+                  roiPctByProductIdFromLogs.get(String(c.productId)) ??
+                  (c.asin != null
+                    ? roiPctByAsinFromLogs.get(String(c.asin).trim())
+                    : undefined);
+                const roiSourceLabel = "calc";
+                const explain =
+                  `Inputs:\nprice=${exp.price != null ? exp.price.toFixed(2) : "—"}\ncogs=${
+                    exp.cogs != null ? exp.cogs.toFixed(2) : "—"
+                  }\nfee=${
+                    exp.feePerUnit != null ? exp.feePerUnit.toFixed(2) : "—"
+                  } (${exp.feeSource})\n\nROI source: ${
+                    roiDisplayPct != null
+                      ? `calculated from inputs (${roiDisplayPct.toFixed(1)}%)`
+                      : "—"
+                  }\nProfit source: ${
+                    exp.profit != null ? `backend preview (${exp.profit.toFixed(2)})` : "—"
+                  }${
+                    roiFromLog != null
+                      ? `\nRepricer log ROI (diagnostic): ${roiFromLog.toFixed(1)}%`
+                      : ""
+                  }\n\n${rawDebug}`;
                 return (
                   <div
                     key={c.productId}
@@ -1603,9 +1765,35 @@ export default function RepricerPage() {
                             {exp.profit != null ? fmtCur(exp.profit) : "—"}
                           </span>
                           {" · "}
-                          ROI{" "}
-                          <span className="font-medium text-[var(--foreground)] tabular-nums">
-                            {exp.roiPct != null ? `${exp.roiPct.toFixed(1)}%` : "—"}
+                          <span title={explain}>ROI</span>{" "}
+                          <span
+                            className="font-medium text-[var(--foreground)] tabular-nums"
+                            title={explain}
+                          >
+                            {roiDisplayPct != null && Number.isFinite(Number(roiDisplayPct))
+                              ? `${Number(roiDisplayPct).toFixed(1)}%`
+                              : "—"}
+                          </span>
+                          <span
+                            className="ml-1 text-[11px] font-semibold text-sb-accent/80"
+                            title="Where this ROI number came from"
+                          >
+                            ({roiSourceLabel})
+                          </span>
+                        </div>
+                        <div className="mt-0.5 text-[10px] text-[var(--muted-foreground)]">
+                          COGS{" "}
+                          <span className="font-mono text-[var(--foreground)] tabular-nums">
+                            {c.expectedCogsPerUnit != null && Number.isFinite(Number(c.expectedCogsPerUnit))
+                              ? fmtCur(Number(c.expectedCogsPerUnit))
+                              : "—"}
+                          </span>
+                          {" · "}
+                          Fee{" "}
+                          <span className="font-mono text-[var(--foreground)] tabular-nums">
+                            {c.expectedFeePerUnit != null && Number.isFinite(Number(c.expectedFeePerUnit))
+                              ? fmtCur(Number(c.expectedFeePerUnit))
+                              : "—"}
                           </span>
                         </div>
                         <div className="mt-0.5 text-[10px] text-[var(--muted-foreground)]">
@@ -2037,6 +2225,13 @@ export default function RepricerPage() {
           </div>
         </div>
       ) : null}
+
+      {repricerBuild && (
+        <div className="mx-auto w-full max-w-6xl px-1 pb-2 text-[10px] text-[var(--muted-foreground)]">
+          Repricer API build:{" "}
+          <span className="font-mono">{repricerBuild.slice(0, 12)}</span>
+        </div>
+      )}
     </div>
   );
 }

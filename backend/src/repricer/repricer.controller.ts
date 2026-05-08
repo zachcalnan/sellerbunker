@@ -8,8 +8,10 @@ import {
   Query,
   Req,
   Param,
+  Res,
   UseGuards,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { ClerkAuthGuard } from '../auth/clerk-auth.guard';
 import { RepricerService } from './repricer.service';
 
@@ -26,10 +28,14 @@ export class RepricerController {
   @Get('candidates')
   async candidates(
     @Req() req: { user: { orgId: string } },
+    @Res({ passthrough: true }) res: Response,
     @Query('page') page?: string,
     @Query('pageSize') pageSize?: string,
     @Query('q') q?: string,
   ) {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
     return this.repricer.listCandidates(req.user.orgId, {
       page: page != null ? Number(page) : undefined,
       pageSize: pageSize != null ? Number(pageSize) : undefined,

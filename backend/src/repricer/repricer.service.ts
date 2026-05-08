@@ -20,10 +20,19 @@ export class RepricerService {
     return this.usersService.getOrgMemberUserIds(orgId);
   }
 
+  private isSuspiciousCogs(cost: number | null, currentPrice: number | null): boolean {
+    if (cost == null || !Number.isFinite(cost) || cost <= 0) return false;
+    if (currentPrice == null || !Number.isFinite(currentPrice) || currentPrice <= 0) return false;
+    // If an item sells for meaningful money but COGS is tiny, it is usually a bad COGS entry (wrong unit / divided twice).
+    // Avoid repricing on it and avoid showing misleading ROI%.
+    return currentPrice >= 10 && cost < 1;
+  }
+
   async listCandidates(
     orgId: string,
     opts?: { page?: number; pageSize?: number; q?: string },
   ): Promise<{
+    meta: { build: string };
     items: Array<{
       productId: string;
       sku: string;
@@ -40,6 +49,14 @@ export class RepricerService {
       amazonFeePerUnit: number | null;
       /** Raw Product Fees API rollup stored on `products` (optional diagnostics). */
       estimatedAmazonFeeRollup: number | null;
+      /** Preview profit at current price (null when missing inputs). */
+      expectedProfit: number | null;
+      /** Preview ROI% at current price (null when missing inputs). */
+      expectedRoiPct: number | null;
+      /** Debug: fee used for preview (null when missing). */
+      expectedFeePerUnit: number | null;
+      /** Debug: cogs used for preview (null when missing). */
+      expectedCogsPerUnit: number | null;
     }>;
     total: number;
     page: number;
@@ -48,7 +65,12 @@ export class RepricerService {
     const userIds = await this.getOrgMemberUserIds(orgId);
     if (userIds.length === 0) {
       const ps = Math.min(100, Math.max(5, Math.floor(Number(opts?.pageSize) || 25)));
-      return { items: [], total: 0, page: 1, pageSize: ps };
+      const build =
+        (process.env.RENDER_GIT_COMMIT ?? '').trim() ||
+        (process.env.VERCEL_GIT_COMMIT_SHA ?? '').trim() ||
+        (process.env.GIT_COMMIT_SHA ?? '').trim() ||
+        'unknown';
+      return { meta: { build }, items: [], total: 0, page: 1, pageSize: ps };
     }
     const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
 
@@ -109,6 +131,32 @@ export class RepricerService {
           },
           financesSnap.get(p.id) ?? null,
         );
+        const alignedSafe =
+          aligned != null && Number.isFinite(aligned) && aligned >= 0.01 ? aligned : null;
+        const price =
+          p.currentListedPrice != null && Number.isFinite(Number(p.currentListedPrice))
+            ? Number(p.currentListedPrice)
+            : null;
+        const cogsRaw =
+          p.costOfGoods != null && Number.isFinite(Number(p.costOfGoods)) && Number(p.costOfGoods) > 0
+            ? Number(p.costOfGoods)
+            : null;
+        const cogs = this.isSuspiciousCogs(cogsRaw, price) ? null : cogsRaw;
+        const feeForPreview =
+          alignedSafe != null
+            ? alignedSafe
+            : rollup != null && Number.isFinite(rollup) && rollup >= 0.01
+              ? Math.abs(rollup)
+              : null;
+        const profit =
+          price != null && cogs != null && feeForPreview != null
+            ? price - feeForPreview - cogs
+            : null;
+        const roiPct =
+          profit != null && cogs != null && cogs > 0
+            ? (profit / cogs) * 100
+            : null;
+
         return {
           productId: p.id,
           sku: p.sku,
@@ -120,9 +168,19 @@ export class RepricerService {
           activeUnits30d,
           currentListedPrice: p.currentListedPrice != null ? Number(p.currentListedPrice) : null,
           currentListedPriceUpdatedAt: (p as any).currentListedPriceUpdatedAt ?? null,
-          costOfGoods: p.costOfGoods != null ? Number(p.costOfGoods) : null,
-          amazonFeePerUnit: aligned,
+          costOfGoods: cogs,
+          amazonFeePerUnit: alignedSafe,
           estimatedAmazonFeeRollup: rollup != null && Number.isFinite(rollup) ? rollup : null,
+          expectedProfit:
+            profit != null && Number.isFinite(profit) ? Math.round(profit * 100) / 100 : null,
+          expectedRoiPct:
+            roiPct != null && Number.isFinite(roiPct) ? Math.round(roiPct * 10) / 10 : null,
+          expectedFeePerUnit:
+            feeForPreview != null && Number.isFinite(feeForPreview)
+              ? Math.round(feeForPreview * 100) / 100
+              : null,
+          expectedCogsPerUnit:
+            cogs != null && Number.isFinite(cogs) ? Math.round(cogs * 100) / 100 : null,
         };
       })
       .filter((r) => r.availableQty > 0);
@@ -151,7 +209,12 @@ export class RepricerService {
     const start = (page - 1) * pageSize;
     const items = list.slice(start, start + pageSize);
 
-    return { items, total, page, pageSize };
+    const build =
+      (process.env.RENDER_GIT_COMMIT ?? '').trim() ||
+      (process.env.VERCEL_GIT_COMMIT_SHA ?? '').trim() ||
+      (process.env.GIT_COMMIT_SHA ?? '').trim() ||
+      'unknown';
+    return { meta: { build }, items, total, page, pageSize };
   }
 
   async getSelectedSkus(orgId: string) {
@@ -1516,7 +1579,9 @@ export class RepricerService {
       const p = row.product;
       const sku = String(p?.sku ?? '');
       const asin = p?.asin ? String(p.asin) : null;
-      const cost = p?.costOfGoods != null ? Number(p.costOfGoods) : null;
+      const current = p?.currentListedPrice != null ? Number(p.currentListedPrice) : null;
+      const costRaw = p?.costOfGoods != null ? Number(p.costOfGoods) : null;
+      const cost = this.isSuspiciousCogs(costRaw, current) ? null : costRaw;
       const fee = this.amazonService.repricerAmazonFeePerUnitFromProduct(
         {
           currentListedPrice: p?.currentListedPrice,
@@ -1527,7 +1592,6 @@ export class RepricerService {
         },
         financesSnapEngine.get(p.id) ?? null,
       );
-      const current = p?.currentListedPrice != null ? Number(p.currentListedPrice) : null;
       // External listing price drift logging is noisy during normal operation (syncs/manual edits/etc).
       // Keep disabled by default; enable only when debugging with REPRICER_LOG_EXTERNAL_DRIFT=true.
       const driftRaw = (process.env.REPRICER_LOG_EXTERNAL_DRIFT ?? '').toLowerCase();
@@ -1554,7 +1618,9 @@ export class RepricerService {
       let refPrice: number | null = null;
       let skipNoBuyBox = false;
       if (!bounds) {
-        message = 'Skipped: missing COGS (needed to compute ROI/profit bounds).';
+        message = this.isSuspiciousCogs(costRaw, current)
+          ? 'Skipped: suspiciously low COGS for this SKU (fix COGS and retry).'
+          : 'Skipped: missing COGS (needed to compute ROI/profit bounds).';
       } else if (bounds.minPrice != null && bounds.maxPrice != null && bounds.maxPrice < bounds.minPrice) {
         message = 'Skipped: bounds invalid (max < min).';
       } else if (current == null || !Number.isFinite(current) || current <= 0) {
@@ -1784,8 +1850,22 @@ export class RepricerService {
                   nextPrice,
                   p?.productType != null ? String(p.productType) : null,
                 );
+                const feeAtPrice = (price: number): number | null => {
+                  const outFee = this.amazonService.repricerAmazonFeePerUnitFromProduct(
+                    {
+                      currentListedPrice: price,
+                      estimatedReferralFeePerUnit: (p as any)?.estimatedReferralFeePerUnit,
+                      estimatedFbaFeePerUnit: (p as any)?.estimatedFbaFeePerUnit,
+                      estimatedDigitalServiceFeePerUnit: (p as any)?.estimatedDigitalServiceFeePerUnit,
+                      estimatedAmazonFeePerUnit: p?.estimatedAmazonFeePerUnit,
+                    },
+                    financesSnapEngine.get(p.id) ?? null,
+                  );
+                  return outFee != null && Number.isFinite(outFee) ? Math.abs(Number(outFee)) : null;
+                };
                 const feeAbs =
-                  fee != null && Number.isFinite(Number(fee)) ? Math.abs(Number(fee)) : null;
+                  feeAtPrice(Number(nextPrice)) ??
+                  (fee != null && Number.isFinite(Number(fee)) ? Math.abs(Number(fee)) : null);
                 const roiPct =
                   cost != null &&
                   Number.isFinite(Number(cost)) &&
@@ -1808,8 +1888,22 @@ export class RepricerService {
               }
             }
           } else {
+            const feeAtPrice = (price: number): number | null => {
+              const outFee = this.amazonService.repricerAmazonFeePerUnitFromProduct(
+                {
+                  currentListedPrice: price,
+                  estimatedReferralFeePerUnit: (p as any)?.estimatedReferralFeePerUnit,
+                  estimatedFbaFeePerUnit: (p as any)?.estimatedFbaFeePerUnit,
+                  estimatedDigitalServiceFeePerUnit: (p as any)?.estimatedDigitalServiceFeePerUnit,
+                  estimatedAmazonFeePerUnit: p?.estimatedAmazonFeePerUnit,
+                },
+                financesSnapEngine.get(p.id) ?? null,
+              );
+              return outFee != null && Number.isFinite(outFee) ? Math.abs(Number(outFee)) : null;
+            };
             const feeAbs =
-              fee != null && Number.isFinite(Number(fee)) ? Math.abs(Number(fee)) : null;
+              feeAtPrice(Number(nextPrice)) ??
+              (fee != null && Number.isFinite(Number(fee)) ? Math.abs(Number(fee)) : null);
             const roiPct =
               cost != null &&
               Number.isFinite(Number(cost)) &&
