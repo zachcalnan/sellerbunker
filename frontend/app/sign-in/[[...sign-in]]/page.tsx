@@ -2,18 +2,44 @@
 
 import { SignOutButton, useAuth } from "@clerk/nextjs";
 import Link from "next/link";
-import { useEffect } from "react";
+import { useSearchParams } from "next/navigation";
+import { Suspense, useEffect, useMemo } from "react";
 import { EmailPasswordSignIn } from "@/components/email-password-sign-in";
+import { navigateAfterAuth, safeAppRedirectPath } from "@/lib/auth-redirect";
 
-export default function SignInPage() {
+function usePostSignInRedirectTarget(): string | null {
+  const searchParams = useSearchParams();
+  return useMemo(() => {
+    const fromQuery =
+      searchParams.get("redirect_url") ?? searchParams.get("return_url") ?? undefined;
+    if (!fromQuery) return null;
+    return safeAppRedirectPath(fromQuery, "/dashboard");
+  }, [searchParams]);
+}
+
+function SignInPageInner() {
   const { isSignedIn, isLoaded } = useAuth();
+  const postSignInRedirect = usePostSignInRedirectTarget();
 
   useEffect(() => {
     window.scrollTo(0, 0);
   }, []);
 
+  useEffect(() => {
+    if (!isLoaded || !isSignedIn || !postSignInRedirect) return;
+    navigateAfterAuth(postSignInRedirect);
+  }, [isLoaded, isSignedIn, postSignInRedirect]);
+
   // Only gate on loaded+signed-in. Waiting on isLoaded alone can hang forever (bad keys, adblock, slow Clerk).
   if (isLoaded && isSignedIn) {
+    if (postSignInRedirect) {
+      return (
+        <div className="clerk-auth-shell fixed inset-0 z-[100] flex flex-col items-center justify-center backdrop-blur-md px-4">
+          <p className="text-sm text-[var(--muted-foreground)]">Taking you to your dashboard…</p>
+        </div>
+      );
+    }
+
     return (
       <div className="clerk-auth-shell fixed inset-0 z-[100] flex flex-col items-center justify-center backdrop-blur-md px-4">
         <div className="absolute left-4 top-4 z-10">
@@ -75,6 +101,20 @@ export default function SignInPage() {
         <EmailPasswordSignIn defaultRedirect="/dashboard" />
       </div>
     </div>
+  );
+}
+
+export default function SignInPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="clerk-auth-shell fixed inset-0 z-[100] flex items-center justify-center p-4">
+          <p className="text-center text-sm text-[var(--muted-foreground)]">Loading sign-in…</p>
+        </div>
+      }
+    >
+      <SignInPageInner />
+    </Suspense>
   );
 }
 

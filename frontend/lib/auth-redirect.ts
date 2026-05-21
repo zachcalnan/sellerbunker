@@ -22,3 +22,12 @@ export function safeAppRedirectPath(
   }
   return fallback;
 }
+
+/**
+ * Full-page navigation after auth so the next request includes Clerk session cookies.
+ * Client-side `router.push` can reach middleware before cookies are visible (common on mobile).
+ */
+export function navigateAfterAuth(path: string): void {
+  if (typeof window === "undefined") return;
+  window.location.assign(path);
+}

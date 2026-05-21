@@ -1067,7 +1067,9 @@ ping() {
   @Post('inventory/sync')
   async syncInventory(@Req() req: { user: { orgId: string; userId: string } }) {
     this.logger.log(`Manual inventory sync requested (orgId=${req.user.orgId})`);
-    return this.amazonService.syncFbaInventory(req.user.orgId, req.user.userId);
+    return this.amazonService.syncFbaInventory(req.user.orgId, req.user.userId, {
+      force: true,
+    });
   }
 
   /**

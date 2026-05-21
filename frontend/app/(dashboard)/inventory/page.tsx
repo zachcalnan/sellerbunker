@@ -1,7 +1,7 @@
 "use client";
 
 import { useAuth, SignedIn, SignedOut } from "@clerk/nextjs";
-import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { useDisplaySettings } from "@/contexts/display-settings-context";
 import { useMarketplace } from "@/contexts/marketplace-context";
@@ -31,6 +31,7 @@ type InventoryRow = {
   issueQty: number | null;
   totalQty: number | null;
   inventoryUpdatedAt: string | null;
+  inventoryMarketplaceMissing?: boolean;
   rawJson: unknown;
   byMarketplace?: Array<{
     marketplaceId: string;
@@ -40,6 +41,9 @@ type InventoryRow = {
     researchingQty: number;
     unfulfillableQty: number;
     currentQty: number;
+    fcProcessingQty?: number;
+    customerOrdersQty?: number;
+    transshipmentQty?: number;
     updatedAt: string | null;
   }>;
 };
@@ -126,6 +130,8 @@ export default function InventoryPage() {
   }, []);
   const [page, setPage] = useState(1);
   const [detailRow, setDetailRow] = useState<InventoryRow | null>(null);
+  const [syncingInventory, setSyncingInventory] = useState(false);
+  const didAutoSyncStale = useRef(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -151,6 +157,35 @@ export default function InventoryPage() {
     }
   }, [getToken, baseUrl, selectedMarketplaceId, devImpersonate]);
 
+  const refreshFromAmazon = useCallback(async () => {
+    setSyncingInventory(true);
+    setNotice(null);
+    setError(null);
+    try {
+      const token = await getToken({ template: "backend" });
+      const url = new URL(`${baseUrl}/api/amazon/inventory/sync`);
+      if (devImpersonate) url.searchParams.set("impersonate", devImpersonate);
+      const res = await fetch(url.toString(), {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          ...getDevImpersonationHeaders(devImpersonate),
+          ...(selectedMarketplaceId ? { "x-marketplace-id": selectedMarketplaceId } : {}),
+        },
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(text || "Inventory sync failed.");
+      }
+      await load();
+      setNotice("Inventory refreshed from Amazon.");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not refresh inventory.");
+    } finally {
+      setSyncingInventory(false);
+    }
+  }, [getToken, baseUrl, selectedMarketplaceId, devImpersonate, load]);
+
   useEffect(() => {
     if (!isSignedIn) {
       setRows([]);
@@ -159,6 +194,20 @@ export default function InventoryPage() {
     }
     void load();
   }, [isSignedIn, load]);
+
+  useEffect(() => {
+    if (!isSignedIn || didAutoSyncStale.current || syncingInventory || rows.length === 0) return;
+    const maxAgeMs = rows.reduce((max, r) => {
+      if (!r.inventoryUpdatedAt) return max;
+      const t = Date.parse(r.inventoryUpdatedAt);
+      if (!Number.isFinite(t)) return max;
+      return Math.max(max, Date.now() - t);
+    }, 0);
+    if (maxAgeMs > 6 * 60 * 60 * 1000) {
+      didAutoSyncStale.current = true;
+      void refreshFromAmazon();
+    }
+  }, [isSignedIn, rows, syncingInventory, refreshFromAmazon]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -207,7 +256,19 @@ export default function InventoryPage() {
   return (
     <div className={`min-h-screen w-full ${backgroundClass} px-4 py-6`}>
       <div className="mb-4 rounded-xl border border-[var(--surface-border)] bg-[var(--surface)] px-4 py-4">
-        <h1 className="text-2xl font-semibold text-[var(--foreground)]">Inventory</h1>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <h1 className="text-2xl font-semibold text-[var(--foreground)]">Inventory</h1>
+          <SignedIn>
+            <button
+              type="button"
+              onClick={() => void refreshFromAmazon()}
+              disabled={syncingInventory || loading}
+              className="cursor-pointer rounded-lg bg-sb-accent px-3 py-2 text-sm font-medium text-black disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {syncingInventory ? "Refreshing from Amazon…" : "Refresh from Amazon"}
+            </button>
+          </SignedIn>
+        </div>
         <SignedIn>
           <label className="mt-3 block text-xs font-medium text-[var(--muted-foreground)]" htmlFor="inventory-search">
             Search
@@ -516,8 +577,11 @@ export default function InventoryPage() {
           <InventoryDetailModal
             row={detailRow}
             currency={selectedCurrency}
+            marketplaceId={selectedMarketplaceId}
             fmtRelative={fmtRelative}
             onClose={() => setDetailRow(null)}
+            onRefreshFromAmazon={() => void refreshFromAmazon()}
+            refreshing={syncingInventory}
           />
         ) : null}
       </SignedIn>
@@ -557,19 +621,37 @@ function activeMarketplaceTable(rows: NonNullable<InventoryRow["byMarketplace"]>
   return { fields, activeRows };
 }
 
+function inventoryStaleHours(iso?: string | null): number | null {
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return null;
+  return (Date.now() - t) / 3600000;
+}
+
 function InventoryDetailModal({
   row,
   currency,
+  marketplaceId,
   fmtRelative,
   onClose,
+  onRefreshFromAmazon,
+  refreshing,
 }: {
   row: InventoryRow;
   currency: string;
+  marketplaceId: string | null;
   fmtRelative: (iso?: string | null) => string | null;
   onClose: () => void;
+  onRefreshFromAmazon: () => void;
+  refreshing: boolean;
 }) {
   const p = inventoryProfitContext(row);
   const num = (n: number | null) => (n == null ? "—" : String(n));
+  const mpSlice = marketplaceId
+    ? row.byMarketplace?.find((m) => m.marketplaceId === marketplaceId)
+    : row.byMarketplace?.[0];
+  const staleHours = inventoryStaleHours(row.inventoryUpdatedAt);
+  const isStale = staleHours != null && staleHours >= 6;
 
   const profitRow = (label: string, value: string, sub?: string) => (
     <div className="flex justify-between gap-4 border-b border-[var(--surface-border)]/60 py-2 last:border-0">
@@ -662,9 +744,41 @@ function InventoryDetailModal({
                 <div className="mt-0.5 text-lg font-semibold tabular-nums text-[var(--foreground)]">{num(row.issueQty)}</div>
               </div>
             </div>
+            {row.inventoryMarketplaceMissing ? (
+              <p className="mt-2 text-xs text-amber-200">
+                No FBA inventory row for {marketplaceId ? marketplaceShortLabel(marketplaceId) : "this marketplace"} yet — refresh from Amazon.
+              </p>
+            ) : null}
             {row.inventoryUpdatedAt ? (
               <p className="mt-2 text-xs text-[var(--muted-foreground)]">
                 Inventory figures updated {fmtRelative(row.inventoryUpdatedAt) ?? row.inventoryUpdatedAt}
+                {marketplaceId ? ` (${marketplaceShortLabel(marketplaceId)})` : ""}
+                {" · "}
+                Reserved = customer orders (matches Seller Central)
+              </p>
+            ) : null}
+            {isStale ? (
+              <div className="mt-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
+                <p>
+                  These counts may not match Seller Central — last Amazon sync was{" "}
+                  {fmtRelative(row.inventoryUpdatedAt) ?? "a while ago"}. Reserved/available change when
+                  orders sell or ship; refresh to pull live FBA numbers.
+                </p>
+                <button
+                  type="button"
+                  onClick={onRefreshFromAmazon}
+                  disabled={refreshing}
+                  className="mt-2 cursor-pointer rounded-md bg-sb-accent px-2.5 py-1 text-[11px] font-semibold text-black disabled:opacity-50"
+                >
+                  {refreshing ? "Refreshing…" : "Refresh from Amazon"}
+                </button>
+              </div>
+            ) : null}
+            {mpSlice && (mpSlice.fcProcessingQty > 0 || mpSlice.transshipmentQty > 0) ? (
+              <p className="mt-2 text-[10px] text-[var(--muted-foreground)]">
+                Other FBA holds: FC processing {num(mpSlice.fcProcessingQty ?? 0)}
+                {mpSlice.transshipmentQty > 0 ? ` · transshipment ${num(mpSlice.transshipmentQty)}` : ""}
+                {" "}(shown under Issue on the grid)
               </p>
             ) : null}
           </section>

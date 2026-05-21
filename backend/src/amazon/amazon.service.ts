@@ -283,6 +283,47 @@ export class AmazonService {
   }
 
   /**
+   * LWA app id/secret are rotated in env (Render/local). Seller refresh tokens stay in DB;
+   * always prefer current `LWA_CLIENT_*` env over values snapshotted at OAuth link time.
+   */
+  private resolveLwaClientCredentials(stored: {
+    lwaClientId?: string;
+    lwaClientSecret?: string;
+  }): { lwaClientId: string; lwaClientSecret: string } {
+    const envId = this.configService.get<string>('LWA_CLIENT_ID')?.trim() ?? '';
+    const envSecret =
+      this.configService.get<string>('LWA_CLIENT_SECRET')?.trim() ?? '';
+    return {
+      lwaClientId: envId || String(stored.lwaClientId ?? '').trim(),
+      lwaClientSecret: envSecret || String(stored.lwaClientSecret ?? '').trim(),
+    };
+  }
+
+  private spApiCredentialsFromSellerAccountJson(creds: {
+    region?: 'na' | 'eu' | 'fe';
+    lwaClientId?: string;
+    lwaClientSecret?: string;
+    refreshToken?: string;
+    awsAccessKeyId?: string;
+    awsSecretAccessKey?: string;
+    awsRoleArn?: string;
+  }): SpApiCredentials {
+    const { lwaClientId, lwaClientSecret } = this.resolveLwaClientCredentials(creds);
+    return {
+      region:
+        creds.region === 'na' || creds.region === 'eu' || creds.region === 'fe'
+          ? creds.region
+          : 'eu',
+      lwaClientId,
+      lwaClientSecret,
+      refreshToken: String(creds.refreshToken ?? '').trim(),
+      awsAccessKeyId: String(creds.awsAccessKeyId ?? '').trim(),
+      awsSecretAccessKey: String(creds.awsSecretAccessKey ?? '').trim(),
+      awsRoleArn: process.env.AWS_ROLE_ARN,
+    };
+  }
+
+  /**
    * Cancelled / returned / unfulfillable Amazon orders must not count toward revenue; still listed in UI with zero sale.
    */
   private getOrderSalesExclusionKind(
@@ -1469,6 +1510,147 @@ export class AmazonService {
     });
   }
 
+  /** Paginate SP-API getOrders for one query shape (LastUpdated* or Created*). */
+  private async fetchSpApiOrdersPaginated(
+    credentials: SpApiCredentials,
+    params: {
+      lastUpdatedAfter?: string;
+      lastUpdatedBefore?: string;
+      createdAfter?: string;
+      createdBefore?: string;
+      marketplaceIds: string[];
+    },
+    maxOrders?: number,
+  ): Promise<Array<Record<string, unknown>>> {
+    const out: Array<Record<string, unknown>> = [];
+    let nextToken: string | undefined;
+    do {
+      const data = (await this.spApiClient.getOrders(
+        credentials,
+        nextToken
+          ? { nextToken }
+          : {
+              ...params,
+              marketplaceIds: params.marketplaceIds,
+            },
+      )) as {
+        payload?: { Orders?: Array<Record<string, unknown>>; NextToken?: string };
+        Payload?: { Orders?: Array<Record<string, unknown>>; NextToken?: string };
+      };
+      const page = data?.payload ?? data?.Payload;
+      const pageOrders = page?.Orders ?? [];
+      out.push(...pageOrders);
+      if (maxOrders != null && out.length >= maxOrders) {
+        out.splice(maxOrders);
+        nextToken = undefined;
+        break;
+      }
+      nextToken = page?.NextToken ?? undefined;
+    } while (nextToken);
+    return out;
+  }
+
+  private spApiOrderPurchaseMs(order: Record<string, unknown>): number {
+    const raw =
+      order.PurchaseDate ??
+      order.LatestShipDate ??
+      order.EarliestShipDate ??
+      order.LastUpdateDate;
+    const t = raw != null ? new Date(String(raw)).getTime() : NaN;
+    return Number.isFinite(t) ? t : 0;
+  }
+
+  private sortSpApiOrdersNewestFirst(
+    orders: Array<Record<string, unknown>>,
+  ): Array<Record<string, unknown>> {
+    return [...orders].sort(
+      (a, b) => this.spApiOrderPurchaseMs(b) - this.spApiOrderPurchaseMs(a),
+    );
+  }
+
+  /**
+   * When getOrderItems is empty or rate-limited but getOrders returned a sale (Pending, awaiting payment, etc.),
+   * persist one placeholder line so listOrders / profit / KPIs can show the order.
+   */
+  private static readonly SYNTHETIC_PENDING_ORDER_ITEM_SUFFIX = '::pending-header';
+
+  private isSyntheticPendingHeaderOrderItemId(
+    orderItemId: string | null | undefined,
+  ): boolean {
+    return String(orderItemId ?? '').includes(
+      AmazonService.SYNTHETIC_PENDING_ORDER_ITEM_SUFFIX,
+    );
+  }
+
+  private isSystemPlaceholderOrderSku(sku: string | null | undefined): boolean {
+    const s = String(sku ?? '').trim().toUpperCase();
+    return s === 'AMAZON_GENERIC' || s === 'AMAZON_MULTI';
+  }
+
+  /** Hide AMAZON_GENERIC / pending-header placeholder when the same order already has a real SKU line. */
+  private dropRedundantPlaceholderOrderLines<
+    T extends {
+      orderId: string;
+      sku?: string | null;
+      orderItemId?: string | null;
+    },
+  >(items: T[]): T[] {
+    const hasRealLineByOrder = new Map<string, boolean>();
+    for (const it of items) {
+      const oid = this.normalizeAmazonOrderIdForDedupe(it.orderId);
+      if (!oid) continue;
+      if (
+        !this.isSystemPlaceholderOrderSku(it.sku) &&
+        !this.isSyntheticPendingHeaderOrderItemId(it.orderItemId)
+      ) {
+        hasRealLineByOrder.set(oid, true);
+      }
+    }
+    return items.filter((it) => {
+      const oid = this.normalizeAmazonOrderIdForDedupe(it.orderId);
+      if (!oid || !hasRealLineByOrder.get(oid)) return true;
+      return (
+        !this.isSystemPlaceholderOrderSku(it.sku) &&
+        !this.isSyntheticPendingHeaderOrderItemId(it.orderItemId)
+      );
+    });
+  }
+
+  private async deleteSyntheticPendingHeaderLinesForOrder(
+    userId: string,
+    orderDbId: string,
+  ): Promise<void> {
+    await this.prisma.orderItem.deleteMany({
+      where: {
+        userId,
+        orderDbId,
+        orderItemId: { endsWith: AmazonService.SYNTHETIC_PENDING_ORDER_ITEM_SUFFIX },
+      },
+    });
+  }
+
+  private buildSyntheticOrderItemsFromOrderHeader(
+    amazonOrderId: string,
+    order: Record<string, unknown>,
+    quantity: number,
+  ): Array<Record<string, unknown>> {
+    const qty =
+      quantity > 0
+        ? quantity
+        : Math.max(
+            1,
+            Number(order.NumberOfItemsUnshipped ?? 0) +
+              Number(order.NumberOfItemsShipped ?? 0),
+          );
+    return [
+      {
+        OrderItemId: `${amazonOrderId}${AmazonService.SYNTHETIC_PENDING_ORDER_ITEM_SUFFIX}`,
+        QuantityOrdered: qty,
+        _syntheticFromOrderHeader: true,
+      },
+    ];
+  }
+
   /**
    * Unsettled order lines: **pre-sale** `products` fee estimates (referral + FBA + digital per unit),
    * ex-VAT magnitudes as Seller Central shows before settlement. Line totals are ≤0 for DB math.
@@ -1810,37 +1992,27 @@ export class AmazonService {
     }
     const creds = account.credentials as {
       region?: 'na' | 'eu' | 'fe';
-      lwaClientId: string;
-      lwaClientSecret: string;
-      refreshToken: string;
-      awsAccessKeyId: string;
-      awsSecretAccessKey: string;
+      lwaClientId?: string;
+      lwaClientSecret?: string;
+      refreshToken?: string;
+      awsAccessKeyId?: string;
+      awsSecretAccessKey?: string;
       awsRoleArn?: string;
     };
+    const resolved = this.spApiCredentialsFromSellerAccountJson(creds ?? {});
     if (
       !creds ||
-      !creds.lwaClientId ||
-      !creds.lwaClientSecret ||
-      !creds.refreshToken ||
-      !creds.awsAccessKeyId ||
-      !creds.awsSecretAccessKey
+      !resolved.lwaClientId ||
+      !resolved.lwaClientSecret ||
+      !resolved.refreshToken ||
+      !resolved.awsAccessKeyId ||
+      !resolved.awsSecretAccessKey
     ) {
       throw new NotFoundException(
         'Amazon credentials are incomplete. Please relink your Amazon account.',
       );
     }
-    return {
-      region:
-        creds.region === 'na' || creds.region === 'eu' || creds.region === 'fe'
-          ? creds.region
-          : 'eu',
-      lwaClientId: creds.lwaClientId,
-      lwaClientSecret: creds.lwaClientSecret,
-      refreshToken: creds.refreshToken,
-      awsAccessKeyId: creds.awsAccessKeyId,
-      awsSecretAccessKey: creds.awsSecretAccessKey,
-      awsRoleArn: process.env.AWS_ROLE_ARN,
-    };
+    return resolved;
   }
 
   async getAmazonConnectionDebug(orgId: string, preferredUserId: string) {
@@ -1947,36 +2119,29 @@ export class AmazonService {
 
     const creds = account.credentials as {
       region?: 'na' | 'eu' | 'fe';
-      lwaClientId: string;
-      lwaClientSecret: string;
-      refreshToken: string;
-      awsAccessKeyId: string;
-      awsSecretAccessKey: string;
+      lwaClientId?: string;
+      lwaClientSecret?: string;
+      refreshToken?: string;
+      awsAccessKeyId?: string;
+      awsSecretAccessKey?: string;
       awsRoleArn?: string;
     };
 
+    const resolved = this.spApiCredentialsFromSellerAccountJson(creds ?? {});
     if (
       !creds ||
-      !creds.lwaClientId ||
-      !creds.lwaClientSecret ||
-      !creds.refreshToken ||
-      !creds.awsAccessKeyId ||
-      !creds.awsSecretAccessKey
+      !resolved.lwaClientId ||
+      !resolved.lwaClientSecret ||
+      !resolved.refreshToken ||
+      !resolved.awsAccessKeyId ||
+      !resolved.awsSecretAccessKey
     ) {
       throw new NotFoundException(
         'Amazon credentials are incomplete. Please relink your Amazon account.',
       );
     }
 
-    return {
-      region: creds.region ?? 'eu',
-      lwaClientId: creds.lwaClientId,
-      lwaClientSecret: creds.lwaClientSecret,
-      refreshToken: creds.refreshToken,
-      awsAccessKeyId: creds.awsAccessKeyId,
-      awsSecretAccessKey: creds.awsSecretAccessKey,
-      awsRoleArn: process.env.AWS_ROLE_ARN,
-    };
+    return resolved;
   }
 
   async getAccountSummary(
@@ -3370,6 +3535,12 @@ export class AmazonService {
   static readonly SYNC_ORDERS_DAYS_DEFAULT = 30;
 
   /**
+   * Extra getOrders pass uses CreatedAfter (not LastUpdatedAfter) so Pending / "awaiting payment"
+   * orders still ingest when incremental LastUpdated polls miss them.
+   */
+  static readonly SYNC_ORDERS_CREATED_CATCHUP_DAYS = 14;
+
+  /**
    * Max calendar days of orders SP-API may pull for this user (30 for everyone except one
    * allowlisted account — see `amazon-extended-sync.constants.ts`).
    */
@@ -3625,48 +3796,80 @@ export class AmazonService {
     if (onProgress) await onProgress(2);
     const maxOrders = opts?.maxOrders != null && opts.maxOrders > 0 ? Math.min(1000, Math.floor(opts.maxOrders)) : undefined;
     const maxOrderItems = opts?.maxOrderItems != null && opts.maxOrderItems > 0 ? Math.min(1000, Math.floor(opts.maxOrderItems)) : undefined;
-    const allOrders: SpApiOrder[] = [];
-    let nextToken: string | undefined;
+    const ordersByAmazonId = new Map<string, SpApiOrder>();
+    let lastUpdatedCount = 0;
     try {
-      do {
-        // Use LastUpdatedAfter/Before; do NOT send OrderStatuses (many accounts return 0 when that filter is set)
-        const data = (await this.spApiClient.getOrders(credentials, nextToken
-          ? { nextToken }
-          : {
-              lastUpdatedAfter: createdAfterIso,
-              lastUpdatedBefore: createdBeforeIso,
-              marketplaceIds,
-            })) as { payload?: { Orders?: SpApiOrder[]; NextToken?: string }; Payload?: { Orders?: SpApiOrder[]; NextToken?: string } };
-        const page = data?.payload ?? data?.Payload;
-        const pageOrders = page?.Orders ?? [];
-        allOrders.push(...pageOrders);
-        if (maxOrders != null && allOrders.length >= maxOrders) {
-          allOrders.splice(maxOrders);
-          nextToken = undefined;
-          break;
-        }
-        nextToken = page?.NextToken ?? undefined;
-      } while (nextToken);
+      // Primary incremental poll (LastUpdated*). Do NOT send OrderStatuses — many accounts return 0.
+      const lastUpdatedOrders = (await this.fetchSpApiOrdersPaginated(
+        credentials,
+        {
+          lastUpdatedAfter: createdAfterIso,
+          lastUpdatedBefore: createdBeforeIso,
+          marketplaceIds,
+        },
+      )) as SpApiOrder[];
+      lastUpdatedCount = lastUpdatedOrders.length;
+      for (const o of lastUpdatedOrders) {
+        const id = o.AmazonOrderId;
+        if (id) ordersByAmazonId.set(id, o);
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.logger.warn(
-        `[syncRecentOrdersToDb] getOrders failed (userId=${userId}): ${msg}`,
+        `[syncRecentOrdersToDb] getOrders (LastUpdatedAfter) failed (userId=${userId}): ${msg}`,
       );
       throw err;
     }
 
+    // Secondary pass: CreatedAfter catches Pending / awaiting-payment orders that never appear in LastUpdated-only polls.
+    const catchUpDays = Math.min(
+      days,
+      AmazonService.SYNC_ORDERS_CREATED_CATCHUP_DAYS,
+    );
+    const createdCatchUpStart = new Date(
+      nowSafe.getTime() - catchUpDays * 24 * 60 * 60 * 1000,
+    );
+    const createdCatchUpIso =
+      createdCatchUpStart.toISOString().split('.')[0] + 'Z';
+    let createdCatchUpAdded = 0;
+    try {
+      const createdOrders = (await this.fetchSpApiOrdersPaginated(
+        credentials,
+        {
+          createdAfter: createdCatchUpIso,
+          createdBefore: createdBeforeIso,
+          marketplaceIds,
+        },
+      )) as SpApiOrder[];
+      for (const o of createdOrders) {
+        const id = o.AmazonOrderId;
+        if (!id) continue;
+        if (!ordersByAmazonId.has(id)) createdCatchUpAdded += 1;
+        ordersByAmazonId.set(id, o);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.warn(
+        `[syncRecentOrdersToDb] getOrders (CreatedAfter catch-up) failed (non-fatal, userId=${userId}): ${msg}`,
+      );
+    }
+
+    const mergedOrders = this.sortSpApiOrdersNewestFirst([
+      ...ordersByAmazonId.values(),
+    ]) as SpApiOrder[];
+
     // Enforce cap so we never process more than maxOrders when set (initial sync = 15 only)
     const orders =
       maxOrders != null && maxOrders > 0
-        ? allOrders.slice(0, maxOrders)
-        : allOrders;
+        ? mergedOrders.slice(0, maxOrders)
+        : mergedOrders;
     if (maxOrders != null && orders.length > 0) {
       this.logger.log(
-        `[syncRecentOrdersToDb] getOrders returned ${allOrders.length} order(s), processing ${orders.length} (capped at ${maxOrders} for initial sync; userId=${userId})`,
+        `[syncRecentOrdersToDb] getOrders merged ${mergedOrders.length} order(s) (LastUpdated=${lastUpdatedCount}, +${createdCatchUpAdded} from CreatedAfter≤${catchUpDays}d), processing ${orders.length} (cap=${maxOrders}; userId=${userId})`,
       );
     } else {
       this.logger.log(
-        `[syncRecentOrdersToDb] getOrders returned ${orders.length} orders (paginated; userId=${userId} lastUpdatedAfter=${createdAfterIso} marketplaces=${marketplaceIds.length})`,
+        `[syncRecentOrdersToDb] getOrders merged ${orders.length} orders (LastUpdated=${lastUpdatedCount}, +${createdCatchUpAdded} from CreatedAfter; userId=${userId} lastUpdatedAfter=${createdAfterIso} createdCatchUpAfter=${createdCatchUpIso} marketplaces=${marketplaceIds.length})`,
       );
     }
     if (onProgress) await onProgress(5);
@@ -3930,6 +4133,28 @@ export class AmazonService {
             0,
           );
           if (lineSum > 0) totalAmount = lineSum;
+        }
+      } else {
+        const headerQty =
+          (order.NumberOfItemsShipped ?? 0) + (order.NumberOfItemsUnshipped ?? 0);
+        const statusLower = (apiOrderStatus ?? '').toLowerCase();
+        const looksUnfulfilled =
+          !statusLower ||
+          statusLower.includes('pending') ||
+          statusLower === 'unshipped' ||
+          statusLower.includes('partiallyshipped') ||
+          statusLower === 'invoiceunconfirmed';
+        if (looksUnfulfilled && (headerQty > 0 || totalAmount > 0)) {
+          orderItems = this.buildSyntheticOrderItemsFromOrderHeader(
+            amazonOrderId,
+            order as Record<string, unknown>,
+            quantity,
+          );
+          if (debug) {
+            this.logger.debug(
+              `[syncRecentOrdersToDb] synthetic order line(s) for ${amazonOrderId} status=${apiOrderStatus ?? '—'} qty=${quantity}`,
+            );
+          }
         }
       }
       const itemPrice =
@@ -4793,6 +5018,10 @@ export class AmazonService {
           });
         }
         orderItemsWrittenThisSync += itemsToWrite;
+        await this.deleteSyntheticPendingHeaderLinesForOrder(
+          userId,
+          persistedOrder.id,
+        );
         if (maxOrderItems != null && orderItemsWrittenThisSync >= maxOrderItems) {
           this.logger.log(
             `[syncRecentOrdersToDb] initial sync: wrote ${orderItemsWrittenThisSync} order items, stopping (userId=${userId})`,
@@ -4846,10 +5075,32 @@ export class AmazonService {
             credentials,
             ord.orderId,
           )) as any;
-          const items = itemsRes?.payload?.OrderItems ?? [];
-          if (!Array.isArray(items) || items.length === 0) continue;
+          let items = itemsRes?.payload?.OrderItems ?? [];
+          if (!Array.isArray(items)) items = [];
 
           let orderTotalAmt = this.parseOrderTotalAmountFromOrderJson(ord.rawResponse);
+          if (items.length === 0) {
+            const raw = ord.rawResponse as Record<string, unknown> | null;
+            const headerQty =
+              Number(raw?.NumberOfItemsUnshipped ?? 0) +
+              Number(raw?.NumberOfItemsShipped ?? 0);
+            const st = String(raw?.OrderStatus ?? raw?.orderStatus ?? '').toLowerCase();
+            const looksUnfulfilled =
+              !st ||
+              st.includes('pending') ||
+              st === 'unshipped' ||
+              st.includes('partiallyshipped') ||
+              st === 'invoiceunconfirmed';
+            if (looksUnfulfilled && (headerQty > 0 || orderTotalAmt > 0)) {
+              items = this.buildSyntheticOrderItemsFromOrderHeader(
+                ord.orderId,
+                raw ?? {},
+                headerQty > 0 ? headerQty : 1,
+              );
+            }
+          }
+          if (items.length === 0) continue;
+
           if (orderTotalAmt <= 0) {
             orderTotalAmt = items.reduce(
               (s, item) => s + this.parseOrderItemLineRevenueFromRaw(item),
@@ -8469,6 +8720,15 @@ export class AmazonService {
         orderItemId?: string | null;
         feesSource?: string | null;
         updatedAt?: Date | string;
+        sku?: string | null;
+      }>,
+    ) as typeof items;
+
+    items = this.dropRedundantPlaceholderOrderLines(
+      items as Array<{
+        orderId: string;
+        sku?: string | null;
+        orderItemId?: string | null;
       }>,
     ) as typeof items;
 
@@ -9436,6 +9696,47 @@ export class AmazonService {
       return canonical;
     };
 
+    /** Same SKU on multiple org members: merge freshest inventory + per-marketplace rows onto canonical. */
+    const mergeInventoryAcrossSiblings = (
+      canonical: InventoryProductRow,
+      group: InventoryProductRow[],
+    ): InventoryProductRow => {
+      const merged = mergeSiblingSkuFields(canonical, group);
+      let bestInv: InventoryProductRow['inventory'] = null;
+      let bestInvAt = 0;
+      for (const row of group) {
+        const inv = row.inventory;
+        const at = inv?.updatedAt?.getTime() ?? 0;
+        if (inv && at >= bestInvAt) {
+          bestInv = inv;
+          bestInvAt = at;
+        }
+      }
+      if (bestInv) (merged as InventoryProductRow).inventory = bestInv;
+
+      const mpById = new Map<string, Record<string, unknown>>();
+      for (const row of group) {
+        for (const m of (row as any).inventoryByMarketplace ?? []) {
+          const prev = mpById.get(m.marketplaceId);
+          const mAt =
+            m.updatedAt instanceof Date
+              ? m.updatedAt.getTime()
+              : m.updatedAt
+                ? new Date(String(m.updatedAt)).getTime()
+                : 0;
+          const pAt =
+            prev?.updatedAt instanceof Date
+              ? prev.updatedAt.getTime()
+              : prev?.updatedAt
+                ? new Date(String(prev.updatedAt)).getTime()
+                : 0;
+          if (!prev || mAt >= pAt) mpById.set(m.marketplaceId, m);
+        }
+      }
+      (merged as any).inventoryByMarketplace = Array.from(mpById.values());
+      return merged;
+    };
+
     const rowsGroupedBySku = new Map<string, InventoryProductRow[]>();
     for (const p of rows) {
       const arr = rowsGroupedBySku.get(p.sku) ?? [];
@@ -9445,7 +9746,7 @@ export class AmazonService {
     const bySku = new Map<string, InventoryProductRow>();
     for (const [, group] of rowsGroupedBySku) {
       const canonical = group.reduce((a, b) => pickCanonicalForSku(a, b));
-      bySku.set(canonical.sku, mergeSiblingSkuFields(canonical, group));
+      bySku.set(canonical.sku, mergeInventoryAcrossSiblings(canonical, group));
     }
     const uniqueRows = Array.from(bySku.values()).sort(
       (a, b) => b.updatedAt.getTime() - a.updatedAt.getTime(),
@@ -9457,29 +9758,31 @@ export class AmazonService {
             (m: any) => m.marketplaceId === marketplaceId,
           )
         : null;
-      const selectedAvailable =
-        selectedMarketplace != null
-          ? Number(selectedMarketplace.fulfillableQty ?? 0)
-          : null;
-      const selectedReserved =
-        selectedMarketplace != null
-          ? Number(selectedMarketplace.reservedQty ?? 0)
-          : null;
-      const selectedInbound =
-        selectedMarketplace != null
-          ? Number(selectedMarketplace.inboundQty ?? 0)
-          : null;
-      const selectedIssue =
-        selectedMarketplace != null
-          ? Number(
-              (selectedMarketplace.unfulfillableQty ?? 0) +
-                (selectedMarketplace.researchingQty ?? 0),
-            )
-          : null;
-      const selectedTotal =
-        selectedMarketplace != null
-          ? Number(selectedMarketplace.currentQty ?? 0)
-          : null;
+      const hasMarketplaceRow = selectedMarketplace != null;
+      const selectedAvailable = hasMarketplaceRow
+        ? Number(selectedMarketplace.fulfillableQty ?? 0)
+        : null;
+      // Seller Central "Reserved" = customer-order reserved (not FC processing).
+      const selectedReserved = hasMarketplaceRow
+        ? Number(
+            selectedMarketplace.customerOrdersQty ??
+              selectedMarketplace.reservedQty ??
+              0,
+          )
+        : null;
+      const selectedInbound = hasMarketplaceRow
+        ? Number(selectedMarketplace.inboundQty ?? 0)
+        : null;
+      const selectedIssue = hasMarketplaceRow
+        ? Number(
+            (selectedMarketplace.unfulfillableQty ?? 0) +
+              (selectedMarketplace.researchingQty ?? 0) +
+              (selectedMarketplace.fcProcessingQty ?? 0),
+          )
+        : null;
+      const selectedTotal = hasMarketplaceRow
+        ? Number(selectedMarketplace.currentQty ?? 0)
+        : null;
       return {
       productId: p.id,
       sku: p.sku,
@@ -9496,14 +9799,18 @@ export class AmazonService {
       currentListedPrice: (p as any).currentListedPrice != null ? Number((p as any).currentListedPrice) : null,
       costOfGoods: (p as any).costOfGoods != null ? Number((p as any).costOfGoods) : null,
       feeEstimateRawJson: (p as any).feeEstimateRawJson ?? null,
-      // When a marketplace is selected, prefer that row *when present* but fall back to
-      // the aggregated inventory snapshot so we don't zero-out stock when per-marketplace is missing.
-      availableQty: marketplaceId ? (selectedAvailable ?? p.inventory?.availableQty ?? null) : p.inventory?.availableQty ?? null,
-      reservedQty: marketplaceId ? (selectedReserved ?? p.inventory?.reservedQty ?? null) : p.inventory?.reservedQty ?? null,
-      inboundQty: marketplaceId ? (selectedInbound ?? p.inventory?.inboundQty ?? null) : p.inventory?.inboundQty ?? null,
-      issueQty: marketplaceId ? (selectedIssue ?? p.inventory?.issueQty ?? null) : p.inventory?.issueQty ?? null,
-      totalQty: marketplaceId ? (selectedTotal ?? p.inventory?.totalQty ?? null) : p.inventory?.totalQty ?? null,
-      inventoryUpdatedAt: p.inventory?.updatedAt ?? null,
+      // When a marketplace is selected, use that marketplace row only (no EU-wide aggregate fallback).
+      availableQty: marketplaceId ? selectedAvailable : p.inventory?.availableQty ?? null,
+      reservedQty: marketplaceId ? selectedReserved : p.inventory?.reservedQty ?? null,
+      inboundQty: marketplaceId ? selectedInbound : p.inventory?.inboundQty ?? null,
+      issueQty: marketplaceId ? selectedIssue : p.inventory?.issueQty ?? null,
+      totalQty: marketplaceId ? selectedTotal : p.inventory?.totalQty ?? null,
+      inventoryMarketplaceMissing:
+        marketplaceId != null && marketplaceId.length > 0 && !hasMarketplaceRow,
+      inventoryUpdatedAt:
+        marketplaceId && selectedMarketplace?.updatedAt != null
+          ? selectedMarketplace.updatedAt
+          : p.inventory?.updatedAt ?? null,
       rawJson: p.inventory?.rawJson ?? null,
       byMarketplace: (p as any).inventoryByMarketplace?.map((m: any) => ({
         marketplaceId: m.marketplaceId,
@@ -10079,7 +10386,11 @@ export class AmazonService {
    * for products we already know about in this org (matched by SKU).
    * @param opts.maxPages - If set (e.g. 1), only fetch this many pages per marketplace. Used for initial sync to get a minimal set quickly.
    */
-  async syncFbaInventory(orgId: string, preferredUserId?: string, opts?: { maxPages?: number }) {
+  async syncFbaInventory(
+    orgId: string,
+    preferredUserId?: string,
+    opts?: { maxPages?: number; force?: boolean },
+  ): Promise<{ ok: boolean; skipped?: boolean; skuCount?: number; syncedAt?: string }> {
     const debug = ['1', 'true', 'yes'].includes(
       (this.configService.get<string>('SPAPI_DEBUG_LOGS') ?? '').toLowerCase(),
     );
@@ -10135,12 +10446,16 @@ export class AmazonService {
   string,
   { id: string; userId: string; updatedAt: Date }
 >();
+    const productIdsBySku = new Map<string, Array<{ id: string; userId: string }>>();
     for (const p of products) {
       const existing = bySku.get(p.sku);
       // Prefer an existing Product owned by the seller connection we're syncing.
       if (!existing || (existing.userId !== ownerUserId && p.userId === ownerUserId)) {
         bySku.set(p.sku, { id: p.id, userId: p.userId, updatedAt: p.updatedAt });
       }
+      const skuTargets = productIdsBySku.get(p.sku) ?? [];
+      skuTargets.push({ id: p.id, userId: p.userId });
+      productIdsBySku.set(p.sku, skuTargets);
       if (p.asin) {
         byAsin.set(p.asin, { id: p.id, userId: p.userId, updatedAt: p.updatedAt });
       }
@@ -10222,7 +10537,7 @@ export class AmazonService {
     select: { lastFbaInventorySyncAt: true },
   });
 
-  if (org?.lastFbaInventorySyncAt) {
+  if (!opts?.force && org?.lastFbaInventorySyncAt) {
     const secondsAgo = (now.getTime() - org.lastFbaInventorySyncAt.getTime()) / 1000;
     if (secondsAgo < 60) {  // 60 = 1 minute
       if (debug) {
@@ -10230,7 +10545,11 @@ export class AmazonService {
           `[syncFbaInventory] Skipping - last successful sync was ${Math.round(secondsAgo / 60)} min ago`,
         );
       }
-      return;  // exit function early, no API calls
+      return {
+        ok: true,
+        skipped: true,
+        syncedAt: org.lastFbaInventorySyncAt.toISOString(),
+      };
     }
   }
   // END OF COOLDOWN BLOCK
@@ -10253,7 +10572,8 @@ export class AmazonService {
     asin: string | null;
     fulfillable: number;
     inbound: number;
-    reserved: number;
+    reservedCustomer: number;
+    reservedTotal: number;
     researching: number;
     unfulfillable: number;
     fcProcessingQty: number;
@@ -10268,6 +10588,95 @@ export class AmazonService {
   }
 >();
 
+
+const ingestInventorySummary = (
+    marketplaceId: string,
+    s: any,
+  ): void => {
+    const sku: string | undefined =
+      s?.sellerSku ?? s?.SellerSku ?? s?.sellerSKU;
+    if (!sku) return;
+
+    const details = s.inventoryDetails ?? s.InventoryDetails ?? {};
+    const fulfillable =
+      details.afnFulfillableQuantity ??
+      details.fulfillableQuantity ??
+      0;
+    const inbound =
+      (details.afnInboundWorkingQuantity ?? 0) +
+      (details.afnInboundShippedQuantity ?? 0) +
+      (details.afnInboundReceivingQuantity ?? 0);
+
+    const key = `${marketplaceId}::${sku}`;
+    const rq = details.reservedQuantity ?? details.ReservedQuantity;
+    const uq = details.unfulfillableQuantity ?? details.UnfulfillableQuantity;
+    const customerReserved = Number(
+      rq?.pendingCustomerOrderQuantity ?? rq?.PendingCustomerOrderQuantity ?? 0,
+    );
+    const fcProcessing = Number(
+      rq?.fcProcessingQuantity ?? rq?.FcProcessingQuantity ?? 0,
+    );
+    const transshipment = Number(
+      rq?.pendingTransshipmentQuantity ?? rq?.PendingTransshipmentQuantity ?? 0,
+    );
+    const totalReserved = Number(
+      rq?.totalReservedQuantity ??
+        rq?.TotalReservedQuantity ??
+        customerReserved + fcProcessing + transshipment,
+    );
+
+    const researchingQty =
+      details.researchingQuantity?.totalResearchingQuantity ??
+      details.ResearchingQuantity?.TotalResearchingQuantity ??
+      0;
+
+    const existing = inventoryBySku.get(key) ?? {
+      sellerSku: sku,
+      marketplaceId,
+      asin: (s?.asin ?? s?.ASIN ?? null) as string | null,
+      fulfillable: 0,
+      inbound: 0,
+      reservedCustomer: 0,
+      reservedTotal: 0,
+      researching: 0,
+      unfulfillable: 0,
+      fcProcessingQty: 0,
+      customerOrdersQty: 0,
+      transshipmentQty: 0,
+      inboundWorkingQty: 0,
+      inboundShippedQty: 0,
+      inboundReceivingQty: 0,
+      warehouseDamagedQty: 0,
+      expiredQty: 0,
+      raw: null as any,
+    };
+
+    existing.fulfillable = fulfillable;
+    existing.inbound = inbound;
+    existing.reservedCustomer = customerReserved;
+    existing.reservedTotal = totalReserved;
+    existing.researching = researchingQty;
+    existing.unfulfillable =
+      uq?.totalUnfulfillableQuantity ?? uq?.TotalUnfulfillableQuantity ?? 0;
+    existing.fcProcessingQty = fcProcessing;
+    existing.customerOrdersQty = customerReserved;
+    existing.transshipmentQty = transshipment;
+    existing.inboundWorkingQty =
+      details.afnInboundWorkingQuantity ?? details.inboundWorkingQuantity ?? 0;
+    existing.inboundShippedQty =
+      details.afnInboundShippedQuantity ?? details.inboundShippedQuantity ?? 0;
+    existing.inboundReceivingQty =
+      details.afnInboundReceivingQuantity ?? details.inboundReceivingQuantity ?? 0;
+    existing.warehouseDamagedQty =
+      uq?.warehouseDamagedQuantity ?? uq?.WarehouseDamagedQuantity ?? 0;
+    existing.expiredQty = uq?.expiredQuantity ?? uq?.ExpiredQuantity ?? 0;
+    if (s?.asin != null || s?.ASIN != null) {
+      existing.asin = (s?.asin ?? s?.ASIN ?? null) as string | null;
+    }
+    existing.raw = s;
+    inventoryBySku.set(key, existing);
+    upsertedInventoryRows += 1;
+  };
 
 try {
   if (debug) {
@@ -10344,70 +10753,7 @@ try {
 
 
           for (const s of summaries) {
-            const sku: string | undefined =
-  s?.sellerSku ?? s?.SellerSku ?? s?.sellerSKU;
-
-if (!sku) continue;
-
-  const details = s.inventoryDetails ?? {};
-
-  const fulfillable =
-    details.afnFulfillableQuantity ??
-    details.fulfillableQuantity ??
-    0;
-
-  const inbound =
-    (details.afnInboundWorkingQuantity ?? 0) +
-    (details.afnInboundShippedQuantity ?? 0) +
-    (details.afnInboundReceivingQuantity ?? 0);
-
-const key = `${marketplaceId}::${sku}`;
-
-const rq = details.reservedQuantity;
-const uq = details.unfulfillableQuantity;
-const existing = inventoryBySku.get(key) ?? {
-  sellerSku: sku,
-  marketplaceId,
-  asin: (s?.asin ?? s?.ASIN ?? null) as string | null,
-  fulfillable: 0,
-  inbound: 0,
-  reserved: 0,
-  researching: 0,
-  unfulfillable: 0,
-  fcProcessingQty: 0,
-  customerOrdersQty: 0,
-  transshipmentQty: 0,
-  inboundWorkingQty: 0,
-  inboundShippedQty: 0,
-  inboundReceivingQty: 0,
-  warehouseDamagedQty: 0,
-  expiredQty: 0,
-  raw: null as any,
-};
-
-existing.fulfillable += fulfillable;
-existing.inbound += inbound;
-existing.reserved += rq?.totalReservedQuantity ?? 0;
-existing.researching += details.researchingQuantity?.totalResearchingQuantity ?? 0;
-existing.unfulfillable += uq?.totalUnfulfillableQuantity ?? 0;
-existing.fcProcessingQty += rq?.fcProcessingQuantity ?? 0;
-existing.customerOrdersQty += rq?.pendingCustomerOrderQuantity ?? 0;
-existing.transshipmentQty += rq?.pendingTransshipmentQuantity ?? 0;
-existing.inboundWorkingQty += details.afnInboundWorkingQuantity ?? details.inboundWorkingQuantity ?? 0;
-existing.inboundShippedQty += details.afnInboundShippedQuantity ?? details.inboundShippedQuantity ?? 0;
-existing.inboundReceivingQty += details.afnInboundReceivingQuantity ?? details.inboundReceivingQuantity ?? 0;
-existing.warehouseDamagedQty += uq?.warehouseDamagedQuantity ?? 0;
-existing.expiredQty += uq?.expiredQuantity ?? 0;
-if (s?.asin != null || s?.ASIN != null) {
-  existing.asin = (s?.asin ?? s?.ASIN ?? null) as string | null;
-}
-existing.raw = s;
-
-inventoryBySku.set(key, existing);
-
-
-            
-            upsertedInventoryRows += 1;
+            ingestInventorySummary(marketplaceId, s);
           }
 
           pagesFetched += 1;
@@ -10454,7 +10800,43 @@ inventoryBySku.set(key, existing);
         if (maxPages != null && maxPages > 0) break;
       }
 
-
+      // SKUs in our DB are sometimes missing from paginated summaries; fetch by sellerSku (≤50).
+      const orgSkus = [...new Set(products.map((p) => p.sku))];
+      const okMarketplaces = marketplaceIds.filter(
+        (id) => !marketplaceErrors.some((e) => e.marketplaceId === id),
+      );
+      for (const marketplaceId of okMarketplaces) {
+        const missing = orgSkus.filter(
+          (sku) => !inventoryBySku.has(`${marketplaceId}::${sku}`),
+        );
+        for (let i = 0; i < missing.length; i += 50) {
+          const batch = missing.slice(i, i + 50);
+          if (batch.length === 0) continue;
+          if (throttleMs > 0) {
+            await new Promise((resolve) => setTimeout(resolve, throttleMs));
+          }
+          try {
+            const res = (await this.spApiClient.getFbaInventorySummaries(
+              credentials,
+              { marketplaceId, details: true, sellerSkus: batch },
+            )) as any;
+            const payload = res?.payload ?? res?.Payload ?? res ?? {};
+            const summaries =
+              payload?.inventorySummaries ??
+              payload?.InventorySummaries ??
+              payload?.summaries ??
+              [];
+            for (const s of summaries) {
+              ingestInventorySummary(marketplaceId, s);
+            }
+          } catch (e: any) {
+            const msg = e instanceof Error ? e.message : String(e);
+            this.logger.warn(
+              `[FBA ${marketplaceId}] sellerSkus backfill failed (${batch.length} sku(s)): ${msg}`,
+            );
+          }
+        }
+      }
 
     } catch (e) {
 
@@ -10486,42 +10868,52 @@ inventoryBySku.set(key, existing);
 
 
 // SAVE INVENTORY
-// 1) Save per-marketplace rows into InventoryByMarketplace
+// 1) Save per-marketplace rows into InventoryByMarketplace (all org Product rows per SKU)
 // 2) Build true aggregates across marketplaces and save totals into Inventory
 try {
+  const ensureOrgProductsForSku = async (
+    sku: string,
+    asin: string | null,
+  ): Promise<Array<{ id: string; userId: string }>> => {
+    const ownerProduct = await this.prisma.product.upsert({
+      where: {
+        userId_sku: { userId: ownerUserId, sku },
+      },
+      update: { asin: asin ?? undefined },
+      create: { userId: ownerUserId, sku, asin },
+    });
+    bySku.set(sku, {
+      id: ownerProduct.id,
+      userId: ownerProduct.userId,
+      updatedAt: ownerProduct.updatedAt,
+    });
+    const targets = [...(productIdsBySku.get(sku) ?? [])];
+    if (!targets.some((t) => t.id === ownerProduct.id)) {
+      targets.push({ id: ownerProduct.id, userId: ownerProduct.userId });
+    }
+    const seen = new Set<string>();
+    return targets.filter((t) => {
+      if (seen.has(t.id)) return false;
+      seen.add(t.id);
+      return true;
+    });
+  };
+
   for (const row of inventoryBySku.values()) {
     const sku = row.sellerSku;
-    const product = await this.prisma.product.upsert({
-      where: {
-        userId_sku: {
-          userId: ownerUserId,
-          sku: row.sellerSku,
-        },
-      },
-      update: {
-        asin: row.asin ?? undefined,
-      },
-      create: {
-        userId: ownerUserId,
-        sku: row.sellerSku,
-        asin: row.asin ?? null,
-      },
-    });
-    const match = { id: product.id, userId: product.userId, updatedAt: product.updatedAt };
-    bySku.set(sku, match);
+    const productTargets = await ensureOrgProductsForSku(sku, row.asin ?? null);
 
     const totalQty =
       row.fulfillable +
       row.inbound +
-      row.reserved +
+      row.reservedTotal +
       row.researching +
       row.unfulfillable;
 
     const byMp = {
-      userId: match.userId,
       fulfillableQty: row.fulfillable,
       inboundQty: row.inbound,
-      reservedQty: row.reserved,
+      reservedQty: row.reservedCustomer,
       researchingQty: row.researching,
       unfulfillableQty: row.unfulfillable,
       currentQty: totalQty,
@@ -10535,20 +10927,24 @@ try {
       expiredQty: row.expiredQty ?? 0,
       rawJson: row.raw ?? row,
     };
-    await this.prisma.inventoryByMarketplace.upsert({
-      where: {
-        productId_marketplaceId: {
-          productId: match.id,
+
+    for (const target of productTargets) {
+      await this.prisma.inventoryByMarketplace.upsert({
+        where: {
+          productId_marketplaceId: {
+            productId: target.id,
+            marketplaceId: row.marketplaceId,
+          },
+        },
+        update: { ...byMp, userId: target.userId },
+        create: {
+          ...byMp,
+          userId: target.userId,
+          productId: target.id,
           marketplaceId: row.marketplaceId,
         },
-      },
-      update: byMp,
-      create: {
-        ...byMp,
-        productId: match.id,
-        marketplaceId: row.marketplaceId,
-      },
-    });
+      });
+    }
   }
 
   // Build true aggregates across marketplaces (per SKU)
@@ -10559,7 +10955,8 @@ try {
       asin: string | null;
       fulfillable: number;
       inbound: number;
-      reserved: number;
+      reservedCustomer: number;
+      reservedTotal: number;
       researching: number;
       unfulfillable: number;
       raw: any[];
@@ -10572,7 +10969,8 @@ try {
       asin: row.asin ?? null,
       fulfillable: 0,
       inbound: 0,
-      reserved: 0,
+      reservedCustomer: 0,
+      reservedTotal: 0,
       researching: 0,
       unfulfillable: 0,
       raw: [],
@@ -10580,7 +10978,8 @@ try {
 
     existing.fulfillable += row.fulfillable;
     existing.inbound += row.inbound;
-    existing.reserved += row.reserved;
+    existing.reservedCustomer += row.reservedCustomer;
+    existing.reservedTotal += row.reservedTotal;
     existing.researching += row.researching;
     existing.unfulfillable += row.unfulfillable;
     if (row.asin != null) existing.asin = row.asin;
@@ -10589,66 +10988,56 @@ try {
     aggregateBySku.set(row.sellerSku, existing);
   }
 
-  // Save aggregate totals (per SKU) into Inventory
+  // Save aggregate totals (per SKU) into Inventory for every org Product with that SKU
   for (const agg of aggregateBySku.values()) {
     const sku = agg.sellerSku;
-    const product = await this.prisma.product.upsert({
-      where: {
-        userId_sku: {
-          userId: ownerUserId,
-          sku: agg.sellerSku,
-        },
-      },
-      update: {
-        asin: agg.asin ?? undefined,
-      },
-      create: {
-        userId: ownerUserId,
-        sku: agg.sellerSku,
-        asin: agg.asin ?? null,
-      },
-    });
-    const match = { id: product.id, userId: product.userId, updatedAt: product.updatedAt };
-    bySku.set(sku, match);
+    const productTargets = await ensureOrgProductsForSku(sku, agg.asin ?? null);
 
     const totalQty =
       agg.fulfillable +
       agg.inbound +
-      agg.reserved +
+      agg.reservedTotal +
       agg.researching +
       agg.unfulfillable;
     const issueQty = agg.researching + agg.unfulfillable;
 
-    await this.prisma.inventory.upsert({
-      where: {
-        productId: match.id,
-      },
-      update: {
-        userId: match.userId,
-        availableQty: agg.fulfillable,
-        reservedQty: agg.reserved,
-        inboundQty: agg.inbound,
-        issueQty,
-        totalQty,
-        rawJson: agg.raw as object,
-      },
-      create: {
-        userId: match.userId,
-        productId: match.id,
-        availableQty: agg.fulfillable,
-        reservedQty: agg.reserved,
-        inboundQty: agg.inbound,
-        issueQty,
-        totalQty,
-        rawJson: agg.raw as object,
-      },
-    });
+    const invPayload = {
+      availableQty: agg.fulfillable,
+      reservedQty: agg.reservedCustomer,
+      inboundQty: agg.inbound,
+      issueQty,
+      totalQty,
+      rawJson: agg.raw as object,
+    };
+
+    for (const target of productTargets) {
+      await this.prisma.inventory.upsert({
+        where: { productId: target.id },
+        update: { userId: target.userId, ...invPayload },
+        create: {
+          userId: target.userId,
+          productId: target.id,
+          ...invPayload,
+        },
+      });
+    }
   }
   const writtenCount = aggregateBySku.size;
   this.logger.log(`[syncFbaInventory] wrote ${writtenCount} inventory row(s) for org ${orgId}`);
   if (writtenCount === 0) {
     this.logger.warn(`[syncFbaInventory] FBA API returned no inventory for this org – check credentials and that the seller has FBA inventory. Existing DB rows are not deleted.`);
   }
+
+  await this.prisma.organization.update({
+    where: { id: orgId },
+    data: { lastFbaInventorySyncAt: now },
+  });
+
+  return {
+    ok: true,
+    skuCount: writtenCount,
+    syncedAt: now.toISOString(),
+  };
 } catch (e) {
   throw e;
 }
@@ -11845,6 +12234,30 @@ try {
           },
         );
         orderItems = [];
+      }
+
+      if (orderItems.length === 0) {
+        const raw = ord.rawResponse as Record<string, unknown> | null;
+        const orderTotalAmtHeader = this.parseOrderTotalAmountFromOrderJson(
+          ord.rawResponse,
+        );
+        const headerQty =
+          Number(raw?.NumberOfItemsUnshipped ?? 0) +
+          Number(raw?.NumberOfItemsShipped ?? 0);
+        const st = String(raw?.OrderStatus ?? raw?.orderStatus ?? '').toLowerCase();
+        const looksUnfulfilled =
+          !st ||
+          st.includes('pending') ||
+          st === 'unshipped' ||
+          st.includes('partiallyshipped') ||
+          st === 'invoiceunconfirmed';
+        if (looksUnfulfilled && (headerQty > 0 || orderTotalAmtHeader > 0)) {
+          orderItems = this.buildSyntheticOrderItemsFromOrderHeader(
+            amazonOrderId,
+            raw ?? {},
+            headerQty > 0 ? headerQty : 1,
+          );
+        }
       }
 
       if (orderItems.length === 0) {

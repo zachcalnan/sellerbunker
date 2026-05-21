@@ -2,10 +2,10 @@
 
 import { SignIn, useSignIn } from "@clerk/nextjs";
 import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { Suspense, useMemo, useState } from "react";
 import { clerkAuthMonochromeAppearance } from "@/lib/clerk-auth-appearance";
-import { safeAppRedirectPath } from "@/lib/auth-redirect";
+import { navigateAfterAuth, safeAppRedirectPath } from "@/lib/auth-redirect";
 
 type Props = {
   /** Used when no `redirect_url` query param (Clerk / middleware). */
@@ -26,7 +26,6 @@ function clerkErrorMessage(err: unknown): string {
 
 function EmailPasswordSignInInner({ defaultRedirect = "/dashboard" }: Props) {
   const { isLoaded, signIn, setActive } = useSignIn();
-  const router = useRouter();
   const searchParams = useSearchParams();
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -104,7 +103,7 @@ function EmailPasswordSignInInner({ defaultRedirect = "/dashboard" }: Props) {
 
       if (activeSignIn.status === "complete" && activeSignIn.createdSessionId) {
         await activateSession({ session: activeSignIn.createdSessionId });
-        router.push(redirectUrl);
+        navigateAfterAuth(redirectUrl);
         return;
       }
 

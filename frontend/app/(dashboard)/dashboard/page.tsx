@@ -1118,17 +1118,14 @@ function HomeInner() {
                   </div>
                 )}
 
-                {/* Top categories by metric (4 pie charts by displayGroup) */}
-                <div className={isLocked ? "blur-sm pointer-events-none select-none" : ""}>
+                {/* Top categories by metric (own date range; default last 30 days) */}
                 <CategoryPieCharts
                   baseUrl={baseUrl}
                   isSignedIn={isSignedIn}
                   getToken={getToken}
                   currency={effectiveCurrency}
-                  start={summaryRangeForApi.start}
-                  end={summaryRangeForApi.end}
+                  chartsLocked={isLocked}
                 />
-                </div>
 
                 {/* Top Sellers (this month) */}
                 <div className={isLocked ? "blur-sm pointer-events-none select-none" : ""}>
@@ -2919,8 +2916,8 @@ type CategoryPieChartsProps = {
   isSignedIn: boolean | undefined;
   getToken: (args: { template?: string }) => Promise<string | null>;
   currency: string;
-  start: string;
-  end: string;
+  /** Blur chart area only; period dropdown stays usable in header. */
+  chartsLocked?: boolean;
 };
 
 const PIE_COLORS = ["#4F46E5", "#10B981", "#F59E0B", "#EC4899"];
@@ -3010,13 +3007,106 @@ function CategoryPieCharts({
   isSignedIn,
   getToken,
   currency,
-  start,
-  end,
+  chartsLocked = false,
 }: CategoryPieChartsProps) {
   const { selectedMarketplaceId } = useMarketplace();
   const [data, setData] = useState<CategoryBreakdown | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [periodPreset, setPeriodPreset] = useState<DashboardRangePreset>("30d");
+  const [customStart, setCustomStart] = useState("");
+  const [customEnd, setCustomEnd] = useState("");
+
+  const {
+    defaultEnd,
+    defaultStart30,
+    defaultStart183,
+    defaultStart365,
+    defaultStart14,
+    defaultStart7,
+    yesterday,
+  } = marketplaceLocalDateAnchors(selectedMarketplaceId);
+  const allTimeStart = "2020-01-01";
+
+  const effectiveStart =
+    periodPreset === "today"
+      ? defaultEnd
+      : periodPreset === "7d"
+        ? defaultStart7
+        : periodPreset === "14d"
+          ? defaultStart14
+          : periodPreset === "30d"
+            ? defaultStart30
+            : periodPreset === "6m"
+              ? defaultStart183
+              : periodPreset === "12m"
+                ? defaultStart365
+                : periodPreset === "yesterday"
+                  ? yesterday
+                  : periodPreset === "all"
+                    ? allTimeStart
+                    : customStart || defaultStart30;
+  const effectiveEnd =
+    periodPreset === "today" ||
+    periodPreset === "7d" ||
+    periodPreset === "14d" ||
+    periodPreset === "30d" ||
+    periodPreset === "6m" ||
+    periodPreset === "12m"
+      ? defaultEnd
+      : periodPreset === "yesterday"
+        ? yesterday
+        : periodPreset === "all"
+          ? defaultEnd
+          : customEnd || defaultEnd;
+
+  const periodLabel =
+    DASHBOARD_RANGE_PERIOD_SELECT_OPTIONS.find((o) => o.value === periodPreset)?.label ??
+    "30 days";
+
+  const periodBar = (
+    <div
+      className="mb-3 flex w-full flex-col gap-2 rounded-lg border border-zinc-600 bg-black/50 px-3 py-2.5 sm:flex-row sm:items-center sm:justify-between"
+      data-testid="category-metrics-period-bar"
+    >
+      <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
+        Period (categories only)
+      </span>
+      <div className="flex w-full min-w-0 flex-wrap items-center gap-2 sm:w-auto sm:justify-end">
+        <select
+          value={periodPreset}
+          onChange={(e) => setPeriodPreset(e.target.value as DashboardRangePreset)}
+          className={`${FILTER_SELECT_CLASS} min-w-[9.5rem] flex-1 sm:flex-none`}
+          aria-label="Category charts date range"
+        >
+          {DASHBOARD_RANGE_PERIOD_SELECT_OPTIONS.map(({ value, label }) => (
+            <option key={value} className="bg-black text-white" value={value}>
+              {label}
+            </option>
+          ))}
+        </select>
+        {periodPreset === "custom" ? (
+          <>
+            <input
+              type="date"
+              value={customStart}
+              onChange={(e) => setCustomStart(e.target.value)}
+              className={FILTER_DATE_CLASS}
+              aria-label="Category charts start date"
+            />
+            <span className="text-[var(--muted-foreground)]">→</span>
+            <input
+              type="date"
+              value={customEnd}
+              onChange={(e) => setCustomEnd(e.target.value)}
+              className={FILTER_DATE_CLASS}
+              aria-label="Category charts end date"
+            />
+          </>
+        ) : null}
+      </div>
+    </div>
+  );
 
   useEffect(() => {
     if (!isSignedIn) {
@@ -3031,8 +3121,8 @@ function CategoryPieCharts({
         const token = await getToken({ template: "backend" });
         const res = await fetch(
           `${baseUrl}/api/amazon/dashboard/category-breakdown?${new URLSearchParams({
-            start,
-            end,
+            start: effectiveStart,
+            end: effectiveEnd,
           }).toString()}`,
           {
             headers: {
@@ -3055,28 +3145,7 @@ function CategoryPieCharts({
       }
     };
     void fetchData();
-  }, [isSignedIn, getToken, baseUrl, start, end, selectedMarketplaceId]);
-
-  if (loading) {
-    return (
-      <div className="flex w-full flex-col rounded-xl bg-[var(--surface)] p-3 ring-1 ring-[var(--surface-border)]">
-        <h2 className="mb-2 text-xs font-medium uppercase tracking-[0.2em] text-[var(--foreground)]">
-          Top categories by metric
-        </h2>
-        <p className="text-[10px] text-[var(--muted-foreground)]">Loading…</p>
-      </div>
-    );
-  }
-  if (error) {
-    return (
-      <div className="flex w-full flex-col rounded-xl bg-[var(--surface)] p-3 ring-1 ring-[var(--surface-border)]">
-        <h2 className="mb-2 text-xs font-medium uppercase tracking-[0.2em] text-[var(--foreground)]">
-          Top categories by metric
-        </h2>
-        <p className="text-[10px] text-[var(--muted-foreground)]">{error}</p>
-      </div>
-    );
-  }
+  }, [isSignedIn, getToken, baseUrl, effectiveStart, effectiveEnd, selectedMarketplaceId]);
 
   const cur = data?.currency ?? currency;
   const formatCur = (n: number) =>
@@ -3090,36 +3159,57 @@ function CategoryPieCharts({
   const formatNum = (n: number) => n.toLocaleString();
 
   return (
-    <div className="flex w-full flex-col rounded-xl bg-[var(--surface)] p-3 ring-1 ring-[var(--surface-border)]">
-      <h2 className="mb-2 text-xs font-medium uppercase tracking-[0.2em] text-[var(--foreground)]">
+    <div className="flex w-full flex-col rounded-2xl border border-[var(--surface-border)] bg-[var(--surface)] p-4 shadow-sm">
+      <h2 className="mb-2 text-xs font-semibold uppercase tracking-[0.2em] text-[var(--foreground)]">
         Top categories by metric
       </h2>
-      <div className="grid grid-cols-2 gap-2 sm:gap-3">
-        <CategoryPieChart
-          title="Sales"
-          data={data?.sales ?? []}
-          currency={cur}
-          formatValue={formatCur}
-        />
-        <CategoryPieChart
-          title="Profit"
-          data={data?.profit ?? []}
-          currency={cur}
-          formatValue={formatCur}
-        />
-        <CategoryPieChart
-          title="ROI"
-          data={data?.roi ?? []}
-          currency={cur}
-          formatValue={formatPct}
-        />
-        <CategoryPieChart
-          title="Units sold"
-          data={data?.units ?? []}
-          currency={cur}
-          formatValue={formatNum}
-        />
+      {periodBar}
+      <p className="mb-3 text-[10px] text-[var(--muted-foreground)]">
+        Showing {periodLabel.toLowerCase()} · {effectiveStart} – {effectiveEnd}
+      </p>
+      <div
+        className={
+          chartsLocked ? "blur-sm pointer-events-none select-none" : ""
+        }
+      >
+        {loading ? (
+          <p className="text-[10px] text-[var(--muted-foreground)]">Loading…</p>
+        ) : error ? (
+          <p className="text-[10px] text-[var(--muted-foreground)]">{error}</p>
+        ) : (
+          <div className="grid grid-cols-2 gap-2 sm:gap-3">
+            <CategoryPieChart
+              title="Sales"
+              data={data?.sales ?? []}
+              currency={cur}
+              formatValue={formatCur}
+            />
+            <CategoryPieChart
+              title="Profit"
+              data={data?.profit ?? []}
+              currency={cur}
+              formatValue={formatCur}
+            />
+            <CategoryPieChart
+              title="ROI"
+              data={data?.roi ?? []}
+              currency={cur}
+              formatValue={formatPct}
+            />
+            <CategoryPieChart
+              title="Units sold"
+              data={data?.units ?? []}
+              currency={cur}
+              formatValue={formatNum}
+            />
+          </div>
+        )}
       </div>
+      {chartsLocked ? (
+        <p className="mt-2 text-[10px] text-[var(--muted-foreground)]">
+          Unlock access to view category breakdown charts.
+        </p>
+      ) : null}
     </div>
   );
 }
