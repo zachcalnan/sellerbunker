@@ -1,8 +1,9 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Inject, Injectable, NotFoundException, forwardRef } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { User } from '@prisma/client';
 import { ClerkService } from '../clerk/clerk.service';
 import { AffiliateService } from '../affiliate/affiliate.service';
+import { EmailService } from '../email/email.service';
 
 @Injectable()
 export class UsersService {
@@ -10,7 +11,16 @@ export class UsersService {
     private readonly prisma: PrismaService,
     private readonly clerkService: ClerkService,
     private readonly affiliateService: AffiliateService,
+    @Inject(forwardRef(() => EmailService))
+    private readonly emailService: EmailService,
   ) {}
+
+  /** Welcome email + Brevo signup list (same as legacy /auth/register). */
+  private fireSignupOnboardingEmails(email: string, name?: string | null): void {
+    const safeName = (name ?? '').trim() || undefined;
+    this.emailService.sendWelcomeEmail(email, safeName).catch(() => undefined);
+    this.emailService.addToBrevoList(email, safeName).catch(() => undefined);
+  }
 
   async listAllUserEmails(): Promise<string[]> {
     const rows = await this.prisma.user.findMany({
@@ -128,17 +138,30 @@ export class UsersService {
       return updated;
     }
 
-    // 3) New user -> create
-    return this.prisma.user.create({
+    // 3) New user -> create (first Clerk sign-up for this account)
+    let nameForUser = nameFromClerk;
+    if (!nameForUser) {
+      const fromClerk =
+        await this.clerkService.getPrimaryEmailAndNameFromClerkUser(clerkId);
+      nameForUser = fromClerk.name;
+    }
+
+    const user = await this.prisma.user.create({
       data: {
         clerkId,
         email: emailToUse,
         passwordHash: '',
-        name: nameFromClerk || undefined,
+        name: nameForUser || undefined,
         referredBy: referral.referredBy,
         referredAffiliateId: referral.referredAffiliateId,
       },
     });
+
+    if (emailToUse.includes('@')) {
+      this.fireSignupOnboardingEmails(emailToUse, nameForUser);
+    }
+
+    return user;
   }
 
   /**

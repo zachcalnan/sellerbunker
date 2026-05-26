@@ -5,7 +5,7 @@
  * - STRIPE_SECRET_KEY (from Stripe Dashboard → Developers → API keys)
  *
  * Optional:
- * - STRIPE_BASIC_PLAN_PRODUCT_ID (default: prod_U5bTfwBcoD2b2R)
+ * - STRIPE_BASIC_PLAN_PRODUCT_ID (default: prod_UaVYwmbiuDsv6w — Basic subscription)
  */
 import Stripe from "stripe";
 
@@ -25,4 +25,4 @@ export function getStripe(): Stripe {
 
 /** Basic plan product ID (Starter). Override with STRIPE_BASIC_PLAN_PRODUCT_ID in .env. */
 export const STRIPE_BASIC_PLAN_PRODUCT_ID =
-  process.env.STRIPE_BASIC_PLAN_PRODUCT_ID ?? "prod_U5bTfwBcoD2b2R";
+  process.env.STRIPE_BASIC_PLAN_PRODUCT_ID ?? "prod_UaVYwmbiuDsv6w";
