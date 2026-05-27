@@ -34,10 +34,7 @@ export class AuthService {
       .sendWelcomeEmail(user.email, user.name ?? name)
       .catch(() => undefined);
 
-    // Fire-and-forget Brevo contact upsert.
-    this.emailService
-      .addToBrevoList(user.email, user.name ?? name)
-      .catch(() => undefined);
+    this.usersService.scheduleBrevoContactSync(user);
 
     return this.buildAuthResponse(user.id, user.email);
   }

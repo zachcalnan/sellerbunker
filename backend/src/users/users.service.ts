@@ -1,4 +1,10 @@
-import { Inject, Injectable, NotFoundException, forwardRef } from '@nestjs/common';
+import {
+  Inject,
+  Injectable,
+  Logger,
+  NotFoundException,
+  forwardRef,
+} from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { User } from '@prisma/client';
 import { ClerkService } from '../clerk/clerk.service';
@@ -7,6 +13,8 @@ import { EmailService } from '../email/email.service';
 
 @Injectable()
 export class UsersService {
+  private readonly logger = new Logger(UsersService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly clerkService: ClerkService,
@@ -15,11 +23,109 @@ export class UsersService {
     private readonly emailService: EmailService,
   ) {}
 
-  /** Welcome email + Brevo signup list (same as legacy /auth/register). */
-  private fireSignupOnboardingEmails(email: string, name?: string | null): void {
+  private isRealUserEmail(email: string): boolean {
+    const e = email.trim().toLowerCase();
+    if (!e.includes('@')) return false;
+    if (e.endsWith('@placeholder.local')) return false;
+    return true;
+  }
+
+  private splitDisplayName(name?: string | null): {
+    firstName?: string;
+    lastName?: string;
+  } {
+    const parts = (name ?? '').trim().split(/\s+/).filter(Boolean);
+    if (parts.length === 0) return {};
+    if (parts.length === 1) return { firstName: parts[0] };
+    return {
+      firstName: parts[0],
+      lastName: parts.slice(1).join(' '),
+    };
+  }
+
+  /**
+   * Upsert contact to Brevo signup list. Retries on later logins until success
+   * (brevoSyncedAt is set only when Brevo accepts the contact).
+   */
+  async ensureBrevoContact(user: {
+    id: string;
+    email: string;
+    name?: string | null;
+    brevoSyncedAt?: Date | null;
+  }): Promise<void> {
+    if (user.brevoSyncedAt) return;
+    if (!this.isRealUserEmail(user.email)) return;
+
+    const { firstName, lastName } = this.splitDisplayName(user.name);
+    const ok = await this.emailService.addToBrevoList(
+      user.email,
+      firstName,
+      lastName,
+    );
+    if (!ok) return;
+
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: { brevoSyncedAt: new Date() },
+    });
+    this.logger.log(`Brevo sync OK for userId=${user.id} email=${user.email}`);
+  }
+
+  /** Non-blocking Brevo upsert (used from auth guard and createFromClerk). */
+  scheduleBrevoContactSync(user: {
+    id: string;
+    email: string;
+    name?: string | null;
+    brevoSyncedAt?: Date | null;
+  }): void {
+    void this.ensureBrevoContact(user).catch((err) => {
+      this.logger.warn(
+        `ensureBrevoContact failed for userId=${user.id}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    });
+  }
+
+  private fireWelcomeEmail(email: string, name?: string | null): void {
     const safeName = (name ?? '').trim() || undefined;
     this.emailService.sendWelcomeEmail(email, safeName).catch(() => undefined);
-    this.emailService.addToBrevoList(email, safeName).catch(() => undefined);
+  }
+
+  /**
+   * Batch-sync users not yet on the Brevo signup list (SellerBunker Users via BREVO_SIGNUP_LIST_ID).
+   */
+  async syncPendingBrevoContacts(opts?: {
+    limit?: number;
+  }): Promise<{ attempted: number; synced: number; pending: number }> {
+    const limitRaw =
+      opts?.limit ?? Number(process.env.BREVO_SYNC_BATCH_LIMIT ?? 200);
+    const limit = Number.isFinite(limitRaw)
+      ? Math.max(1, Math.min(5000, Math.floor(limitRaw)))
+      : 200;
+
+    const users = await this.prisma.user.findMany({
+      where: { brevoSyncedAt: null },
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+      select: { id: true, email: true, name: true, brevoSyncedAt: true },
+    });
+
+    let synced = 0;
+    for (const u of users) {
+      await this.ensureBrevoContact(u);
+      const fresh = await this.prisma.user.findUnique({
+        where: { id: u.id },
+        select: { brevoSyncedAt: true },
+      });
+      if (fresh?.brevoSyncedAt) synced += 1;
+      await new Promise((r) => setTimeout(r, 150));
+    }
+
+    const pending = await this.prisma.user.count({
+      where: { brevoSyncedAt: null },
+    });
+    return { attempted: users.length, synced, pending };
   }
 
   async listAllUserEmails(): Promise<string[]> {
@@ -113,7 +219,10 @@ export class UsersService {
     const byClerk = await this.prisma.user.findUnique({
       where: { clerkId },
     });
-    if (byClerk) return byClerk;
+    if (byClerk) {
+      this.scheduleBrevoContactSync(byClerk);
+      return byClerk;
+    }
 
     const referral = await this.resolveReferralFromClerk(clerkId);
 
@@ -135,6 +244,7 @@ export class UsersService {
         where: { id: byEmail.id },
         data: patch,
       });
+      this.scheduleBrevoContactSync(updated);
       return updated;
     }
 
@@ -158,8 +268,9 @@ export class UsersService {
     });
 
     if (emailToUse.includes('@')) {
-      this.fireSignupOnboardingEmails(emailToUse, nameForUser);
+      this.fireWelcomeEmail(emailToUse, nameForUser);
     }
+    this.scheduleBrevoContactSync(user);
 
     return user;
   }

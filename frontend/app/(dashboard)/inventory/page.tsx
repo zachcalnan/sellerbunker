@@ -774,10 +774,13 @@ function InventoryDetailModal({
                 </button>
               </div>
             ) : null}
-            {mpSlice && (mpSlice.fcProcessingQty > 0 || mpSlice.transshipmentQty > 0) ? (
+            {mpSlice &&
+            ((mpSlice.fcProcessingQty ?? 0) > 0 || (mpSlice.transshipmentQty ?? 0) > 0) ? (
               <p className="mt-2 text-[10px] text-[var(--muted-foreground)]">
                 Other FBA holds: FC processing {num(mpSlice.fcProcessingQty ?? 0)}
-                {mpSlice.transshipmentQty > 0 ? ` · transshipment ${num(mpSlice.transshipmentQty)}` : ""}
+                {(mpSlice.transshipmentQty ?? 0) > 0
+                  ? ` · transshipment ${num(mpSlice.transshipmentQty ?? 0)}`
+                  : ""}
                 {" "}(shown under Issue on the grid)
               </p>
             ) : null}

@@ -27,7 +27,8 @@
     "align-prod-clerk": "node -r dotenv/config -r tsconfig-paths/register -r ts-node/register src/scripts/align-user-clerk-from-prod.ts",
     "selling-eligibility:refresh": "node -r dotenv/config -r tsconfig-paths/register -r ts-node/register src/scripts/run-selling-eligibility-refresh.ts",
     "brevo:upsert-contact": "node -r dotenv/config -r tsconfig-paths/register -r ts-node/register src/scripts/brevo-upsert-contact.ts",
-    "brevo:backfill-users": "node -r dotenv/config -r tsconfig-paths/register -r ts-node/register src/scripts/brevo-backfill-users.ts"
+    "brevo:backfill-users": "node -r dotenv/config -r tsconfig-paths/register -r ts-node/register src/scripts/brevo-backfill-users.ts",
+    "brevo:backfill-now": "node -r dotenv/config -r tsconfig-paths/register -r ts-node/register src/scripts/brevo-backfill-standalone.ts"
   },
   "dependencies": {
     "@api/sp-api": "file:.api/apis/sp-api",

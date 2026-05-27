@@ -61,5 +61,17 @@ export class EmailAdminController {
     await this.emailService.sendBulkEmail(emails, dto.subject, dto.content);
     return { ok: true, sent: emails.length };
   }
+
+  /** Backfill Brevo list (BREVO_SIGNUP_LIST_ID) for users missing brevoSyncedAt. */
+  @Post('sync-brevo-contacts')
+  async syncBrevoContacts(
+    @Headers('x-email-admin-secret') secret: string | undefined,
+  ) {
+    this.assertAdminSecret(secret);
+    const result = await this.usersService.syncPendingBrevoContacts({
+      limit: 5000,
+    });
+    return { ok: true, ...result };
+  }
 }
 

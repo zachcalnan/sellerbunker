@@ -1,62 +1,43 @@
 /**
- * One-off: backfill Brevo contacts (and optionally a list) from existing users.
+ * One-off: backfill Brevo contacts missing from the signup list (BREVO_SIGNUP_LIST_ID).
  *
  * Usage (from `backend/`):
- *   BREVO_SIGNUP_LIST_ID=123 npm run brevo:backfill-users
+ *   npm run brevo:backfill-users
  *
  * Optional env:
- *   BREVO_BACKFILL_LIMIT=5000        (default 5000)
- *   BREVO_BACKFILL_SINCE_DAYS=14     (only users created within last N days; omit for all)
+ *   BREVO_BACKFILL_LIMIT=5000        (batch size per round, default 5000)
  */
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from '../app.module';
-import { PrismaService } from '../prisma/prisma.service';
-import { EmailService } from '../email/email.service';
+import { UsersService } from '../users/users.service';
 
 async function main() {
   const limitRaw = Number(process.env.BREVO_BACKFILL_LIMIT ?? 5000);
-  const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(50_000, Math.floor(limitRaw))) : 5000;
-  const sinceDaysRaw = process.env.BREVO_BACKFILL_SINCE_DAYS != null ? Number(process.env.BREVO_BACKFILL_SINCE_DAYS) : null;
-  const sinceDays =
-    sinceDaysRaw != null && Number.isFinite(sinceDaysRaw)
-      ? Math.max(1, Math.min(3650, Math.floor(sinceDaysRaw)))
-      : null;
+  const limit = Number.isFinite(limitRaw)
+    ? Math.max(1, Math.min(50_000, Math.floor(limitRaw)))
+    : 5000;
 
   const app = await NestFactory.createApplicationContext(AppModule, {
     logger: ['error', 'warn', 'log'],
   });
   try {
-    const prisma = app.get(PrismaService);
-    const emailSvc = app.get(EmailService);
+    const usersSvc = app.get(UsersService);
 
-    const where =
-      sinceDays != null
-        ? { createdAt: { gte: new Date(Date.now() - sinceDays * 24 * 60 * 60 * 1000) } }
-        : {};
+    let totalSynced = 0;
+    let rounds = 0;
+    const maxRounds = 50;
 
-    const users = await prisma.user.findMany({
-      where,
-      orderBy: { createdAt: 'desc' },
-      take: limit,
-      select: { email: true, name: true, createdAt: true },
-    });
-
-    if (!users.length) {
-      console.log('[brevo] no users to backfill');
-      return;
+    while (rounds < maxRounds) {
+      const result = await usersSvc.syncPendingBrevoContacts({ limit });
+      totalSynced += result.synced;
+      rounds += 1;
+      console.log(
+        `[brevo] round ${rounds}: synced=${result.synced} attempted=${result.attempted} stillPending=${result.pending}`,
+      );
+      if (result.pending === 0 || result.attempted === 0) break;
     }
 
-    let ok = 0;
-    for (const u of users) {
-      await emailSvc.addToBrevoList(u.email, u.name ?? undefined);
-      ok += 1;
-      if (ok % 50 === 0) {
-        console.log(`[brevo] backfilled ${ok}/${users.length}`);
-      }
-      // Gentle pacing to avoid bursting (Brevo limits vary by plan).
-      await new Promise((r) => setTimeout(r, 150));
-    }
-    console.log(`[brevo] done. attempted=${ok}`);
+    console.log(`[brevo] done. totalSynced=${totalSynced} rounds=${rounds}`);
   } finally {
     await app.close();
   }
@@ -66,4 +47,3 @@ main().catch((err) => {
   console.error(err);
   process.exit(1);
 });
-

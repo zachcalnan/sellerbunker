@@ -63,6 +63,9 @@ export class ClerkAuthGuard implements CanActivate {
         clerkId: clerkUserId,
         email: tokenEmail,
       });
+    } else {
+      // Retry Brevo for existing users (failed API, email-relink path, pre-fix signups).
+      this.usersService.scheduleBrevoContactSync(user);
     }
 
     const activeOrgId = await this.usersService.ensureActiveOrg(

@@ -117,16 +117,22 @@ export class EmailService {
     });
   }
 
-  async addToBrevoList(email: string, firstName?: string, lastName?: string) {
+  /** Upsert contact (+ optional signup list). Returns true on success. */
+  async addToBrevoList(
+    email: string,
+    firstName?: string,
+    lastName?: string,
+  ): Promise<boolean> {
     try {
       const brevo = this.getBrevoClient();
       if (!brevo) {
         this.logger.warn('BREVO_API_KEY not configured; skipping addToBrevoList');
-        return;
+        return false;
       }
       const listId = this.getBrevoSignupListId();
+      const normalized = email.trim().toLowerCase();
       await brevo.contacts.createContact({
-        email,
+        email: normalized,
         attributes: {
           FIRSTNAME: (firstName ?? '').trim(),
           LASTNAME: (lastName ?? '').trim(),
@@ -135,10 +141,18 @@ export class EmailService {
         updateEnabled: true,
       });
       this.logger.log(
-        `Added/updated ${email} in Brevo contacts${listId ? ` (listId=${listId})` : ''}`,
+        `Added/updated ${normalized} in Brevo contacts${listId ? ` (listId=${listId})` : ''}`,
       );
+      return true;
     } catch (err) {
-      this.logger.error(`Failed to add ${email} to Brevo`, err as any);
+      const msg =
+        err instanceof Error
+          ? err.message
+          : typeof err === 'object' && err !== null && 'body' in err
+            ? JSON.stringify((err as { body?: unknown }).body)
+            : String(err);
+      this.logger.error(`Failed to add ${email} to Brevo: ${msg}`);
+      return false;
     }
   }
 
