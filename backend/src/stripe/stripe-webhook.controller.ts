@@ -26,7 +26,10 @@ export class StripeWebhookController {
   ) {
     const webhookSecret = this.configService.get<string>('STRIPE_WEBHOOK_SECRET');
     if (!this.stripe || !webhookSecret || !signature) {
-      return { received: true };
+      return {
+        received: false,
+        error: 'Stripe webhook not configured (STRIPE_SECRET_KEY / STRIPE_WEBHOOK_SECRET / signature)',
+      };
     }
     const rawBody = req.rawBody;
     if (!rawBody) {

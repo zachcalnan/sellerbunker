@@ -62,21 +62,66 @@ export class SubscriptionService {
     return sub.status;
   }
 
-  /** Sync our subscription record from Stripe subscription (e.g. when canceled or payment fails). */
-  async syncFromStripeSubscription(stripeSub: { id: string; status: string; trial_end?: number | null }): Promise<void> {
+  /** Map Stripe subscription → DB (webhooks + Stripe Dashboard cancel). */
+  mapStripeSubscriptionToDb(stripeSub: {
+    status: string;
+    trial_end?: number | null;
+    current_period_end?: number | null;
+    cancel_at_period_end?: boolean;
+  }): { status: string; trialEndAt: Date | null } {
+    const trialEnd =
+      stripeSub.trial_end != null ? new Date(stripeSub.trial_end * 1000) : null;
+    const periodEnd =
+      stripeSub.current_period_end != null
+        ? new Date(stripeSub.current_period_end * 1000)
+        : null;
+
+    // Match in-app cancel: scheduled end → status canceled + lockout date.
+    if (stripeSub.cancel_at_period_end) {
+      return {
+        status: 'canceled',
+        trialEndAt: periodEnd ?? trialEnd,
+      };
+    }
+
+    if (stripeSub.status === 'trialing') {
+      return { status: 'trialing', trialEndAt: trialEnd ?? periodEnd };
+    }
+
+    if (stripeSub.status === 'active') {
+      return { status: 'active', trialEndAt: periodEnd };
+    }
+
+    return {
+      status: stripeSub.status,
+      trialEndAt: trialEnd ?? periodEnd,
+    };
+  }
+
+  /** Sync our subscription record from Stripe (Dashboard cancel, payment failure, etc.). */
+  async syncFromStripeSubscription(stripeSub: {
+    id: string;
+    status: string;
+    trial_end?: number | null;
+    current_period_end?: number | null;
+    cancel_at_period_end?: boolean;
+  }): Promise<void> {
     const existing = await this.prisma.subscription.findFirst({
       where: { stripeSubscriptionId: stripeSub.id },
     });
     if (!existing) return;
-    const trialEndAt =
-      stripeSub.trial_end != null ? new Date(stripeSub.trial_end * 1000) : null;
+
+    const mapped = this.mapStripeSubscriptionToDb(stripeSub);
     await this.prisma.subscription.update({
       where: { id: existing.id },
       data: {
-        status: stripeSub.status,
-        trialEndAt: trialEndAt ?? undefined,
+        status: mapped.status,
+        trialEndAt: mapped.trialEndAt,
       },
     });
+    this.logger.log(
+      `Synced subscription ${stripeSub.id} → status=${mapped.status} lockout=${mapped.trialEndAt?.toISOString() ?? 'none'}`,
+    );
   }
 
   /** Remove subscription when Clerk account is deleted so re-sign-up must go through payment again. */
