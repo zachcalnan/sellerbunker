@@ -103,7 +103,11 @@ function EmailPasswordSignInInner({ defaultRedirect = "/dashboard" }: Props) {
 
       if (activeSignIn.status === "complete" && activeSignIn.createdSessionId) {
         await activateSession({ session: activeSignIn.createdSessionId });
-        navigateAfterAuth(redirectUrl);
+        // On mobile Safari, redirecting straight to a protected route can race Clerk cookie visibility
+        // and bounce the user back into Clerk's sign-in flow. Hop via /sign-in first, then let
+        // the sign-in page's "already signed in" redirect take over.
+        const hop = `/sign-in?redirect_url=${encodeURIComponent(redirectUrl)}`;
+        navigateAfterAuth(hop);
         return;
       }
 

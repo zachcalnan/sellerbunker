@@ -231,21 +231,36 @@ export default function InventoryPage() {
     [filtered, safePage],
   );
 
+  const fcTransferQtyForRow = useCallback(
+    (r: InventoryRow): number | null => {
+      const list = r.byMarketplace ?? [];
+      if (list.length === 0) return null;
+      if (selectedMarketplaceId) {
+        const mp = list.find((m) => m.marketplaceId === selectedMarketplaceId);
+        const v = mp?.transshipmentQty ?? null;
+        return v != null ? Number(v) : null;
+      }
+      const sum = list.reduce((acc, m) => acc + Number(m.transshipmentQty ?? 0), 0);
+      return sum;
+    },
+    [selectedMarketplaceId],
+  );
+
   const inventoryTotals = useMemo(() => {
     let available = 0;
     let reserved = 0;
     let inbound = 0;
-    let issue = 0;
+    let fcTransfer = 0;
     let total = 0;
     for (const r of filtered) {
       available += r.availableQty ?? 0;
       reserved += r.reservedQty ?? 0;
       inbound += r.inboundQty ?? 0;
-      issue += r.issueQty ?? 0;
+      fcTransfer += fcTransferQtyForRow(r) ?? 0;
       total += r.totalQty ?? 0;
     }
-    return { available, reserved, inbound, issue, total };
-  }, [filtered]);
+    return { available, reserved, inbound, fcTransfer, total };
+  }, [filtered, fcTransferQtyForRow]);
 
   useEffect(() => {
     setPage(1);
@@ -330,8 +345,8 @@ export default function InventoryPage() {
               <span className="text-lg font-semibold tabular-nums text-[var(--foreground)]">{inventoryTotals.inbound.toLocaleString()}</span>
             </div>
             <div>
-              <span className="text-sm text-[var(--muted-foreground)]">Issue </span>
-              <span className="text-lg font-semibold tabular-nums text-[var(--foreground)]">{inventoryTotals.issue.toLocaleString()}</span>
+              <span className="text-sm text-[var(--muted-foreground)]">FC transfer </span>
+              <span className="text-lg font-semibold tabular-nums text-[var(--foreground)]">{inventoryTotals.fcTransfer.toLocaleString()}</span>
             </div>
           </div>
         </div>
@@ -357,7 +372,7 @@ export default function InventoryPage() {
               <div className="text-center">Available</div>
               <div className="text-center">Reserved</div>
               <div className="text-center">Inbound</div>
-              <div className="text-center">Issue</div>
+              <div className="text-center">FC transfer</div>
               <div className="text-left pl-2">
                 <div>List</div>
                 <div>price</div>
@@ -426,7 +441,7 @@ export default function InventoryPage() {
                             <span>Available {num(r.availableQty)}</span>
                             <span>Reserved {num(r.reservedQty)}</span>
                             <span>Inbound {num(r.inboundQty)}</span>
-                            <span>Issue {num(r.issueQty)}</span>
+                            <span>FC transfer {fcTransferQtyForRow(r) == null ? "—" : String(fcTransferQtyForRow(r))}</span>
                             {r.currentListedPrice != null && (
                               <span>
                                 Price:{" "}
@@ -503,7 +518,7 @@ export default function InventoryPage() {
                       <div className="text-center text-[11px] text-[var(--foreground)] tabular-nums">{num(r.reservedQty)}</div>
                       <div className="text-center text-[11px] text-[var(--foreground)] tabular-nums">{num(r.inboundQty)}</div>
                       <div className="text-center text-[11px] text-[var(--foreground)] tabular-nums">
-                        {num(r.issueQty)}
+                        {fcTransferQtyForRow(r) == null ? "—" : String(fcTransferQtyForRow(r))}
                       </div>
                       <div className="text-left min-w-0 pl-2">
                         <div className="text-[11px] text-[var(--foreground)] tabular-nums">
@@ -647,6 +662,12 @@ function InventoryDetailModal({
 }) {
   const p = inventoryProfitContext(row);
   const num = (n: number | null) => (n == null ? "—" : String(n));
+  const fcTransferQty =
+    marketplaceId && row.byMarketplace
+      ? row.byMarketplace.find((m) => m.marketplaceId === marketplaceId)?.transshipmentQty ?? null
+      : row.byMarketplace
+        ? row.byMarketplace.reduce((acc, m) => acc + Number(m.transshipmentQty ?? 0), 0)
+        : null;
   const mpSlice = marketplaceId
     ? row.byMarketplace?.find((m) => m.marketplaceId === marketplaceId)
     : row.byMarketplace?.[0];
@@ -740,8 +761,10 @@ function InventoryDetailModal({
                 <div className="mt-0.5 text-lg font-semibold tabular-nums text-[var(--foreground)]">{num(row.inboundQty)}</div>
               </div>
               <div>
-                <div className="text-[10px] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">Issue</div>
-                <div className="mt-0.5 text-lg font-semibold tabular-nums text-[var(--foreground)]">{num(row.issueQty)}</div>
+                <div className="text-[10px] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">FC transfer</div>
+                <div className="mt-0.5 text-lg font-semibold tabular-nums text-[var(--foreground)]">
+                  {fcTransferQty == null ? "—" : String(fcTransferQty)}
+                </div>
               </div>
             </div>
             {row.inventoryMarketplaceMissing ? (
@@ -781,7 +804,7 @@ function InventoryDetailModal({
                 {(mpSlice.transshipmentQty ?? 0) > 0
                   ? ` · transshipment ${num(mpSlice.transshipmentQty ?? 0)}`
                   : ""}
-                {" "}(shown under Issue on the grid)
+                {" "}(shown under FC transfer on the grid)
               </p>
             ) : null}
           </section>
