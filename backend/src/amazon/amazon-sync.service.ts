@@ -79,8 +79,21 @@ export class AmazonSyncService implements OnModuleInit {
 
     const ordersEveryMs =
       Number(process.env.AMAZON_ORDERS_SYNC_EVERY_MS) || 10 * 60 * 1000;
+    const ordersHotEveryMs =
+      Number(process.env.AMAZON_ORDERS_HOT_SYNC_EVERY_MS) || 5 * 60 * 1000;
     const inventoryEveryMs =
       Number(process.env.AMAZON_INVENTORY_SYNC_EVERY_MS) || 2 * 60 * 60 * 1000;
+
+    await this.queue.add(
+      'orders-hot-sync',
+      {},
+      {
+        repeat: {
+          every: ordersHotEveryMs,
+        },
+        jobId: 'orders-hot-sync',
+      },
+    );
 
     await this.queue.add(
       'orders-batch-sync',
@@ -186,7 +199,7 @@ export class AmazonSyncService implements OnModuleInit {
     );
 
     this.logger.log(
-      `Scheduled Amazon sync jobs (orders=${ordersEveryMs}ms, inventory=${inventoryEveryMs}ms, shipments=${shipmentsEveryMs}ms, feeCron=${feeEstimateCron}, sellingEligibility=${['1', 'true', 'yes'].includes(sellingEligibilityEnabled) ? sellingEligibilityCron : 'off'}, listingHot=${listingPriceHotEveryMs}ms, listingCold=${listingPriceColdEveryMs}ms, titlesBackfill=${titlesBackfillEveryMs}ms)`,
+      `Scheduled Amazon sync jobs (ordersHot=${ordersHotEveryMs}ms, orders=${ordersEveryMs}ms, inventory=${inventoryEveryMs}ms, shipments=${shipmentsEveryMs}ms, feeCron=${feeEstimateCron}, sellingEligibility=${['1', 'true', 'yes'].includes(sellingEligibilityEnabled) ? sellingEligibilityCron : 'off'}, listingHot=${listingPriceHotEveryMs}ms, listingCold=${listingPriceColdEveryMs}ms, titlesBackfill=${titlesBackfillEveryMs}ms)`,
     );
   }
 

@@ -403,6 +403,25 @@ export class AmazonSyncProcessor extends WorkerHost {
       }
     }
 
+    if (job.name === 'orders-hot-sync') {
+      const accounts = await this.prisma.sellerAccount.findMany({
+        where: { marketplace: 'amazon', isActive: true },
+        select: { userId: true },
+      });
+      this.logger.log(`[AmazonSync] orders-hot-sync: ${accounts.length} seller(s)`);
+      for (const { userId } of accounts) {
+        if (!(await this.isInitialSyncComplete(userId))) {
+          continue;
+        }
+        try {
+          await this.amazonService.syncHotRecentOrdersToDb(userId);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          this.logger.warn(`[AmazonSync] orders-hot-sync failed (userId=${userId}): ${msg}`);
+        }
+      }
+    }
+
     if (job.name === 'orders-batch-sync') {
       const accounts = await this.prisma.sellerAccount.findMany({
         where: { marketplace: 'amazon', isActive: true },
@@ -415,6 +434,8 @@ export class AmazonSyncProcessor extends WorkerHost {
           continue;
         }
         try {
+          // Hot pass first so new Pending sales land even if the full 30d finances pass is slow.
+          await this.amazonService.syncHotRecentOrdersToDb(userId);
           await this.amazonService.syncRecentOrdersToDb(userId, { days: 30 });
           const user = await this.prisma.user.findUnique({
             where: { id: userId },

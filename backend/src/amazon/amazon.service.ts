@@ -1595,6 +1595,38 @@ export class AmazonService {
     );
   }
 
+  private isSpApiQuotaError(err: unknown): boolean {
+    const status =
+      (err as { statusCode?: number; status?: number })?.statusCode ??
+      (err as { status?: number })?.status ??
+      null;
+    const body =
+      typeof (err as { message?: string })?.message === 'string'
+        ? (err as { message: string }).message
+        : '';
+    return (
+      status === 429 ||
+      body.includes('(429)') ||
+      body.includes('QuotaExceeded')
+    );
+  }
+
+  /** Pending / unshipped rarely have Finances rows; skipping avoids 429s blocking getOrderItems. */
+  private spApiOrderStatusLikelyUnsettled(
+    status: string | null | undefined,
+  ): boolean {
+    const st = String(status ?? '').trim().toLowerCase();
+    if (!st) return true;
+    return (
+      st === 'pending' ||
+      st === 'unshipped' ||
+      st.includes('pending') ||
+      st === 'invoiceunconfirmed' ||
+      st === 'canceled' ||
+      st === 'cancelled'
+    );
+  }
+
   private isSystemPlaceholderOrderSku(sku: string | null | undefined): boolean {
     const s = String(sku ?? '').trim().toUpperCase();
     return s === 'AMAZON_GENERIC' || s === 'AMAZON_MULTI';
@@ -3553,6 +3585,12 @@ export class AmazonService {
    */
   static readonly SYNC_ORDERS_CREATED_CATCHUP_DAYS = 14;
 
+  /** Fast path: CreatedAfter window for Pending / new sales (no Finances calls). */
+  static readonly SYNC_ORDERS_HOT_DAYS = 3;
+
+  /** Cap per hot-sync run — newest N orders only, completes in seconds. */
+  static readonly SYNC_ORDERS_HOT_MAX_ORDERS = 50;
+
   /**
    * Max calendar days of orders SP-API may pull for this user (30 for everyone except one
    * allowlisted account — see `amazon-extended-sync.constants.ts`).
@@ -3673,8 +3711,17 @@ export class AmazonService {
       maxOrderItems?: number;
       /** Progress 0–25 for initial-sync progress bar (orders phase). */
       onProgress?: (progress: number) => void | Promise<void>;
+      /**
+       * Lightweight ingest: CreatedAfter only, no Finances API, newest orders first.
+       * Runs every few minutes so Pending / awaiting-payment sales show within ~10 min.
+       */
+      hotSync?: boolean;
+      /** Skip all Finances / deferred fee API calls (also set by hotSync). */
+      skipFinances?: boolean;
     },
   ): Promise<void> {
+    const hotSync = opts?.hotSync === true;
+    const skipAllFinances = hotSync || opts?.skipFinances === true;
     const credentials = await this.getAmazonCredentialsForUser(userId);
 
     const account = await this.prisma.sellerAccount.findUnique({
@@ -3688,9 +3735,10 @@ export class AmazonService {
 
     const nowSafe = new Date(Date.now() - 5 * 60 * 1000);
     const maxDaysAllowed = await this.orderSyncMaxDaysForUser(userId);
-    const requested =
-      Number(opts?.days ?? AmazonService.SYNC_ORDERS_DAYS_DEFAULT) ||
-      AmazonService.SYNC_ORDERS_DAYS_DEFAULT;
+    const requested = hotSync
+      ? AmazonService.SYNC_ORDERS_HOT_DAYS
+      : Number(opts?.days ?? AmazonService.SYNC_ORDERS_DAYS_DEFAULT) ||
+        AmazonService.SYNC_ORDERS_DAYS_DEFAULT;
     const days = Math.max(1, Math.min(maxDaysAllowed, requested));
     if (maxDaysAllowed > 30 && days > 30) {
       this.logger.log(
@@ -3734,7 +3782,7 @@ export class AmazonService {
         : null;
 
     const startDate =
-      opts?.ignoreCursor === true
+      hotSync || opts?.ignoreCursor === true
         ? defaultStart
         : new Date(
             Math.max(
@@ -3807,64 +3855,95 @@ export class AmazonService {
     };
 
     if (onProgress) await onProgress(2);
-    const maxOrders = opts?.maxOrders != null && opts.maxOrders > 0 ? Math.min(1000, Math.floor(opts.maxOrders)) : undefined;
+    const maxOrders =
+      opts?.maxOrders != null && opts.maxOrders > 0
+        ? Math.min(1000, Math.floor(opts.maxOrders))
+        : hotSync
+          ? AmazonService.SYNC_ORDERS_HOT_MAX_ORDERS
+          : undefined;
     const maxOrderItems = opts?.maxOrderItems != null && opts.maxOrderItems > 0 ? Math.min(1000, Math.floor(opts.maxOrderItems)) : undefined;
     const ordersByAmazonId = new Map<string, SpApiOrder>();
     let lastUpdatedCount = 0;
-    try {
-      // Primary incremental poll (LastUpdated*). Do NOT send OrderStatuses — many accounts return 0.
-      const lastUpdatedOrders = (await this.fetchSpApiOrdersPaginated(
-        credentials,
-        {
-          lastUpdatedAfter: createdAfterIso,
-          lastUpdatedBefore: createdBeforeIso,
-          marketplaceIds,
-        },
-      )) as SpApiOrder[];
-      lastUpdatedCount = lastUpdatedOrders.length;
-      for (const o of lastUpdatedOrders) {
-        const id = o.AmazonOrderId;
-        if (id) ordersByAmazonId.set(id, o);
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.logger.warn(
-        `[syncRecentOrdersToDb] getOrders (LastUpdatedAfter) failed (userId=${userId}): ${msg}`,
-      );
-      throw err;
-    }
-
-    // Secondary pass: CreatedAfter catches Pending / awaiting-payment orders that never appear in LastUpdated-only polls.
-    const catchUpDays = Math.min(
-      days,
-      AmazonService.SYNC_ORDERS_CREATED_CATCHUP_DAYS,
-    );
-    const createdCatchUpStart = new Date(
-      nowSafe.getTime() - catchUpDays * 24 * 60 * 60 * 1000,
-    );
-    const createdCatchUpIso =
-      createdCatchUpStart.toISOString().split('.')[0] + 'Z';
     let createdCatchUpAdded = 0;
-    try {
-      const createdOrders = (await this.fetchSpApiOrdersPaginated(
-        credentials,
-        {
-          createdAfter: createdCatchUpIso,
-          createdBefore: createdBeforeIso,
-          marketplaceIds,
-        },
-      )) as SpApiOrder[];
-      for (const o of createdOrders) {
-        const id = o.AmazonOrderId;
-        if (!id) continue;
-        if (!ordersByAmazonId.has(id)) createdCatchUpAdded += 1;
-        ordersByAmazonId.set(id, o);
+
+    if (hotSync) {
+      // Hot path: CreatedAfter only — catches Pending / awaiting-payment that LastUpdated polls miss.
+      try {
+        const createdOrders = (await this.fetchSpApiOrdersPaginated(
+          credentials,
+          {
+            createdAfter: createdAfterIso,
+            createdBefore: createdBeforeIso,
+            marketplaceIds,
+          },
+        )) as SpApiOrder[];
+        createdCatchUpAdded = createdOrders.length;
+        for (const o of createdOrders) {
+          const id = o.AmazonOrderId;
+          if (id) ordersByAmazonId.set(id, o);
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.logger.warn(
+          `[syncRecentOrdersToDb] hot getOrders (CreatedAfter) failed (userId=${userId}): ${msg}`,
+        );
+        throw err;
       }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.logger.warn(
-        `[syncRecentOrdersToDb] getOrders (CreatedAfter catch-up) failed (non-fatal, userId=${userId}): ${msg}`,
+    } else {
+      try {
+        // Primary incremental poll (LastUpdated*). Do NOT send OrderStatuses — many accounts return 0.
+        const lastUpdatedOrders = (await this.fetchSpApiOrdersPaginated(
+          credentials,
+          {
+            lastUpdatedAfter: createdAfterIso,
+            lastUpdatedBefore: createdBeforeIso,
+            marketplaceIds,
+          },
+        )) as SpApiOrder[];
+        lastUpdatedCount = lastUpdatedOrders.length;
+        for (const o of lastUpdatedOrders) {
+          const id = o.AmazonOrderId;
+          if (id) ordersByAmazonId.set(id, o);
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.logger.warn(
+          `[syncRecentOrdersToDb] getOrders (LastUpdatedAfter) failed (userId=${userId}): ${msg}`,
+        );
+        throw err;
+      }
+
+      // Secondary pass: CreatedAfter catches Pending / awaiting-payment orders that never appear in LastUpdated-only polls.
+      const catchUpDays = Math.min(
+        days,
+        AmazonService.SYNC_ORDERS_CREATED_CATCHUP_DAYS,
       );
+      const createdCatchUpStart = new Date(
+        nowSafe.getTime() - catchUpDays * 24 * 60 * 60 * 1000,
+      );
+      const createdCatchUpIso =
+        createdCatchUpStart.toISOString().split('.')[0] + 'Z';
+      try {
+        const createdOrders = (await this.fetchSpApiOrdersPaginated(
+          credentials,
+          {
+            createdAfter: createdCatchUpIso,
+            createdBefore: createdBeforeIso,
+            marketplaceIds,
+          },
+        )) as SpApiOrder[];
+        for (const o of createdOrders) {
+          const id = o.AmazonOrderId;
+          if (!id) continue;
+          if (!ordersByAmazonId.has(id)) createdCatchUpAdded += 1;
+          ordersByAmazonId.set(id, o);
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.logger.warn(
+          `[syncRecentOrdersToDb] getOrders (CreatedAfter catch-up) failed (non-fatal, userId=${userId}): ${msg}`,
+        );
+      }
     }
 
     const mergedOrders = this.sortSpApiOrdersNewestFirst([
@@ -3878,11 +3957,11 @@ export class AmazonService {
         : mergedOrders;
     if (maxOrders != null && orders.length > 0) {
       this.logger.log(
-        `[syncRecentOrdersToDb] getOrders merged ${mergedOrders.length} order(s) (LastUpdated=${lastUpdatedCount}, +${createdCatchUpAdded} from CreatedAfter≤${catchUpDays}d), processing ${orders.length} (cap=${maxOrders}; userId=${userId})`,
+        `[syncRecentOrdersToDb${hotSync ? ' HOT' : ''}] getOrders merged ${mergedOrders.length} order(s) (LastUpdated=${lastUpdatedCount}, +${createdCatchUpAdded} from CreatedAfter), processing ${orders.length} (cap=${maxOrders}; userId=${userId})`,
       );
     } else {
       this.logger.log(
-        `[syncRecentOrdersToDb] getOrders merged ${orders.length} orders (LastUpdated=${lastUpdatedCount}, +${createdCatchUpAdded} from CreatedAfter; userId=${userId} lastUpdatedAfter=${createdAfterIso} createdCatchUpAfter=${createdCatchUpIso} marketplaces=${marketplaceIds.length})`,
+        `[syncRecentOrdersToDb${hotSync ? ' HOT' : ''}] getOrders merged ${orders.length} orders (LastUpdated=${lastUpdatedCount}, +${createdCatchUpAdded} from CreatedAfter; userId=${userId} lastUpdatedAfter=${createdAfterIso} marketplaces=${marketplaceIds.length})`,
       );
     }
     if (onProgress) await onProgress(5);
@@ -3989,6 +4068,7 @@ export class AmazonService {
     );
 
     let orderItemsThrottled = false;
+    let financesThrottled = false;
     let financesUnauthorized = false;
 
     const vatSettings = await this.getVatSettingsForUser(userId);
@@ -4044,9 +4124,14 @@ export class AmazonService {
       const orderDate = new Date(orderDateStr);
       if (Number.isNaN(orderDate.getTime())) continue;
 
+      const likelyUnsettled =
+        this.spApiOrderStatusLikelyUnsettled(apiOrderStatus);
       const shouldFetchLineItems =
         !orderItemsThrottled && !existingOrderItemOrderIds.has(amazonOrderId);
       const shouldFetchFinances =
+        !skipAllFinances &&
+        !likelyUnsettled &&
+        !financesThrottled &&
         !financesUnauthorized &&
         (shouldFetchLineItems || existingOrderItemOrderIds.has(amazonOrderId));
 
@@ -4057,38 +4142,7 @@ export class AmazonService {
       let finRes: any = null;
       let itemsRes: any = null;
 
-      if (shouldFetchLineItems && shouldFetchFinances) {
-        try {
-          // Sequential calls: Finances + Orders in parallel spikes 429s on long backfills.
-          itemsRes = (await this.spApiClient.getOrderItems(credentials, amazonOrderId)) as any;
-          await new Promise((r) =>
-            setTimeout(r, Math.max(300, Math.floor(orderFinancesPauseMs / 2))),
-          );
-          finRes = (await this.spApiClient.listFinancialEventsByOrderId(
-            credentials,
-            amazonOrderId,
-            { maxResultsPerPage: 100 },
-          )) as any;
-          orderItems = itemsRes?.payload?.OrderItems ?? [];
-          for (const item of orderItems) {
-            const itemTaxAmt = Number(item?.ItemTax?.Amount ?? 0);
-            if (!Number.isNaN(itemTaxAmt)) taxChargedTotal += itemTaxAmt;
-            const shipAmt = Number(item?.ShippingPrice?.Amount ?? 0);
-            if (!Number.isNaN(shipAmt)) shippingChargedTotal += shipAmt;
-          }
-        } catch (err: any) {
-          const status = err?.statusCode ?? err?.status ?? null;
-          const body = typeof err?.message === 'string' ? err.message : '';
-          if (status === 429 || body.includes('(429)') || body.includes('QuotaExceeded')) {
-            orderItemsThrottled = true;
-          }
-          console.warn('[AmazonService.syncRecentOrdersToDb] getOrderItems/listFinancialEvents failed', {
-            userId,
-            amazonOrderId,
-            err: err?.message ?? err,
-          });
-        }
-      } else if (shouldFetchLineItems) {
+      if (shouldFetchLineItems) {
         try {
           itemsRes = (await this.spApiClient.getOrderItems(credentials, amazonOrderId)) as any;
           orderItems = itemsRes?.payload?.OrderItems ?? [];
@@ -4099,9 +4153,7 @@ export class AmazonService {
             if (!Number.isNaN(shipAmt)) shippingChargedTotal += shipAmt;
           }
         } catch (err: any) {
-          const status = err?.statusCode ?? err?.status ?? null;
-          const body = typeof err?.message === 'string' ? err.message : '';
-          if (status === 429 || body.includes('(429)') || body.includes('QuotaExceeded')) {
+          if (this.isSpApiQuotaError(err)) {
             orderItemsThrottled = true;
           }
           console.warn('[AmazonService.syncRecentOrdersToDb] getOrderItems failed', {
@@ -4110,14 +4162,25 @@ export class AmazonService {
             err: err?.message ?? err,
           });
         }
-      } else if (shouldFetchFinances) {
+      }
+
+      if (shouldFetchFinances) {
         try {
-          finRes = (await this.spApiClient.listFinancialEventsByOrderId(credentials, amazonOrderId, { maxResultsPerPage: 100 })) as any;
+          await new Promise((r) =>
+            setTimeout(r, Math.max(300, Math.floor(orderFinancesPauseMs / 2))),
+          );
+          finRes = (await this.spApiClient.listFinancialEventsByOrderId(
+            credentials,
+            amazonOrderId,
+            { maxResultsPerPage: 100 },
+          )) as any;
         } catch (err: any) {
-          const status = err?.statusCode ?? err?.status ?? null;
           const msg = typeof err?.message === 'string' ? err.message : '';
-          if (
-            status === 403 ||
+          if (this.isSpApiQuotaError(err)) {
+            financesThrottled = true;
+          } else if (
+            err?.statusCode === 403 ||
+            err?.status === 403 ||
             msg.includes('(403)') ||
             msg.includes('"code": "Unauthorized"') ||
             msg.includes('Access to requested resource is denied')
@@ -4157,11 +4220,11 @@ export class AmazonService {
           statusLower === 'unshipped' ||
           statusLower.includes('partiallyshipped') ||
           statusLower === 'invoiceunconfirmed';
-        if (looksUnfulfilled && (headerQty > 0 || totalAmount > 0)) {
+        if (looksUnfulfilled) {
           orderItems = this.buildSyntheticOrderItemsFromOrderHeader(
             amazonOrderId,
             order as Record<string, unknown>,
-            quantity,
+            headerQty > 0 ? headerQty : quantity,
           );
           if (debug) {
             this.logger.debug(
@@ -4283,6 +4346,7 @@ export class AmazonService {
       // Deferred Order Payment: Seller Central shows fees while Finances v0 has **no** Shipment/Deferred item rows yet.
       // Same fees appear under Finances 2024 `listTransactions` (DEFERRED). Without this, first sync writes estimates only.
       if (
+        !skipAllFinances &&
         !financesUnauthorized &&
         orderItems.length > 0 &&
         feeByOrderItemId.size === 0 &&
@@ -4315,7 +4379,13 @@ export class AmazonService {
       }
 
       // When we already have OrderItems for this order, fetch Finances if not yet done and backfill settled fee breakdown.
-      if (!financesUnauthorized && existingOrderItemOrderIds.has(amazonOrderId)) {
+      if (
+        !skipAllFinances &&
+        !likelyUnsettled &&
+        !financesThrottled &&
+        !financesUnauthorized &&
+        existingOrderItemOrderIds.has(amazonOrderId)
+      ) {
         if (!finRes) {
           try {
             await new Promise((r) =>
@@ -5063,12 +5133,18 @@ export class AmazonService {
     //
     // We retry a small number per run to stay under quotas.
     try {
-      if (maxOrders == null) {
+      if (maxOrders == null || hotSync) {
+      const missingSince = hotSync
+        ? new Date(
+            nowSafe.getTime() -
+              AmazonService.SYNC_ORDERS_HOT_DAYS * 24 * 60 * 60 * 1000,
+          )
+        : defaultStart;
       const missingOrders = await this.prisma.order.findMany({
         where: {
           userId,
           marketplace: 'amazon',
-          orderDate: { gte: defaultStart, lte: nowSafe },
+          orderDate: { gte: missingSince, lte: nowSafe },
           orderItems: { none: {} },
         },
         select: {
@@ -5078,7 +5154,7 @@ export class AmazonService {
           rawResponse: true,
         },
         orderBy: { orderDate: 'desc' },
-        take: 5,
+        take: hotSync ? 15 : 5,
       });
 
       for (const ord of missingOrders) {
@@ -5104,7 +5180,7 @@ export class AmazonService {
               st === 'unshipped' ||
               st.includes('partiallyshipped') ||
               st === 'invoiceunconfirmed';
-            if (looksUnfulfilled && (headerQty > 0 || orderTotalAmt > 0)) {
+            if (looksUnfulfilled) {
               items = this.buildSyntheticOrderItemsFromOrderHeader(
                 ord.orderId,
                 raw ?? {},
@@ -5269,6 +5345,14 @@ export class AmazonService {
   }
 
   /**
+   * Fast ingest for new / Pending sales — no Finances API, completes in seconds.
+   * Scheduled every ~5 min so Seller Central orders appear in the app within ~10 min.
+   */
+  async syncHotRecentOrdersToDb(userId: string): Promise<void> {
+    await this.syncRecentOrdersToDb(userId, { hotSync: true, ignoreCursor: true });
+  }
+
+  /**
    * Batch background sync: run recent-order sync for all active Amazon sellers.
    * Intended to be triggered periodically by a BullMQ repeatable job.
    */
@@ -5290,6 +5374,7 @@ export class AmazonService {
     for (const { userId } of accounts) {
       try {
         this.logger.log(`[syncRecentOrdersForAllSellers] syncing orders for userId=${userId}`);
+        await this.syncHotRecentOrdersToDb(userId);
         await this.syncRecentOrdersToDb(userId);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
