@@ -602,6 +602,41 @@ export class AmazonSpApiClient {
   }
 
   /**
+   * FBA Inbound API v0: getShipmentItems
+   * GET /fba/inbound/v0/shipmentItems
+   * Use for pagination when getShipmentItemsByShipmentId returns NextToken with 200+ items.
+   */
+  async getFbaInboundShipmentItems(
+    credentials: SpApiCredentials,
+    params: {
+      marketplaceId: string;
+      queryType: 'SHIPMENT' | 'DATE_RANGE' | 'NEXT_TOKEN';
+      shipmentId?: string;
+      nextToken?: string;
+      lastUpdatedAfter?: string;
+      lastUpdatedBefore?: string;
+    },
+  ): Promise<unknown> {
+    const query: Record<string, unknown> = {
+      QueryType: params.queryType,
+      MarketplaceId: params.marketplaceId,
+    };
+    if (params.queryType === 'SHIPMENT' && params.shipmentId) {
+      query.ShipmentId = params.shipmentId;
+    }
+    if (params.queryType === 'DATE_RANGE') {
+      if (params.lastUpdatedAfter) query.LastUpdatedAfter = params.lastUpdatedAfter;
+      if (params.lastUpdatedBefore) query.LastUpdatedBefore = params.lastUpdatedBefore;
+    }
+    if (params.nextToken) query.NextToken = params.nextToken;
+    return this.signedSpApiRequest(credentials, {
+      method: 'GET',
+      path: '/fba/inbound/v0/shipmentItems',
+      query,
+    });
+  }
+
+  /**
    * FBA Inbound API v0: getTransportDetails
    * GET /fba/inbound/v0/shipments/{shipmentId}/transportDetails
    * Path segment encoded once here; same string is used for canonical URI and request (no double-encoding).
@@ -617,6 +652,65 @@ export class AmazonSpApiClient {
     return this.signedSpApiRequest(credentials, {
       method: 'GET',
       path,
+      query: {},
+    });
+  }
+
+  /**
+   * Fulfillment Inbound API v2024-03-20: listInboundPlans
+   * GET /inbound/fba/2024-03-20/inboundPlans
+   */
+  async listFbaInboundPlans(
+    credentials: SpApiCredentials,
+    params?: {
+      pageSize?: number;
+      paginationToken?: string;
+      status?: 'ACTIVE' | 'VOIDED' | 'SHIPPED';
+      sortBy?: 'LAST_UPDATED_TIME' | 'CREATION_TIME';
+      sortOrder?: 'ASC' | 'DESC';
+    },
+  ): Promise<unknown> {
+    const query: Record<string, unknown> = {};
+    if (params?.pageSize != null) query.pageSize = params.pageSize;
+    if (params?.paginationToken) query.paginationToken = params.paginationToken;
+    if (params?.status) query.status = params.status;
+    if (params?.sortBy) query.sortBy = params.sortBy;
+    if (params?.sortOrder) query.sortOrder = params.sortOrder;
+    return this.signedSpApiRequest(credentials, {
+      method: 'GET',
+      path: '/inbound/fba/2024-03-20/inboundPlans',
+      query,
+    });
+  }
+
+  /**
+   * Fulfillment Inbound API v2024-03-20: getInboundPlan
+   * GET /inbound/fba/2024-03-20/inboundPlans/{inboundPlanId}
+   */
+  async getFbaInboundPlan(
+    credentials: SpApiCredentials,
+    inboundPlanId: string,
+  ): Promise<unknown> {
+    return this.signedSpApiRequest(credentials, {
+      method: 'GET',
+      path: `/inbound/fba/2024-03-20/inboundPlans/${encodeURIComponent(inboundPlanId)}`,
+      query: {},
+    });
+  }
+
+  /**
+   * Fulfillment Inbound API v2024-03-20: getShipment
+   * GET /inbound/fba/2024-03-20/inboundPlans/{inboundPlanId}/shipments/{shipmentId}
+   * Note: path shipmentId is the internal v2024 id (not the FBA confirmation id on labels).
+   */
+  async getFbaInboundPlanShipment(
+    credentials: SpApiCredentials,
+    inboundPlanId: string,
+    shipmentId: string,
+  ): Promise<unknown> {
+    return this.signedSpApiRequest(credentials, {
+      method: 'GET',
+      path: `/inbound/fba/2024-03-20/inboundPlans/${encodeURIComponent(inboundPlanId)}/shipments/${encodeURIComponent(shipmentId)}`,
       query: {},
     });
   }

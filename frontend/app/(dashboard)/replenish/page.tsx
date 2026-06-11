@@ -30,6 +30,7 @@ type SmartReplenishRow = {
   fulfillableQty: number;
   inboundQty: number;
   effectiveStock: number;
+  targetStockUnits: number;
   avgDailyUnits: number;
   daysOfCover: number | null;
   avgGrossProfitPerUnit: number | null;
@@ -470,8 +471,18 @@ export default function ReplenishPage() {
                     <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-[var(--muted-foreground)]">
                       <span className="tabular-nums">
                         Suggest{" "}
-                        <span className="font-semibold text-[var(--foreground)]">
+                        <span className="font-semibold tabular-nums text-emerald-400">
                           {s.suggestedBuyQty}
+                        </span>
+                      </span>
+                      <span className="tabular-nums">
+                        Stock{" "}
+                        <span className="text-[var(--foreground)]">
+                          {s.effectiveStock}
+                        </span>
+                        {" → "}
+                        <span className="text-[var(--foreground)]">
+                          {s.targetStockUnits ?? "—"}
                         </span>
                       </span>
                       {s.daysOfCover != null && (
@@ -697,10 +708,20 @@ export default function ReplenishPage() {
                       </div>
                       <div className="mt-1 text-sm text-[var(--foreground)]">
                         Buy{" "}
-                        <span className="font-semibold tabular-nums">
+                        <span className="font-semibold tabular-nums text-emerald-400">
                           {detailsItem.suggestedBuyQty}
                         </span>{" "}
                         units
+                      </div>
+                      <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                        Current stock{" "}
+                        <span className="tabular-nums text-[var(--foreground)]">
+                          {detailsItem.effectiveStock}
+                        </span>{" "}
+                        · Target stock{" "}
+                        <span className="tabular-nums text-[var(--foreground)]">
+                          {detailsItem.targetStockUnits ?? "—"}
+                        </span>
                       </div>
                       <div className="mt-1 text-xs text-[var(--muted-foreground)]">
                         Current cover{" "}

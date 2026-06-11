@@ -563,15 +563,20 @@ function MockIconRepricer({ className }: { className?: string }) {
   );
 }
 
-const HERO_MOCK_NAV: { label: string; icon: MockNavIcon; disabled?: boolean }[] = [
+const HERO_MOCK_NAV: {
+  label: string;
+  icon: MockNavIcon;
+  disabled?: boolean;
+  live?: boolean;
+}[] = [
   { label: "Dashboard", icon: MockIconDashboard },
   { label: "Cost of Goods", icon: MockIconCostOfGoods },
   { label: "Inventory", icon: MockIconInventory },
   { label: "Orders", icon: MockIconOrders },
   { label: "FBA Shipments", icon: MockIconShipments },
-  { label: "Replenish", icon: MockIconReplenish },
+  { label: "Smart Replenish", icon: MockIconReplenish, live: true },
   { label: "FBM Orders", icon: MockIconFbmOrders, disabled: true },
-  { label: "Repricer", icon: MockIconRepricer, disabled: true },
+  { label: "Smart Repricer", icon: MockIconRepricer, live: true },
 ];
 
 function HeroDashboardMock() {
@@ -748,7 +753,12 @@ function HeroDashboardMock() {
                   }`}
                 >
                   <Icon className="h-3.5 w-3.5 shrink-0 opacity-90 sm:h-4 sm:w-4" />
-                  <span className="min-w-0 leading-tight">{item.label}</span>
+                  <span className="min-w-0 flex-1 leading-tight">{item.label}</span>
+                  {item.live ? (
+                    <span className="shrink-0 rounded bg-emerald-500/20 px-1 py-px text-[7px] font-bold uppercase tracking-wide text-emerald-400 sm:text-[8px]">
+                      Live
+                    </span>
+                  ) : null}
                 </button>
               );
             })}
@@ -1431,8 +1441,17 @@ export default function LandingPage() {
                 <Link href="#how-it-works" className="block px-4 py-2 text-sm text-[var(--foreground)] hover:bg-[var(--foreground)]/5 no-underline">
                   How it works
                 </Link>
-                <span className="block px-4 py-2.5 text-sm text-[var(--muted-foreground)]" aria-hidden>
-                  Repricer module coming soon
+                <span className="block px-4 py-2 text-sm text-[var(--foreground)]">
+                  Smart Repricer{" "}
+                  <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-600 dark:text-emerald-400">
+                    Live
+                  </span>
+                </span>
+                <span className="block px-4 py-2 text-sm text-[var(--foreground)]">
+                  Smart Replenishment{" "}
+                  <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-600 dark:text-emerald-400">
+                    Live
+                  </span>
                 </span>
               </NavDropdown>
             </div>
@@ -1743,6 +1762,7 @@ export default function LandingPage() {
                   { text: "Missing inventory detection", emblem: "🛡️", person: "🧑‍🔬" },
                   { text: "Shipment delay tracking", emblem: "⏱️", person: "🧑‍💼" },
                   { text: "Smart replenishment", emblem: "🎯", person: "🧑‍💼" },
+                  { text: "Smart repricing", emblem: "⚡", person: "🧑‍💻" },
                 ].map((item, idx) => (
                   <li
                     key={item.text}
@@ -1933,9 +1953,25 @@ export default function LandingPage() {
                 </p>
               </div>
               <div className="rounded-2xl border border-[var(--surface-border)] bg-[var(--background)] p-6">
-                <h3 className="text-lg font-semibold text-[var(--foreground)]">Replenishment tools</h3>
+                <div className="flex flex-wrap items-center gap-2">
+                  <h3 className="text-lg font-semibold text-[var(--foreground)]">Smart replenishment</h3>
+                  <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-600 dark:text-emerald-400">
+                    Live
+                  </span>
+                </div>
                 <p className="mt-2 text-[var(--muted-foreground)]">
-                  Know exactly when to reorder based on sales velocity.
+                  Velocity-based reorder targets plus smart suggestions so you restock the right SKUs at the right time.
+                </p>
+              </div>
+              <div className="rounded-2xl border border-[var(--surface-border)] bg-[var(--background)] p-6">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h3 className="text-lg font-semibold text-[var(--foreground)]">Smart repricing</h3>
+                  <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-600 dark:text-emerald-400">
+                    Live
+                  </span>
+                </div>
+                <p className="mt-2 text-[var(--muted-foreground)]">
+                  Rules-based repricing that protects margin while staying competitive — built into your dashboard.
                 </p>
               </div>
               <div className="rounded-2xl border border-[var(--surface-border)] bg-[var(--background)] p-6">
@@ -2042,42 +2078,56 @@ export default function LandingPage() {
           </div>
         </section>
 
-        {/* Repricer in development */}
+        {/* Live modules + roadmap */}
         <section className="border-b border-[var(--surface-border)] bg-[var(--surface)]/30 py-20 sm:py-24">
           <div className="mx-auto max-w-3xl px-4 text-center sm:px-6 lg:px-8">
-            <div className="mb-6 inline-flex items-center gap-2 rounded-full border border-[var(--surface-border)] bg-[var(--background)] px-4 py-1.5 text-sm font-semibold uppercase tracking-wider text-[var(--foreground)] shadow-sm">
-              <span className="h-2 w-2 rounded-full bg-amber-400 animate-pulse" aria-hidden />
-              Coming soon
-            </div>
             <h2 className="text-3xl font-bold text-[var(--foreground)] sm:text-4xl">
               SellerBunker is continuously developing new products
             </h2>
             <p className="mt-4 text-lg text-[var(--muted-foreground)]">
-              We keep shipping practical tools that work with your existing dashboard so you can make faster, more confident decisions.
+              Smart repricing and smart replenishment are live in the dashboard now — with more automation on the way.
             </p>
-            <p className="mx-auto mt-4 max-w-2xl text-center text-sm text-[var(--muted-foreground)]">
-              Our roadmap is focused on real seller workflows: improving profitability, automation, and day-to-day clarity.
-            </p>
-            <div className="mt-8 grid w-full max-w-4xl grid-cols-1 gap-4 sm:grid-cols-3">
+            <div className="mt-8 grid w-full max-w-4xl grid-cols-1 gap-4 sm:grid-cols-2">
               {[
+                {
+                  title: "Smart repricing",
+                  desc: "Rules-based repricing to stay competitive while protecting margin across your catalog.",
+                  live: true,
+                },
+                {
+                  title: "Smart replenishment",
+                  desc: "Sales-velocity targets and reorder suggestions so you restock before you run out.",
+                  live: true,
+                },
                 {
                   title: "PPC",
                   desc: "Campaign insights, spend breakdowns, and performance signals to help you optimize ad efficiency.",
-                },
-                {
-                  title: "Repricer",
-                  desc: "Smarter pricing rules to stay competitive while protecting margin across your catalog.",
+                  live: false,
                 },
                 {
                   title: "AI Data Help Agent",
                   desc: "Ask questions about your seller data and get quick, actionable answers in plain English.",
+                  live: false,
                 },
               ].map((item) => (
                 <div
                   key={item.title}
-                  className="rounded-2xl border border-white/20 bg-white/10 px-5 py-5 text-left shadow-sm sm:min-h-[170px]"
+                  className="rounded-2xl border border-white/20 bg-white/10 px-5 py-5 text-left shadow-sm sm:min-h-[150px]"
                 >
-                  <p className="text-base font-semibold text-[var(--foreground)]">{item.title}</p>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="text-base font-semibold text-[var(--foreground)]">{item.title}</p>
+                    {item.live ? (
+                      <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-600 dark:text-emerald-400">
+                        <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" aria-hidden />
+                        Live
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1.5 rounded-full border border-[var(--surface-border)] bg-[var(--background)]/80 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted-foreground)]">
+                        <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" aria-hidden />
+                        Soon
+                      </span>
+                    )}
+                  </div>
                   <p className="mt-2 text-xs leading-relaxed text-[var(--muted-foreground)] sm:text-sm">
                     {item.desc}
                   </p>
@@ -2231,7 +2281,7 @@ export default function LandingPage() {
                 The profit command center for Amazon FBA &amp; FBM sellers.
               </p>
               <p className="mt-1 text-[10px] text-[var(--muted-foreground)]/80">
-                Repricer coming soon once beta testing of the dashboard is complete.
+                Smart repricing &amp; smart replenishment live in the dashboard.
               </p>
               <div className="mt-2 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-[11px] sm:justify-start">
                 <span className="text-[var(--muted-foreground)]/75">Guides:</span>

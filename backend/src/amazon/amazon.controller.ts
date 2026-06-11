@@ -1093,6 +1093,23 @@ ping() {
   }
 
   /**
+   * FBA Shipments: single shipment with per-SKU lines.
+   * Example: GET /api/amazon/shipments/FBA123
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Get('shipments/:shipmentId')
+  async getShipment(
+    @Req() req: { user: { orgId: string; marketplaceId?: string } },
+    @Param('shipmentId') shipmentId: string,
+  ) {
+    return this.amazonService.getShipmentDetail(
+      req.user.orgId,
+      shipmentId,
+      req.user.marketplaceId,
+    );
+  }
+
+  /**
    * FBA Shipments: sync from SP-API (getShipments + items + transport).
    * Example: POST /api/amazon/shipments/sync
    */
@@ -1100,33 +1117,6 @@ ping() {
   @Post('shipments/sync')
   async syncShipments(@Req() req: { user: { orgId: string; userId: string } }) {
     return this.amazonService.syncShipments(req.user.orgId, req.user.userId);
-  }
-
-  /**
-   * FBA Shipments: set manual check-in date (for historic shipments where API didn't return it).
-   * Example: PATCH /api/amazon/shipments/:shipmentId/checked-in
-   * Body: { "checkedInDate": "YYYY-MM-DD" }
-   */
-  @UseGuards(ClerkAuthGuard)
-  @Patch('shipments/:shipmentId/checked-in')
-  async setShipmentCheckedIn(
-    @Req() req: { user: { orgId: string } },
-    @Param('shipmentId') shipmentId: string,
-    @Body() body: { checkedInDate: string },
-  ) {
-    const checkedInDate = body?.checkedInDate?.trim();
-    if (!checkedInDate) {
-      throw new BadRequestException('checkedInDate is required (YYYY-MM-DD)');
-    }
-    const result = await this.amazonService.setShipmentManualCheckedInDate(
-      req.user.orgId,
-      shipmentId,
-      checkedInDate,
-    );
-    if (!result.ok) {
-      throw new BadRequestException(result.error ?? 'Failed to set check-in date');
-    }
-    return { ok: true };
   }
 
   /**

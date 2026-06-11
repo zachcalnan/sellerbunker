@@ -437,10 +437,29 @@ model Shipment {
   createdAt                         DateTime  @default(now()) @map("created_at")
   updatedAt                         DateTime  @updatedAt @map("updated_at")
   user                              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  itemLines                         ShipmentItemLine[]
 
   @@unique([userId, shipmentId])
   @@index([userId])
   @@map("shipments")
+}
+
+model ShipmentItemLine {
+  id               String   @id @default(uuid())
+  shipmentId       String   @map("shipment_id")
+  sellerSku        String   @default("") @map("seller_sku")
+  fnsku            String   @default("") @map("fnsku")
+  asin             String?
+  productTitle     String?  @map("product_title")
+  quantityShipped  Int      @default(0) @map("quantity_shipped")
+  quantityReceived Int      @default(0) @map("quantity_received")
+  quantityDamaged  Int      @default(0) @map("quantity_damaged")
+  quantityDisposed Int      @default(0) @map("quantity_disposed")
+  shipment         Shipment @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+
+  @@unique([shipmentId, sellerSku, fnsku])
+  @@index([shipmentId])
+  @@map("shipment_item_lines")
 }
 
 model Purchase {

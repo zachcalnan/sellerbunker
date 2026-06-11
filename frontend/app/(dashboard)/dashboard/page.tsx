@@ -2938,7 +2938,50 @@ function CategoryPieChart({
   const size = 80;
   const cx = size / 2;
   const cy = size / 2;
-  const r = 32;
+  const rOuter = 32;
+  const rInner = 18;
+  const padAngle = 0.018; // radians; small visual gap between segments
+
+  function clampAngle(a: number): number {
+    // Keep angles in [0, 2π)
+    const twoPi = 2 * Math.PI;
+    return ((a % twoPi) + twoPi) % twoPi;
+  }
+
+  function polarToCartesian(angle: number, radius: number): { x: number; y: number } {
+    const a = clampAngle(angle);
+    return {
+      x: cx + radius * Math.sin(a),
+      y: cy - radius * Math.cos(a),
+    };
+  }
+
+  function donutSegmentPath(startAngle: number, endAngle: number): string {
+    const twoPi = 2 * Math.PI;
+    const span = Math.max(0, Math.min(twoPi, endAngle - startAngle));
+    if (span <= 0) return "";
+
+    const a0 = startAngle + padAngle / 2;
+    const a1 = endAngle - padAngle / 2;
+    if (a1 <= a0) return "";
+
+    const spanPadded = a1 - a0;
+    const largeArc = spanPadded > Math.PI ? 1 : 0;
+
+    const p0 = polarToCartesian(a0, rOuter);
+    const p1 = polarToCartesian(a1, rOuter);
+    const p2 = polarToCartesian(a1, rInner);
+    const p3 = polarToCartesian(a0, rInner);
+
+    // Sweep flag 1: clockwise in our angle system
+    return [
+      `M ${p0.x} ${p0.y}`,
+      `A ${rOuter} ${rOuter} 0 ${largeArc} 1 ${p1.x} ${p1.y}`,
+      `L ${p2.x} ${p2.y}`,
+      `A ${rInner} ${rInner} 0 ${largeArc} 0 ${p3.x} ${p3.y}`,
+      "Z",
+    ].join(" ");
+  }
 
   let cumulative = 0;
   const segments = hasData
@@ -2947,12 +2990,7 @@ function CategoryPieChart({
         const startAngle = cumulative * 2 * Math.PI;
         cumulative += pct;
         const endAngle = cumulative * 2 * Math.PI;
-        const x1 = cx + r * Math.sin(startAngle);
-        const y1 = cy - r * Math.cos(startAngle);
-        const x2 = cx + r * Math.sin(endAngle);
-        const y2 = cy - r * Math.cos(endAngle);
-        const large = pct > 0.5 ? 1 : 0;
-        const path = `M ${cx} ${cy} L ${x1} ${y1} A ${r} ${r} 0 ${large} 1 ${x2} ${y2} Z`;
+        const path = donutSegmentPath(startAngle, endAngle);
         return { path, color: PIE_COLORS[i % PIE_COLORS.length], ...d };
       })
     : [];
@@ -2965,15 +3003,16 @@ function CategoryPieChart({
       {hasData ? (
         <div className="flex min-w-0 items-start gap-2">
           <svg viewBox={`0 0 ${size} ${size}`} className="h-14 w-14 shrink-0 sm:h-16 sm:w-16">
+            <circle cx={cx} cy={cy} r={rOuter} fill="none" stroke="var(--surface-border)" strokeWidth={1} />
             {segments.map((seg, i) => (
               <path
                 key={i}
                 d={seg.path}
                 fill={seg.color}
-                stroke="var(--background)"
-                strokeWidth={1}
+                shapeRendering="geometricPrecision"
               />
             ))}
+            <circle cx={cx} cy={cy} r={rInner} fill="var(--background)" />
           </svg>
           <ul className="min-w-0 flex-1 space-y-0.5 text-[10px]">
             {segments.map((seg, i) => (

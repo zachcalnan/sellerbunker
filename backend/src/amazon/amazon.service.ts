@@ -31,6 +31,19 @@ import {
   parseFinancesShipmentItemFeesSignedTotal,
 } from './finances-item-fee-parse.util';
 import { eligibilityFromListingsRestrictionsBody } from './asin-selling-eligibility.util';
+import {
+  avgDailyUnitsInStock,
+  estimateInStockDaysForVelocity,
+} from './replenish-velocity.util';
+import {
+  extractInboundShipmentDatesFromRow,
+  extractInboundV2024ShipmentDates,
+  extractTransportDatesFromPayload,
+  FBA_CHECKED_IN_STATUSES,
+  parseDateFromShipmentName,
+  resolveShipmentCheckedIn,
+  sameCalendarDay,
+} from './shipment-date.util';
 
 /** When we have no settled fees and no product fee estimate, use this share of revenue as fee so profit/ROI are not overstated. */
 const DEFAULT_AMAZON_FEE_RATE_WHEN_UNKNOWN = 0.35;
@@ -5750,6 +5763,9 @@ export class AmazonService {
       avgDailyUnitsLong: number;
       avgDailyUnits: number;
       daysOfCover: number | null;
+      inStockDaysShort: number;
+      inStockDaysLong: number;
+      targetStockUnits: number;
       avgGrossProfitPerUnit: number | null;
       avgCogsPerUnit: number | null;
       roi: number | null;
@@ -5816,26 +5832,17 @@ export class AmazonService {
     const sinceLong = new Date(Date.now() - velocityLongDays * 24 * 60 * 60 * 1000);
     const sinceProfit = new Date(Date.now() - profitDays * 24 * 60 * 60 * 1000);
 
-    const [shortStats, longStats, profitStats] = await Promise.all([
-      (this.prisma as any).orderItem.groupBy({
-        by: ['asin'],
-        where: {
-          userId: { in: userIds },
-          marketplace: marketplaceFilter,
-          orderDate: { gte: sinceShort },
-          asin: { not: null },
-        },
-        _sum: { quantity: true },
-      }),
-      (this.prisma as any).orderItem.groupBy({
-        by: ['asin'],
+    const now = new Date();
+
+    const [velocityOrderRows, profitStats] = await Promise.all([
+      (this.prisma as any).orderItem.findMany({
         where: {
           userId: { in: userIds },
           marketplace: marketplaceFilter,
           orderDate: { gte: sinceLong },
           asin: { not: null },
         },
-        _sum: { quantity: true },
+        select: { asin: true, orderDate: true, quantity: true },
       }),
       (this.prisma as any).orderItem.groupBy({
         by: ['asin'],
@@ -5856,17 +5863,41 @@ export class AmazonService {
       }),
     ]);
 
-    const mapSum = (rows: any[], field: string) => {
-      const m = new Map<string, number>();
-      for (const r of rows ?? []) {
-        const asin = String(r.asin ?? '').trim();
-        if (!asin) continue;
-        m.set(asin, Number(r._sum?.[field] ?? 0));
+    type VelWindow = { units: number; dates: Date[] };
+    const velocityByAsin = new Map<string, { short: VelWindow; long: VelWindow }>();
+    const ensureVelocity = (asin: string) => {
+      let v = velocityByAsin.get(asin);
+      if (!v) {
+        v = {
+          short: { units: 0, dates: [] },
+          long: { units: 0, dates: [] },
+        };
+        velocityByAsin.set(asin, v);
       }
-      return m;
+      return v;
     };
-    const unitsShortByAsin = mapSum(shortStats, 'quantity');
-    const unitsLongByAsin = mapSum(longStats, 'quantity');
+
+    for (const row of (velocityOrderRows as any[]) ?? []) {
+      const asin = String(row?.asin ?? '').trim();
+      if (!asin) continue;
+      const qty = Math.max(0, Math.round(Number(row?.quantity ?? 0)));
+      if (qty <= 0) continue;
+      const orderDate =
+        row?.orderDate instanceof Date
+          ? row.orderDate
+          : new Date(row.orderDate as string);
+      if (Number.isNaN(orderDate.getTime())) continue;
+
+      const agg = ensureVelocity(asin);
+      if (orderDate >= sinceLong) {
+        agg.long.units += qty;
+        agg.long.dates.push(orderDate);
+      }
+      if (orderDate >= sinceShort) {
+        agg.short.units += qty;
+        agg.short.dates.push(orderDate);
+      }
+    }
 
     const profitByAsin = new Map<
       string,
@@ -5895,8 +5926,7 @@ export class AmazonService {
     }
 
     const allAsins = new Set<string>();
-    for (const a of unitsShortByAsin.keys()) allAsins.add(a);
-    for (const a of unitsLongByAsin.keys()) allAsins.add(a);
+    for (const a of velocityByAsin.keys()) allAsins.add(a);
     for (const a of profitByAsin.keys()) allAsins.add(a);
     if (allAsins.size === 0) return [];
 
@@ -6072,12 +6102,12 @@ export class AmazonService {
       const prod = productByAsin.get(asin);
       if (!prod) continue;
 
-      const unitsVShort = Number(unitsShortByAsin.get(asin) ?? 0);
-      const unitsVLong = Number(unitsLongByAsin.get(asin) ?? 0);
-      const avgDailyShort = unitsVShort / Math.max(1, velocityShortDays);
-      const avgDailyLong = unitsVLong / Math.max(1, velocityLongDays);
-      let avgDaily = Math.max(avgDailyShort, avgDailyLong);
-      if (avgDaily === 0) avgDaily = unknownDemandFloorPerDay;
+      const vel = velocityByAsin.get(asin) ?? {
+        short: { units: 0, dates: [] as Date[] },
+        long: { units: 0, dates: [] as Date[] },
+      };
+      const unitsVShort = vel.short.units;
+      const unitsVLong = vel.long.units;
 
       const inv = invByAsin.get(asin) ?? {
         fulfillable: 0,
@@ -6090,6 +6120,32 @@ export class AmazonService {
         inv.inboundWorking + inv.inboundShipped + inv.inboundReceiving;
       const inboundQty = inboundStages > 0 ? inboundStages : inv.inboundStored;
       const effectiveStock = Math.max(0, inv.fulfillable + inboundQty);
+
+      const inStockDaysShort = estimateInStockDaysForVelocity({
+        unitsSold: unitsVShort,
+        orderDates: vel.short.dates,
+        windowDays: velocityShortDays,
+        windowStart: sinceShort,
+        effectiveStock,
+        now,
+      });
+      const inStockDaysLong = estimateInStockDaysForVelocity({
+        unitsSold: unitsVLong,
+        orderDates: vel.long.dates,
+        windowDays: velocityLongDays,
+        windowStart: sinceLong,
+        effectiveStock,
+        now,
+      });
+      const avgDailyShort = avgDailyUnitsInStock(
+        unitsVShort,
+        inStockDaysShort,
+        0,
+      );
+      const avgDailyLong = avgDailyUnitsInStock(unitsVLong, inStockDaysLong, 0);
+      let avgDaily = Math.max(avgDailyShort, avgDailyLong);
+      if (avgDaily === 0) avgDaily = unknownDemandFloorPerDay;
+
       const coverDays = avgDaily > 0 ? effectiveStock / avgDaily : null;
 
       const p = (profitByAsin.get(asin) ?? {
@@ -6119,6 +6175,7 @@ export class AmazonService {
       if (!passesProfit || !passesRoi) continue;
 
       const targetStockUnits = avgDaily * (targetDaysOfCover + safetyDays);
+      const targetStockRounded = Math.ceil(targetStockUnits);
       const netNeed = Math.max(0, targetStockUnits - effectiveStock);
       const rawBuy = Math.ceil(netNeed);
       let buyQty = 0;
@@ -6197,9 +6254,11 @@ export class AmazonService {
 
       const rationaleParts: string[] = [];
       rationaleParts.push(
-        `demand=${(Math.round(avgDaily * 100) / 100).toFixed(2)}/day`,
+        `demand=${(Math.round(avgDaily * 100) / 100).toFixed(2)}/day (in-stock days: ${inStockDaysShort}/${velocityShortDays})`,
       );
-      rationaleParts.push(`stock=${inv.fulfillable} fulfillable + ${inboundQty} inbound`);
+      rationaleParts.push(
+        `stock=${effectiveStock} (target ${targetStockRounded})`,
+      );
       if (coverDays != null) rationaleParts.push(`cover≈${Math.round(coverDays)}d`);
 
       out.push({
@@ -6215,6 +6274,9 @@ export class AmazonService {
         avgDailyUnitsLong: Math.round(avgDailyLong * 1000) / 1000,
         avgDailyUnits: Math.round(avgDaily * 1000) / 1000,
         daysOfCover: coverDays != null ? Math.round(coverDays * 10) / 10 : null,
+        inStockDaysShort,
+        inStockDaysLong,
+        targetStockUnits: targetStockRounded,
         avgGrossProfitPerUnit: unitsP > 0 ? Math.round(avgProfitPerUnit * 100) / 100 : null,
         avgCogsPerUnit:
           avgCogsPerUnit > 0 ? Math.round(avgCogsPerUnit * 100) / 100 : (prod.costOfGoods ?? null),
@@ -9835,94 +9897,872 @@ export class AmazonService {
   }
 
   /**
-   * Set manual check-in date for a shipment (when historic check-in was not recorded).
-   * Recomputes checkInDurationDays from createdDate to the new checkedInDate.
-   */
-  async setShipmentManualCheckedInDate(
-    orgId: string,
-    shipmentId: string,
-    checkedInDateIso: string,
-  ): Promise<{ ok: boolean; error?: string }> {
-    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
-    const shipment = await this.prisma.shipment.findFirst({
-      where: { shipmentId, userId: { in: userIds } },
-      select: { id: true, userId: true, createdDate: true },
-    });
-    if (!shipment) {
-      return { ok: false, error: 'Shipment not found' };
-    }
-    const checkedInDate = new Date(checkedInDateIso);
-    if (Number.isNaN(checkedInDate.getTime())) {
-      return { ok: false, error: 'Invalid date' };
-    }
-    const checkInDurationDays =
-      shipment.createdDate != null
-        ? Math.max(0, Math.floor((checkedInDate.getTime() - shipment.createdDate.getTime()) / (24 * 60 * 60 * 1000)))
-        : null;
-    await this.prisma.shipment.update({
-      where: { id: shipment.id },
-      data: {
-        checkedInDate,
-        checkedInDateIsClosedDate: false,
-        checkInDurationDays: checkInDurationDays ?? undefined,
-      },
-    });
-    return { ok: true };
-  }
-
-  /**
    * List FBA inbound shipments for the org (from DB).
    * Masks createdDate/checkedInDate when they fall on the same calendar day as createdAt/updatedAt,
    * since those were likely stored as "today" at sync time rather than real API dates.
    */
-  async listShipments(orgId: string, marketplaceId?: string) {
-    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
-    const rows = await this.prisma.shipment.findMany({
-      where: { userId: { in: userIds } },
-      orderBy: [{ createdDate: 'desc' }, { updatedAt: 'desc' }],
+  private async loadShipmentItemProductMaps(
+    userIds: string[],
+    skus: string[],
+    asins: string[],
+  ): Promise<{
+    bySku: Map<string, { sku: string; title: string | null; imageUrl: string | null; asin: string | null }>;
+    byAsin: Map<string, { sku: string; title: string | null; imageUrl: string | null; asin: string | null }>;
+  }> {
+    const or: Array<{ sku: { in: string[] } } | { asin: { in: string[] } }> = [];
+    if (skus.length > 0) or.push({ sku: { in: skus } });
+    if (asins.length > 0) or.push({ asin: { in: asins } });
+    const products =
+      or.length > 0
+        ? await this.prisma.product.findMany({
+            where: { userId: { in: userIds }, OR: or },
+            select: { sku: true, title: true, imageUrl: true, asin: true },
+          })
+        : [];
+    const bySku = new Map(products.map((p) => [p.sku, p]));
+    const byAsin = new Map<string, (typeof products)[number]>();
+    for (const p of products) {
+      if (p.asin) byAsin.set(p.asin, p);
+    }
+    return { bySku, byAsin };
+  }
+
+  private mapShipmentItemLineDto(
+    line: {
+      id: string;
+      sellerSku: string;
+      fnsku: string;
+      asin: string | null;
+      productTitle: string | null;
+      quantityShipped: number;
+      quantityReceived: number;
+      quantityDamaged: number;
+      quantityDisposed: number;
+    },
+    productBySku: Map<string, { sku: string; title: string | null; imageUrl: string | null; asin: string | null }>,
+    productByAsin: Map<string, { sku: string; title: string | null; imageUrl: string | null; asin: string | null }>,
+  ) {
+    const product =
+      (line.sellerSku ? productBySku.get(line.sellerSku) : undefined) ??
+      (line.asin ? productByAsin.get(line.asin) : undefined);
+    const asin = line.asin ?? product?.asin ?? null;
+    const title = line.productTitle ?? product?.title ?? null;
+    return {
+      id: line.id,
+      sellerSku: line.sellerSku || null,
+      fnsku: line.fnsku || null,
+      asin,
+      title,
+      imageUrl: product?.imageUrl ?? null,
+      quantityShipped: line.quantityShipped,
+      quantityReceived: line.quantityReceived,
+      quantityDamaged: line.quantityDamaged,
+      quantityDisposed: line.quantityDisposed,
+      quantityMissing: Math.max(0, line.quantityShipped - line.quantityReceived),
+    };
+  }
+
+  /**
+   * All user ids whose Amazon seller_id matches any org member — including duplicate SP-API
+   * links on other logins (same Seller Central). Prevents empty stub rows on one login from
+   * hiding the real shipment + SKU lines stored under another.
+   */
+  private async getOrgAmazonShipmentReadUserIds(orgId: string): Promise<string[]> {
+    const members = await this.getOrgMemberUserIds(orgId);
+    if (members.length === 0) return [];
+
+    const memberAccounts = await this.prisma.sellerAccount.findMany({
+      where: {
+        userId: { in: members },
+        marketplace: 'amazon',
+        isActive: true,
+      },
+      select: { userId: true, sellerId: true },
     });
-    const sameCalendarDay = (a: Date, b: Date) =>
-      a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
-    return rows.map((s) => {
-      const createdDateReal =
-        s.createdDate != null && !sameCalendarDay(s.createdDate, s.createdAt)
-          ? s.createdDate
-          : null;
-      const checkedInDateReal =
-        s.checkedInDate != null && !sameCalendarDay(s.checkedInDate, s.updatedAt)
-          ? s.checkedInDate
-          : null;
-      const checkInDurationDays =
-        checkedInDateReal != null
-          ? s.checkInDurationDays ??
-            (createdDateReal && checkedInDateReal
-              ? Math.max(0, Math.floor((checkedInDateReal.getTime() - createdDateReal.getTime()) / (24 * 60 * 60 * 1000)))
-              : null)
-          : null;
+    const sellerIds = [
+      ...new Set(
+        memberAccounts
+          .map((a) => (a.sellerId != null ? String(a.sellerId).trim().toUpperCase() : ''))
+          .filter((sid) => sid.length > 0),
+      ),
+    ];
+    if (sellerIds.length === 0) return members;
+
+    const sellerUserIds = new Set<string>(members);
+    const linkedAccounts = await this.prisma.sellerAccount.findMany({
+      where: {
+        marketplace: 'amazon',
+        isActive: true,
+        sellerId: { in: sellerIds },
+      },
+      select: { userId: true },
+    });
+    for (const a of linkedAccounts) sellerUserIds.add(a.userId);
+    return [...sellerUserIds];
+  }
+
+  private shipmentLineCount(row: {
+    itemLines?: unknown[];
+    _count?: { itemLines: number };
+  }): number {
+    return (
+      row._count?.itemLines ??
+      (Array.isArray(row.itemLines) ? row.itemLines.length : 0)
+    );
+  }
+
+  /** Prefer rows with SKU lines and real unit totals — not empty stubs with a fresh updatedAt. */
+  private compareShipmentRowRichness(
+    a: { updatedAt?: Date; unitsSent?: number; itemLines?: unknown[]; _count?: { itemLines: number } },
+    b: { updatedAt?: Date; unitsSent?: number; itemLines?: unknown[]; _count?: { itemLines: number } },
+  ): number {
+    const aLines = this.shipmentLineCount(a);
+    const bLines = this.shipmentLineCount(b);
+    if (bLines !== aLines) return bLines - aLines;
+    const aUnits = a.unitsSent ?? 0;
+    const bUnits = b.unitsSent ?? 0;
+    if (bUnits !== aUnits) return bUnits - aUnits;
+    return (b.updatedAt?.getTime() ?? 0) - (a.updatedAt?.getTime() ?? 0);
+  }
+
+  private pickLatestDate(dates: Array<Date | null | undefined>): Date | null {
+    let best: Date | null = null;
+    for (const d of dates) {
+      if (!d) continue;
+      if (!best || d.getTime() > best.getTime()) best = d;
+    }
+    return best;
+  }
+
+  /** Prefer stored header totals, but fill gaps from per-SKU lines when header is empty. */
+  private resolveShipmentUnitTotals<
+    T extends {
+      unitsSent: number;
+      unitsReceived: number;
+      unitsDamaged: number;
+      unitsDisposed: number;
+      unitsMissing: number;
+      itemLines?: Array<{
+        quantityShipped: number;
+        quantityReceived: number;
+        quantityDamaged: number;
+        quantityDisposed: number;
+      }>;
+    },
+  >(
+    row: T,
+  ): Pick<
+    T,
+    'unitsSent' | 'unitsReceived' | 'unitsDamaged' | 'unitsDisposed' | 'unitsMissing'
+  > {
+    const lines = row.itemLines ?? [];
+    let lineSent = 0;
+    let lineRecv = 0;
+    let lineDamaged = 0;
+    let lineDisposed = 0;
+    for (const line of lines) {
+      lineSent += line.quantityShipped ?? 0;
+      lineRecv += line.quantityReceived ?? 0;
+      lineDamaged += line.quantityDamaged ?? 0;
+      lineDisposed += line.quantityDisposed ?? 0;
+    }
+    const unitsSent = Math.max(row.unitsSent ?? 0, lineSent);
+    const unitsReceived = Math.max(row.unitsReceived ?? 0, lineRecv);
+    const unitsDamaged = Math.max(row.unitsDamaged ?? 0, lineDamaged);
+    const unitsDisposed = Math.max(row.unitsDisposed ?? 0, lineDisposed);
+    const unitsMissing = Math.max(
+      row.unitsMissing ?? 0,
+      Math.max(0, unitsSent - unitsReceived),
+    );
+    return {
+      unitsSent,
+      unitsReceived,
+      unitsDamaged,
+      unitsDisposed,
+      unitsMissing,
+    };
+  }
+
+  /** Org members can have duplicate rows for the same FBA id — keep the richest row and merge SKU lines. */
+  private mergeDuplicateShipmentRows<
+    T extends {
+      shipmentId: string;
+      updatedAt: Date;
+      unitsSent: number;
+      unitsReceived: number;
+      unitsDamaged: number;
+      unitsDisposed: number;
+      unitsMissing: number;
+      shipmentName?: string | null;
+      shipmentStatus?: string | null;
+      destinationFulfillmentCenterId?: string | null;
+      createdDate?: Date | null;
+      lastUpdatedDate?: Date | null;
+      pickupDate?: Date | null;
+      deliveryDate?: Date | null;
+      damageClosedDate?: Date | null;
+      checkInDurationDays?: number | null;
+      checkedInDate?: Date | null;
+      checkedInDateIsClosedDate?: boolean | null;
+      transportStatus?: string | null;
+      itemLines: Array<{
+        id: string;
+        sellerSku: string;
+        fnsku: string;
+        quantityShipped: number;
+        quantityReceived: number;
+        quantityDamaged: number;
+        quantityDisposed: number;
+      }>;
+      _count?: { itemLines: number };
+    },
+  >(rows: T[]): T[] {
+    const groups = new Map<string, T[]>();
+    for (const row of rows) {
+      const arr = groups.get(row.shipmentId) ?? [];
+      arr.push(row);
+      groups.set(row.shipmentId, arr);
+    }
+    const merged: T[] = [];
+    for (const group of groups.values()) {
+      const best = [...group].sort((a, b) =>
+        this.compareShipmentRowRichness(a, b),
+      )[0]!;
+      if (group.length === 1) {
+        merged.push({ ...best, ...this.resolveShipmentUnitTotals(best) });
+        continue;
+      }
+      const lineByKey = new Map<string, (typeof best.itemLines)[number]>();
+      for (const row of group) {
+        for (const line of row.itemLines) {
+          const key = `${line.sellerSku}\0${line.fnsku}`;
+          const prev = lineByKey.get(key);
+          if (!prev || line.quantityShipped > prev.quantityShipped) {
+            lineByKey.set(key, line);
+          }
+        }
+      }
+      const unitsSent = Math.max(...group.map((g) => g.unitsSent ?? 0));
+      const unitsReceived = Math.max(...group.map((g) => g.unitsReceived ?? 0));
+      const unitsDamaged = Math.max(...group.map((g) => g.unitsDamaged ?? 0));
+      const unitsDisposed = Math.max(...group.map((g) => g.unitsDisposed ?? 0));
+      const shipmentName =
+        group.map((g) => g.shipmentName).find((n) => n != null && String(n).trim()) ??
+        best.shipmentName;
+      const mergedRow = {
+        ...best,
+        shipmentName,
+        createdDate:
+          this.pickLatestDate(group.map((g) => g.createdDate)) ?? best.createdDate,
+        lastUpdatedDate:
+          this.pickLatestDate(group.map((g) => g.lastUpdatedDate)) ??
+          best.lastUpdatedDate,
+        pickupDate:
+          this.pickLatestDate(group.map((g) => g.pickupDate)) ?? best.pickupDate,
+        deliveryDate:
+          this.pickLatestDate(group.map((g) => g.deliveryDate)) ?? best.deliveryDate,
+        unitsSent,
+        unitsReceived,
+        unitsDamaged,
+        unitsDisposed,
+        unitsMissing: Math.max(0, unitsSent - unitsReceived),
+        itemLines: [...lineByKey.values()].sort(
+          (a, b) =>
+            b.quantityShipped - a.quantityShipped ||
+            a.sellerSku.localeCompare(b.sellerSku),
+        ),
+      };
+      merged.push({
+        ...mergedRow,
+        ...this.resolveShipmentUnitTotals(mergedRow),
+      });
+    }
+    return merged;
+  }
+
+  private inboundMarketplaceIdForCredentials(credentials: SpApiCredentials): string {
+    return credentials.region === 'eu'
+      ? 'A1F83G8C2ARO7P'
+      : credentials.region === 'fe'
+        ? 'A1VC38T7YXB528'
+        : 'ATVPDKIKX0DER';
+  }
+
+  private parseInboundShipmentItemPage(payload: unknown): {
+    items: any[];
+    nextToken?: string;
+  } {
+    const itemPayload = (payload as any)?.payload ?? payload;
+    const itemList =
+      itemPayload?.ItemData ??
+      itemPayload?.itemData ??
+      itemPayload?.ShipmentItems ??
+      itemPayload?.shipmentItems ??
+      [];
+    const items = Array.isArray(itemList) ? itemList : [];
+    const nextToken =
+      itemPayload?.NextToken ?? itemPayload?.nextToken ?? undefined;
+    return { items, nextToken };
+  }
+
+  /**
+   * One row per FBA shipment id under the org's canonical Amazon user.
+   * Duplicate seller links (same seller_id, different logins) were creating empty stub rows.
+   */
+  private async consolidateOrgShipmentDuplicates(
+    orgId: string,
+    canonicalUserId: string,
+  ): Promise<number> {
+    const readUserIds = await this.getOrgAmazonShipmentReadUserIds(orgId);
+    if (readUserIds.length === 0) return 0;
+
+    const allRows = await this.prisma.shipment.findMany({
+      where: { userId: { in: readUserIds } },
+      include: {
+        itemLines: true,
+        _count: { select: { itemLines: true } },
+      },
+    });
+
+    const groups = new Map<string, typeof allRows>();
+    for (const row of allRows) {
+      const arr = groups.get(row.shipmentId) ?? [];
+      arr.push(row);
+      groups.set(row.shipmentId, arr);
+    }
+
+    let consolidated = 0;
+    for (const [shipmentId, duplicates] of groups) {
+      const needsWork =
+        duplicates.length > 1 ||
+        duplicates.some((r) => r.userId !== canonicalUserId);
+      if (!needsWork) continue;
+
+      const merged = this.mergeDuplicateShipmentRows(duplicates)[0]!;
+      const resolved = { ...merged, ...this.resolveShipmentUnitTotals(merged) };
+
+      const canonical = await this.prisma.shipment.upsert({
+        where: {
+          userId_shipmentId: { userId: canonicalUserId, shipmentId },
+        },
+        create: {
+          userId: canonicalUserId,
+          shipmentId,
+          shipmentName: resolved.shipmentName,
+          shipmentStatus: resolved.shipmentStatus,
+          destinationFulfillmentCenterId: resolved.destinationFulfillmentCenterId,
+          createdDate: resolved.createdDate,
+          lastUpdatedDate: resolved.lastUpdatedDate,
+          unitsSent: resolved.unitsSent,
+          unitsReceived: resolved.unitsReceived,
+          unitsDamaged: resolved.unitsDamaged,
+          unitsDisposed: resolved.unitsDisposed,
+          unitsMissing: resolved.unitsMissing,
+          pickupDate: resolved.pickupDate,
+          deliveryDate: resolved.deliveryDate,
+          damageClosedDate: resolved.damageClosedDate,
+          checkInDurationDays: resolved.checkInDurationDays,
+          checkedInDate: resolved.checkedInDate,
+          checkedInDateIsClosedDate: resolved.checkedInDateIsClosedDate,
+          transportStatus: resolved.transportStatus,
+        },
+        update: {
+          shipmentName: resolved.shipmentName ?? undefined,
+          shipmentStatus: resolved.shipmentStatus ?? undefined,
+          destinationFulfillmentCenterId:
+            resolved.destinationFulfillmentCenterId ?? undefined,
+          createdDate: resolved.createdDate ?? undefined,
+          lastUpdatedDate: resolved.lastUpdatedDate ?? undefined,
+          unitsSent: resolved.unitsSent,
+          unitsReceived: resolved.unitsReceived,
+          unitsDamaged: resolved.unitsDamaged,
+          unitsDisposed: resolved.unitsDisposed,
+          unitsMissing: resolved.unitsMissing,
+          pickupDate: resolved.pickupDate ?? undefined,
+          deliveryDate: resolved.deliveryDate ?? undefined,
+          damageClosedDate: resolved.damageClosedDate ?? undefined,
+          checkInDurationDays: resolved.checkInDurationDays ?? undefined,
+          checkedInDate: resolved.checkedInDate ?? undefined,
+          checkedInDateIsClosedDate: resolved.checkedInDateIsClosedDate ?? undefined,
+          transportStatus: resolved.transportStatus ?? undefined,
+        },
+      });
+
+      if (resolved.itemLines.length > 0) {
+        await this.prisma.shipmentItemLine.deleteMany({
+          where: { shipmentId: canonical.id },
+        });
+        await this.prisma.shipmentItemLine.createMany({
+          data: resolved.itemLines.map((line) => ({
+            shipmentId: canonical.id,
+            sellerSku: line.sellerSku,
+            fnsku: line.fnsku,
+            asin:
+              'asin' in line && line.asin != null ? String(line.asin) : null,
+            productTitle:
+              'productTitle' in line && line.productTitle != null
+                ? String(line.productTitle)
+                : null,
+            quantityShipped: line.quantityShipped,
+            quantityReceived: line.quantityReceived,
+            quantityDamaged: line.quantityDamaged,
+            quantityDisposed: line.quantityDisposed,
+          })),
+        });
+      }
+
+      for (const dup of duplicates) {
+        if (dup.id === canonical.id) continue;
+        const removed = await this.prisma.shipment.deleteMany({
+          where: { id: dup.id },
+        });
+        consolidated += removed.count;
+      }
+    }
+
+    if (consolidated > 0) {
+      this.logger.log(
+        `[consolidateOrgShipmentDuplicates] orgId=${orgId} removed ${consolidated} duplicate row(s); canonical userId=${canonicalUserId}`,
+      );
+    }
+    return consolidated;
+  }
+
+  private async loadOrgShipmentRowsForList(userIds: string[]) {
+    return this.mergeDuplicateShipmentRows(
+      await this.prisma.shipment.findMany({
+        where: { userId: { in: userIds } },
+        orderBy: [{ updatedAt: 'desc' }, { createdDate: 'desc' }],
+        include: {
+          itemLines: {
+            orderBy: [{ quantityShipped: 'desc' }, { sellerSku: 'asc' }],
+          },
+          _count: { select: { itemLines: true } },
+        },
+      }),
+    );
+  }
+
+  async listShipments(orgId: string, marketplaceId?: string) {
+    const userIds = await this.getOrgAmazonShipmentReadUserIds(orgId);
+    const rows = await this.loadOrgShipmentRowsForList(userIds);
+
+    const skus = [
+      ...new Set(
+        rows
+          .flatMap((s) => s.itemLines.map((l) => l.sellerSku))
+          .filter((sku): sku is string => sku.length > 0),
+      ),
+    ];
+    const asins = [
+      ...new Set(
+        rows
+          .flatMap((s) => s.itemLines.map((l) => l.asin))
+          .filter((asin): asin is string => asin != null && asin.length > 0),
+      ),
+    ];
+    const { bySku: productBySku, byAsin: productByAsin } =
+      await this.loadShipmentItemProductMaps(userIds, skus, asins);
+
+    const mapped = rows.map((s) => {
+      const resolved = { ...s, ...this.resolveShipmentUnitTotals(s) };
+      const items = s.itemLines.map((line) =>
+        this.mapShipmentItemLineDto(line, productBySku, productByAsin),
+      );
       return {
-        id: s.id,
-        shipmentId: s.shipmentId,
-        shipmentName: s.shipmentName ?? null,
-        shipmentStatus: s.shipmentStatus ?? null,
-        destinationFulfillmentCenterId: s.destinationFulfillmentCenterId ?? null,
-        createdDate: createdDateReal?.toISOString() ?? null,
-        lastUpdatedDate: s.lastUpdatedDate?.toISOString() ?? null,
-        createdAt: s.createdAt.toISOString(),
-        updatedAt: s.updatedAt.toISOString(),
-        unitsSent: s.unitsSent,
-        unitsReceived: s.unitsReceived,
-        unitsDamaged: s.unitsDamaged,
-        unitsDisposed: s.unitsDisposed,
-        unitsMissing: s.unitsMissing,
-        pickupDate: s.pickupDate?.toISOString() ?? null,
-        transportStatus: s.transportStatus ?? null,
-        deliveryDate: s.deliveryDate?.toISOString() ?? null,
-        damageClosedDate: s.damageClosedDate?.toISOString() ?? null,
-        checkInDurationDays,
-        checkedInDate: checkedInDateReal?.toISOString() ?? null,
-        checkedInDateIsClosedDate: checkedInDateReal != null ? s.checkedInDateIsClosedDate ?? null : null,
+        ...this.mapShipmentRow({ ...resolved, _count: { itemLines: items.length } }),
+        items,
+        itemLineCount: items.length,
       };
     });
+    /** Shipment age for ordering — created date only, not DB sync time (updatedAt). */
+    const shipmentCreatedSortTime = (row: (typeof mapped)[number]): number => {
+      for (const iso of [row.createdDate, row.lastUpdatedDate, row.pickupDate]) {
+        if (!iso) continue;
+        const t = new Date(iso).getTime();
+        if (!Number.isNaN(t)) return t;
+      }
+      return 0;
+    };
+    mapped.sort(
+      (a, b) =>
+        shipmentCreatedSortTime(b) - shipmentCreatedSortTime(a) ||
+        b.shipmentId.localeCompare(a.shipmentId),
+    );
+    return mapped;
+  }
+
+  private mapShipmentRow(
+    s: {
+      id: string;
+      shipmentId: string;
+      shipmentName: string | null;
+      shipmentStatus: string | null;
+      destinationFulfillmentCenterId: string | null;
+      createdDate: Date | null;
+      lastUpdatedDate: Date | null;
+      createdAt: Date;
+      updatedAt: Date;
+      unitsSent: number;
+      unitsReceived: number;
+      unitsDamaged: number;
+      unitsDisposed: number;
+      unitsMissing: number;
+      pickupDate: Date | null;
+      transportStatus: string | null;
+      deliveryDate: Date | null;
+      damageClosedDate: Date | null;
+      checkInDurationDays: number | null;
+      checkedInDate: Date | null;
+      checkedInDateIsClosedDate: boolean | null;
+      _count?: { itemLines: number };
+    },
+  ) {
+    const createdFromName = parseDateFromShipmentName(s.shipmentName);
+    const createdDateStored =
+      s.createdDate != null && !sameCalendarDay(s.createdDate, s.createdAt)
+        ? s.createdDate
+        : null;
+    const createdDate = createdDateStored ?? createdFromName;
+
+    const {
+      checkedInDate: checkedInDateReal,
+      checkedInDateIsClosedDate,
+      checkedInDateSource,
+      receivedDate,
+    } = resolveShipmentCheckedIn({
+      shipmentStatus: s.shipmentStatus,
+      checkedInDate: s.checkedInDate,
+      checkedInDateIsClosedDate: s.checkedInDateIsClosedDate,
+      deliveryDate: s.deliveryDate,
+      lastUpdatedDate: s.lastUpdatedDate,
+      updatedAt: s.updatedAt,
+      createdAt: s.createdAt,
+      unitsReceived: s.unitsReceived,
+    });
+    const checkInDurationDays =
+      checkedInDateReal != null
+        ? s.checkInDurationDays ??
+          (createdDate && checkedInDateReal
+            ? Math.max(
+                0,
+                Math.floor(
+                  (checkedInDateReal.getTime() - createdDate.getTime()) /
+                    (24 * 60 * 60 * 1000),
+                ),
+              )
+            : null)
+        : null;
+
+    return {
+      id: s.id,
+      shipmentId: s.shipmentId,
+      shipmentName: s.shipmentName ?? null,
+      shipmentStatus: s.shipmentStatus ?? null,
+      destinationFulfillmentCenterId: s.destinationFulfillmentCenterId ?? null,
+      createdDate: createdDate?.toISOString() ?? null,
+      createdDateSource: createdDateStored
+        ? 'api'
+        : createdFromName
+          ? 'name'
+          : null,
+      lastUpdatedDate: s.lastUpdatedDate?.toISOString() ?? null,
+      createdAt: s.createdAt.toISOString(),
+      updatedAt: s.updatedAt.toISOString(),
+      unitsSent: s.unitsSent,
+      unitsReceived: s.unitsReceived,
+      unitsDamaged: s.unitsDamaged,
+      unitsDisposed: s.unitsDisposed,
+      unitsMissing: s.unitsMissing,
+      pickupDate: s.pickupDate?.toISOString() ?? null,
+      transportStatus: s.transportStatus ?? null,
+      deliveryDate: s.deliveryDate?.toISOString() ?? null,
+      damageClosedDate: s.damageClosedDate?.toISOString() ?? null,
+      checkInDurationDays,
+      checkedInDate: checkedInDateReal?.toISOString() ?? null,
+      checkedInDateIsClosedDate:
+        checkedInDateReal != null ? checkedInDateIsClosedDate : null,
+      checkedInDateSource,
+      receivedDate: receivedDate?.toISOString() ?? null,
+      itemLineCount: s._count?.itemLines ?? 0,
+    };
+  }
+
+  private shipmentItemToInt(v: unknown): number {
+    if (v == null) return 0;
+    if (typeof v === 'number' && Number.isInteger(v)) return v;
+    const n = parseInt(String(v), 10);
+    return Number.isNaN(n) ? 0 : n;
+  }
+
+  private async fetchInboundShipmentItemsFromApi(
+    credentials: SpApiCredentials,
+    amazonShipmentId: string,
+    throttleMs = 400,
+  ): Promise<any[]> {
+    const marketplaceId = this.inboundMarketplaceIdForCredentials(credentials);
+    const sleep = async () => {
+      if (throttleMs > 0) await new Promise((r) => setTimeout(r, throttleMs));
+    };
+
+    await sleep();
+    const byPathRes = (await this.spApiClient.getFbaInboundShipmentItemsByShipmentId(
+      credentials,
+      String(amazonShipmentId),
+    )) as unknown;
+    const byPathPage = this.parseInboundShipmentItemPage(byPathRes);
+    const itemArr = [...byPathPage.items];
+
+    // Amazon often returns a bogus NextToken on this endpoint — only paginate via
+    // getShipmentItems when the first page is full (200 SKU lines).
+    let nextToken = byPathPage.nextToken;
+    if (itemArr.length >= 200 && nextToken) {
+      while (nextToken) {
+        await sleep();
+        const pageRes = (await this.spApiClient.getFbaInboundShipmentItems(
+          credentials,
+          {
+            marketplaceId,
+            queryType: 'NEXT_TOKEN',
+            nextToken,
+          },
+        )) as unknown;
+        const page = this.parseInboundShipmentItemPage(pageRes);
+        if (page.items.length === 0) break;
+        itemArr.push(...page.items);
+        nextToken = page.items.length >= 200 ? page.nextToken : undefined;
+      }
+    }
+
+    if (itemArr.length > 0) return itemArr;
+
+    await sleep();
+    let queryType: 'SHIPMENT' | 'NEXT_TOKEN' = 'SHIPMENT';
+    nextToken = undefined;
+    do {
+      const queryRes = (await this.spApiClient.getFbaInboundShipmentItems(
+        credentials,
+        {
+          marketplaceId,
+          queryType,
+          shipmentId: queryType === 'SHIPMENT' ? String(amazonShipmentId) : undefined,
+          nextToken,
+        },
+      )) as unknown;
+      const page = this.parseInboundShipmentItemPage(queryRes);
+      if (page.items.length === 0) break;
+      itemArr.push(...page.items);
+      if (page.items.length < 200) break;
+      nextToken = page.nextToken;
+      queryType = 'NEXT_TOKEN';
+    } while (nextToken);
+
+    return itemArr;
+  }
+
+  private async persistShipmentItemLinesForRecord(
+    shipmentDbId: string,
+    catalogUserId: string,
+    itemArr: any[],
+  ): Promise<{ unitsSent: number; unitsReceived: number; unitsDamaged: number; unitsDisposed: number }> {
+    let unitsSent = 0;
+    let unitsReceived = 0;
+    let unitsDamaged = 0;
+    let unitsDisposed = 0;
+    for (const it of itemArr) {
+      unitsSent += this.shipmentItemToInt(it.QuantityShipped ?? it.quantityShipped);
+      unitsReceived += this.shipmentItemToInt(it.QuantityReceived ?? it.quantityReceived);
+      unitsDamaged += this.shipmentItemToInt(it.QuantityDamaged ?? it.quantityDamaged);
+      unitsDisposed += this.shipmentItemToInt(it.QuantityDisposed ?? it.quantityDisposed);
+    }
+
+    if (itemArr.length === 0) {
+      return { unitsSent, unitsReceived, unitsDamaged, unitsDisposed };
+    }
+
+    const lineSkus = [
+      ...new Set(
+        itemArr
+          .map((it) => String(it.SellerSKU ?? it.sellerSKU ?? '').trim())
+          .filter((sku) => sku.length > 0),
+      ),
+    ];
+    const catalogProducts =
+      lineSkus.length > 0
+        ? await this.prisma.product.findMany({
+            where: { userId: catalogUserId, sku: { in: lineSkus } },
+            select: { sku: true, title: true, asin: true },
+          })
+        : [];
+    const catalogBySku = new Map(catalogProducts.map((p) => [p.sku, p]));
+
+    await this.prisma.shipmentItemLine.deleteMany({
+      where: { shipmentId: shipmentDbId },
+    });
+    await this.prisma.shipmentItemLine.createMany({
+      data: itemArr.map((it) => {
+        const sellerSku = String(it.SellerSKU ?? it.sellerSKU ?? '');
+        const catalog = sellerSku ? catalogBySku.get(sellerSku) : undefined;
+        const asinRaw = it.ASIN ?? it.asin ?? catalog?.asin;
+        const titleRaw =
+          it.ProductName ?? it.productName ?? it.Title ?? it.title ?? catalog?.title;
+        return {
+          shipmentId: shipmentDbId,
+          sellerSku,
+          fnsku: String(
+            it.FulfillmentNetworkSKU ??
+              it.fulfillmentNetworkSKU ??
+              it.FNSKU ??
+              it.fnsku ??
+              '',
+          ),
+          asin:
+            asinRaw != null && String(asinRaw).trim() ? String(asinRaw).trim() : null,
+          productTitle:
+            titleRaw != null && String(titleRaw).trim() ? String(titleRaw).trim() : null,
+          quantityShipped: this.shipmentItemToInt(it.QuantityShipped ?? it.quantityShipped),
+          quantityReceived: this.shipmentItemToInt(it.QuantityReceived ?? it.quantityReceived),
+          quantityDamaged: this.shipmentItemToInt(it.QuantityDamaged ?? it.quantityDamaged),
+          quantityDisposed: this.shipmentItemToInt(it.QuantityDisposed ?? it.quantityDisposed),
+        };
+      }),
+    });
+
+    return { unitsSent, unitsReceived, unitsDamaged, unitsDisposed };
+  }
+
+  /** Pull SKU lines from Amazon when the DB row has none (expand / detail view). */
+  private async ensureShipmentItemLinesFromAmazon(
+    orgId: string,
+    amazonShipmentId: string,
+    shipmentDbId: string,
+    preferredUserId?: string,
+  ): Promise<void> {
+    const credentials = await this.getAmazonCredentialsForOrg(orgId, preferredUserId);
+    const aggregateUserIds = await this.getOrgAmazonAggregateUserIds(orgId);
+    const canonicalUserId =
+      preferredUserId && aggregateUserIds.includes(preferredUserId)
+        ? preferredUserId
+        : aggregateUserIds[0];
+    if (!canonicalUserId) return;
+
+    const canonicalRow = await this.prisma.shipment.findUnique({
+      where: {
+        userId_shipmentId: {
+          userId: canonicalUserId,
+          shipmentId: amazonShipmentId,
+        },
+      },
+      select: { id: true },
+    });
+    const targetDbId = canonicalRow?.id ?? shipmentDbId;
+
+    const itemArr = await this.fetchInboundShipmentItemsFromApi(
+      credentials,
+      amazonShipmentId,
+    );
+    if (itemArr.length === 0) return;
+
+    const totals = await this.persistShipmentItemLinesForRecord(
+      targetDbId,
+      canonicalUserId,
+      itemArr,
+    );
+    const existing = await this.prisma.shipment.findUnique({
+      where: { id: targetDbId },
+      select: { unitsSent: true, unitsReceived: true },
+    });
+    await this.prisma.shipment.update({
+      where: { id: targetDbId },
+      data: {
+        unitsSent: Math.max(existing?.unitsSent ?? 0, totals.unitsSent),
+        unitsReceived: Math.max(existing?.unitsReceived ?? 0, totals.unitsReceived),
+        unitsDamaged: totals.unitsDamaged,
+        unitsDisposed: totals.unitsDisposed,
+        unitsMissing: Math.max(
+          0,
+          Math.max(existing?.unitsSent ?? 0, totals.unitsSent) -
+            Math.max(existing?.unitsReceived ?? 0, totals.unitsReceived),
+        ),
+      },
+    });
+  }
+
+  private async loadMergedShipmentRow(orgId: string, amazonShipmentId: string) {
+    const userIds = await this.getOrgAmazonShipmentReadUserIds(orgId);
+    const allRows = await this.prisma.shipment.findMany({
+      where: {
+        userId: { in: userIds },
+        shipmentId: amazonShipmentId,
+      },
+      include: {
+        itemLines: { orderBy: [{ quantityShipped: 'desc' }, { sellerSku: 'asc' }] },
+        _count: { select: { itemLines: true } },
+      },
+    });
+    const merged = this.mergeDuplicateShipmentRows(allRows);
+    return { row: merged[0] ?? null, userIds };
+  }
+
+  async getShipmentDetail(
+    orgId: string,
+    amazonShipmentId: string,
+    _marketplaceId?: string,
+    preferredUserId?: string,
+  ) {
+    let { row, userIds } = await this.loadMergedShipmentRow(orgId, amazonShipmentId);
+    if (!row) {
+      throw new NotFoundException('Shipment not found');
+    }
+
+    if (row.itemLines.length === 0) {
+      try {
+        await this.ensureShipmentItemLinesFromAmazon(
+          orgId,
+          amazonShipmentId,
+          row.id,
+          preferredUserId,
+        );
+        ({ row, userIds } = await this.loadMergedShipmentRow(orgId, amazonShipmentId));
+        if (!row) {
+          throw new NotFoundException('Shipment not found');
+        }
+      } catch (e) {
+        this.logger.warn(
+          `[getShipmentDetail] item backfill failed for ${amazonShipmentId}: ${
+            e instanceof Error ? e.message : String(e)
+          }`,
+        );
+      }
+    }
+
+    const skus = [
+      ...new Set(
+        row.itemLines
+          .map((l) => l.sellerSku)
+          .filter((sku): sku is string => sku.length > 0),
+      ),
+    ];
+    const asins = [
+      ...new Set(
+        row.itemLines
+          .map((l) => l.asin)
+          .filter((asin): asin is string => asin != null && asin.length > 0),
+      ),
+    ];
+    const { bySku: productBySku, byAsin: productByAsin } =
+      await this.loadShipmentItemProductMaps(userIds, skus, asins);
+
+    const resolved = { ...row, ...this.resolveShipmentUnitTotals(row) };
+    const items = row.itemLines.map((line) =>
+      this.mapShipmentItemLineDto(line, productBySku, productByAsin),
+    );
+    const summary = this.mapShipmentRow({
+      ...resolved,
+      _count: { itemLines: items.length },
+    });
+
+    return { ...summary, items, itemLineCount: items.length };
   }
 
   /**
@@ -9937,8 +10777,8 @@ export class AmazonService {
       shipmentName: string | null;
     }>;
   }> {
-    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
-    const rows = await this.prisma.shipment.findMany({
+    const userIds = await this.getOrgAmazonShipmentReadUserIds(orgId);
+    const raw = await this.prisma.shipment.findMany({
       where: {
         userId: { in: userIds },
         unitsMissing: { gt: 0 },
@@ -9947,11 +10787,22 @@ export class AmazonService {
         shipmentId: true,
         shipmentName: true,
         unitsMissing: true,
+        unitsSent: true,
         pickupDate: true,
         createdDate: true,
+        updatedAt: true,
+        _count: { select: { itemLines: true } },
       },
       orderBy: [{ createdDate: 'desc' }, { pickupDate: 'desc' }],
     });
+    const byId = new Map<string, (typeof raw)[number]>();
+    for (const row of raw) {
+      const prev = byId.get(row.shipmentId);
+      if (!prev || this.compareShipmentRowRichness(row, prev) < 0) {
+        byId.set(row.shipmentId, row);
+      }
+    }
+    const rows = [...byId.values()];
     const shipments = rows.map((r) => {
       const sentDate =
         (r.pickupDate ?? r.createdDate)?.toISOString().slice(0, 10) ?? null;
@@ -9985,19 +10836,21 @@ export class AmazonService {
     rawResponses?: unknown[];
   }> {
     const credentials = await this.getAmazonCredentialsForOrg(orgId, preferredUserId);
-    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
+    const aggregateUserIds = await this.getOrgAmazonAggregateUserIds(orgId);
+    const shipmentReadUserIds = await this.getOrgAmazonShipmentReadUserIds(orgId);
+    const userIds = shipmentReadUserIds;
     const account =
-      preferredUserId && userIds.includes(preferredUserId)
+      preferredUserId && aggregateUserIds.includes(preferredUserId)
         ? await this.prisma.sellerAccount.findUnique({
             where: {
               userId_marketplace: { userId: preferredUserId, marketplace: 'amazon' },
             },
           })
         : await this.prisma.sellerAccount.findFirst({
-            where: { userId: { in: userIds }, marketplace: 'amazon' },
+            where: { userId: { in: aggregateUserIds }, marketplace: 'amazon' },
             orderBy: { updatedAt: 'desc' },
           });
-    const ownerUserId = account?.userId ?? userIds[0];
+    const ownerUserId = account?.userId ?? aggregateUserIds[0];
     if (!ownerUserId) {
       return { synced: 0, errors: ['No Amazon account found for org'] };
     }
@@ -10051,25 +10904,6 @@ export class AmazonService {
       return Number.isNaN(n) ? 0 : n;
     };
 
-    /** Parse date from ShipmentName when API does not return CreatedDate. e.g. "FBA STA (11/03/2025 19:20)-BHX4" -> DD/MM/YYYY HH:MM */
-    const parseDateFromShipmentName = (name: unknown): Date | null => {
-      const s = typeof name === 'string' ? name : null;
-      if (!s) return null;
-      const match = s.match(/\((\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2}))?\)/);
-      if (!match) return null;
-      const [, day, month, year, hour = '0', min = '0'] = match;
-      const d = new Date(
-        parseInt(year, 10),
-        parseInt(month, 10) - 1,
-        parseInt(day, 10),
-        parseInt(hour, 10),
-        parseInt(min, 10),
-        0,
-        0,
-      );
-      return Number.isNaN(d.getTime()) ? null : d;
-    };
-
     // Phase 1 requires the first getShipments request to specify every status; otherwise the API won't return all shipment IDs.
     // Single source of truth for all FBA inbound statuses (comma-separated in request).
     const ALL_SHIPMENT_STATUSES = [
@@ -10101,69 +10935,166 @@ export class AmazonService {
       return Array.isArray(list) ? list : [];
     };
 
-    // ——— Phase 1: Fetch shipments (last N days). First request uses DATE_RANGE; pagination uses NEXT_TOKEN. ———
-    const SHIPMENT_SYNC_DAYS = options?.days != null && options.days > 0 ? Math.min(90, Math.floor(options.days)) : 60;
+    // ——— Phase 1: Fetch shipments. Status query (no date cap) + DATE_RANGE for closed/history. ———
+    const SHIPMENT_SYNC_DAYS =
+      options?.days != null && options.days > 0
+        ? Math.min(365, Math.floor(options.days))
+        : 180;
     const now = new Date();
     const shipmentWindowStart = new Date(now.getTime() - SHIPMENT_SYNC_DAYS * 24 * 60 * 60 * 1000);
     const lastUpdatedAfterIso = shipmentWindowStart.toISOString().split('.')[0] + 'Z';
     const lastUpdatedBeforeIso = now.toISOString().split('.')[0] + 'Z';
 
-    const listRows: any[] = [];
-    let nextToken: string | undefined;
+    const shipmentById = new Map<string, any>();
+    const ingestShipmentPage = (items: any[]): boolean => {
+      for (const row of items) {
+        const shipmentId =
+          row.ShipmentId ??
+          row.shipmentId ??
+          row.ShipmentIdentifier ??
+          row.shipmentIdentifier;
+        if (!shipmentId) continue;
+        shipmentById.set(String(shipmentId), row);
+        if (options?.maxShipments != null && shipmentById.size >= options.maxShipments) {
+          return false;
+        }
+      }
+      return true;
+    };
+
     await reportProgress(0, 100);
+
+    // 1a: All statuses, no date window — Amazon requires every status on the first SHIPMENT request.
+    // DATE_RANGE (phase 1b) misses rows when LastUpdatedDate is null (common on v0).
     this.logger.log(
-      `[syncShipments] Phase 1: getShipments last ${SHIPMENT_SYNC_DAYS} days, all ${ALL_SHIPMENT_STATUSES.length} statuses`,
+      `[syncShipments] Phase 1a: getShipments by status (all ${ALL_SHIPMENT_STATUSES.length} statuses, no date window)`,
     );
+    let statusNextToken: string | undefined;
+    let statusDone = false;
     do {
       try {
         if (throttleMs > 0) await new Promise((r) => setTimeout(r, throttleMs));
-        const queryType: 'NEXT_TOKEN' | 'DATE_RANGE' | 'SHIPMENT' = nextToken ? 'NEXT_TOKEN' : 'DATE_RANGE';
         const res = (await this.spApiClient.getFbaInboundShipments(credentials, {
           marketplaceId,
-          queryType,
-          ...(nextToken
-            ? { nextToken }
-            : {
-                lastUpdatedAfter: lastUpdatedAfterIso,
-                lastUpdatedBefore: lastUpdatedBeforeIso,
-                shipmentStatusList: [...ALL_SHIPMENT_STATUSES],
-              }),
+          queryType: statusNextToken ? 'NEXT_TOKEN' : 'SHIPMENT',
+          ...(statusNextToken
+            ? { nextToken: statusNextToken }
+            : { shipmentStatusList: [...ALL_SHIPMENT_STATUSES] }),
         })) as any;
         const payload = res?.payload ?? res;
         rawResponses.push(payload);
-        // No DTO: payload and ShipmentData items are raw API JSON; we never map or strip fields.
-        this.logger.log(
-          `[syncShipments] getShipments page: payload keys=${Object.keys(payload ?? {}).join(', ')} ShipmentData length=${parseShipmentList(payload).length}`,
-        );
         const items = parseShipmentList(payload);
-        for (const row of items) {
-          listRows.push(row);
-          if (options?.maxShipments != null && listRows.length >= options.maxShipments) break;
-        }
-        if (options?.maxShipments != null && listRows.length >= options.maxShipments) {
-          nextToken = undefined;
+        this.logger.log(
+          `[syncShipments] Phase 1a page: ${items.length} shipment(s), total unique=${shipmentById.size}`,
+        );
+        if (!ingestShipmentPage(items)) {
+          statusDone = true;
+          statusNextToken = undefined;
         } else {
-          nextToken = payload?.NextToken ?? payload?.nextToken ?? undefined;
+          statusNextToken = payload?.NextToken ?? payload?.nextToken ?? undefined;
         }
       } catch (e) {
-        const msg = (e as Error).message ?? 'Failed to fetch shipments';
+        const msg = (e as Error).message ?? 'Failed to fetch shipments by status';
         errors.push(msg);
-        this.logger.warn(`[syncShipments] Phase 1 request failed: ${msg}`);
+        this.logger.warn(`[syncShipments] Phase 1a failed: ${msg}`);
         break;
       }
-    } while (nextToken);
+    } while (statusNextToken && !statusDone);
 
-    const rowsToProcess =
+    // 1b: Last N days by last-updated (closed + anything status query missed).
+    let dateNextToken: string | undefined;
+    let dateDone = shipmentById.size >= (options?.maxShipments ?? Infinity);
+    if (!dateDone) {
+      this.logger.log(
+        `[syncShipments] Phase 1b: getShipments last ${SHIPMENT_SYNC_DAYS} days, all ${ALL_SHIPMENT_STATUSES.length} statuses`,
+      );
+      do {
+        try {
+          if (throttleMs > 0) await new Promise((r) => setTimeout(r, throttleMs));
+          const res = (await this.spApiClient.getFbaInboundShipments(credentials, {
+            marketplaceId,
+            queryType: dateNextToken ? 'NEXT_TOKEN' : 'DATE_RANGE',
+            ...(dateNextToken
+              ? { nextToken: dateNextToken }
+              : {
+                  lastUpdatedAfter: lastUpdatedAfterIso,
+                  lastUpdatedBefore: lastUpdatedBeforeIso,
+                  shipmentStatusList: [...ALL_SHIPMENT_STATUSES],
+                }),
+          })) as any;
+          const payload = res?.payload ?? res;
+          rawResponses.push(payload);
+          const items = parseShipmentList(payload);
+          this.logger.log(
+            `[syncShipments] Phase 1b page: ${items.length} shipment(s), total unique=${shipmentById.size}`,
+          );
+          if (!ingestShipmentPage(items)) {
+            dateDone = true;
+            dateNextToken = undefined;
+          } else {
+            dateNextToken = payload?.NextToken ?? payload?.nextToken ?? undefined;
+          }
+        } catch (e) {
+          const msg = (e as Error).message ?? 'Failed to fetch shipments by date';
+          errors.push(msg);
+          this.logger.warn(`[syncShipments] Phase 1b failed: ${msg}`);
+          break;
+        }
+      } while (dateNextToken && !dateDone);
+    }
+
+    const listRows = [...shipmentById.values()];
+    let rowsToProcess =
       options?.maxShipments != null
         ? listRows.slice(0, options.maxShipments)
         : listRows;
+
+    // Keep enriching shipments already in DB even when Amazon's list query skipped them.
+    const apiShipmentIds = new Set(
+      rowsToProcess
+        .map((row) =>
+          String(
+            row.ShipmentId ??
+              row.shipmentId ??
+              row.ShipmentIdentifier ??
+              row.shipmentIdentifier ??
+              '',
+          ).trim(),
+        )
+        .filter((id) => id.length > 0),
+    );
+    const dbOnlyRows = await this.prisma.shipment.findMany({
+      where: { userId: { in: userIds } },
+      select: {
+        shipmentId: true,
+        shipmentStatus: true,
+        shipmentName: true,
+        lastUpdatedDate: true,
+      },
+    });
+    for (const dbRow of dbOnlyRows) {
+      if (apiShipmentIds.has(dbRow.shipmentId)) continue;
+      if (
+        options?.maxShipments != null &&
+        rowsToProcess.length >= options.maxShipments
+      ) {
+        break;
+      }
+      rowsToProcess.push({
+        ShipmentId: dbRow.shipmentId,
+        ShipmentStatus: dbRow.shipmentStatus,
+        ShipmentName: dbRow.shipmentName,
+        LastUpdatedDate: dbRow.lastUpdatedDate,
+      });
+      apiShipmentIds.add(dbRow.shipmentId);
+    }
     this.logger.log(`[syncShipments] Phase 1 done: ${listRows.length} shipment(s) from API, processing ${rowsToProcess.length}. Saving to DB.`);
     if (rowsToProcess.length === 0) {
       await reportProgress(100, 100);
     }
 
-    // Statuses that mean "checked in at FC" – we record lastUpdatedDate as checkedInDate when we see these
-    const CHECKED_IN_STATUSES = ['CLOSED', 'RECEIVING', 'Closed', 'Receiving'];
+    // Statuses that mean "checked in at FC" – we record closed/last-updated as checkedInDate when we see these
+    const CHECKED_IN_STATUSES = [...FBA_CHECKED_IN_STATUSES];
 
     // Raw API data only: no DTO or mapper – we use the same objects from getFbaInboundShipments (JSON.parse(response.body)).
     // Log full first shipment object so no field is hidden by truncation (e.g. LastUpdatedDate, ClosedDate).
@@ -10181,22 +11112,23 @@ export class AmazonService {
     for (const row of rowsToProcess) {
       const shipmentId = row.ShipmentId ?? row.shipmentId ?? row.ShipmentIdentifier ?? row.shipmentIdentifier;
       if (!shipmentId) continue;
+      const rowDates = extractInboundShipmentDatesFromRow(
+        row as Record<string, unknown>,
+      );
       // Created: API may return CreatedDate; else parse from ShipmentName e.g. "FBA STA (11/03/2025 19:20)-BHX4"
       const createdDate =
+        rowDates.created ??
         parseDate(
           row.CreatedDate ?? row.createdDate ?? row.Created ?? row.created ?? row.Created_date ?? row.created_date,
-        ) ?? parseDateFromShipmentName(row.ShipmentName ?? row.shipmentName);
-      // Last updated / closed: try every plausible key (API may return LastUpdatedDate or ClosedDate even if not in v0 schema)
+        ) ??
+        parseDateFromShipmentName(row.ShipmentName ?? row.shipmentName);
       const lastUpdatedDate =
+        rowDates.lastUpdated ??
         parseDate(
           row.LastUpdatedDate ??
             row.lastUpdatedDate ??
             row.LastUpdatedAt ??
             row.lastUpdatedAt ??
-            row.ClosedDate ??
-            row.closedDate ??
-            row.ClosedAt ??
-            row.closedAt ??
             row.LastUpdated ??
             row.lastUpdated ??
             row.LastUpdateDate ??
@@ -10208,6 +11140,15 @@ export class AmazonService {
             row.Last_updated_date ??
             row.last_updated_date,
         );
+      const closedDate =
+        rowDates.closed ??
+        parseDate(
+          row.ClosedDate ??
+            row.closedDate ??
+            row.ClosedAt ??
+            row.closedAt,
+        );
+      const checkInFromRow = rowDates.checkIn ?? rowDates.received;
       if (rowsToProcess.indexOf(row) === 0) {
         const dateLikeKeys = Object.keys(row).filter(
           (k) =>
@@ -10230,18 +11171,34 @@ export class AmazonService {
       let checkedInDateIsClosedDate: boolean | undefined = undefined;
 
       const existing = await this.prisma.shipment.findUnique({
-        where: { userId_shipmentId: { userId: ownerUserId, shipmentId: String(shipmentId) } },
-        select: { shipmentStatus: true, checkedInDate: true },
+        where: {
+          userId_shipmentId: {
+            userId: ownerUserId,
+            shipmentId: String(shipmentId),
+          },
+        },
+        select: { id: true, userId: true, shipmentStatus: true },
       });
-      // Automatic check-in: only set from API when we don't already have a date (1st preference = automatic timestamp when status first changed; never overwrite existing automatic or manual).
-      if (lastUpdatedDate && (statusUpper === 'CLOSED' || statusUpper === 'RECEIVING') && existing?.checkedInDate == null) {
+      const prevStatusUpper = (existing?.shipmentStatus ?? '').toUpperCase();
+      const wasAtFc = CHECKED_IN_STATUSES.some((s) => s === prevStatusUpper);
+      const nowAtFc = CHECKED_IN_STATUSES.some((s) => s === statusUpper);
+      const checkInCandidate =
+        checkInFromRow ?? closedDate ?? lastUpdatedDate;
+      if (nowAtFc && checkInCandidate) {
         const wasAlreadyCheckedIn =
-          existing?.shipmentStatus != null &&
-          CHECKED_IN_STATUSES.some((s) => existing.shipmentStatus!.toUpperCase() === s.toUpperCase());
-        checkedInDate = lastUpdatedDate;
-        checkedInDateIsClosedDate = !existing || wasAlreadyCheckedIn;
+          existing?.shipmentStatus != null && wasAtFc;
+        checkedInDate = checkInCandidate;
+        checkedInDateIsClosedDate =
+          statusUpper === 'CLOSED' ||
+          statusUpper === 'RECEIVING' ||
+          closedDate != null ||
+          checkInFromRow != null ||
+          (!existing || wasAlreadyCheckedIn);
+      } else if (!wasAtFc && nowAtFc && checkInCandidate) {
+        checkedInDate = checkInCandidate;
+        checkedInDateIsClosedDate =
+          statusUpper === 'CLOSED' || statusUpper === 'RECEIVING';
       }
-      // When API does not return LastUpdatedDate, we do not set checkedInDate; user can enter manually in the app.
 
       const checkInDurationDays =
         createdDate && checkedInDate
@@ -10272,9 +11229,14 @@ export class AmazonService {
 
       try {
         await this.prisma.shipment.upsert({
-          where: { userId_shipmentId: { userId: ownerUserId, shipmentId: String(shipmentId) } },
-          update: updatePayload,
+          where: {
+            userId_shipmentId: {
+              userId: ownerUserId,
+              shipmentId: String(shipmentId),
+            },
+          },
           create: createPayload,
+          update: updatePayload,
         });
         synced += 1;
         if (rowsToProcess.length > 0) {
@@ -10293,7 +11255,16 @@ export class AmazonService {
 
     // ——— Phase 2: For each shipment ID, fetch items + transport and update DB (batches of 4 in parallel) ———
     this.logger.log(`[syncShipments] Phase 2: enriching ${rowsToProcess.length} shipment(s) with items and transport.`);
-    const STATUSES_WITH_TRANSPORT = ['WORKING', 'READY_TO_SHIP', 'SHIPPED', 'IN_TRANSIT', 'DELIVERED'];
+    const STATUSES_WITH_TRANSPORT = [
+      'WORKING',
+      'READY_TO_SHIP',
+      'SHIPPED',
+      'IN_TRANSIT',
+      'DELIVERED',
+      'CHECKED_IN',
+      'RECEIVING',
+      'CLOSED',
+    ];
     const PHASE2_BATCH = 4;
 
     const enrichOneShipment = async (row: any, index: number): Promise<void> => {
@@ -10304,12 +11275,13 @@ export class AmazonService {
       let unitsReceived = 0;
       let unitsDamaged = 0;
       let unitsDisposed = 0;
+      let itemArr: any[] = [];
       try {
-        if (throttleMs > 0) await new Promise((r) => setTimeout(r, Math.floor(throttleMs / 2)));
-        const itemsRes = (await this.spApiClient.getFbaInboundShipmentItemsByShipmentId(credentials, String(shipmentId))) as any;
-        const itemPayload = itemsRes?.payload ?? itemsRes;
-        const itemList = itemPayload?.ItemData ?? itemPayload?.itemData ?? itemPayload?.ShipmentItems ?? itemPayload?.shipmentItems ?? [];
-        const itemArr = Array.isArray(itemList) ? itemList : [];
+        itemArr = await this.fetchInboundShipmentItemsFromApi(
+          credentials,
+          String(shipmentId),
+          Math.floor(throttleMs / 2),
+        );
         for (const it of itemArr) {
           unitsSent += toInt(it.QuantityShipped ?? it.quantityShipped);
           unitsReceived += toInt(it.QuantityReceived ?? it.quantityReceived);
@@ -10334,6 +11306,12 @@ export class AmazonService {
           pickupDate = parseDate(transport.PickupDate ?? transport.pickupDate ?? transport.ShipmentPickupDate ?? transport.shipmentPickupDate) ?? null;
           transportStatus = (transport.TransportStatus ?? transport.transportStatus ?? null) ?? null;
           deliveryDate = parseDate(transport.DeliveryDate ?? transport.deliveryDate ?? transport.EstimatedDeliveryDate ?? transport.estimatedDeliveryDate) ?? null;
+          const transportDates = extractTransportDatesFromPayload(
+            transport as Record<string, unknown>,
+          );
+          pickupDate = pickupDate ?? transportDates.pickup ?? null;
+          deliveryDate =
+            deliveryDate ?? transportDates.delivery ?? transportDates.received ?? null;
         } catch (e) {
           const msg = (e as Error).message ?? String(e);
           if (!msg.includes('403') && !msg.includes('Unauthorized')) {
@@ -10342,24 +11320,123 @@ export class AmazonService {
         }
       }
 
+      const rowStatusUpper = rowStatus.toUpperCase();
+      if (
+        !pickupDate &&
+        ['SHIPPED', 'IN_TRANSIT', 'DELIVERED'].includes(rowStatusUpper)
+      ) {
+        pickupDate =
+          parseDate(
+            row.LastUpdatedDate ??
+              row.lastUpdatedDate ??
+              row.LastUpdatedAt ??
+              row.lastUpdatedAt,
+          ) ?? null;
+      }
+
       const damageClosedDate = parseDate(row.DamageClosedDate ?? row.damageClosedDate ?? row.UnitsDamageClosedDate ?? row.unitsDamageClosedDate);
-      const unitsMissing = Math.max(0, unitsSent - unitsReceived);
 
       try {
+        const shipmentRecord = await this.prisma.shipment.findUnique({
+          where: {
+            userId_shipmentId: {
+              userId: ownerUserId,
+              shipmentId: String(shipmentId),
+            },
+          },
+          select: {
+            id: true,
+            checkedInDate: true,
+            checkedInDateIsClosedDate: true,
+            createdDate: true,
+            shipmentStatus: true,
+            unitsSent: true,
+            unitsReceived: true,
+            unitsDamaged: true,
+            unitsDisposed: true,
+          },
+        });
+        if (!shipmentRecord) return;
+
+        const hasItemLines = itemArr.length > 0;
+        const effectiveUnitsSent = hasItemLines
+          ? unitsSent
+          : (shipmentRecord.unitsSent ?? 0);
+        const effectiveUnitsReceived = hasItemLines
+          ? unitsReceived
+          : (shipmentRecord.unitsReceived ?? 0);
+        const effectiveUnitsDamaged = hasItemLines
+          ? unitsDamaged
+          : (shipmentRecord.unitsDamaged ?? 0);
+        const effectiveUnitsDisposed = hasItemLines
+          ? unitsDisposed
+          : (shipmentRecord.unitsDisposed ?? 0);
+        const unitsMissing = Math.max(
+          0,
+          effectiveUnitsSent - effectiveUnitsReceived,
+        );
+
+        const checkInPatch: {
+          checkedInDate?: Date;
+          checkedInDateIsClosedDate?: boolean;
+          checkInDurationDays?: number;
+        } = {};
+        const effectiveStatus = rowStatusUpper;
+        if (FBA_CHECKED_IN_STATUSES.some((s) => s === effectiveStatus)) {
+          const checkInCandidate =
+            deliveryDate ??
+            parseDate(
+              row.ClosedDate ??
+                row.closedDate ??
+                row.ClosedAt ??
+                row.closedAt,
+            ) ??
+            parseDate(
+              row.LastUpdatedDate ??
+                row.lastUpdatedDate ??
+                row.LastUpdatedAt ??
+                row.lastUpdatedAt,
+            );
+          if (checkInCandidate) {
+            checkInPatch.checkedInDate = checkInCandidate;
+            checkInPatch.checkedInDateIsClosedDate =
+              effectiveStatus === 'CLOSED' || effectiveStatus === 'RECEIVING';
+            if (shipmentRecord.createdDate) {
+              checkInPatch.checkInDurationDays = Math.max(
+                0,
+                Math.floor(
+                  (checkInCandidate.getTime() -
+                    shipmentRecord.createdDate.getTime()) /
+                    (24 * 60 * 60 * 1000),
+                ),
+              );
+            }
+          }
+        }
+
         await this.prisma.shipment.update({
-          where: { userId_shipmentId: { userId: ownerUserId, shipmentId: String(shipmentId) } },
+          where: { id: shipmentRecord.id },
           data: {
-            unitsSent,
-            unitsReceived,
-            unitsDamaged,
-            unitsDisposed,
+            unitsSent: effectiveUnitsSent,
+            unitsReceived: effectiveUnitsReceived,
+            unitsDamaged: effectiveUnitsDamaged,
+            unitsDisposed: effectiveUnitsDisposed,
             unitsMissing,
             pickupDate: pickupDate ?? undefined,
             transportStatus: transportStatus ?? undefined,
             deliveryDate: deliveryDate ?? undefined,
             damageClosedDate: damageClosedDate ?? undefined,
+            ...checkInPatch,
           },
         });
+
+        if (hasItemLines) {
+          await this.persistShipmentItemLinesForRecord(
+            shipmentRecord.id,
+            ownerUserId,
+            itemArr,
+          );
+        }
       } catch (e) {
         const msg = (e as Error).message ?? String(e);
         errors.push(`Shipment ${shipmentId} update: ${msg}`);
@@ -10371,9 +11448,283 @@ export class AmazonService {
       await Promise.all(chunk.map((row, j) => enrichOneShipment(row, start + j)));
       if (rowsToProcess.length > 0) {
         const done = Math.min(start + chunk.length, rowsToProcess.length);
-        const stageProgress = 40 + Math.floor((done / rowsToProcess.length) * 60);
-        await reportProgress(Math.min(100, stageProgress), 100);
+        const stageProgress = 40 + Math.floor((done / rowsToProcess.length) * 30);
+        await reportProgress(Math.min(70, stageProgress), 100);
       }
+    }
+
+    // Phase 2b: DB rows still missing SKU lines / zero sent — fetch items directly.
+    const STALE_ITEM_STATUSES = [
+      'CLOSED',
+      'RECEIVING',
+      'SHIPPED',
+      'DELIVERED',
+      'CHECKED_IN',
+      'IN_TRANSIT',
+    ];
+    const staleCandidates = await this.prisma.shipment.findMany({
+      where: {
+        userId: ownerUserId,
+        shipmentStatus: { in: STALE_ITEM_STATUSES },
+        OR: [
+          { unitsSent: 0, itemLines: { none: {} } },
+          { unitsSent: { gt: 0 }, itemLines: { none: {} } },
+        ],
+      },
+      select: {
+        id: true,
+        shipmentId: true,
+        userId: true,
+        unitsSent: true,
+        updatedAt: true,
+        _count: { select: { itemLines: true } },
+      },
+      orderBy: [{ unitsSent: 'desc' }, { updatedAt: 'desc' }],
+    });
+    const staleByShipmentId = new Map<string, (typeof staleCandidates)[number]>();
+    for (const row of staleCandidates) {
+      const prev = staleByShipmentId.get(row.shipmentId);
+      if (!prev || this.compareShipmentRowRichness(row, prev) < 0) {
+        staleByShipmentId.set(row.shipmentId, row);
+      }
+    }
+    const staleRows = [...staleByShipmentId.values()];
+    if (staleRows.length > 0) {
+      this.logger.log(
+        `[syncShipments] Phase 2b: item backfill for ${staleRows.length} shipment(s) with missing SKU lines.`,
+      );
+      for (let i = 0; i < staleRows.length; i += PHASE2_BATCH) {
+        const chunk = staleRows.slice(i, i + PHASE2_BATCH);
+        await Promise.all(
+          chunk.map(async (row) => {
+            try {
+              await this.ensureShipmentItemLinesFromAmazon(
+                orgId,
+                row.shipmentId,
+                row.id,
+                row.userId,
+              );
+            } catch (e) {
+              const msg = e instanceof Error ? e.message : String(e);
+              errors.push(`Shipment ${row.shipmentId} item backfill: ${msg}`);
+            }
+          }),
+        );
+        const done = Math.min(i + chunk.length, staleRows.length);
+        const stageProgress =
+          70 + Math.floor((done / Math.max(1, staleRows.length)) * 5);
+        await reportProgress(Math.min(75, stageProgress), 100);
+      }
+    }
+
+    // ——— Phase 3: Inbound API v2024 — real delivery windows + plan lastUpdated for check-in ———
+    const targetConfirmationIds = new Set(
+      rowsToProcess
+        .map((row) =>
+          String(
+            row.ShipmentId ??
+              row.shipmentId ??
+              row.ShipmentIdentifier ??
+              row.shipmentIdentifier ??
+              '',
+          ).trim(),
+        )
+        .filter((id) => id.length > 0),
+    );
+    const v2024Matched = new Set<string>();
+    if (targetConfirmationIds.size > 0) {
+      this.logger.log(
+        `[syncShipments] Phase 3: Inbound v2024 date enrichment for up to ${targetConfirmationIds.size} shipment(s).`,
+      );
+      const planStatuses: Array<'SHIPPED' | 'ACTIVE'> = ['SHIPPED', 'ACTIVE'];
+      const V2024_BATCH = 2;
+      try {
+        for (const planStatus of planStatuses) {
+          if (v2024Matched.size >= targetConfirmationIds.size) break;
+          let paginationToken: string | undefined;
+          let stopPaging = false;
+          do {
+            if (throttleMs > 0) await new Promise((r) => setTimeout(r, throttleMs));
+            const listRes = (await this.spApiClient.listFbaInboundPlans(credentials, {
+              pageSize: 30,
+              paginationToken,
+              status: planStatus,
+              sortBy: 'LAST_UPDATED_TIME',
+              sortOrder: 'DESC',
+            })) as Record<string, unknown>;
+            const listPayload = (listRes?.payload ?? listRes) as Record<string, unknown>;
+            const inboundPlans = (listPayload.inboundPlans ?? []) as Record<string, unknown>[];
+            for (const planSummary of inboundPlans) {
+              if (v2024Matched.size >= targetConfirmationIds.size) break;
+              const summaryUpdated = parseDate(
+                planSummary.lastUpdatedAt ?? planSummary.LastUpdatedAt,
+              );
+              const summaryCreated = parseDate(
+                planSummary.createdAt ?? planSummary.CreatedAt,
+              );
+              if (
+                summaryUpdated != null &&
+                summaryUpdated < shipmentWindowStart &&
+                summaryCreated != null &&
+                summaryCreated < shipmentWindowStart
+              ) {
+                stopPaging = true;
+                break;
+              }
+
+              const inboundPlanId = String(
+                planSummary.inboundPlanId ?? planSummary.InboundPlanId ?? '',
+              ).trim();
+              if (!inboundPlanId) continue;
+
+              if (throttleMs > 0) await new Promise((r) => setTimeout(r, throttleMs));
+              let planDetail: Record<string, unknown>;
+              try {
+                const planRes = (await this.spApiClient.getFbaInboundPlan(
+                  credentials,
+                  inboundPlanId,
+                )) as Record<string, unknown>;
+                planDetail = (planRes?.payload ?? planRes) as Record<string, unknown>;
+              } catch (e) {
+                const msg = (e as Error).message ?? String(e);
+                if (!msg.includes('403') && !msg.includes('Unauthorized')) {
+                  errors.push(`Inbound plan ${inboundPlanId}: ${msg}`);
+                }
+                continue;
+              }
+
+              const shipmentSummaries = (planDetail.shipments ?? []) as Record<
+                string,
+                unknown
+              >[];
+              for (let i = 0; i < shipmentSummaries.length; i += V2024_BATCH) {
+                const chunk = shipmentSummaries.slice(i, i + V2024_BATCH);
+                await Promise.all(
+                  chunk.map(async (shSummary) => {
+                    const internalShipmentId = String(
+                      shSummary.shipmentId ?? shSummary.ShipmentId ?? '',
+                    ).trim();
+                    if (!internalShipmentId) return;
+
+                    if (throttleMs > 0) {
+                      await new Promise((r) => setTimeout(r, Math.floor(throttleMs / 2)));
+                    }
+                    let shipmentDetail: Record<string, unknown>;
+                    try {
+                      const shRes = (await this.spApiClient.getFbaInboundPlanShipment(
+                        credentials,
+                        inboundPlanId,
+                        internalShipmentId,
+                      )) as Record<string, unknown>;
+                      shipmentDetail = (shRes?.payload ?? shRes) as Record<string, unknown>;
+                    } catch {
+                      return;
+                    }
+
+                    const dates = extractInboundV2024ShipmentDates(planDetail, shipmentDetail);
+                    const confirmationId = dates.shipmentConfirmationId;
+                    if (!confirmationId || !targetConfirmationIds.has(confirmationId)) return;
+
+                    const record = await this.prisma.shipment.findFirst({
+                      where: {
+                        userId: { in: userIds },
+                        shipmentId: confirmationId,
+                      },
+                      orderBy: [{ unitsSent: 'desc' }, { updatedAt: 'desc' }],
+                      select: {
+                        id: true,
+                        checkedInDate: true,
+                        checkedInDateIsClosedDate: true,
+                        createdDate: true,
+                        deliveryDate: true,
+                        lastUpdatedDate: true,
+                        pickupDate: true,
+                      },
+                    });
+                    if (!record) return;
+
+                    const atFc =
+                      dates.status != null &&
+                      FBA_CHECKED_IN_STATUSES.some((s) => s === dates.status);
+                    const deliveryCandidate =
+                      dates.appointmentEnd ??
+                      dates.deliveryWindowEnd ??
+                      dates.deliveryWindowStart;
+                    const checkInCandidate = atFc
+                      ? dates.planLastUpdatedAt ?? deliveryCandidate
+                      : null;
+
+                    const patch: {
+                      lastUpdatedDate?: Date;
+                      deliveryDate?: Date;
+                      pickupDate?: Date;
+                      checkedInDate?: Date;
+                      checkedInDateIsClosedDate?: boolean;
+                      checkInDurationDays?: number;
+                    } = {};
+                    if (dates.planLastUpdatedAt) {
+                      if (
+                        !record.lastUpdatedDate ||
+                        dates.planLastUpdatedAt > record.lastUpdatedDate
+                      ) {
+                        patch.lastUpdatedDate = dates.planLastUpdatedAt;
+                      }
+                    }
+                    if (deliveryCandidate) {
+                      if (!record.deliveryDate || deliveryCandidate > record.deliveryDate) {
+                        patch.deliveryDate = deliveryCandidate;
+                      }
+                    }
+                    if (dates.readyToShipEnd && !record.pickupDate) {
+                      patch.pickupDate = dates.readyToShipEnd;
+                    }
+                    if (checkInCandidate) {
+                      patch.checkedInDate = checkInCandidate;
+                      patch.checkedInDateIsClosedDate =
+                        dates.status === 'CLOSED' ||
+                        dates.status === 'RECEIVING' ||
+                        dates.status === 'CHECKED_IN';
+                      if (record.createdDate) {
+                        patch.checkInDurationDays = Math.max(
+                          0,
+                          Math.floor(
+                            (checkInCandidate.getTime() - record.createdDate.getTime()) /
+                              (24 * 60 * 60 * 1000),
+                          ),
+                        );
+                      }
+                    }
+
+                    if (Object.keys(patch).length > 0) {
+                      await this.prisma.shipment.update({
+                        where: { id: record.id },
+                        data: patch,
+                      });
+                    }
+                    v2024Matched.add(confirmationId);
+                  }),
+                );
+              }
+            }
+            if (stopPaging) {
+              paginationToken = undefined;
+            } else {
+              const pagination = listPayload.pagination as Record<string, unknown> | undefined;
+              paginationToken = (pagination?.nextToken ?? listPayload.nextToken) as
+                | string
+                | undefined;
+            }
+          } while (paginationToken && v2024Matched.size < targetConfirmationIds.size);
+        }
+        this.logger.log(
+          `[syncShipments] Phase 3 done: matched ${v2024Matched.size}/${targetConfirmationIds.size} via Inbound v2024.`,
+        );
+      } catch (e) {
+        const msg = (e as Error).message ?? String(e);
+        errors.push(`Inbound v2024 enrichment: ${msg}`);
+        this.logger.warn(`[syncShipments] Phase 3 failed: ${msg}`);
+      }
+      await reportProgress(95, 100);
     }
 
     await reportProgress(100, 100);
