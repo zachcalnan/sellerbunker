@@ -90,6 +90,13 @@ export class AmazonExtendedHistoryBootstrap
         return;
       }
 
+      if (!(await this.amazonSyncService.userHasPaidAccess(user.id))) {
+        this.logger.log(
+          `[extended-history] No active subscription for userId=${user.id.slice(0, 8)}…; skipping`,
+        );
+        return;
+      }
+
       const lockKey = `${LOCK_KEY_PREFIX}${user.id}`;
       let gotLock = await this.redis.setIfNotExistsWithExpiry(
         lockKey,

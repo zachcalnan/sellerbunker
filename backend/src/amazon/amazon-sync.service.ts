@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
+import { Prisma } from '@prisma/client';
 import { RedisService } from '../redis/redis.service';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -65,8 +66,13 @@ export class AmazonSyncService implements OnModuleInit {
   }
 
   /**
-   * Configure periodic batch sync when the module starts.
-   * This enqueues a repeatable job that will run every 10 minutes.
+   * Configure periodic Amazon sync when the module starts.
+   *
+   * Tiered strategy (minimize SP-API waste):
+   * - Frequent: hot orders (~5 min, last few days only).
+   * - Moderate: in-stock / recently-sold list prices (~30 min).
+   * - Nightly: full orders+finances, inventory, shipments, titles, cold list prices, fee estimates.
+   * - On signup: full-sync + post-initial (not on this scheduler).
    */
   async onModuleInit(): Promise<void> {
     const enabled = (process.env.ENABLE_AMAZON_SYNC_SCHEDULER ?? 'true').toLowerCase();
@@ -77,74 +83,80 @@ export class AmazonSyncService implements OnModuleInit {
       return;
     }
 
-    const ordersEveryMs =
-      Number(process.env.AMAZON_ORDERS_SYNC_EVERY_MS) || 10 * 60 * 1000;
     const ordersHotEveryMs =
       Number(process.env.AMAZON_ORDERS_HOT_SYNC_EVERY_MS) || 5 * 60 * 1000;
-    const inventoryEveryMs =
-      Number(process.env.AMAZON_INVENTORY_SYNC_EVERY_MS) || 2 * 60 * 60 * 1000;
+    const ordersFullSyncCron =
+      process.env.AMAZON_ORDERS_FULL_SYNC_CRON ?? '0 2 * * *';
+    const inventorySyncCron =
+      process.env.AMAZON_INVENTORY_SYNC_CRON ?? '0 3 * * *';
+    const shipmentsSyncCron =
+      process.env.AMAZON_SHIPMENTS_SYNC_CRON ?? '0 4 * * *';
+    const titlesBackfillCron =
+      process.env.AMAZON_TITLES_BACKFILL_CRON ?? '0 5 * * *';
+    const feeEstimateCron =
+      process.env.FEE_ESTIMATE_REFRESH_CRON ?? '0 6 * * *';
+    const listingPriceHotEveryMs =
+      Number(process.env.LISTING_PRICE_REFRESH_HOT_EVERY_MS) || 30 * 60 * 1000;
+    const listingPriceColdCron =
+      process.env.LISTING_PRICE_REFRESH_COLD_CRON ?? '0 7 * * *';
 
     await this.queue.add(
       'orders-hot-sync',
       {},
       {
-        repeat: {
-          every: ordersHotEveryMs,
-        },
+        repeat: { every: ordersHotEveryMs },
         jobId: 'orders-hot-sync',
       },
     );
 
+    await this.removeLegacyRepeatable(
+      'orders-batch-sync',
+      Number(process.env.AMAZON_ORDERS_SYNC_EVERY_MS) || 10 * 60 * 1000,
+    );
     await this.queue.add(
       'orders-batch-sync',
       {},
       {
-        repeat: {
-          every: ordersEveryMs,
-        },
+        repeat: { pattern: ordersFullSyncCron },
         jobId: 'orders-batch-sync',
       },
     );
 
+    await this.removeLegacyRepeatable(
+      'inventory-batch-sync',
+      Number(process.env.AMAZON_INVENTORY_SYNC_EVERY_MS) || 2 * 60 * 60 * 1000,
+    );
     await this.queue.add(
       'inventory-batch-sync',
       {},
       {
-        repeat: {
-          every: inventoryEveryMs,
-        },
+        repeat: { pattern: inventorySyncCron },
         jobId: 'inventory-batch-sync',
       },
     );
 
-    const shipmentsEveryMs =
-      Number(process.env.AMAZON_SHIPMENTS_SYNC_EVERY_MS) || 2 * 60 * 60 * 1000;
+    await this.removeLegacyRepeatable(
+      'shipments-batch-sync',
+      Number(process.env.AMAZON_SHIPMENTS_SYNC_EVERY_MS) || 2 * 60 * 60 * 1000,
+    );
     await this.queue.add(
       'shipments-batch-sync',
       {},
       {
-        repeat: {
-          every: shipmentsEveryMs,
-        },
+        repeat: { pattern: shipmentsSyncCron },
         jobId: 'shipments-batch-sync',
       },
     );
 
-    // Fee estimate refresh: once per day (default 6 AM) to avoid Product Fees API rate limits
-    const feeEstimateCron =
-      process.env.FEE_ESTIMATE_REFRESH_CRON ?? '0 6 * * *';
     await this.queue.add(
       'fee-estimate-refresh',
       {},
       {
-        repeat: {
-          pattern: feeEstimateCron,
-        },
+        repeat: { pattern: feeEstimateCron },
         jobId: 'fee-estimate-refresh',
       },
     );
 
-    // Listings Restrictions → `asin_selling_eligibility` for one dedicated account (see `AMAZON_EXTENDED_ORDER_HISTORY_EMAIL`).
     const sellingEligibilityCron =
       process.env.SELLING_ELIGIBILITY_REFRESH_CRON ?? '30 6 * * *';
     const sellingEligibilityEnabled = (
@@ -155,21 +167,12 @@ export class AmazonSyncService implements OnModuleInit {
         'selling-eligibility-daily',
         {},
         {
-          repeat: {
-            pattern: sellingEligibilityCron,
-          },
+          repeat: { pattern: sellingEligibilityCron },
           jobId: 'selling-eligibility-daily',
         },
       );
     }
 
-    // Listed price only: Listings API (no Product Fees)
-    // - Hot SKUs (in-stock or recently sold): every 5 minutes
-    // - Cold SKUs: every 60 minutes
-    const listingPriceHotEveryMs =
-      Number(process.env.LISTING_PRICE_REFRESH_HOT_EVERY_MS) || 5 * 60 * 1000;
-    const listingPriceColdEveryMs =
-      Number(process.env.LISTING_PRICE_REFRESH_COLD_EVERY_MS) || 60 * 60 * 1000;
     await this.queue.add(
       'listing-price-refresh-hot',
       {},
@@ -178,29 +181,45 @@ export class AmazonSyncService implements OnModuleInit {
         jobId: 'listing-price-refresh-hot',
       },
     );
+    await this.removeLegacyRepeatable(
+      'listing-price-refresh-cold',
+      Number(process.env.LISTING_PRICE_REFRESH_COLD_EVERY_MS) || 60 * 60 * 1000,
+    );
     await this.queue.add(
       'listing-price-refresh-cold',
       {},
       {
-        repeat: { every: listingPriceColdEveryMs },
+        repeat: { pattern: listingPriceColdCron },
         jobId: 'listing-price-refresh-cold',
       },
     );
 
-    const titlesBackfillEveryMs =
-      Number(process.env.AMAZON_TITLES_BACKFILL_EVERY_MS) || 4 * 60 * 60 * 1000;
+    await this.removeLegacyRepeatable(
+      'product-titles-backfill',
+      Number(process.env.AMAZON_TITLES_BACKFILL_EVERY_MS) || 4 * 60 * 60 * 1000,
+    );
     await this.queue.add(
       'product-titles-backfill',
       {},
       {
-        repeat: { every: titlesBackfillEveryMs },
+        repeat: { pattern: titlesBackfillCron },
         jobId: 'product-titles-backfill',
       },
     );
 
     this.logger.log(
-      `Scheduled Amazon sync jobs (ordersHot=${ordersHotEveryMs}ms, orders=${ordersEveryMs}ms, inventory=${inventoryEveryMs}ms, shipments=${shipmentsEveryMs}ms, feeCron=${feeEstimateCron}, sellingEligibility=${['1', 'true', 'yes'].includes(sellingEligibilityEnabled) ? sellingEligibilityCron : 'off'}, listingHot=${listingPriceHotEveryMs}ms, listingCold=${listingPriceColdEveryMs}ms, titlesBackfill=${titlesBackfillEveryMs}ms)`,
+      `Scheduled Amazon sync (ordersHot=${ordersHotEveryMs}ms, ordersFull=${ordersFullSyncCron}, inventory=${inventorySyncCron}, shipments=${shipmentsSyncCron}, titles=${titlesBackfillCron}, fees=${feeEstimateCron}, listingHot=${listingPriceHotEveryMs}ms, listingCold=${listingPriceColdCron}, sellingEligibility=${['1', 'true', 'yes'].includes(sellingEligibilityEnabled) ? sellingEligibilityCron : 'off'})`,
     );
+  }
+
+  /** Remove pre-cron every-N-ms repeatable jobs after schedule changes. */
+  private async removeLegacyRepeatable(jobName: string, everyMs: number): Promise<void> {
+    if (!Number.isFinite(everyMs) || everyMs <= 0) return;
+    try {
+      await this.queue.removeRepeatable(jobName, { every: everyMs });
+    } catch {
+      /* no legacy job */
+    }
   }
 
   /**
@@ -218,7 +237,13 @@ export class AmazonSyncService implements OnModuleInit {
     });
   }
 
-  async enqueueFullSync(userId: string): Promise<void> {
+  async enqueueFullSync(userId: string): Promise<boolean> {
+    if (!(await this.userHasPaidAccess(userId))) {
+      this.logger.log(
+        `[enqueueFullSync] Skipping — no active subscription (userId=${userId.slice(0, 8)}…). Subscribe to sync Amazon data.`,
+      );
+      return false;
+    }
     this.logger.log(`Enqueuing full-sync job (userId=${userId})`);
     // Set DB first so batch jobs (orders-batch-sync etc.) see progress 0 and skip this user until initial sync hits 100%
     try {
@@ -249,6 +274,7 @@ export class AmazonSyncService implements OnModuleInit {
       `Full-sync for userId=${userId}`,
       { delay: fullSyncDelayMs, lockDurationMs: fullSyncLockMs },
     );
+    return true;
   }
 
   /**
@@ -401,6 +427,12 @@ export class AmazonSyncService implements OnModuleInit {
   }
 
   async enqueueFeeSync(userId: string, orgId: string): Promise<void> {
+    if (!(await this.userHasPaidAccess(userId))) {
+      this.logger.log(
+        `[enqueueFeeSync] Skipping — no active subscription (userId=${userId.slice(0, 8)}…)`,
+      );
+      return;
+    }
     this.logger.log(`Enqueuing fee-sync job (userId=${userId}, orgId=${orgId})`);
     await this.redis.set(
       `amazon-fee-sync:${userId}`,
@@ -460,6 +492,12 @@ export class AmazonSyncService implements OnModuleInit {
 
   /** Enqueue category backfill (productType/displayGroup) to run in background. Runs after initial sync and after order sync so new ASINs get categories. */
   async enqueueCategoryBackfill(orgId: string, userId: string, options?: { limit?: number }): Promise<void> {
+    if (!(await this.userHasPaidAccess(userId))) {
+      this.logger.log(
+        `[enqueueCategoryBackfill] Skipping — no active subscription (userId=${userId.slice(0, 8)}…)`,
+      );
+      return;
+    }
     const limit = Math.min(
       250,
       Math.max(1, options?.limit ?? (Number(process.env.AMAZON_CATEGORY_BACKFILL_LIMIT) || 100)),
@@ -480,7 +518,7 @@ export class AmazonSyncService implements OnModuleInit {
 
   /**
    * Same rules as SubscriptionService.hasAccess (no Subscription import — avoids module cycle).
-   * Full catalog sync after the limited initial pass only runs when this is true.
+   * All Amazon SP-API sync / DB writes require this (active, trialing, or canceled within trial).
    */
   async userHasPaidAccess(userId: string): Promise<boolean> {
     if (this.billingBypassed()) return true;
@@ -493,6 +531,77 @@ export class AmazonSyncService implements OnModuleInit {
     if (sub.status === 'canceled' && sub.trialEndAt && new Date() < sub.trialEndAt)
       return true;
     return false;
+  }
+
+  /** Org is sync-eligible when a member with an active Amazon link has paid access. */
+  async orgHasPaidAccess(orgId: string): Promise<boolean> {
+    if (this.billingBypassed()) return true;
+    const members = await this.prisma.organizationMembership.findMany({
+      where: { orgId },
+      select: { userId: true },
+    });
+    for (const { userId } of members) {
+      const linked = await this.prisma.sellerAccount.findFirst({
+        where: { userId, marketplace: 'amazon', isActive: true },
+        select: { id: true },
+      });
+      if (!linked) continue;
+      if (await this.userHasPaidAccess(userId)) return true;
+    }
+    return false;
+  }
+
+  private subscribedAmazonSellerAccountWhere(): Prisma.SellerAccountWhereInput {
+    if (this.billingBypassed()) {
+      return { marketplace: 'amazon', isActive: true };
+    }
+    const now = new Date();
+    return {
+      marketplace: 'amazon',
+      isActive: true,
+      user: {
+        subscriptions: {
+          some: {
+            OR: [
+              { status: { in: ['active', 'trialing'] } },
+              { status: 'canceled', trialEndAt: { gt: now } },
+            ],
+          },
+        },
+      },
+    };
+  }
+
+  private subscribedAmazonOrgWhere(): Prisma.OrganizationWhereInput {
+    return {
+      members: {
+        some: {
+          user: {
+            sellerAccounts: {
+              some: this.subscribedAmazonSellerAccountWhere(),
+            },
+          },
+        },
+      },
+    };
+  }
+
+  /** Active Amazon sellers with a paid subscription — for scheduled order sync jobs. */
+  async findAmazonSellerUserIdsForScheduledSync(): Promise<string[]> {
+    const accounts = await this.prisma.sellerAccount.findMany({
+      where: this.subscribedAmazonSellerAccountWhere(),
+      select: { userId: true },
+    });
+    return accounts.map((a) => a.userId);
+  }
+
+  /** Orgs with a subscribed Amazon link — for inventory/shipments/listings batch jobs. */
+  async findAmazonOrgIdsForScheduledSync(): Promise<string[]> {
+    const orgs = await this.prisma.organization.findMany({
+      where: this.subscribedAmazonOrgWhere(),
+      select: { id: true },
+    });
+    return orgs.map((o) => o.id);
   }
 
   /** True when the limited initial-sync job has written 100% to InitialSyncProgress. */

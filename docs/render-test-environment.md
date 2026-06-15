@@ -64,14 +64,16 @@ Optional later for Amazon OAuth and SP-API:
 - `SPAPI_DEBUG_LOGS`
 - `SPAPI_THROTTLE_MS`
 
-Optional later for scheduled sync tuning:
+Optional sync tuning (defaults are tiered — hot orders every 5 min; most other jobs nightly):
 
-- `AMAZON_ORDERS_SYNC_EVERY_MS`
-- `AMAZON_INVENTORY_SYNC_EVERY_MS`
-- `AMAZON_SHIPMENTS_SYNC_EVERY_MS`
-- `FEE_ESTIMATE_REFRESH_CRON`
-- `AMAZON_TITLES_BACKFILL_EVERY_MS`
-- `AMAZON_TITLES_BACKFILL_LIMIT`
+- `AMAZON_ORDERS_HOT_SYNC_EVERY_MS` — recent orders only (default 5 min)
+- `AMAZON_ORDERS_FULL_SYNC_CRON` — full 30d orders + finances (default `0 2 * * *`)
+- `AMAZON_INVENTORY_SYNC_CRON` — FBA inventory (default `0 3 * * *`)
+- `AMAZON_SHIPMENTS_SYNC_CRON` — inbound shipments (default `0 4 * * *`)
+- `AMAZON_TITLES_BACKFILL_CRON` — product titles/images (default `0 5 * * *`)
+- `FEE_ESTIMATE_REFRESH_CRON` — Product Fees API (default `0 6 * * *`)
+- `LISTING_PRICE_REFRESH_HOT_EVERY_MS` — in-stock / recently sold prices (default 30 min)
+- `LISTING_PRICE_REFRESH_COLD_CRON` — other SKU list prices (default `0 7 * * *`)
 
 Optional later for Stripe and webhook handling:
 

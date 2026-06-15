@@ -7,6 +7,7 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
 import { AmazonService } from './amazon.service';
+import { AmazonSyncService } from './amazon-sync.service';
 import {
   AMAZON_EXTENDED_ORDER_HISTORY_DONE_KEY_PREFIX,
   AMAZON_EXTENDED_ORDER_HISTORY_EMAIL,
@@ -44,6 +45,7 @@ export class AmazonOrderLineFeeBackfillBootstrap
   constructor(
     private readonly prisma: PrismaService,
     private readonly amazonService: AmazonService,
+    private readonly amazonSyncService: AmazonSyncService,
     private readonly redis: RedisService,
   ) {}
 
@@ -112,6 +114,13 @@ export class AmazonOrderLineFeeBackfillBootstrap
       if (!amazon) {
         this.logger.log(
           `[order-line-fee-backfill] No active Amazon seller account for userId=${user.id.slice(0, 8)}…; skipping`,
+        );
+        return;
+      }
+
+      if (!(await this.amazonSyncService.userHasPaidAccess(user.id))) {
+        this.logger.log(
+          `[order-line-fee-backfill] No active subscription for userId=${user.id.slice(0, 8)}…; skipping`,
         );
         return;
       }

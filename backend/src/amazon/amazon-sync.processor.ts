@@ -76,7 +76,7 @@ export class AmazonSyncProcessor extends WorkerHost {
       'Syncing full inventory & shipments',
     );
     // Do NOT sync full orders here: that was causing many orders to appear right after the bar moved.
-    // Full 30-day order backfill is done by recurring orders-batch-sync.
+    // Full 30-day order backfill runs nightly (orders-batch-sync) and on initial signup.
     try {
       await this.amazonService.syncFbaInventory(orgId, userId);
       this.logger.log(`[post-initial-sync] full inventory done`);
@@ -105,7 +105,7 @@ export class AmazonSyncProcessor extends WorkerHost {
     } catch (ordErr) {
       const msg = ordErr instanceof Error ? ordErr.message : String(ordErr);
       this.logger.warn(
-        `[post-initial-sync] orders sync failed (non-fatal); orders-batch-sync will retry: ${msg}`,
+        `[post-initial-sync] orders sync failed (non-fatal); nightly orders-batch-sync will retry: ${msg}`,
       );
     }
     await this.amazonSyncService.enqueueFeeSync(userId, orgId);
@@ -172,10 +172,35 @@ export class AmazonSyncProcessor extends WorkerHost {
     return false;
   }
 
+  private async shouldSkipUserWithoutSubscription(
+    userId: string,
+    context: string,
+  ): Promise<boolean> {
+    if (await this.amazonSyncService.userHasPaidAccess(userId)) return false;
+    this.logger.log(
+      `[AmazonSync] Skipping ${context} — no active subscription (userId=${userId.slice(0, 8)}…)`,
+    );
+    return true;
+  }
+
+  private async shouldSkipOrgWithoutSubscription(
+    orgId: string,
+    context: string,
+  ): Promise<boolean> {
+    if (await this.amazonSyncService.orgHasPaidAccess(orgId)) return false;
+    this.logger.log(
+      `[AmazonSync] Skipping ${context} — no active subscription (orgId=${orgId.slice(0, 8)}…)`,
+    );
+    return true;
+  }
+
   /**
    * Runs when queue job name = inventory-batch-sync
    */
   public async runFullSyncInline(userId: string): Promise<void> {
+    if (await this.shouldSkipUserWithoutSubscription(userId, 'full-sync:inline')) {
+      return;
+    }
     this.logger.log(`[full-sync:inline] Starting for userId=${userId}`);
     const setProgress = async (p: number, phase?: string) => {
       await this.setCoreSyncProgress(userId, p, phase);
@@ -286,36 +311,33 @@ export class AmazonSyncProcessor extends WorkerHost {
     });
 
     if (job.name === 'inventory-batch-sync') {
-      this.logger.log('[AmazonSync] Running inventory batch sync');
+      this.logger.log('[AmazonSync] Running inventory batch sync (nightly)');
 
-      const orgs = await this.prisma.organization.findMany({
-        select: { id: true },
-      });
-
+      const orgIds = await this.amazonSyncService.findAmazonOrgIdsForScheduledSync();
       const errors: Array<{ orgId: string; error: string }> = [];
-      for (const org of orgs) {
-        if (await this.shouldSkipOrgForBatch(org.id)) {
-          this.logger.log(`[AmazonSync] Skipping org ${org.id} – initial sync not yet complete`);
+      for (const orgId of orgIds) {
+        if (await this.shouldSkipOrgForBatch(orgId)) {
+          this.logger.log(`[AmazonSync] Skipping org ${orgId} – initial sync not yet complete`);
           continue;
         }
         try {
-          await this.amazonService.syncFbaInventory(org.id);
-          const missingFees = await this.amazonService.countInventoryProductsMissingFeeSnapshot(org.id);
+          await this.amazonService.syncFbaInventory(orgId);
+          const missingFees = await this.amazonService.countInventoryProductsMissingFeeSnapshot(orgId);
           if (missingFees > 0) {
-            await this.amazonSyncService.enqueueFeeSyncForOrg(org.id);
+            await this.amazonSyncService.enqueueFeeSyncForOrg(orgId);
             this.logger.log(
-              `[AmazonSync] inventory-batch-sync: org ${org.id} — ${missingFees} SKU(s) still missing fee/list price; enqueued fee-sync`,
+              `[AmazonSync] inventory-batch-sync: org ${orgId} — ${missingFees} SKU(s) still missing fee/list price; enqueued fee-sync`,
             );
           }
         } catch (e: any) {
           const msg = e instanceof Error ? e.message : String(e);
           if (msg.includes('Amazon account not linked') || msg.includes('link your Amazon account first')) {
-            this.logger.log(`[AmazonSync] Skipping org ${org.id} – no Amazon account linked`);
+            this.logger.log(`[AmazonSync] Skipping org ${orgId} – no Amazon account linked`);
             continue;
           }
-          errors.push({ orgId: org.id, error: msg });
+          errors.push({ orgId, error: msg });
           this.logger.error(
-            `[AmazonSync] Inventory sync failed for org ${org.id}: ${msg}`,
+            `[AmazonSync] Inventory sync failed for org ${orgId}: ${msg}`,
           );
         }
       }
@@ -331,6 +353,9 @@ export class AmazonSyncProcessor extends WorkerHost {
       const { userId } = job.data as AmazonSyncJobData;
       if (!userId) {
         throw new Error('Missing userId for full-sync job');
+      }
+      if (await this.shouldSkipUserWithoutSubscription(userId, 'full-sync')) {
+        return;
       }
       try {
         this.logger.log(
@@ -359,6 +384,9 @@ export class AmazonSyncProcessor extends WorkerHost {
       if (!userId || !orgId) {
         throw new Error('Missing userId or orgId for post-initial-sync job');
       }
+      if (await this.shouldSkipUserWithoutSubscription(userId, 'post-initial-sync')) {
+        return;
+      }
       await this.executePostInitialCatalogSync(userId, orgId);
     }
 
@@ -366,6 +394,9 @@ export class AmazonSyncProcessor extends WorkerHost {
       const { userId, orgId } = job.data as AmazonSyncJobData;
       if (!userId || !orgId) {
         throw new Error('Missing userId or orgId for fee-sync job');
+      }
+      if (await this.shouldSkipUserWithoutSubscription(userId, 'fee-sync')) {
+        return;
       }
       try {
         this.logger.log(`[fee-sync] Starting for userId=${userId}, orgId=${orgId}`);
@@ -404,12 +435,9 @@ export class AmazonSyncProcessor extends WorkerHost {
     }
 
     if (job.name === 'orders-hot-sync') {
-      const accounts = await this.prisma.sellerAccount.findMany({
-        where: { marketplace: 'amazon', isActive: true },
-        select: { userId: true },
-      });
-      this.logger.log(`[AmazonSync] orders-hot-sync: ${accounts.length} seller(s)`);
-      for (const { userId } of accounts) {
+      const userIds = await this.amazonSyncService.findAmazonSellerUserIdsForScheduledSync();
+      this.logger.log(`[AmazonSync] orders-hot-sync: ${userIds.length} seller(s)`);
+      for (const userId of userIds) {
         if (!(await this.isInitialSyncComplete(userId))) {
           continue;
         }
@@ -423,19 +451,18 @@ export class AmazonSyncProcessor extends WorkerHost {
     }
 
     if (job.name === 'orders-batch-sync') {
-      const accounts = await this.prisma.sellerAccount.findMany({
-        where: { marketplace: 'amazon', isActive: true },
-        select: { userId: true },
-      });
-      this.logger.log(`[AmazonSync] orders-batch-sync: ${accounts.length} seller(s)`);
-      for (const { userId } of accounts) {
+      const userIds = await this.amazonSyncService.findAmazonSellerUserIdsForScheduledSync();
+      this.logger.log(
+        `[AmazonSync] orders-batch-sync (nightly full 30d): ${userIds.length} seller(s)`,
+      );
+      for (const userId of userIds) {
         if (!(await this.isInitialSyncComplete(userId))) {
-          this.logger.log(`[AmazonSync] Skipping orders for userId=${userId.slice(0, 8)}… – initial sync not yet complete`);
+          this.logger.log(
+            `[AmazonSync] Skipping nightly orders for userId=${userId.slice(0, 8)}… – initial sync not yet complete`,
+          );
           continue;
         }
         try {
-          // Hot pass first so new Pending sales land even if the full 30d finances pass is slow.
-          await this.amazonService.syncHotRecentOrdersToDb(userId);
           await this.amazonService.syncRecentOrdersToDb(userId, { days: 30 });
           const user = await this.prisma.user.findUnique({
             where: { id: userId },
@@ -460,29 +487,26 @@ export class AmazonSyncProcessor extends WorkerHost {
     }
 
     if (job.name === 'shipments-batch-sync') {
-      this.logger.log('[AmazonSync] Running shipments batch sync');
+      this.logger.log('[AmazonSync] Running shipments batch sync (nightly)');
 
-      const orgs = await this.prisma.organization.findMany({
-        select: { id: true },
-      });
-
+      const orgIds = await this.amazonSyncService.findAmazonOrgIdsForScheduledSync();
       const errors: Array<{ orgId: string; error: string }> = [];
-      for (const org of orgs) {
-        if (await this.shouldSkipOrgForBatch(org.id)) {
-          this.logger.log(`[AmazonSync] Skipping shipments for org ${org.id} – initial sync not yet complete`);
+      for (const orgId of orgIds) {
+        if (await this.shouldSkipOrgForBatch(orgId)) {
+          this.logger.log(`[AmazonSync] Skipping shipments for org ${orgId} – initial sync not yet complete`);
           continue;
         }
         const member = await this.prisma.organizationMembership.findFirst({
-          where: { orgId: org.id },
+          where: { orgId },
           select: { userId: true },
         });
         try {
-          await this.amazonService.syncShipments(org.id, member?.userId);
+          await this.amazonService.syncShipments(orgId, member?.userId);
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e);
-          errors.push({ orgId: org.id, error: msg });
+          errors.push({ orgId, error: msg });
           this.logger.error(
-            `[AmazonSync] Shipments sync failed for org ${org.id}: ${msg}`,
+            `[AmazonSync] Shipments sync failed for org ${orgId}: ${msg}`,
           );
         }
       }
@@ -496,43 +520,27 @@ export class AmazonSyncProcessor extends WorkerHost {
 
     if (job.name === 'fee-estimate-refresh') {
       this.logger.log(
-        '[AmazonSync] Running fee estimate refresh (all SKUs, batched) for orgs with Amazon linked',
+        '[AmazonSync] Running fee estimate refresh (daily) for subscribed Amazon orgs',
       );
 
-      // Only orgs that have at least one member with a linked Amazon account (avoid touching orphan/test orgs).
-      const orgs = await this.prisma.organization.findMany({
-        where: {
-          members: {
-            some: {
-              user: {
-                sellerAccounts: {
-                  some: { marketplace: 'amazon' },
-                },
-              },
-            },
-          },
-        },
-        select: { id: true },
-      });
-
+      const orgIds = await this.amazonSyncService.findAmazonOrgIdsForScheduledSync();
       const errors: Array<{ orgId: string; error: string }> = [];
-      for (const org of orgs) {
-        if (await this.shouldSkipOrgForBatch(org.id)) {
-          this.logger.log(`[AmazonSync] Skipping fee-estimate-refresh for org ${org.id} – initial sync not yet complete`);
+      for (const orgId of orgIds) {
+        if (await this.shouldSkipOrgForBatch(orgId)) {
+          this.logger.log(`[AmazonSync] Skipping fee-estimate-refresh for org ${orgId} – initial sync not yet complete`);
           continue;
         }
         try {
-          // Full pass: list price + Product Fees API for every product (not just top 10 by qty).
-          await this.amazonService.refreshFeeEstimatesForOrg(org.id);
+          await this.amazonService.refreshFeeEstimatesForOrg(orgId);
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e);
           const isNotLinked = /amazon account not linked|link your amazon account/i.test(msg);
           if (isNotLinked) {
-            // Skip silently; no need to log every org without Amazon
+            // skip
           } else {
-            errors.push({ orgId: org.id, error: msg });
+            errors.push({ orgId, error: msg });
             this.logger.error(
-              `[AmazonSync] Fee estimate refresh failed for org ${org.id}: ${msg}`,
+              `[AmazonSync] Fee estimate refresh failed for org ${orgId}: ${msg}`,
             );
           }
         }
@@ -563,6 +571,9 @@ export class AmazonSyncProcessor extends WorkerHost {
         );
         return;
       }
+      if (await this.shouldSkipUserWithoutSubscription(user.id, 'selling-eligibility-daily')) {
+        return;
+      }
       const limit = Math.max(1, Math.min(5000, Number(process.env.AMAZON_SELLING_ELIGIBILITY_REFRESH_LIMIT) || 5000));
       const delayParsed = Number(process.env.AMAZON_SELLING_ELIGIBILITY_REFRESH_DELAY_MS);
       const delayMs = Number.isFinite(delayParsed) ? Math.max(0, Math.min(5000, delayParsed)) : 250;
@@ -582,43 +593,29 @@ export class AmazonSyncProcessor extends WorkerHost {
 
     if (job.name === 'listing-price-refresh-hot') {
       this.logger.log(
-        '[AmazonSync] Running HOT listing price refresh (Listings API only) for orgs with Amazon linked',
+        '[AmazonSync] Running HOT listing price refresh (in-stock / recently sold SKUs)',
       );
 
-      const orgs = await this.prisma.organization.findMany({
-        where: {
-          members: {
-            some: {
-              user: {
-                sellerAccounts: {
-                  some: { marketplace: 'amazon' },
-                },
-              },
-            },
-          },
-        },
-        select: { id: true },
-      });
-
+      const orgIds = await this.amazonSyncService.findAmazonOrgIdsForScheduledSync();
       const errors: Array<{ orgId: string; error: string }> = [];
-      for (const org of orgs) {
-        if (await this.shouldSkipOrgForBatch(org.id)) {
+      for (const orgId of orgIds) {
+        if (await this.shouldSkipOrgForBatch(orgId)) {
           this.logger.log(
-            `[AmazonSync] Skipping listing-price-refresh for org ${org.id} – initial sync not yet complete`,
+            `[AmazonSync] Skipping listing-price-refresh for org ${orgId} – initial sync not yet complete`,
           );
           continue;
         }
         try {
-          await this.amazonService.refreshListedPricesForOrg(org.id, { mode: 'hot' });
+          await this.amazonService.refreshListedPricesForOrg(orgId, { mode: 'hot' });
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e);
           const isNotLinked = /amazon account not linked|link your amazon account/i.test(msg);
           if (isNotLinked) {
             // skip
           } else {
-            errors.push({ orgId: org.id, error: msg });
+            errors.push({ orgId, error: msg });
             this.logger.error(
-              `[AmazonSync] Listing price refresh failed for org ${org.id}: ${msg}`,
+              `[AmazonSync] Listing price refresh failed for org ${orgId}: ${msg}`,
             );
           }
         }
@@ -633,43 +630,29 @@ export class AmazonSyncProcessor extends WorkerHost {
 
     if (job.name === 'listing-price-refresh-cold') {
       this.logger.log(
-        '[AmazonSync] Running COLD listing price refresh (Listings API only) for orgs with Amazon linked',
+        '[AmazonSync] Running COLD listing price refresh (nightly, non-hot SKUs)',
       );
 
-      const orgs = await this.prisma.organization.findMany({
-        where: {
-          members: {
-            some: {
-              user: {
-                sellerAccounts: {
-                  some: { marketplace: 'amazon' },
-                },
-              },
-            },
-          },
-        },
-        select: { id: true },
-      });
-
+      const orgIds = await this.amazonSyncService.findAmazonOrgIdsForScheduledSync();
       const errors: Array<{ orgId: string; error: string }> = [];
-      for (const org of orgs) {
-        if (await this.shouldSkipOrgForBatch(org.id)) {
+      for (const orgId of orgIds) {
+        if (await this.shouldSkipOrgForBatch(orgId)) {
           this.logger.log(
-            `[AmazonSync] Skipping listing-price-refresh-cold for org ${org.id} – initial sync not yet complete`,
+            `[AmazonSync] Skipping listing-price-refresh-cold for org ${orgId} – initial sync not yet complete`,
           );
           continue;
         }
         try {
-          await this.amazonService.refreshListedPricesForOrg(org.id, { mode: 'cold' });
+          await this.amazonService.refreshListedPricesForOrg(orgId, { mode: 'cold' });
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e);
           const isNotLinked = /amazon account not linked|link your amazon account/i.test(msg);
           if (isNotLinked) {
             // skip
           } else {
-            errors.push({ orgId: org.id, error: msg });
+            errors.push({ orgId, error: msg });
             this.logger.error(
-              `[AmazonSync] Listing price refresh (cold) failed for org ${org.id}: ${msg}`,
+              `[AmazonSync] Listing price refresh (cold) failed for org ${orgId}: ${msg}`,
             );
           }
         }
@@ -686,6 +669,9 @@ export class AmazonSyncProcessor extends WorkerHost {
       const { orgId, userId, limit } = job.data as { orgId?: string; userId?: string; limit?: number };
       if (!orgId) {
         throw new Error('Missing orgId for titles-backfill job');
+      }
+      if (await this.shouldSkipOrgWithoutSubscription(orgId, 'titles-backfill')) {
+        return;
       }
       const safeLimit = Math.min(300, Math.max(1, Number(limit) || 100));
       this.logger.log(`[AmazonSync] Running titles backfill for org ${orgId} (limit=${safeLimit})`);
@@ -712,6 +698,9 @@ export class AmazonSyncProcessor extends WorkerHost {
         this.logger.warn(`[AmazonSync] Category backfill skipped for org ${orgId}: no userId and no org members`);
         return;
       }
+      if (await this.shouldSkipUserWithoutSubscription(preferredUserId, 'category-backfill')) {
+        return;
+      }
       const safeLimit = Math.min(250, Math.max(1, Number(limit) || 100));
       this.logger.log(`[AmazonSync] Running category backfill for org ${orgId} (limit=${safeLimit})`);
       const result = await this.amazonService.backfillCatalogCategoriesForNewAsins(orgId, preferredUserId, undefined, safeLimit);
@@ -721,35 +710,31 @@ export class AmazonSyncProcessor extends WorkerHost {
     }
 
     if (job.name === 'product-titles-backfill') {
-      this.logger.log('[AmazonSync] Running product titles/images backfill for all orgs');
+      this.logger.log('[AmazonSync] Running product titles/images backfill (nightly)');
 
-      const orgs = await this.prisma.organization.findMany({
-        select: { id: true },
-      });
-
+      const orgIds = await this.amazonSyncService.findAmazonOrgIdsForScheduledSync();
       const limit = Math.min(200, Math.max(50, Number(process.env.AMAZON_TITLES_BACKFILL_LIMIT) || 100));
       const errors: Array<{ orgId: string; error: string }> = [];
-      for (const org of orgs) {
-        if (await this.shouldSkipOrgForBatch(org.id)) {
-          this.logger.log(`[AmazonSync] Skipping product-titles-backfill for org ${org.id} – initial sync not yet complete`);
+      for (const orgId of orgIds) {
+        if (await this.shouldSkipOrgForBatch(orgId)) {
+          this.logger.log(`[AmazonSync] Skipping product-titles-backfill for org ${orgId} – initial sync not yet complete`);
           continue;
         }
         try {
-          const result = await this.amazonService.backfillProductTitles(org.id, limit);
+          const result = await this.amazonService.backfillProductTitles(orgId, limit);
           this.logger.log(
-            `[AmazonSync] Titles backfill org ${org.id}: updated=${result?.updated ?? 0} skipped=${result?.skipped ?? 0} errors=${result?.errorsCount ?? 0}`,
+            `[AmazonSync] Titles backfill org ${orgId}: updated=${result?.updated ?? 0} skipped=${result?.skipped ?? 0} errors=${result?.errorsCount ?? 0}`,
           );
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e);
-          // Not linked is an expected state for many orgs; don't spam errors or fail the batch.
           if (typeof msg === 'string' && msg.toLowerCase().includes('amazon account not linked')) {
             this.logger.log(
-              `[AmazonSync] Titles backfill skipped for org ${org.id}: Amazon account not linked`,
+              `[AmazonSync] Titles backfill skipped for org ${orgId}: Amazon account not linked`,
             );
           } else {
-            errors.push({ orgId: org.id, error: msg });
+            errors.push({ orgId, error: msg });
             this.logger.error(
-              `[AmazonSync] Titles backfill failed for org ${org.id}: ${msg}`,
+              `[AmazonSync] Titles backfill failed for org ${orgId}: ${msg}`,
             );
           }
         }

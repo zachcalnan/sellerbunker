@@ -3697,7 +3697,8 @@ export class AmazonService {
   /**
    * Sync orders from SP-API into DB (including finances per order via listFinancialEventsByOrderId). Call paths:
    * - full-sync (initial): days=30 (or env-extended cap for allowlisted user IDs), no cap → orders + finances.
-   * - orders-batch-sync (recurring): days=30; runs when initial sync is 100%.
+   * - orders-hot-sync (every ~5 min): last 3 days, no Finances — Pending / new sales.
+   * - orders-batch-sync (nightly cron): days=30 + Finances when initial sync is 100%.
    * Optional maxOrders/maxOrderItems cap for testing or limited sync.
    */
   async syncRecentOrdersToDb(

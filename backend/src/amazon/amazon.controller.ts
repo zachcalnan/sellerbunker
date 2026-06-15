@@ -94,10 +94,17 @@ ping() {
       // can start populating without blocking the OAuth callback response.
       try {
         if (stateData.userId) {
-          this.logger.log(
-            `[AmazonController] Enqueuing initial full-sync after OAuth (userId=${stateData.userId}, jobId=full-sync-${stateData.userId})`,
-          );
-          await this.amazonSyncService.enqueueFullSync(stateData.userId);
+          const hasAccess = await this.amazonSyncService.userHasPaidAccess(stateData.userId);
+          if (hasAccess) {
+            this.logger.log(
+              `[AmazonController] Enqueuing initial full-sync after OAuth (userId=${stateData.userId}, jobId=full-sync-${stateData.userId})`,
+            );
+            await this.amazonSyncService.enqueueFullSync(stateData.userId);
+          } else {
+            this.logger.log(
+              `[AmazonController] OAuth linked but no active subscription — skipping initial sync (userId=${stateData.userId})`,
+            );
+          }
         } else {
           this.logger.warn('[AmazonController] OAuth state missing userId – cannot enqueue full-sync');
         }
@@ -269,6 +276,12 @@ ping() {
     const runInline =
       inline === '1' || inline === 'true' || inline === 'yes';
 
+    if (!(await this.amazonSyncService.userHasPaidAccess(req.user.userId))) {
+      throw new BadRequestException(
+        'An active subscription is required to sync Amazon data.',
+      );
+    }
+
     if (runInline) {
       void this.amazonSyncProcessor.runFullSyncInline(req.user.userId).catch((e) => {
         const msg = e instanceof Error ? e.message : String(e);
@@ -360,6 +373,9 @@ ping() {
     const { ordersRemoved, orgUserIds } =
       await this.amazonService.repairDuplicateAmazonOrdersForOrg(req.user.orgId);
     for (const userId of orgUserIds) {
+      if (!(await this.amazonSyncService.userHasPaidAccess(userId))) {
+        continue;
+      }
       void this.amazonService.syncRecentOrdersToDb(userId, { days: 30 }).catch((e) => {
         const msg = e instanceof Error ? e.message : String(e);
         this.logger.warn(
@@ -1066,6 +1082,11 @@ ping() {
   @UseGuards(ClerkAuthGuard)
   @Post('inventory/sync')
   async syncInventory(@Req() req: { user: { orgId: string; userId: string } }) {
+    if (!(await this.amazonSyncService.userHasPaidAccess(req.user.userId))) {
+      throw new BadRequestException(
+        'An active subscription is required to sync Amazon data.',
+      );
+    }
     this.logger.log(`Manual inventory sync requested (orgId=${req.user.orgId})`);
     return this.amazonService.syncFbaInventory(req.user.orgId, req.user.userId, {
       force: true,
