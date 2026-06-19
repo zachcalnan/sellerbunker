@@ -36,6 +36,11 @@ import {
   estimateInStockDaysForVelocity,
 } from './replenish-velocity.util';
 import {
+  parseOrderItemGrossItemPriceFromRaw,
+  parseOrderItemLineRevenueFromRaw,
+  parseOrderItemPromotionDiscountFromRaw,
+} from './order-item-revenue-parse.util';
+import {
   extractInboundShipmentDatesFromRow,
   extractInboundV2024ShipmentDates,
   extractTransportDatesFromPayload,
@@ -365,6 +370,65 @@ export class AmazonService {
     return null;
   }
 
+  private applyPendingOrderListPriceRevenueFallback(
+    revenueTotal: number,
+    quantityOrdered: number,
+    apiOrderStatus: string | null | undefined,
+    rawOrder: unknown,
+    currentListedPrice: unknown,
+  ): number {
+    if (revenueTotal > 0) return revenueTotal;
+    if (
+      !this.orderParentStatusAllowsReconstructedRevenueForZeroStoredLine(
+        apiOrderStatus,
+        rawOrder,
+      )
+    ) {
+      return revenueTotal;
+    }
+    const listNum =
+      currentListedPrice != null ? Number(currentListedPrice) : 0;
+    if (Number.isFinite(listNum) && listNum > 0) {
+      return Number((listNum * quantityOrdered).toFixed(2));
+    }
+    return revenueTotal;
+  }
+
+  /**
+   * Revenue to persist during order sync. Amazon getOrderItems (ItemPrice − promos) wins.
+   * Never replace with live `currentListedPrice` when Amazon already returned a line price
+   * or we already stored one — repricer/listing refresh can change list price after the sale.
+   */
+  private resolveOrderLineRevenueForSync(opts: {
+    rawLine: unknown;
+    lineRevenueFromSplit: number;
+    quantityOrdered: number;
+    existingRevenueTotal?: number | null;
+    apiOrderStatus?: string | null;
+    rawOrder?: unknown;
+    currentListedPrice?: unknown;
+  }): number {
+    const rawRev = parseOrderItemLineRevenueFromRaw(opts.rawLine);
+    if (rawRev > 0) return rawRev;
+
+    let revenue = opts.lineRevenueFromSplit;
+    if (revenue <= 0) {
+      const existing =
+        opts.existingRevenueTotal != null
+          ? this.safeNumOrderMoney(opts.existingRevenueTotal)
+          : 0;
+      if (existing > 0) revenue = existing;
+    }
+
+    return this.applyPendingOrderListPriceRevenueFallback(
+      revenue,
+      opts.quantityOrdered,
+      opts.apiOrderStatus ?? null,
+      opts.rawOrder,
+      opts.currentListedPrice,
+    );
+  }
+
   /**
    * When `revenueTotal` is stored as **0**, only reconstruct a positive sale from order splits / list price
    * if the parent order still looks **unfulfilled** (pending*, unshipped, etc.). For **Shipped** and similar,
@@ -604,7 +668,7 @@ export class AmazonService {
       if (!sku || map.has(sku)) continue;
       let rev = this.safeNumOrderMoney(it.revenueTotal);
       if (rev <= 0 && it.rawResponse != null && typeof it.rawResponse === 'object') {
-        rev = this.parseOrderItemLineRevenueFromRaw(it.rawResponse);
+        rev = parseOrderItemLineRevenueFromRaw(it.rawResponse);
       }
       const qty = this.safeNumOrderMoney(it.quantity);
       if (rev > 0 && qty > 0) map.set(sku, rev / qty);
@@ -693,7 +757,7 @@ export class AmazonService {
 
     const linePayload = it.rawResponse;
     if (linePayload != null && typeof linePayload === 'object') {
-      const lineRev = this.parseOrderItemLineRevenueFromRaw(linePayload);
+      const lineRev = parseOrderItemLineRevenueFromRaw(linePayload);
       if (lineRev > 0) return lineRev;
     }
 
@@ -738,7 +802,17 @@ export class AmazonService {
     parentOrder?: { amazonOrderStatus?: string | null; rawOrder?: unknown } | null,
   ): number {
     const stored = this.safeNumOrderMoney(it.revenueTotal);
-    if (stored !== 0 && Number.isFinite(stored)) return stored;
+    if (stored !== 0 && Number.isFinite(stored)) {
+      if (stored < 0) return stored;
+      if (it.rawResponse != null && typeof it.rawResponse === 'object') {
+        const reparsed = parseOrderItemLineRevenueFromRaw(it.rawResponse);
+        // Amazon sold price beats a stale DB value (e.g. list-price guess after repricer moved list).
+        if (reparsed > 0 && Math.abs(stored - reparsed) > 0.009) {
+          return reparsed;
+        }
+      }
+      return stored;
+    }
     if (
       stored === 0 &&
       parentOrder != null &&
@@ -1349,7 +1423,7 @@ export class AmazonService {
         if (curRev > 0) continue;
         let rev = 0;
         if (line.rawResponse != null && typeof line.rawResponse === 'object') {
-          rev = this.parseOrderItemLineRevenueFromRaw(line.rawResponse);
+          rev = parseOrderItemLineRevenueFromRaw(line.rawResponse);
         }
         if (rev <= 0 && orderTotalAmt > 0) {
           const q = this.safeNumOrderMoney(line.quantity) || 1;
@@ -1440,37 +1514,6 @@ export class AmazonService {
     return this.parseMoneyAmountFromMoneyLike(ip);
   }
 
-  /**
-   * Best-effort line sale amount from getOrderItems payload: ItemPrice total, unitPrice × qty,
-   * or ItemChargeList Principal (common when ItemPrice is still zero).
-   */
-  private parseOrderItemLineRevenueFromRaw(it: any): number {
-    if (it == null || typeof it !== 'object') return 0;
-    const fromItemPrice = this.parseOrderItemItemPriceAmount(it);
-    if (fromItemPrice > 0) return fromItemPrice;
-    const ip = it?.ItemPrice ?? it?.itemPrice;
-    const unitPrice = ip?.unitPrice ?? ip?.UnitPrice;
-    if (unitPrice != null) {
-      const up = this.parseMoneyAmountFromMoneyLike(unitPrice);
-      const qty = Number(it?.QuantityOrdered ?? it?.quantityOrdered ?? 0);
-      const quantityOrdered = qty > 0 ? qty : 1;
-      if (up > 0) return Number((up * quantityOrdered).toFixed(2));
-    }
-    const lists = [
-      ...(Array.isArray(it?.ItemChargeList) ? it.ItemChargeList : []),
-      ...(Array.isArray(it?.itemChargeList) ? it.itemChargeList : []),
-    ];
-    let principal = 0;
-    for (const ch of lists) {
-      const ct = String(ch?.ChargeType ?? ch?.chargeType ?? '').toLowerCase();
-      if (!ct.includes('principal')) continue;
-      const ca = ch?.ChargeAmount ?? ch?.chargeAmount;
-      principal += this.parseMoneyAmountFromMoneyLike(ca);
-    }
-    if (principal > 0) return Number(principal.toFixed(2));
-    return 0;
-  }
-
   /** `OrderTotal` from getOrders payload (stored on Order.rawResponse). */
   private parseOrderTotalAmountFromOrderJson(orderLike: any): number {
     let o = orderLike;
@@ -1500,7 +1543,7 @@ export class AmazonService {
    * If OrderTotal is also 0 (pending invoice, etc.), lines stay 0 — there is no reliable total to split.
    */
   private computeLineRevenueTotals(orderItems: any[], orderTotalAmount: number): number[] {
-    const itemRevenues = orderItems.map((it) => this.parseOrderItemLineRevenueFromRaw(it));
+    const itemRevenues = orderItems.map((it) => parseOrderItemLineRevenueFromRaw(it));
     const totalQtyFromItems = orderItems.reduce((sum, it) => {
       const q = Number(it?.QuantityOrdered ?? 0);
       return sum + (Number.isFinite(q) && q > 0 ? q : 0);
@@ -3157,22 +3200,8 @@ export class AmazonService {
       const pnlExclusionByOrderDbId = await this.buildOrderSalesExclusionMap(
         items.map((it: any) => String(it.orderDbId ?? '')).filter(Boolean),
       );
-      const promoFromRaw = (raw: unknown): number => {
-        const it = raw as any;
-        if (!it || typeof it !== 'object') return 0;
-        const readAmt = (obj: any): number => {
-          if (!obj) return 0;
-          const n = Number(obj?.Amount ?? obj?.amount ?? obj?.CurrencyAmount ?? obj?.currencyAmount ?? 0);
-          return Number.isFinite(n) ? n : 0;
-        };
-        // Orders API fields (usually positive magnitude); treat as a negative adjustment to profit.
-        const promo =
-          readAmt(it.PromotionDiscount ?? it.promotionDiscount) +
-          readAmt(it.PromotionDiscountTax ?? it.promotionDiscountTax) +
-          readAmt(it.ShippingDiscount ?? it.shippingDiscount) +
-          readAmt(it.ShippingDiscountTax ?? it.shippingDiscountTax);
-        return promo;
-      };
+      const promoFromRaw = (raw: unknown): number =>
+        parseOrderItemPromotionDiscountFromRaw(raw);
       for (const it of items) {
         const pnlOid = String((it as { orderDbId?: unknown }).orderDbId ?? '');
         if (pnlOid && pnlExclusionByOrderDbId.has(pnlOid)) continue;
@@ -3200,7 +3229,14 @@ export class AmazonService {
         if (lineRev > 0) salesRevenue += lineRev;
         else if (lineRev < 0) refundsRevenue += lineRev;
         const promoAdj = promoFromRaw((it as any).rawResponse);
-        if (promoAdj !== 0) promotionalAdjustments -= Math.abs(promoAdj);
+        if (promoAdj !== 0) {
+          const gross = parseOrderItemGrossItemPriceFromRaw((it as any).rawResponse);
+          const promoAlreadyInLine =
+            lineRev > 0 &&
+            gross > 0 &&
+            Math.abs(lineRev - (gross - promoAdj)) < 0.05;
+          if (!promoAlreadyInLine) promotionalAdjustments -= Math.abs(promoAdj);
+        }
         const rev = lineRev;
         const cogs = it.cogsTotal != null ? toNum(it.cogsTotal) : null;
         const qty = Math.max(1, Number(it.quantity) || 1);
@@ -4206,7 +4242,7 @@ export class AmazonService {
         if (qtyFromItems > 0) quantity = qtyFromItems;
         if (totalAmount <= 0) {
           const lineSum = orderItems.reduce(
-            (s: number, item: any) => s + this.parseOrderItemLineRevenueFromRaw(item),
+            (s: number, item: any) => s + parseOrderItemLineRevenueFromRaw(item),
             0,
           );
           if (lineSum > 0) totalAmount = lineSum;
@@ -4754,7 +4790,51 @@ export class AmazonService {
           const qty = Number(it?.QuantityOrdered ?? 0);
           const quantityOrdered = qty > 0 ? qty : 1;
 
-          let revenueTotal = lineRevenues[idx] ?? 0;
+          const existingItem = orderItemId
+            ? await this.prisma.orderItem.findUnique({
+                where: {
+                  orderDbId_orderItemId: {
+                    orderDbId: persistedOrder.id,
+                    orderItemId,
+                  },
+                },
+                select: {
+                  revenueTotal: true,
+                  amazonFeesTotal: true,
+                  profit: true,
+                  feesSource: true,
+                  atSaleEstimateReferralFeeTotal: true,
+                  atSaleEstimateFbaFeeTotal: true,
+                  atSaleEstimateDigitalServiceFeeTotal: true,
+                },
+              })
+            : null;
+
+          // Attach to a real product for this SKU (needed for pre-sale fee estimates on the row).
+          const itemProduct = sku
+            ? await this.prisma.product.upsert({
+                where: { userId_sku: { userId, sku } },
+                update: {
+                  asin: asin ?? undefined,
+                  title: itemTitle ?? undefined,
+                },
+                create: { userId, sku, asin, title: itemTitle },
+              })
+            : genericProduct;
+
+          let revenueTotal = this.resolveOrderLineRevenueForSync({
+            rawLine: it,
+            lineRevenueFromSplit: lineRevenues[idx] ?? 0,
+            quantityOrdered,
+            existingRevenueTotal:
+              existingItem?.revenueTotal != null
+                ? this.safeNumOrderMoney(existingItem.revenueTotal)
+                : null,
+            apiOrderStatus,
+            rawOrder: order,
+            currentListedPrice: (itemProduct as { currentListedPrice?: unknown })
+              .currentListedPrice,
+          });
           const shippingCharged = Number(it?.ShippingPrice?.Amount ?? 0);
           const taxCharged = Number(it?.ItemTax?.Amount ?? 0);
 
@@ -4784,9 +4864,9 @@ export class AmazonService {
                 feesSource: 'finances',
                 quantity: { gt: 0 },
                 OR: [
-                    { amazonFeesTotal: { gt: 0 } },
-                    { amazonFeesTotal: { lt: 0 } },
-                  ],
+                  { amazonFeesTotal: { gt: 0 } },
+                  { amazonFeesTotal: { lt: 0 } },
+                ],
               },
               orderBy: { orderDate: 'desc' },
               select: { amazonFeesTotal: true, quantity: true },
@@ -4803,42 +4883,6 @@ export class AmazonService {
               usedSameAsinSettled = true;
             }
           }
-          // Attach to a real product for this SKU (needed for pre-sale fee estimates on the row).
-          const itemProduct = sku
-            ? await this.prisma.product.upsert({
-                where: { userId_sku: { userId, sku } },
-                update: {
-                  asin: asin ?? undefined,
-                  title: itemTitle ?? undefined,
-                },
-                create: { userId, sku, asin, title: itemTitle },
-              })
-            : genericProduct;
-
-          if (revenueTotal <= 0 && itemProduct) {
-            const lp = (itemProduct as { currentListedPrice?: unknown }).currentListedPrice;
-            const listNum = lp != null ? Number(lp) : 0;
-            if (listNum > 0) {
-              revenueTotal = Number((listNum * quantityOrdered).toFixed(2));
-            }
-          }
-
-          const existingItem = await this.prisma.orderItem.findUnique({
-            where: {
-              orderDbId_orderItemId: {
-                orderDbId: persistedOrder.id,
-                orderItemId,
-              },
-            },
-            select: {
-              amazonFeesTotal: true,
-              profit: true,
-              feesSource: true,
-              atSaleEstimateReferralFeeTotal: true,
-              atSaleEstimateFbaFeeTotal: true,
-              atSaleEstimateDigitalServiceFeeTotal: true,
-            },
-          });
 
           const feesFromFinancesForLine =
             (orderItemId && feeByOrderItemId.has(orderItemId)) ||
@@ -5193,7 +5237,7 @@ export class AmazonService {
 
           if (orderTotalAmt <= 0) {
             orderTotalAmt = items.reduce(
-              (s, item) => s + this.parseOrderItemLineRevenueFromRaw(item),
+              (s, item) => s + parseOrderItemLineRevenueFromRaw(item),
               0,
             );
           }
@@ -5206,9 +5250,6 @@ export class AmazonService {
             const asin = (it?.ASIN as string | undefined) ?? null;
             const qty = Number(it?.QuantityOrdered ?? 0);
             const quantityOrdered = qty > 0 ? qty : 1;
-            let revenueTotal = lineRevenues[itemIdx] ?? 0;
-            const shippingCharged = Number(it?.ShippingPrice?.Amount ?? 0);
-            const taxCharged = Number(it?.ItemTax?.Amount ?? 0);
 
             const itemProduct = sku
               ? await this.prisma.product.upsert({
@@ -5232,13 +5273,36 @@ export class AmazonService {
                 })
               : genericProduct;
 
-            if (revenueTotal <= 0 && itemProduct) {
-              const lp = (itemProduct as { currentListedPrice?: unknown }).currentListedPrice;
-              const listNum = lp != null ? Number(lp) : 0;
-              if (listNum > 0) {
-                revenueTotal = Number((listNum * quantityOrdered).toFixed(2));
-              }
-            }
+            const existingRevRow = orderItemId
+              ? await this.prisma.orderItem.findUnique({
+                  where: {
+                    orderDbId_orderItemId: {
+                      orderDbId: ord.id,
+                      orderItemId,
+                    },
+                  },
+                  select: { revenueTotal: true },
+                })
+              : null;
+            const rawOrd = ord.rawResponse as Record<string, unknown> | null;
+            const backfillOrderStatus = String(
+              rawOrd?.OrderStatus ?? rawOrd?.orderStatus ?? '',
+            );
+            const revenueTotal = this.resolveOrderLineRevenueForSync({
+              rawLine: it,
+              lineRevenueFromSplit: lineRevenues[itemIdx] ?? 0,
+              quantityOrdered,
+              existingRevenueTotal:
+                existingRevRow?.revenueTotal != null
+                  ? this.safeNumOrderMoney(existingRevRow.revenueTotal)
+                  : null,
+              apiOrderStatus: backfillOrderStatus,
+              rawOrder: ord.rawResponse,
+              currentListedPrice: (itemProduct as { currentListedPrice?: unknown })
+                .currentListedPrice,
+            });
+            const shippingCharged = Number(it?.ShippingPrice?.Amount ?? 0);
+            const taxCharged = Number(it?.ItemTax?.Amount ?? 0);
 
             await (this.prisma as any).orderItem.upsert({
               where: {
@@ -13976,7 +14040,7 @@ try {
       let orderTotalAmt = this.parseOrderTotalAmountFromOrderJson(ord.rawResponse);
       if (orderTotalAmt <= 0) {
         orderTotalAmt = orderItems.reduce(
-          (s, item) => s + this.parseOrderItemLineRevenueFromRaw(item),
+          (s, item) => s + parseOrderItemLineRevenueFromRaw(item),
           0,
         );
       }
@@ -14013,7 +14077,55 @@ try {
         const qty = Number(it?.QuantityOrdered ?? 0);
         const quantityOrdered = qty > 0 ? qty : 1;
 
-        let revenueTotal = lineRevenues[idx] ?? 0;
+        const itemProduct = sku
+          ? await this.prisma.product.upsert({
+              where: { userId_sku: { userId, sku } },
+              update: {
+                asin: asin ?? undefined,
+                title: itemTitle ?? undefined,
+              },
+              create: { userId, sku, asin, title: itemTitle },
+            })
+          : await this.prisma.product.upsert({
+              where: { userId_sku: { userId, sku: 'AMAZON_GENERIC' } },
+              update: {},
+              create: {
+                userId,
+                sku: 'AMAZON_GENERIC',
+                title: 'Amazon Sales (Generic)',
+              },
+            });
+
+        const existingItem = await this.prisma.orderItem.findUnique({
+          where: {
+            orderDbId_orderItemId: { orderDbId: ord.id, orderItemId },
+          },
+          select: {
+            revenueTotal: true,
+            amazonFeesTotal: true,
+            profit: true,
+            feesSource: true,
+            atSaleEstimateReferralFeeTotal: true,
+            atSaleEstimateFbaFeeTotal: true,
+            atSaleEstimateDigitalServiceFeeTotal: true,
+          },
+        });
+
+        const rawOrd = ord.rawResponse as Record<string, unknown> | null;
+        const bfOrderStatus = String(rawOrd?.OrderStatus ?? rawOrd?.orderStatus ?? '');
+        const revenueTotal = this.resolveOrderLineRevenueForSync({
+          rawLine: it,
+          lineRevenueFromSplit: lineRevenues[idx] ?? 0,
+          quantityOrdered,
+          existingRevenueTotal:
+            existingItem?.revenueTotal != null
+              ? this.safeNumOrderMoney(existingItem.revenueTotal)
+              : null,
+          apiOrderStatus: bfOrderStatus,
+          rawOrder: ord.rawResponse,
+          currentListedPrice: (itemProduct as { currentListedPrice?: unknown })
+            .currentListedPrice,
+        });
         const shippingCharged = Number(it?.ShippingPrice?.Amount ?? 0);
         const taxCharged = Number(it?.ItemTax?.Amount ?? 0);
 
@@ -14058,47 +14170,6 @@ try {
             usedSameAsinSettled = true;
           }
         }
-
-        const itemProduct = sku
-          ? await this.prisma.product.upsert({
-              where: { userId_sku: { userId, sku } },
-              update: {
-                asin: asin ?? undefined,
-                title: itemTitle ?? undefined,
-              },
-              create: { userId, sku, asin, title: itemTitle },
-            })
-          : await this.prisma.product.upsert({
-              where: { userId_sku: { userId, sku: 'AMAZON_GENERIC' } },
-              update: {},
-              create: {
-                userId,
-                sku: 'AMAZON_GENERIC',
-                title: 'Amazon Sales (Generic)',
-              },
-            });
-
-        if (revenueTotal <= 0 && itemProduct) {
-          const lp = (itemProduct as { currentListedPrice?: unknown }).currentListedPrice;
-          const listNum = lp != null ? Number(lp) : 0;
-          if (listNum > 0) {
-            revenueTotal = Number((listNum * quantityOrdered).toFixed(2));
-          }
-        }
-
-        const existingItem = await this.prisma.orderItem.findUnique({
-          where: {
-            orderDbId_orderItemId: { orderDbId: ord.id, orderItemId },
-          },
-          select: {
-            amazonFeesTotal: true,
-            profit: true,
-            feesSource: true,
-            atSaleEstimateReferralFeeTotal: true,
-            atSaleEstimateFbaFeeTotal: true,
-            atSaleEstimateDigitalServiceFeeTotal: true,
-          },
-        });
 
         const feesFromFinancesForLineBf =
           (orderItemId && feeByOrderItemId.has(orderItemId)) ||
