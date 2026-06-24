@@ -1,14 +1,14 @@
 import type { Metadata } from "next";
 import { ClerkProvider } from "@clerk/nextjs";
 import { shadcn } from "@clerk/themes";
-import { Manrope } from "next/font/google";
+import { Exo_2 } from "next/font/google";
 import { Suspense } from "react";
 import { RefAttribution } from "@/components/ref-attribution";
 import "./globals.css";
 
-const landingFont = Manrope({
+const appFont = Exo_2({
   subsets: ["latin"],
-  variable: "--font-landing",
+  variable: "--font-exo-2",
   weight: ["400", "500", "600", "700", "800"],
 });
 
@@ -88,7 +88,7 @@ export default function RootLayout({
             dangerouslySetInnerHTML={{ __html: themeScript }}
           />
         </head>
-        <body className={`${landingFont.variable} antialiased`}>
+        <body className={`${appFont.variable} font-sans antialiased`}>
           <Suspense fallback={null}>
             <RefAttribution />
           </Suspense>

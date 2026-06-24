@@ -450,6 +450,21 @@ export class AmazonSyncProcessor extends WorkerHost {
       }
     }
 
+    if (job.name === 'orders-hot-sync-user') {
+      const userId =
+        typeof (job.data as { userId?: unknown })?.userId === 'string'
+          ? String((job.data as { userId: string }).userId)
+          : '';
+      if (!userId) return;
+      if (!(await this.isInitialSyncComplete(userId))) return;
+      try {
+        await this.amazonService.syncHotRecentOrdersToDb(userId);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.logger.warn(`[AmazonSync] orders-hot-sync-user failed (userId=${userId}): ${msg}`);
+      }
+    }
+
     if (job.name === 'orders-batch-sync') {
       const userIds = await this.amazonSyncService.findAmazonSellerUserIdsForScheduledSync();
       this.logger.log(

@@ -1,0 +1,165 @@
+{
+  "version": "2.0.0",
+  "inputs": [
+    {
+      "id": "commitMessage",
+      "type": "promptString",
+      "description": "Commit message",
+      "default": "updates"
+    }
+  ],
+  "tasks": [
+    {
+      "label": "Docker: Start",
+      "type": "shell",
+      "command": "& '${workspaceFolder}/.vscode/start-docker.ps1'",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "shell": {
+          "executable": "powershell.exe",
+          "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
+        }
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "focus": false,
+        "close": false
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Backend: Dev",
+      "type": "shell",
+      "command": "npm run start:dev",
+      "options": {
+        "cwd": "${workspaceFolder}/backend",
+        "shell": {
+          "executable": "powershell.exe",
+          "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
+        }
+      },
+      "isBackground": true,
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "group": "dev",
+        "focus": false
+      },
+      "problemMatcher": {
+        "owner": "nestjs",
+        "pattern": {
+          "regexp": "^$"
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": ".",
+          "endsPattern": "Server running on"
+        }
+      }
+    },
+    {
+      "label": "Frontend: Dev",
+      "type": "shell",
+      "command": "npm run dev",
+      "options": {
+        "cwd": "${workspaceFolder}/frontend",
+        "shell": {
+          "executable": "powershell.exe",
+          "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
+        }
+      },
+      "isBackground": true,
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "group": "dev",
+        "focus": false
+      },
+      "problemMatcher": {
+        "owner": "nextjs",
+        "pattern": {
+          "regexp": "^$"
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": ".",
+          "endsPattern": "✓ Ready in"
+        }
+      }
+    },
+    {
+      "label": "Open App",
+      "type": "shell",
+      "command": "& '${workspaceFolder}/.vscode/open-app.ps1'",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "shell": {
+          "executable": "powershell.exe",
+          "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
+        }
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "focus": false,
+        "close": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Start Apps",
+      "dependsOn": ["Backend: Dev", "Frontend: Dev"],
+      "dependsOrder": "parallel",
+      "problemMatcher": []
+    },
+    {
+      "label": "Start Full Stack",
+      "dependsOn": ["Docker: Start", "Start Apps", "Open App"],
+      "dependsOrder": "sequence",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Git: Commit and Push",
+      "type": "shell",
+      "command": "& '${workspaceFolder}/.vscode/git-push.ps1' -Message '${input:commitMessage}'",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "shell": {
+          "executable": "powershell.exe",
+          "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
+        }
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "focus": true,
+        "close": false
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Deploy to Live (push main)",
+      "type": "shell",
+      "command": "& '${workspaceFolder}/.vscode/deploy-live.ps1' -Message '${input:commitMessage}'",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "shell": {
+          "executable": "powershell.exe",
+          "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
+        }
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "focus": true,
+        "close": false
+      },
+      "problemMatcher": []
+    }
+  ]
+}

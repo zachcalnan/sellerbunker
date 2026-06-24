@@ -94,6 +94,15 @@ export default function OrdersPage() {
     void load();
   }, [isSignedIn, load]);
 
+  useEffect(() => {
+    if (!isSignedIn) return;
+    const interval = setInterval(() => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      void load();
+    }, 5 * 60 * 1000);
+    return () => clearInterval(interval);
+  }, [isSignedIn, load]);
+
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return rows;

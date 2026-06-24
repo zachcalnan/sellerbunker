@@ -1589,7 +1589,7 @@ export default function RepricerPage() {
         <div className="rounded-2xl border border-[var(--surface-border)] bg-[var(--surface)] p-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="rounded-lg border border-[var(--surface-border)] bg-[var(--background)]/50 px-3 py-2 text-sm">
-              Select SKUs below, then click Apply on a pricing rule.
+              All listings (sorted by available stock). Search or paginate to find a SKU.
             </div>
             <input
               value={query}
@@ -1729,7 +1729,9 @@ export default function RepricerPage() {
                           <span className="select-none text-xs text-[var(--muted-foreground)]">
                             {c.availableQty != null && c.availableQty > 0
                               ? `Available ${c.availableQty}`
-                              : `In stock ${c.totalQty}`}
+                              : c.totalQty > 0
+                                ? `In stock ${c.totalQty} (0 available)`
+                                : "Out of stock"}
                           </span>
                           <span className="select-none text-xs text-[var(--muted-foreground)]">
                             Sales (30d) {c.activeUnits30d}
@@ -1808,7 +1810,7 @@ export default function RepricerPage() {
               })}
               {candidates.length === 0 ? (
                 <div className="text-sm text-[var(--muted-foreground)]">
-                  No SKUs with available inventory match your search.
+                  No SKUs match your search.
                 </div>
               ) : null}
             </div>

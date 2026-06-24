@@ -302,7 +302,7 @@ function GrowthAndMoneyIllustration() {
                 style={{
                   fontSize: 17,
                   fontWeight: 800,
-                  fontFamily: "system-ui, ui-sans-serif, sans-serif",
+                  fontFamily: 'var(--font-exo-2), "Exo 2", sans-serif',
                   letterSpacing: "0.06em",
                 }}
               >
@@ -347,7 +347,7 @@ function GrowthAndMoneyIllustration() {
                   style={{
                     fontSize: 13,
                     fontWeight: 800,
-                    fontFamily: "system-ui, ui-sans-serif, sans-serif",
+                    fontFamily: 'var(--font-exo-2), "Exo 2", sans-serif',
                   }}
                 >
                   {sym}

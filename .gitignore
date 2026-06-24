@@ -25,8 +25,16 @@ out/
 !frontend/.env.render.example
 
 # IDE
-.vscode/
-.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+!.vscode/*.ps1
 *.swp
 *.swo
 *~

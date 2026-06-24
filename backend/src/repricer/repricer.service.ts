@@ -28,6 +28,26 @@ export class RepricerService {
     return currentPrice >= 10 && cost < 1;
   }
 
+  private static readonly REPRICER_SYSTEM_SKUS = new Set(['AMAZON_GENERIC', 'AMAZON_MULTI']);
+
+  private pickRepricerCandidateRow<
+    T extends {
+      productId: string;
+      availableQty: number;
+      totalQty: number;
+      activeUnits30d: number;
+    },
+  >(a: T, b: T, repricerProductIds: Set<string>): T {
+    const aSel = repricerProductIds.has(a.productId);
+    const bSel = repricerProductIds.has(b.productId);
+    if (aSel && !bSel) return a;
+    if (!aSel && bSel) return b;
+    if (b.availableQty !== a.availableQty) return b.availableQty > a.availableQty ? b : a;
+    if (b.totalQty !== a.totalQty) return b.totalQty > a.totalQty ? b : a;
+    if (b.activeUnits30d !== a.activeUnits30d) return b.activeUnits30d > a.activeUnits30d ? b : a;
+    return b;
+  }
+
   async listCandidates(
     orgId: string,
     opts?: { page?: number; pageSize?: number; q?: string },
@@ -86,8 +106,20 @@ export class RepricerService {
       unitsByProductId.set(pid, Number.isFinite(q) && q > 0 ? q : 0);
     }
 
+    const selectedRows = await (this.prisma as any).repricerSelectedSku.findMany({
+      where: { orgId, enabled: true },
+      select: { productId: true },
+    });
+    const repricerProductIds = new Set<string>(
+      (selectedRows ?? []).map((r: { productId: string }) => r.productId),
+    );
+
     const products = await this.prisma.product.findMany({
-      where: { userId: { in: userIds }, sku: { not: '' }, inventory: { isNot: null } },
+      where: {
+        userId: { in: userIds },
+        sku: { not: '' },
+        NOT: { sku: { in: ['AMAZON_GENERIC', 'AMAZON_MULTI'] } },
+      },
       select: {
         id: true,
         sku: true,
@@ -105,7 +137,11 @@ export class RepricerService {
       },
     });
 
-    const productIds = products.map((p) => p.id);
+    const visibleProducts = products.filter(
+      (p) => !RepricerService.REPRICER_SYSTEM_SKUS.has(String(p.sku ?? '').trim()),
+    );
+
+    const productIds = visibleProducts.map((p) => p.id);
     const financesSnap =
       productIds.length > 0
         ? await this.amazonService.getLatestFinancesFeeSnapshotsForProducts(
@@ -114,7 +150,7 @@ export class RepricerService {
           )
         : new Map();
 
-    const mapped = products
+    const mapped = visibleProducts
       .map((p) => {
         const totalQty = Number((p as any)?.inventory?.totalQty ?? 0);
         const availableQty = Number((p as any)?.inventory?.availableQty ?? 0);
@@ -182,18 +218,29 @@ export class RepricerService {
           expectedCogsPerUnit:
             cogs != null && Number.isFinite(cogs) ? Math.round(cogs * 100) / 100 : null,
         };
-      })
-      .filter((r) => r.availableQty > 0);
+      });
 
-    mapped.sort((a, b) => {
+    const bySku = new Map<string, (typeof mapped)[number]>();
+    for (const row of mapped) {
+      const key = row.sku.trim().toLowerCase();
+      const prev = bySku.get(key);
+      bySku.set(
+        key,
+        prev ? this.pickRepricerCandidateRow(prev, row, repricerProductIds) : row,
+      );
+    }
+    const listable = [...bySku.values()];
+
+    listable.sort((a, b) => {
+      if (b.availableQty !== a.availableQty) return b.availableQty - a.availableQty;
       if (b.activeUnits30d !== a.activeUnits30d) return b.activeUnits30d - a.activeUnits30d;
       return b.totalQty - a.totalQty;
     });
 
     const q = (opts?.q ?? '').trim().toLowerCase();
-    let list = mapped;
+    let list = listable;
     if (q) {
-      list = mapped.filter((c) => {
+      list = listable.filter((c) => {
         return (
           c.sku.toLowerCase().includes(q) ||
           (c.asin ?? '').toLowerCase().includes(q) ||

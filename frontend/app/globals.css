@@ -30,8 +30,7 @@
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-sb-accent: var(--sb-accent);
-  --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
-    sans-serif;
+  --font-sans: var(--font-exo-2), "Exo 2", ui-sans-serif, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
     "Liberation Mono", "Courier New", monospace;
 }
@@ -51,12 +50,7 @@ html {
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
-}
-
-/* Landing page gets a more modern SaaS font, dashboard stays unchanged. */
-.landing-page {
-  font-family: var(--font-landing), "Inter", "Segoe UI", Arial, Helvetica, sans-serif;
+  font-family: var(--font-exo-2), "Exo 2", ui-sans-serif, sans-serif;
 }
 
 /* Dashboard page backgrounds with subtle shine */

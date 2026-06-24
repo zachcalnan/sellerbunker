@@ -77,8 +77,8 @@ export class AmazonSyncService implements OnModuleInit {
   async onModuleInit(): Promise<void> {
     const enabled = (process.env.ENABLE_AMAZON_SYNC_SCHEDULER ?? 'true').toLowerCase();
     if (!['1', 'true', 'yes'].includes(enabled)) {
-      this.logger.log(
-        'Amazon sync scheduler disabled via ENABLE_AMAZON_SYNC_SCHEDULER',
+      this.logger.error(
+        'Amazon sync scheduler DISABLED (ENABLE_AMAZON_SYNC_SCHEDULER). Background order/inventory jobs will not run — dashboard reads still hot-pull stale orders.',
       );
       return;
     }
@@ -713,5 +713,49 @@ export class AmazonSyncService implements OnModuleInit {
     }
     this.logger.log(`[wipe-sync-data] Data wiped for userId=${userId}; enqueuing full-sync`);
     await this.enqueueFullSync(userId);
+  }
+
+  /**
+   * Dashboard / Orders polls: if Amazon order sync is stale, queue a fast hot pull (Pending sales).
+   * Complements the 5-minute repeatable job when the worker was down or the app was closed.
+   */
+  async nudgeHotOrdersSyncForOrg(orgId: string): Promise<void> {
+    const memberships = await this.prisma.organizationMembership.findMany({
+      where: { orgId },
+      select: { userId: true },
+    });
+    const memberIds = memberships.map((m) => m.userId);
+    if (memberIds.length === 0) return;
+
+    const staleMs = Math.max(
+      60_000,
+      Number(process.env.AMAZON_ORDERS_HOT_NUDGE_STALE_MS) || 8 * 60 * 1000,
+    );
+    const now = Date.now();
+
+    const accounts = await this.prisma.sellerAccount.findMany({
+      where: {
+        userId: { in: memberIds },
+        marketplace: 'amazon',
+        isActive: true,
+      },
+      select: { userId: true, ordersLastSyncedAt: true },
+    });
+
+    for (const account of accounts) {
+      const { userId } = account;
+      if (!(await this.userHasPaidAccess(userId))) continue;
+      if (!(await this.isInitialMiniSyncComplete(userId))) continue;
+
+      const last = account.ordersLastSyncedAt;
+      if (last instanceof Date && now - last.getTime() < staleMs) continue;
+
+      await this.enqueueUniqueJob(
+        'orders-hot-sync-user',
+        `orders-hot-nudge-${userId}`,
+        { userId },
+        `[orders-hot-nudge] userId=${userId.slice(0, 8)}…`,
+      );
+    }
   }
 }

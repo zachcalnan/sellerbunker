@@ -1,0 +1,11 @@
+{
+  "folders": [
+    {
+      "name": "SellerBunker",
+      "path": "."
+    }
+  ],
+  "settings": {
+    "terminal.integrated.defaultProfile.windows": "PowerShell"
+  }
+}

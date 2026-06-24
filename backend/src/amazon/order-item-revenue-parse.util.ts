@@ -82,6 +82,63 @@ export function parseOrderItemLineRevenueFromRaw(it: unknown): number {
   return gross > 0 ? Number(gross.toFixed(2)) : 0;
 }
 
+/** Split parent order `OrderTotal` across lines by quantity (matches sync `computeLineRevenueTotals`). */
+export function lineRevenueFromOrderTotalSplit(
+  quantity: number,
+  orderTotalAmount: number,
+  sumLineQty: number,
+): number {
+  if (
+    !Number.isFinite(quantity) ||
+    !Number.isFinite(orderTotalAmount) ||
+    !Number.isFinite(sumLineQty) ||
+    quantity <= 0 ||
+    orderTotalAmount <= 0 ||
+    sumLineQty <= 0
+  ) {
+    return 0;
+  }
+  return Number(((orderTotalAmount * quantity) / sumLineQty).toFixed(2));
+}
+
+/**
+ * Pick the best line revenue when DB may hold a stale list-price guess (pending sync) but Amazon
+ * later exposed ItemPrice or parent OrderTotal on a shipped order.
+ */
+export function correctStaleStoredLineRevenue(opts: {
+  storedRevenueTotal: number;
+  lineRevenueFromRaw: number;
+  lineRevenueFromOrderSplit: number;
+  /** True while parent order is still pending/unshipped — keep list-price placeholders. */
+  orderStillPending: boolean;
+}): number {
+  const stored = opts.storedRevenueTotal;
+  if (!Number.isFinite(stored) || stored === 0) {
+    if (opts.lineRevenueFromRaw > 0) return opts.lineRevenueFromRaw;
+    if (opts.lineRevenueFromOrderSplit > 0) return opts.lineRevenueFromOrderSplit;
+    return stored;
+  }
+  if (stored < 0) return stored;
+
+  if (
+    opts.lineRevenueFromRaw > 0 &&
+    Math.abs(stored - opts.lineRevenueFromRaw) > 0.009
+  ) {
+    return opts.lineRevenueFromRaw;
+  }
+
+  if (
+    opts.lineRevenueFromRaw <= 0 &&
+    opts.lineRevenueFromOrderSplit > 0 &&
+    Math.abs(stored - opts.lineRevenueFromOrderSplit) > 0.009 &&
+    !opts.orderStillPending
+  ) {
+    return opts.lineRevenueFromOrderSplit;
+  }
+
+  return stored;
+}
+
 /** Gross ItemPrice before promotions (for detecting stale DB rows). */
 export function parseOrderItemGrossItemPriceFromRaw(it: unknown): number {
   if (it == null || typeof it !== 'object') return 0;

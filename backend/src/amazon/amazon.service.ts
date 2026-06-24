@@ -36,6 +36,8 @@ import {
   estimateInStockDaysForVelocity,
 } from './replenish-velocity.util';
 import {
+  correctStaleStoredLineRevenue,
+  lineRevenueFromOrderTotalSplit,
   parseOrderItemGrossItemPriceFromRaw,
   parseOrderItemLineRevenueFromRaw,
   parseOrderItemPromotionDiscountFromRaw,
@@ -803,15 +805,33 @@ export class AmazonService {
   ): number {
     const stored = this.safeNumOrderMoney(it.revenueTotal);
     if (stored !== 0 && Number.isFinite(stored)) {
-      if (stored < 0) return stored;
-      if (it.rawResponse != null && typeof it.rawResponse === 'object') {
-        const reparsed = parseOrderItemLineRevenueFromRaw(it.rawResponse);
-        // Amazon sold price beats a stale DB value (e.g. list-price guess after repricer moved list).
-        if (reparsed > 0 && Math.abs(stored - reparsed) > 0.009) {
-          return reparsed;
-        }
-      }
-      return stored;
+      const qty = this.safeNumOrderMoney(it.quantity) || 1;
+      const orderDbId = it.orderDbId != null ? String(it.orderDbId) : '';
+      const orderFallback = orderDbId ? orderPriceByDbId.get(orderDbId) : undefined;
+      const sumLineQty = orderDbId
+        ? orderLineQtySumByOrderDbId.get(orderDbId) ?? 0
+        : 0;
+      const reparsed =
+        it.rawResponse != null && typeof it.rawResponse === 'object'
+          ? parseOrderItemLineRevenueFromRaw(it.rawResponse)
+          : 0;
+      const fromOrderSplit = lineRevenueFromOrderTotalSplit(
+        qty,
+        orderFallback?.orderTotalAmount ?? 0,
+        sumLineQty,
+      );
+      const orderStillPending =
+        parentOrder != null &&
+        this.orderParentStatusAllowsReconstructedRevenueForZeroStoredLine(
+          parentOrder.amazonOrderStatus,
+          parentOrder.rawOrder,
+        );
+      return correctStaleStoredLineRevenue({
+        storedRevenueTotal: stored,
+        lineRevenueFromRaw: reparsed,
+        lineRevenueFromOrderSplit: fromOrderSplit,
+        orderStillPending,
+      });
     }
     if (
       stored === 0 &&
@@ -1366,8 +1386,9 @@ export class AmazonService {
   }
 
   /**
-   * Write `order_items.revenue_total` when it is still 0 but parent `OrderTotal` or line `ItemPrice`
-   * exists in stored JSON (matches sync `computeLineRevenueTotals`). Small batch per sync run.
+   * Write `order_items.revenue_total` when it is still 0 or a stale list-price guess but parent
+   * `OrderTotal` or line `ItemPrice` exists in stored JSON (matches sync `computeLineRevenueTotals`).
+   * Small batch per sync run.
    */
   private async backfillZeroRevenueOrderItemsFromStoredTotals(userId: string): Promise<void> {
     const zeroRows = (await (this.prisma as any).orderItem.findMany({
@@ -1380,7 +1401,23 @@ export class AmazonService {
       orderBy: { orderDate: 'desc' },
       take: 80,
     })) as Array<{ orderDbId: string }>;
-    const orderDbIds = [...new Set(zeroRows.map((r) => r.orderDbId))].slice(0, 25);
+    const recentShippedRows = (await (this.prisma as any).orderItem.findMany({
+      where: {
+        userId,
+        marketplace: 'amazon',
+        revenueTotal: { gt: 0 },
+        order: { amazonOrderStatus: 'Shipped' },
+      },
+      select: { orderDbId: true },
+      orderBy: { orderDate: 'desc' },
+      take: 80,
+    })) as Array<{ orderDbId: string }>;
+    const orderDbIds = [
+      ...new Set([
+        ...zeroRows.map((r) => r.orderDbId),
+        ...recentShippedRows.map((r) => r.orderDbId),
+      ]),
+    ].slice(0, 30);
     if (orderDbIds.length === 0) return;
 
     let exclusionMap: Map<string, OrderSalesExclusionKind>;
@@ -1394,10 +1431,15 @@ export class AmazonService {
       if (exclusionMap.has(orderDbId)) continue;
       const ord = await this.prisma.order.findUnique({
         where: { id: orderDbId },
-        select: { id: true, rawResponse: true },
+        select: { id: true, rawResponse: true, amazonOrderStatus: true },
       });
       if (!ord) continue;
       const orderTotalAmt = this.parseOrderTotalAmountFromOrderJson(ord.rawResponse);
+      const orderStillPending =
+        this.orderParentStatusAllowsReconstructedRevenueForZeroStoredLine(
+          ord.amazonOrderStatus,
+          ord.rawResponse,
+        );
 
       const lines = await (this.prisma as any).orderItem.findMany({
         where: { orderDbId },
@@ -1420,16 +1462,19 @@ export class AmazonService {
 
       for (const line of lines) {
         const curRev = this.safeNumOrderMoney(line.revenueTotal);
-        if (curRev > 0) continue;
-        let rev = 0;
-        if (line.rawResponse != null && typeof line.rawResponse === 'object') {
-          rev = parseOrderItemLineRevenueFromRaw(line.rawResponse);
-        }
-        if (rev <= 0 && orderTotalAmt > 0) {
-          const q = this.safeNumOrderMoney(line.quantity) || 1;
-          rev = Number(((orderTotalAmt * q) / sumQty).toFixed(2));
-        }
-        if (rev <= 0) continue;
+        const q = this.safeNumOrderMoney(line.quantity) || 1;
+        const fromRaw =
+          line.rawResponse != null && typeof line.rawResponse === 'object'
+            ? parseOrderItemLineRevenueFromRaw(line.rawResponse)
+            : 0;
+        const fromOrderSplit = lineRevenueFromOrderTotalSplit(q, orderTotalAmt, sumQty);
+        const rev = correctStaleStoredLineRevenue({
+          storedRevenueTotal: curRev,
+          lineRevenueFromRaw: fromRaw,
+          lineRevenueFromOrderSplit: fromOrderSplit,
+          orderStillPending,
+        });
+        if (rev <= 0 || Math.abs(curRev - rev) < 0.009) continue;
         await (this.prisma as any).orderItem.update({
           where: { id: line.id },
           data: { revenueTotal: rev },
@@ -2238,6 +2283,8 @@ export class AmazonService {
     range?: { start?: string; end?: string },
     marketplaceId?: string,
   ) {
+    await this.ensureRecentOrdersSyncedForOrg(orgId);
+
     const marketplaceFilter = this.resolveMarketplaceFilter(marketplaceId);
     let credentials: SpApiCredentials;
 
@@ -3423,6 +3470,8 @@ export class AmazonService {
     preferredUserId?: string,
     marketplaceId?: string,
   ) {
+    await this.ensureRecentOrdersSyncedForOrg(orgId);
+
     const marketplaceFilter = this.resolveMarketplaceFilter(marketplaceId);
     let credentials: SpApiCredentials;
 
@@ -5415,6 +5464,78 @@ export class AmazonService {
    */
   async syncHotRecentOrdersToDb(userId: string): Promise<void> {
     await this.syncRecentOrdersToDb(userId, { hotSync: true, ignoreCursor: true });
+  }
+
+  private readonly hotOrdersSyncInFlight = new Set<string>();
+
+  private ordersStaleMs(): number {
+    const n = Number(process.env.AMAZON_ORDERS_STALE_MS);
+    return Number.isFinite(n) && n >= 60_000 ? Math.floor(n) : 5 * 60 * 1000;
+  }
+
+  private async isInitialSyncCompleteForUser(userId: string): Promise<boolean> {
+    const row = await this.prisma.initialSyncProgress.findUnique({
+      where: { userId },
+      select: { progress: true },
+    });
+    const p = row?.progress ?? 0;
+    return Number.isFinite(p) && p >= 100;
+  }
+
+  /**
+   * Before dashboard/orders reads: pull from Amazon when sync is stale so new sales
+   * appear without depending on background cron / BullMQ uptime alone.
+   */
+  async ensureRecentOrdersSyncedForOrg(orgId: string): Promise<void> {
+    let userIds: string[];
+    try {
+      userIds = await this.getOrgAmazonAggregateUserIds(orgId);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`[ensureRecentOrdersSynced] scope failed orgId=${orgId}: ${msg}`);
+      return;
+    }
+    if (userIds.length === 0) return;
+
+    const staleMs = this.ordersStaleMs();
+    const now = Date.now();
+
+    const accounts = await this.prisma.sellerAccount.findMany({
+      where: {
+        userId: { in: userIds },
+        marketplace: 'amazon',
+        isActive: true,
+      },
+      select: { userId: true, ordersLastSyncedAt: true },
+    });
+
+    const stale = accounts.filter((a) => {
+      const last = a.ordersLastSyncedAt;
+      return !(last instanceof Date) || now - last.getTime() >= staleMs;
+    });
+    if (stale.length === 0) return;
+
+    await Promise.all(
+      stale.map(async ({ userId }) => {
+        if (this.hotOrdersSyncInFlight.has(userId)) return;
+        if (!(await this.isInitialSyncCompleteForUser(userId))) return;
+
+        this.hotOrdersSyncInFlight.add(userId);
+        try {
+          this.logger.log(
+            `[ensureRecentOrdersSynced] hot pull userId=${userId.slice(0, 8)}… orgId=${orgId}`,
+          );
+          await this.syncHotRecentOrdersToDb(userId);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          this.logger.warn(
+            `[ensureRecentOrdersSynced] failed userId=${userId.slice(0, 8)}…: ${msg}`,
+          );
+        } finally {
+          this.hotOrdersSyncInFlight.delete(userId);
+        }
+      }),
+    );
   }
 
   /**
@@ -8856,6 +8977,8 @@ export class AmazonService {
    * current unit price vs the reference (same price → qty-only scale).
    */
   async listOrders(orgId: string, marketplaceId?: string) {
+    await this.ensureRecentOrdersSyncedForOrg(orgId);
+
     const marketplaceFilter = this.resolveMarketplaceFilter(marketplaceId);
     let userIds: string[];
     try {

@@ -606,6 +606,17 @@ function HomeInner() {
     };
   }, [isSignedIn, fetchOrdersForRings, fetchSummary, fetchPrevSummary]);
 
+  // Refresh orders + summary every 5 min while dashboard is open (backend hot-pulls from Amazon when stale).
+  useEffect(() => {
+    if (!isSignedIn) return;
+    const interval = setInterval(() => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      void fetchOrdersForRings();
+      void fetchSummary({ silent: true });
+    }, 5 * 60 * 1000);
+    return () => clearInterval(interval);
+  }, [isSignedIn, fetchOrdersForRings, fetchSummary]);
+
   useEffect(() => {
     if (!isSignedIn) return;
     const checkAccess = async () => {
@@ -2879,7 +2890,7 @@ function SalesTrend({
                 y={labelY}
                 textAnchor="end"
                 fontSize="9"
-                fontFamily="system-ui, sans-serif"
+                fontFamily='var(--font-exo-2), "Exo 2", sans-serif'
                 fontWeight="600"
                 fontStyle="normal"
                 fill="var(--foreground)"
