@@ -475,6 +475,36 @@ export class AmazonSpApiClient {
   }
 
   /**
+   * Product Pricing API v0: getItemOffers
+   * GET /products/pricing/v0/items/{Asin}/offers
+   *
+   * Unlike getCompetitivePricing, this returns per-offer detail we need for seller-level
+   * repricer filters: SellerId, IsFulfilledByAmazon (FBA vs FBM), IsBuyBoxWinner,
+   * SellerFeedbackRating (positive % + count), ListingPrice + Shipping (for landed price).
+   */
+  async getItemOffersForAsin(
+    credentials: SpApiCredentials,
+    params: {
+      marketplaceId: string;
+      asin: string;
+      itemCondition?: 'New' | 'Used' | 'Collectible' | 'Refurbished' | 'Club';
+      customerType?: 'Consumer' | 'Business';
+    },
+  ) {
+    const asin = String(params.asin ?? '').trim();
+    const query: Record<string, unknown> = {
+      MarketplaceId: params.marketplaceId,
+      ItemCondition: params.itemCondition ?? 'New',
+    };
+    if (params.customerType) query.CustomerType = params.customerType;
+    return this.signedSpApiRequest(credentials, {
+      method: 'GET',
+      path: `/products/pricing/v0/items/${encodeURIComponent(asin)}/offers`,
+      query,
+    });
+  }
+
+  /**
    * Catalog Items API v2022-04-01: getCatalogItem
    * GET /catalog/2022-04-01/items/{asin}
    *

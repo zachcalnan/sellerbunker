@@ -143,7 +143,7 @@
       "problemMatcher": []
     },
     {
-      "label": "Deploy to Live (push main)",
+      "label": "Deploy to Live test (push main)",
       "type": "shell",
       "command": "& '${workspaceFolder}/.vscode/deploy-live.ps1' -Message '${input:commitMessage}'",
       "options": {

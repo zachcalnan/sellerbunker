@@ -1336,6 +1336,141 @@ export class RepricerService {
     return this.parseCompetitivePricingTargets(res).buyBox;
   }
 
+  /**
+   * Known Amazon retail seller IDs per marketplace (for the "Ignore Amazon" rule).
+   * GetItemOffers does not flag Amazon's own offer, so we match on seller id.
+   * Override / extend via REPRICER_AMAZON_SELLER_IDS (comma-separated) without a deploy.
+   */
+  private amazonRetailSellerIds(marketplaceId: string): Set<string> {
+    const known: Record<string, string[]> = {
+      A1F83G8C2ARO7P: ['A3P5ROKL5A1OLE'], // UK
+      ATVPDKIKX0DER: ['ATVPDKIKX0DER'], // US
+      A1PA6795UKMFR9: ['A3JWKAKR8XB7XF'], // DE
+      A13V1IB3VIYZZH: ['A1X6FK5RDHNB96'], // FR
+      APJ6JRA9NG5V4: ['A11IL2PNWYJU7H'], // IT
+      A1RKKUPIHCS9HS: ['A1AT7YVPFBWXBL'], // ES
+    };
+    const set = new Set<string>((known[marketplaceId] ?? []).map((s) => s.trim()).filter(Boolean));
+    const extra = (process.env.REPRICER_AMAZON_SELLER_IDS ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    for (const id of extra) set.add(id);
+    return set;
+  }
+
+  /**
+   * Parse GetItemOffers into repricing anchors, applying seller-level filters.
+   *
+   * Filters drop competing offers we should not chase (our own offer, FBM sellers, Amazon,
+   * blocked seller ids, low feedback %, sellers with too few ratings). The buy-box anchor is
+   * only used when the buy-box winner survives the filters.
+   */
+  private parseItemOffersTargets(
+    res: any,
+    opts: {
+      sellerId?: string | null;
+      ignoreFbm?: boolean;
+      ignoreAmazon?: boolean;
+      amazonSellerIds?: Set<string>;
+      ignoreSellerIds?: Set<string>;
+      minSellerFeedbackPct?: number | null;
+      minSellerRatingCount?: number | null;
+    },
+  ): {
+    buyBox: number | null;
+    bestOffer: number | null;
+    nextBestOffer: number | null;
+    buyBoxIsFba: boolean | null;
+    hadOffers: boolean;
+    keptCount: number;
+  } {
+    const root = res?.payload ?? res;
+    const payload = root?.payload ?? root;
+    const offers: any[] = Array.isArray(payload?.Offers)
+      ? payload.Offers
+      : Array.isArray(payload?.offers)
+        ? payload.offers
+        : [];
+
+    const num = (v: unknown): number | null => {
+      if (typeof v === 'number' && Number.isFinite(v)) return v;
+      if (typeof v === 'string') {
+        const n = parseFloat(v);
+        return Number.isFinite(n) ? n : null;
+      }
+      return null;
+    };
+    const landed = (o: any): number | null => {
+      const listing = num(o?.ListingPrice?.Amount ?? o?.listingPrice?.amount);
+      if (listing == null) return null;
+      const ship = num(o?.Shipping?.Amount ?? o?.shipping?.amount) ?? 0;
+      const total = listing + ship;
+      return Number.isFinite(total) && total > 0 ? total : null;
+    };
+    const isFba = (o: any): boolean =>
+      Boolean(o?.IsFulfilledByAmazon ?? o?.isFulfilledByAmazon);
+    const isBuyBoxWinner = (o: any): boolean =>
+      Boolean(o?.IsBuyBoxWinner ?? o?.isBuyBoxWinner);
+    const sellerOf = (o: any): string => String(o?.SellerId ?? o?.sellerId ?? '').trim();
+
+    const ownId = String(opts.sellerId ?? '').trim();
+    const amazonIds = opts.amazonSellerIds ?? new Set<string>();
+    const blocked = opts.ignoreSellerIds ?? new Set<string>();
+    const minFb = opts.minSellerFeedbackPct ?? null;
+    const minCount = opts.minSellerRatingCount ?? null;
+
+    // Fulfillment of the *actual* current buy box winner (before filtering) — for onlyWhenBuyBoxFba.
+    let buyBoxIsFba: boolean | null = null;
+    for (const o of offers) {
+      if (isBuyBoxWinner(o)) {
+        buyBoxIsFba = isFba(o);
+        break;
+      }
+    }
+
+    const kept: { price: number; isBuyBoxWinner: boolean }[] = [];
+    for (const o of offers) {
+      const seller = sellerOf(o);
+      if (ownId && seller && seller === ownId) continue; // our own offer
+      if (opts.ignoreFbm && !isFba(o)) continue;
+      if (opts.ignoreAmazon && seller && amazonIds.has(seller)) continue;
+      if (blocked.size > 0 && seller && blocked.has(seller)) continue;
+      if (minFb != null) {
+        const pct = num(
+          o?.SellerFeedbackRating?.SellerPositiveFeedbackRating ??
+            o?.sellerFeedbackRating?.sellerPositiveFeedbackRating,
+        );
+        if (pct == null || pct < minFb) continue; // unknown/low feedback excluded
+      }
+      if (minCount != null) {
+        const cnt = num(
+          o?.SellerFeedbackRating?.FeedbackCount ?? o?.sellerFeedbackRating?.feedbackCount,
+        );
+        if (cnt == null || cnt < minCount) continue;
+      }
+      const price = landed(o);
+      if (price == null) continue;
+      kept.push({ price, isBuyBoxWinner: isBuyBoxWinner(o) });
+    }
+
+    const prices = kept.map((k) => k.price).sort((a, b) => a - b);
+    const uniqueAsc = Array.from(new Set(prices));
+    const bestOffer = uniqueAsc.length ? uniqueAsc[0] : null;
+    const nextBestOffer = uniqueAsc.length > 1 ? uniqueAsc[1] : null;
+    const winner = kept.find((k) => k.isBuyBoxWinner);
+    const buyBox = winner ? winner.price : null;
+
+    return {
+      buyBox,
+      bestOffer,
+      nextBestOffer,
+      buyBoxIsFba,
+      hadOffers: offers.length > 0,
+      keptCount: kept.length,
+    };
+  }
+
   private async getAmazonCredentialsForOrg(orgId: string): Promise<SpApiCredentials> {
     const userIds = await this.getOrgMemberUserIds(orgId);
     const account = await this.prisma.sellerAccount.findFirst({
@@ -1536,6 +1671,7 @@ export class RepricerService {
             estimatedFbaFeePerUnit: true,
             estimatedDigitalServiceFeePerUnit: true,
             currentListedPrice: true,
+            inventory: { select: { totalQty: true, availableQty: true } },
           },
         },
         ruleSet: true,
@@ -1583,6 +1719,34 @@ export class RepricerService {
       creds = null;
     }
 
+    // Last actual price change per product (for cooldown + smart delay). One query, not N.
+    const lastChangeByProduct = new Map<
+      string,
+      { at: Date; prev: number | null; next: number | null }
+    >();
+    if (engineProductIds.length > 0) {
+      const changeLogs = await (this.prisma as any).repricerLog.findMany({
+        where: { orgId, productId: { in: engineProductIds }, nextPrice: { not: null } },
+        orderBy: { createdAt: 'desc' },
+        select: { productId: true, createdAt: true, prevPrice: true, nextPrice: true },
+        take: 10_000,
+      });
+      for (const l of changeLogs ?? []) {
+        const pid = String(l.productId);
+        if (lastChangeByProduct.has(pid)) continue; // first = most recent
+        lastChangeByProduct.set(pid, {
+          at: l.createdAt instanceof Date ? l.createdAt : new Date(l.createdAt),
+          prev: l.prevPrice != null ? Number(l.prevPrice) : null,
+          next: l.nextPrice != null ? Number(l.nextPrice) : null,
+        });
+      }
+    }
+    const smartDelayMinutes = (() => {
+      const raw = Number(process.env.REPRICER_SMART_DELAY_MINUTES);
+      return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 10;
+    })();
+    const amazonSellerIds = this.amazonRetailSellerIds(marketplaceId);
+
     let processed = 0;
     for (const row of selected) {
       const preset = (row as any).ruleSet ?? activeFallback;
@@ -1622,6 +1786,59 @@ export class RepricerService {
           : pr === 'next_best_offer'
             ? 'next_best_offer'
             : 'buy_box';
+
+      // Seller-level filters (require GetItemOffers, which carries per-offer seller detail).
+      const onlyWhenBuyBoxFba = Boolean(preset.rule1OnlyWhenBuyBoxFba);
+      const ignoreAmazon = Boolean(preset.rule1IgnoreAmazon);
+      const ignoreFbm = Boolean(preset.rule1IgnoreFbm);
+      const minSellerFeedbackPct =
+        preset.rule1MinSellerFeedbackPct != null
+          ? Number(preset.rule1MinSellerFeedbackPct)
+          : null;
+      const ignoreSellerViewsEnabled = Boolean(preset.rule1IgnoreSellerViewsEnabled);
+      const minSellerRatingCount =
+        ignoreSellerViewsEnabled && preset.rule1IgnoreSellerViewsBelow != null
+          ? Number(preset.rule1IgnoreSellerViewsBelow)
+          : null;
+      const ignoreSellerIdSet = new Set<string>(
+        (Array.isArray(preset.rule1IgnoreSellerIds) ? preset.rule1IgnoreSellerIds : [])
+          .map((s: unknown) => String(s).trim())
+          .filter((s: string) => s.length > 0),
+      );
+      const needOffers =
+        Boolean(creds) &&
+        (ignoreFbm ||
+          ignoreAmazon ||
+          onlyWhenBuyBoxFba ||
+          ignoreSellerIdSet.size > 0 ||
+          minSellerFeedbackPct != null ||
+          minSellerRatingCount != null);
+
+      // Rule expiry + cooldown gates.
+      const ruleEndsAt = preset.rule1EndsAt ? new Date(preset.rule1EndsAt) : null;
+      const ruleExpired =
+        ruleEndsAt != null && !Number.isNaN(ruleEndsAt.getTime()) && ruleEndsAt.getTime() < Date.now();
+      const cooldownMinutes =
+        preset.rule1CooldownMinutes != null ? Number(preset.rule1CooldownMinutes) : null;
+      const smartDelayEnabled = Boolean(preset.rule1SmartDelayEnabled);
+      const lastChange = lastChangeByProduct.get(String(row.product?.id ?? '')) ?? null;
+      const minutesSinceLastChange =
+        lastChange != null ? (Date.now() - lastChange.at.getTime()) / 60_000 : null;
+      const inCooldown =
+        cooldownMinutes != null &&
+        cooldownMinutes > 0 &&
+        minutesSinceLastChange != null &&
+        minutesSinceLastChange < cooldownMinutes;
+
+      // Stock gate: only reprice ASINs we positively know are in stock.
+      // Skip only when inventory is known AND zero (don't punish listings without an FBA inventory row).
+      const invTotalQty = Number((row.product as any)?.inventory?.totalQty);
+      const invAvailQty = Number((row.product as any)?.inventory?.availableQty);
+      const hasInventoryRow = (row.product as any)?.inventory != null;
+      const knownOutOfStock =
+        hasInventoryRow &&
+        (!Number.isFinite(invTotalQty) || invTotalQty <= 0) &&
+        (!Number.isFinite(invAvailQty) || invAvailQty <= 0);
 
       const p = row.product;
       const sku = String(p?.sku ?? '');
@@ -1664,7 +1881,22 @@ export class RepricerService {
       let bestOfferPrice: number | null = null;
       let refPrice: number | null = null;
       let skipNoBuyBox = false;
-      if (!bounds) {
+      let skipMessageOverride: string | null = null;
+      let usedOffers = false;
+      let gateReason: string | null = null;
+      if (ruleExpired) {
+        gateReason = 'rule_expired';
+        message = 'No change: pricing rule end date has passed (rule paused).';
+        nextPrice = current;
+      } else if (knownOutOfStock) {
+        gateReason = 'out_of_stock';
+        message = 'No change: out of stock — repricer only adjusts in-stock listings.';
+        nextPrice = current;
+      } else if (inCooldown) {
+        gateReason = 'cooldown';
+        message = `No change: within cooldown window (${cooldownMinutes}m since last change).`;
+        nextPrice = current;
+      } else if (!bounds) {
         message = this.isSuspiciousCogs(costRaw, current)
           ? 'Skipped: suspiciously low COGS for this SKU (fix COGS and retry).'
           : 'Skipped: missing COGS (needed to compute ROI/profit bounds).';
@@ -1674,12 +1906,56 @@ export class RepricerService {
         message = 'Skipped: missing current listed price.';
       } else {
         if (creds && asin && strategy && strategy !== 'no_buy_box') {
+          let t: { buyBox: number | null; bestOffer: number | null; nextBestOffer: number | null } | null =
+            null;
+          // Seller-level filters need per-offer detail → GetItemOffers. Fall back to
+          // competitive pricing if offers are unavailable so repricing never breaks.
+          if (needOffers) {
+            try {
+              const ores = await this.spApiClient.getItemOffersForAsin(creds, {
+                marketplaceId,
+                asin,
+              });
+              const ot = this.parseItemOffersTargets(ores as any, {
+                sellerId,
+                ignoreFbm,
+                ignoreAmazon,
+                amazonSellerIds,
+                ignoreSellerIds: ignoreSellerIdSet,
+                minSellerFeedbackPct,
+                minSellerRatingCount,
+              });
+              if (ot.hadOffers) {
+                if (onlyWhenBuyBoxFba && ot.buyBoxIsFba === false) {
+                  skipNoBuyBox = true;
+                  skipMessageOverride =
+                    'No change: buy box is not FBA (rule: only reprice when buy box is FBA).';
+                } else if (ot.keptCount === 0) {
+                  skipNoBuyBox = true;
+                  skipMessageOverride =
+                    'No change: no eligible competitor offers after filters (FBM/Amazon/seller rules).';
+                } else {
+                  t = {
+                    buyBox: ot.buyBox,
+                    bestOffer: ot.bestOffer,
+                    nextBestOffer: ot.nextBestOffer,
+                  };
+                  usedOffers = true;
+                }
+              }
+            } catch {
+              t = null; // fall back to competitive pricing
+            }
+          }
           try {
-            const res = await this.spApiClient.getCompetitivePricingForASINs(creds, {
-              marketplaceId,
-              asins: [asin],
-            });
-            const t = this.parseCompetitivePricingTargets(res as any);
+            if (!skipNoBuyBox && !t) {
+              const res = await this.spApiClient.getCompetitivePricingForASINs(creds, {
+                marketplaceId,
+                asins: [asin],
+              });
+              t = this.parseCompetitivePricingTargets(res as any);
+            }
+            if (!skipNoBuyBox && t) {
             buyBoxPrice = t.buyBox;
             bestOfferPrice = t.bestOffer;
             const bestOk =
@@ -1739,6 +2015,7 @@ export class RepricerService {
               ) {
                 refPrice = buyBoxPrice;
               }
+            }
             }
           } catch {
             buyBoxPrice = null;
@@ -1871,8 +2148,26 @@ export class RepricerService {
           }
         }
 
+        // Smart delay: hold off chasing a competitor's price DROP for a short window
+        // (anti price-war). Upward moves are always allowed. Disabled if smartDelayEnabled is off.
+        if (
+          smartDelayEnabled &&
+          !skipNoBuyBox &&
+          nextPrice != null &&
+          current != null &&
+          Number.isFinite(nextPrice) &&
+          nextPrice < current &&
+          minutesSinceLastChange != null &&
+          minutesSinceLastChange < smartDelayMinutes
+        ) {
+          skipNoBuyBox = true;
+          skipMessageOverride = `No change: smart delay holding price drop (${Math.floor(
+            minutesSinceLastChange,
+          )}m of ${smartDelayMinutes}m).`;
+        }
+
         if (skipNoBuyBox) {
-          message = RepricerService.SKIP_NO_BUY_BOX_UNCHANGED_MSG;
+          message = skipMessageOverride ?? RepricerService.SKIP_NO_BUY_BOX_UNCHANGED_MSG;
           nextPrice = current;
         } else if (nextPrice != null && nextPrice !== current) {
           const refLabel =
@@ -1999,6 +2294,22 @@ export class RepricerService {
         ruleSetId: preset.id,
         ruleSetName: preset.name ?? null,
         skipNoBuyBox,
+        usedOffers,
+        gateReason,
+        filters: {
+          ignoreFbm,
+          ignoreAmazon,
+          onlyWhenBuyBoxFba,
+          ignoreSellerIds: Array.from(ignoreSellerIdSet),
+          minSellerFeedbackPct,
+          minSellerRatingCount,
+          cooldownMinutes,
+          smartDelayEnabled,
+          ruleEndsAt: ruleEndsAt ? ruleEndsAt.toISOString() : null,
+        },
+        stock: hasInventoryRow
+          ? { totalQty: invTotalQty, availableQty: invAvailQty }
+          : null,
       };
 
       const unchangedNumeric =
