@@ -1046,6 +1046,82 @@ export class RepricerService {
     return { ok: true };
   }
 
+  /**
+   * Price-aware fee model for a product: fee(price) = k*price + b.
+   *
+   * Amazon's **referral fee is a percentage of the sale price** — it must scale when we move
+   * the listing price. The stored `estimatedReferralFeePerUnit` is a frozen £ amount computed at
+   * one price (`feeEstimateRawJson.PriceToEstimateFees`); using it flat understates fees when we
+   * price up and overstates ROI, so the repricer would settle below the rule's true min ROI.
+   *
+   * FBA fulfilment is a flat fee (price-independent). Digital services fee (UK/EU ≈ 2%) is charged
+   * on referral+FBA, so it scales with referral.
+   *
+   * Returns referralRate=null when there is no usable referral basis (caller should fall back to the
+   * frozen/finances estimate via repricerAmazonFeePerUnitFromProduct).
+   */
+  private repricerFeeModel(product: {
+    estimatedReferralFeePerUnit?: unknown;
+    estimatedFbaFeePerUnit?: unknown;
+    estimatedDigitalServiceFeePerUnit?: unknown;
+    feeEstimateRawJson?: unknown;
+  }): { k: number; b: number; referralRate: number | null } {
+    const toNum = (v: unknown): number | null => {
+      if (v == null) return null;
+      const n = typeof v === 'number' ? v : Number(String(v));
+      return Number.isFinite(n) ? n : null;
+    };
+    const ref = Math.abs(toNum(product.estimatedReferralFeePerUnit) ?? 0);
+    const fba = Math.abs(toNum(product.estimatedFbaFeePerUnit) ?? 0);
+    const digStored = Math.abs(toNum(product.estimatedDigitalServiceFeePerUnit) ?? 0);
+
+    // Price the referral estimate was computed at (Product Fees API echoes PriceToEstimateFees).
+    let priceAtEstimate: number | null = null;
+    const raw = product.feeEstimateRawJson as any;
+    if (raw) {
+      const feeResult = raw?.payload?.FeesEstimateResult ?? raw?.FeesEstimateResult ?? raw;
+      const pp =
+        feeResult?.FeesEstimateIdentifier?.PriceToEstimateFees?.ListingPrice ??
+        feeResult?.feesEstimateIdentifier?.priceToEstimateFees?.listingPrice;
+      const amt = pp?.Amount ?? pp?.amount;
+      const n = typeof amt === 'number' ? amt : typeof amt === 'string' ? parseFloat(amt) : null;
+      if (n != null && Number.isFinite(n) && n > 0) priceAtEstimate = n;
+    }
+
+    let referralRate: number | null = null;
+    if (ref > 1e-9 && priceAtEstimate != null) referralRate = ref / priceAtEstimate;
+    // Clamp to a sane category range; otherwise fall back to standard 15% so referral still scales.
+    if (
+      referralRate == null ||
+      !Number.isFinite(referralRate) ||
+      referralRate < 0.02 ||
+      referralRate > 0.45
+    ) {
+      referralRate = ref > 1e-9 ? 0.15 : null;
+    }
+
+    // Digital services rate (per-product when derivable, else UK/EU 2% when fees exist).
+    let digRate = 0;
+    if (digStored > 1e-9 && ref + fba > 1e-9) digRate = digStored / (ref + fba);
+    else if (ref + fba > 1e-9) digRate = 0.02;
+    if (!Number.isFinite(digRate) || digRate < 0 || digRate > 0.1) digRate = 0.02;
+
+    if (referralRate == null) {
+      const dig =
+        digStored > 1e-9
+          ? digStored
+          : ref + fba > 1e-9
+            ? Math.round((ref + fba) * 0.02 * 100) / 100
+            : 0;
+      return { k: 0, b: ref + fba + dig, referralRate: null };
+    }
+
+    // fee(price) = referralRate*price + fba + digRate*(referralRate*price + fba)
+    const k = referralRate * (1 + digRate);
+    const b = fba * (1 + digRate);
+    return { k, b, referralRate };
+  }
+
   private computeBounds(params: {
     cost: number | null;
     fee: number | null;
@@ -1057,8 +1133,10 @@ export class RepricerService {
     minListPrice?: number | null;
     /** Optional listing-currency ceiling (combined with profit/ROI: strictest max wins). */
     maxListPrice?: number | null;
+    /** Optional price-aware fee model fee(price)=k*price+b. When set, referral scales with price. */
+    feeModel?: { k: number; b: number } | null;
   }) {
-    const { cost, fee, minProfit, maxProfit, minRoiPct, maxRoiPct, minListPrice, maxListPrice } = params;
+    const { cost, fee, minProfit, maxProfit, minRoiPct, maxRoiPct, minListPrice, maxListPrice, feeModel } = params;
     if (cost == null || !Number.isFinite(cost) || cost <= 0) return null;
     // Fees can be stored as negative (common in orders/finances). Bounds should use absolute fee cost.
     const f = fee != null && Number.isFinite(fee) ? Math.abs(fee) : 0;
@@ -1067,10 +1145,17 @@ export class RepricerService {
     const minRoi = minRoiPct != null && Number.isFinite(minRoiPct) ? minRoiPct / 100 : null;
     const maxRoi = maxRoiPct != null && Number.isFinite(maxRoiPct) ? maxRoiPct / 100 : null;
 
-    const minByProfit = minProfitAbs != null ? cost + f + minProfitAbs : null;
-    const minByRoi = minRoi != null ? cost * (1 + minRoi) + f : null;
-    const maxByProfit = maxProfitAbs != null ? cost + f + maxProfitAbs : null;
-    const maxByRoi = maxRoi != null ? cost * (1 + maxRoi) + f : null;
+    // With a price-aware fee model, solve  price - (k*price + b) - cost >= target  for price:
+    //   price >= (cost*(1+roi) + b) / (1 - k)   (ROI)   /   (cost + profit + b)/(1-k)  (profit)
+    const useModel =
+      feeModel != null && Number.isFinite(feeModel.k) && feeModel.k >= 0 && feeModel.k < 0.95;
+    const solveMin = (rhsBase: number): number =>
+      useModel ? (rhsBase + feeModel!.b) / (1 - feeModel!.k) : rhsBase + f;
+
+    const minByProfit = minProfitAbs != null ? solveMin(cost + minProfitAbs) : null;
+    const minByRoi = minRoi != null ? solveMin(cost * (1 + minRoi)) : null;
+    const maxByProfit = maxProfitAbs != null ? solveMin(cost + maxProfitAbs) : null;
+    const maxByRoi = maxRoi != null ? solveMin(cost * (1 + maxRoi)) : null;
 
     const minCandidates = [minByProfit, minByRoi].filter((n) => n != null) as number[];
     const maxCandidates = [maxByProfit, maxByRoi].filter((n) => n != null) as number[];
@@ -1671,6 +1756,7 @@ export class RepricerService {
             estimatedFbaFeePerUnit: true,
             estimatedDigitalServiceFeePerUnit: true,
             currentListedPrice: true,
+            feeEstimateRawJson: true,
             inventory: { select: { totalQty: true, availableQty: true } },
           },
         },
@@ -1846,15 +1932,33 @@ export class RepricerService {
       const current = p?.currentListedPrice != null ? Number(p.currentListedPrice) : null;
       const costRaw = p?.costOfGoods != null ? Number(p.costOfGoods) : null;
       const cost = this.isSuspiciousCogs(costRaw, current) ? null : costRaw;
-      const fee = this.amazonService.repricerAmazonFeePerUnitFromProduct(
-        {
-          currentListedPrice: p?.currentListedPrice,
-          estimatedReferralFeePerUnit: (p as any)?.estimatedReferralFeePerUnit,
-          estimatedFbaFeePerUnit: (p as any)?.estimatedFbaFeePerUnit,
-          estimatedDigitalServiceFeePerUnit: (p as any)?.estimatedDigitalServiceFeePerUnit,
-          estimatedAmazonFeePerUnit: p?.estimatedAmazonFeePerUnit,
-        },
-        financesSnapEngine.get(p.id) ?? null,
+      // Price-aware fee: referral scales with price (see repricerFeeModel). Falls back to the
+      // frozen/finances estimate when there's no usable referral basis.
+      const feeModel = this.repricerFeeModel({
+        estimatedReferralFeePerUnit: (p as any)?.estimatedReferralFeePerUnit,
+        estimatedFbaFeePerUnit: (p as any)?.estimatedFbaFeePerUnit,
+        estimatedDigitalServiceFeePerUnit: (p as any)?.estimatedDigitalServiceFeePerUnit,
+        feeEstimateRawJson: (p as any)?.feeEstimateRawJson,
+      });
+      const useLinearFee = feeModel.referralRate != null;
+      const feeAtPriceModel = (price: number): number | null => {
+        if (useLinearFee && Number.isFinite(price)) {
+          return Math.abs(feeModel.k * price + feeModel.b);
+        }
+        const out = this.amazonService.repricerAmazonFeePerUnitFromProduct(
+          {
+            currentListedPrice: price,
+            estimatedReferralFeePerUnit: (p as any)?.estimatedReferralFeePerUnit,
+            estimatedFbaFeePerUnit: (p as any)?.estimatedFbaFeePerUnit,
+            estimatedDigitalServiceFeePerUnit: (p as any)?.estimatedDigitalServiceFeePerUnit,
+            estimatedAmazonFeePerUnit: p?.estimatedAmazonFeePerUnit,
+          },
+          financesSnapEngine.get(p.id) ?? null,
+        );
+        return out != null && Number.isFinite(out) ? Math.abs(out) : null;
+      };
+      const fee = feeAtPriceModel(
+        current != null && Number.isFinite(current) && current > 0 ? current : 0,
       );
       // External listing price drift logging is noisy during normal operation (syncs/manual edits/etc).
       // Keep disabled by default; enable only when debugging with REPRICER_LOG_EXTERNAL_DRIFT=true.
@@ -1872,6 +1976,7 @@ export class RepricerService {
         maxRoiPct,
         minListPrice: minListPriceRule,
         maxListPrice: maxListPriceRule,
+        feeModel: useLinearFee ? { k: feeModel.k, b: feeModel.b } : null,
       });
 
       let message = '';
@@ -2091,16 +2196,7 @@ export class RepricerService {
           cost > 0
         ) {
           const feeAt = (price: number): number => {
-            const outFee = this.amazonService.repricerAmazonFeePerUnitFromProduct(
-              {
-                currentListedPrice: price,
-                estimatedReferralFeePerUnit: (p as any)?.estimatedReferralFeePerUnit,
-                estimatedFbaFeePerUnit: (p as any)?.estimatedFbaFeePerUnit,
-                estimatedDigitalServiceFeePerUnit: (p as any)?.estimatedDigitalServiceFeePerUnit,
-                estimatedAmazonFeePerUnit: p?.estimatedAmazonFeePerUnit,
-              },
-              financesSnapEngine.get(p.id) ?? null,
-            );
+            const outFee = feeAtPriceModel(price);
             return outFee != null && Number.isFinite(outFee) ? Math.abs(Number(outFee)) : 0;
           };
           const meets = (price: number) => {
@@ -2192,21 +2288,8 @@ export class RepricerService {
                   nextPrice,
                   p?.productType != null ? String(p.productType) : null,
                 );
-                const feeAtPrice = (price: number): number | null => {
-                  const outFee = this.amazonService.repricerAmazonFeePerUnitFromProduct(
-                    {
-                      currentListedPrice: price,
-                      estimatedReferralFeePerUnit: (p as any)?.estimatedReferralFeePerUnit,
-                      estimatedFbaFeePerUnit: (p as any)?.estimatedFbaFeePerUnit,
-                      estimatedDigitalServiceFeePerUnit: (p as any)?.estimatedDigitalServiceFeePerUnit,
-                      estimatedAmazonFeePerUnit: p?.estimatedAmazonFeePerUnit,
-                    },
-                    financesSnapEngine.get(p.id) ?? null,
-                  );
-                  return outFee != null && Number.isFinite(outFee) ? Math.abs(Number(outFee)) : null;
-                };
                 const feeAbs =
-                  feeAtPrice(Number(nextPrice)) ??
+                  feeAtPriceModel(Number(nextPrice)) ??
                   (fee != null && Number.isFinite(Number(fee)) ? Math.abs(Number(fee)) : null);
                 const roiPct =
                   cost != null &&
@@ -2230,21 +2313,8 @@ export class RepricerService {
               }
             }
           } else {
-            const feeAtPrice = (price: number): number | null => {
-              const outFee = this.amazonService.repricerAmazonFeePerUnitFromProduct(
-                {
-                  currentListedPrice: price,
-                  estimatedReferralFeePerUnit: (p as any)?.estimatedReferralFeePerUnit,
-                  estimatedFbaFeePerUnit: (p as any)?.estimatedFbaFeePerUnit,
-                  estimatedDigitalServiceFeePerUnit: (p as any)?.estimatedDigitalServiceFeePerUnit,
-                  estimatedAmazonFeePerUnit: p?.estimatedAmazonFeePerUnit,
-                },
-                financesSnapEngine.get(p.id) ?? null,
-              );
-              return outFee != null && Number.isFinite(outFee) ? Math.abs(Number(outFee)) : null;
-            };
             const feeAbs =
-              feeAtPrice(Number(nextPrice)) ??
+              feeAtPriceModel(Number(nextPrice)) ??
               (fee != null && Number.isFinite(Number(fee)) ? Math.abs(Number(fee)) : null);
             const roiPct =
               cost != null &&
@@ -2290,6 +2360,13 @@ export class RepricerService {
         maxRoiPct,
         cost,
         fee,
+        feeModel: useLinearFee
+          ? {
+              referralRate: feeModel.referralRate,
+              k: Math.round(feeModel.k * 1e6) / 1e6,
+              b: Math.round(feeModel.b * 100) / 100,
+            }
+          : null,
         bounds: bounds ?? null,
         ruleSetId: preset.id,
         ruleSetName: preset.name ?? null,
