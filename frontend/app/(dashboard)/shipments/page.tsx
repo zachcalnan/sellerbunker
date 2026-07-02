@@ -78,6 +78,80 @@ function checkedInSourceLabel(
   }
 }
 
+function ShipmentItemThumbnails({
+  items,
+  max = 5,
+}: {
+  items: ShipmentItemLine[];
+  max?: number;
+}) {
+  const unique = useMemo(() => {
+    const seen = new Set<string>();
+    const out: ShipmentItemLine[] = [];
+    for (const item of items) {
+      const key = (item.asin ?? item.sellerSku ?? item.id).toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(item);
+    }
+    return out;
+  }, [items]);
+
+  if (unique.length === 0) {
+    return (
+      <div
+        className="flex h-8 w-8 items-center justify-center rounded-md bg-[var(--surface-hover)] text-[10px] text-[var(--muted-foreground)]"
+        title="Item images load when SKU lines are synced"
+      >
+        —
+      </div>
+    );
+  }
+
+  const shown = unique.slice(0, max);
+  const extra = unique.length - shown.length;
+
+  return (
+    <div className="flex items-center">
+      <div className="flex -space-x-2">
+        {shown.map((item) => {
+          const label = item.title ?? item.sellerSku ?? item.asin ?? "Product";
+          return (
+            <div
+              key={item.id}
+              className="relative h-8 w-8 shrink-0 overflow-hidden rounded-md ring-2 ring-[var(--surface)]"
+              title={`${item.quantityShipped}× ${label}`}
+            >
+              {item.imageUrl ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={item.imageUrl}
+                  alt=""
+                  className="h-full w-full object-cover"
+                  loading="lazy"
+                  referrerPolicy="no-referrer"
+                />
+              ) : (
+                <div className="flex h-full w-full items-center justify-center bg-[var(--surface-hover)] text-[9px] text-[var(--muted-foreground)]">
+                  ?
+                </div>
+              )}
+            </div>
+          );
+        })}
+        {extra > 0 && (
+          <div
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-[var(--surface-hover)] text-[10px] font-medium tabular-nums text-[var(--muted-foreground)] ring-2 ring-[var(--surface)]"
+            title={`${extra} more SKU${extra !== 1 ? "s" : ""}`}
+          >
+            +{extra}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ShipmentItemsBreakdown({ row }: { row: ShipmentRow }) {
   const items = row.items ?? [];
   if (items.length === 0) {
@@ -343,7 +417,7 @@ export default function ShipmentsPage() {
   const { backgroundClass } = useDisplaySettings();
 
   const gridCols =
-    "grid-cols-[20px_minmax(88px,0.85fr)_0.55fr_0.5fr_0.65fr_0.35fr_0.4fr_0.4fr_0.4fr]";
+    "grid-cols-[20px_minmax(0,auto)_minmax(88px,0.75fr)_0.55fr_0.5fr_0.65fr_0.35fr_0.4fr_0.4fr_0.4fr]";
 
   return (
     <div className={`flex min-h-screen flex-col gap-4 ${backgroundClass} p-4 md:p-6`}>
@@ -401,6 +475,7 @@ export default function ShipmentsPage() {
           <div className="overflow-x-auto rounded-lg border border-[var(--surface-border)] bg-[var(--surface)]">
             <div className={`grid ${gridCols} items-center gap-2 px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-[var(--muted-foreground)]`}>
               <div aria-hidden />
+              <div>Items</div>
               <div>Shipment ID</div>
               <div className="pl-0.5">Status</div>
               <div>Created</div>
@@ -448,6 +523,9 @@ export default function ShipmentsPage() {
                             >
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                             </svg>
+                          </div>
+                          <div className="py-0.5">
+                            <ShipmentItemThumbnails items={r.items ?? []} />
                           </div>
                           <div className="min-w-0">
                             <div className="truncate font-mono text-[var(--foreground)]" title={r.shipmentId}>
