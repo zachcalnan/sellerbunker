@@ -1122,6 +1122,63 @@ export class RepricerService {
     return { k, b, referralRate };
   }
 
+  /**
+   * Price-aware fee model from a settled Finances order line (matches Orders profit path).
+   * Referral scales with sale price; FBA + digital stay flat per unit from settlement.
+   */
+  private repricerFeeModelFromFinancesSnapshot(snap: {
+    quantity: number;
+    revenueTotal: number;
+    amazonFeesTotal: number;
+    settledReferralFeeTotal?: number | null;
+    settledFbaFeeTotal?: number | null;
+    settledDigitalServiceFeeTotal?: number | null;
+  }): {
+    k: number;
+    b: number;
+    referralRate: number | null;
+    flatFeePerUnit: number;
+    source: 'finances_breakdown' | 'finances_total';
+  } | null {
+    const qty = Math.max(1, Math.floor(Number(snap.quantity) || 1));
+    const rev = Math.abs(Number(snap.revenueTotal));
+    const feeMag = Math.abs(Number(snap.amazonFeesTotal));
+    const flatFeePerUnit = feeMag / qty;
+    if (!Number.isFinite(flatFeePerUnit) || flatFeePerUnit < 0.01) return null;
+
+    const refMag =
+      snap.settledReferralFeeTotal != null
+        ? Math.abs(Number(snap.settledReferralFeeTotal)) / qty
+        : 0;
+    const fbaMag =
+      snap.settledFbaFeeTotal != null ? Math.abs(Number(snap.settledFbaFeeTotal)) / qty : 0;
+    const digMag =
+      snap.settledDigitalServiceFeeTotal != null
+        ? Math.abs(Number(snap.settledDigitalServiceFeeTotal)) / qty
+        : 0;
+
+    if (refMag > 1e-9 && rev > 1e-9) {
+      const referralRate = refMag / rev;
+      if (Number.isFinite(referralRate) && referralRate > 0 && referralRate < 0.95) {
+        return {
+          k: referralRate,
+          b: fbaMag + digMag,
+          referralRate,
+          flatFeePerUnit,
+          source: 'finances_breakdown',
+        };
+      }
+    }
+
+    return {
+      k: 0,
+      b: flatFeePerUnit,
+      referralRate: null,
+      flatFeePerUnit,
+      source: 'finances_total',
+    };
+  }
+
   private computeBounds(params: {
     cost: number | null;
     fee: number | null;
@@ -1781,7 +1838,17 @@ export class RepricerService {
             userIdsForFees,
             engineProductIds,
           )
-        : new Map<string, { quantity: number; revenueTotal: number; amazonFeesTotal: number }>();
+        : new Map<
+            string,
+            {
+              quantity: number;
+              revenueTotal: number;
+              amazonFeesTotal: number;
+              settledReferralFeeTotal: number | null;
+              settledFbaFeeTotal: number | null;
+              settledDigitalServiceFeeTotal: number | null;
+            }
+          >();
 
     const activeFallback = await (this.prisma as any).repricerRuleSet.findFirst({
       where: { orgId, isActive: true },
@@ -1932,18 +1999,29 @@ export class RepricerService {
       const current = p?.currentListedPrice != null ? Number(p.currentListedPrice) : null;
       const costRaw = p?.costOfGoods != null ? Number(p.costOfGoods) : null;
       const cost = this.isSuspiciousCogs(costRaw, current) ? null : costRaw;
-      // Price-aware fee: referral scales with price (see repricerFeeModel). Falls back to the
-      // frozen/finances estimate when there's no usable referral basis.
-      const feeModel = this.repricerFeeModel({
+      const financesSnapRow = financesSnapEngine.get(p.id) ?? null;
+      const financesFeeModel =
+        financesSnapRow?.settledReferralFeeTotal != null
+          ? this.repricerFeeModelFromFinancesSnapshot(financesSnapRow)
+          : null;
+      // Price-aware fee from Product Fees when no settled Finances history exists.
+      const productFeeModel = this.repricerFeeModel({
         estimatedReferralFeePerUnit: (p as any)?.estimatedReferralFeePerUnit,
         estimatedFbaFeePerUnit: (p as any)?.estimatedFbaFeePerUnit,
         estimatedDigitalServiceFeePerUnit: (p as any)?.estimatedDigitalServiceFeePerUnit,
         feeEstimateRawJson: (p as any)?.feeEstimateRawJson,
       });
-      const useLinearFee = feeModel.referralRate != null;
+      const activeFeeModel = financesFeeModel ?? productFeeModel;
+      const useLinearFee =
+        financesFeeModel != null
+          ? financesFeeModel.k > 1e-9
+          : productFeeModel.referralRate != null;
       const feeAtPriceModel = (price: number): number | null => {
         if (useLinearFee && Number.isFinite(price)) {
-          return Math.abs(feeModel.k * price + feeModel.b);
+          return Math.abs(activeFeeModel.k * price + activeFeeModel.b);
+        }
+        if (financesFeeModel != null) {
+          return financesFeeModel.flatFeePerUnit;
         }
         const out = this.amazonService.repricerAmazonFeePerUnitFromProduct(
           {
@@ -1953,7 +2031,7 @@ export class RepricerService {
             estimatedDigitalServiceFeePerUnit: (p as any)?.estimatedDigitalServiceFeePerUnit,
             estimatedAmazonFeePerUnit: p?.estimatedAmazonFeePerUnit,
           },
-          financesSnapEngine.get(p.id) ?? null,
+          financesSnapRow,
         );
         return out != null && Number.isFinite(out) ? Math.abs(out) : null;
       };
@@ -1976,7 +2054,7 @@ export class RepricerService {
         maxRoiPct,
         minListPrice: minListPriceRule,
         maxListPrice: maxListPriceRule,
-        feeModel: useLinearFee ? { k: feeModel.k, b: feeModel.b } : null,
+        feeModel: useLinearFee ? { k: activeFeeModel.k, b: activeFeeModel.b } : null,
       });
 
       let message = '';
@@ -2362,11 +2440,14 @@ export class RepricerService {
         fee,
         feeModel: useLinearFee
           ? {
-              referralRate: feeModel.referralRate,
-              k: Math.round(feeModel.k * 1e6) / 1e6,
-              b: Math.round(feeModel.b * 100) / 100,
+              referralRate: activeFeeModel.referralRate,
+              k: Math.round(activeFeeModel.k * 1e6) / 1e6,
+              b: Math.round(activeFeeModel.b * 100) / 100,
+              source: financesFeeModel?.source ?? 'product_estimate',
             }
-          : null,
+          : financesFeeModel
+            ? { source: financesFeeModel.source, flatFeePerUnit: financesFeeModel.flatFeePerUnit }
+            : null,
         bounds: bounds ?? null,
         ruleSetId: preset.id,
         ruleSetName: preset.name ?? null,
