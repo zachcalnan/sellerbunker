@@ -9,7 +9,7 @@ name: sellerbunker-personal
 
 services:
   postgres:
-    image: postgres:15-alpine
+    image: postgres:18-alpine
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-seller}
