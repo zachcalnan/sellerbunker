@@ -1,0 +1,5 @@
+# Ignore local personal secrets and DB dumps
+.env.personal
+*.dump
+*.sql.gz
+backups/

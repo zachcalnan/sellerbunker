@@ -3,6 +3,8 @@ import type { NextConfig } from "next";
 const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
 
 const nextConfig: NextConfig = {
+  // Smaller Docker images; used by deploy/docker-compose.personal.yml
+  output: "standalone",
   async rewrites() {
     // Proxy API paths to Nest; otherwise client-side fetches to the same origin would 404 on Next.
     return [

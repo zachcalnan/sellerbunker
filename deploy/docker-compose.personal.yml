@@ -1,0 +1,117 @@
+# Personal always-on stack for one VPS (Hetzner etc.).
+# Usage (from repo root on the VPS):
+#   cp deploy/.env.personal.example deploy/.env.personal   # fill secrets
+#   docker compose -f deploy/docker-compose.personal.yml --env-file deploy/.env.personal up -d --build
+#
+# Postgres/Redis are not published to the host. Only Caddy exposes 80/443.
+
+name: sellerbunker-personal
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-seller}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.personal}
+      POSTGRES_DB: ${POSTGRES_DB:-sellertoolkit}
+    volumes:
+      - personal_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - internal
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - personal_redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - internal
+
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env.personal
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-seller}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-sellertoolkit}?schema=public
+      REDIS_URL: redis://redis:6379
+      PORT: "3001"
+      NODE_ENV: production
+      FRONTEND_URL: ${FRONTEND_URL:-https://www.sellerbunker.com}
+      ENABLE_AMAZON_SYNC_SCHEDULER: ${ENABLE_AMAZON_SYNC_SCHEDULER:-true}
+      ENABLE_REPRICER_SCHEDULER: ${ENABLE_REPRICER_SCHEDULER:-true}
+      BYPASS_BILLING: ${BYPASS_BILLING:-true}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - internal
+
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-https://www.sellerbunker.com}
+        NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-https://www.sellerbunker.com}
+        NEXT_PUBLIC_BYPASS_BILLING: ${NEXT_PUBLIC_BYPASS_BILLING:-true}
+        NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY:-}
+    restart: unless-stopped
+    env_file:
+      - .env.personal
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      HOSTNAME: 0.0.0.0
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-https://www.sellerbunker.com}
+      NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-https://www.sellerbunker.com}
+      NEXT_PUBLIC_BYPASS_BILLING: ${NEXT_PUBLIC_BYPASS_BILLING:-true}
+    depends_on:
+      - backend
+    networks:
+      - internal
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-www.sellerbunker.com}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - personal_caddy_data:/data
+      - personal_caddy_config:/config
+    depends_on:
+      - frontend
+      - backend
+    networks:
+      - internal
+
+volumes:
+  personal_pgdata:
+  personal_redisdata:
+  personal_caddy_data:
+  personal_caddy_config:
+
+networks:
+  internal:
+    driver: bridge

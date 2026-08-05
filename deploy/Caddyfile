@@ -1,0 +1,25 @@
+# Personal VPS reverse proxy.
+# SITE_ADDRESS from compose, e.g. "www.sellerbunker.com" or "www.sellerbunker.com, sellerbunker.com"
+{$SITE_ADDRESS} {
+	encode gzip
+
+	# Next.js app routes that must stay on the frontend
+	handle /api/webhooks/* {
+		reverse_proxy frontend:3000
+	}
+	handle /api/checkout* {
+		reverse_proxy frontend:3000
+	}
+	handle /api/contact* {
+		reverse_proxy frontend:3000
+	}
+
+	# NestJS API (global prefix /api)
+	handle /api* {
+		reverse_proxy backend:3001
+	}
+
+	handle {
+		reverse_proxy frontend:3000
+	}
+}

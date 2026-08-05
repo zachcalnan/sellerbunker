@@ -1,0 +1,8 @@
+node_modules
+.next
+.env
+.env.*
+!.env.render.example
+*.log
+.git
+.vscode

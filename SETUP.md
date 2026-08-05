@@ -68,4 +68,8 @@ For an isolated Render-based test environment, use:
 - `frontend/.env.render.example`
 - `docs/render-test-environment.md`
 
+## Personal VPS (one account, phone bookmark)
+
+To run always-on on a cheap VPS instead of Render, see **[docs/personal-vps.md](docs/personal-vps.md)** (`deploy/docker-compose.personal.yml` + bootstrap/restore scripts).
+
 
