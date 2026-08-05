@@ -16,7 +16,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.personal}
       POSTGRES_DB: ${POSTGRES_DB:-sellertoolkit}
     volumes:
-      - personal_pgdata:/var/lib/postgresql/data
+      - personal_pgdata:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 10s
