@@ -1,9 +1,11 @@
 import {
   BadRequestException,
   ForbiddenException,
+  Inject,
   Injectable,
   Logger,
   NotFoundException,
+  forwardRef,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as crypto from 'crypto';
@@ -51,6 +53,7 @@ import {
   resolveShipmentCheckedIn,
   sameCalendarDay,
 } from './shipment-date.util';
+import { RepricerService } from '../repricer/repricer.service';
 
 /** When we have no settled fees and no product fee estimate, use this share of revenue as fee so profit/ROI are not overstated. */
 const DEFAULT_AMAZON_FEE_RATE_WHEN_UNKNOWN = 0.35;
@@ -85,6 +88,8 @@ export class AmazonService {
     private readonly prisma: PrismaService,
     private readonly configService: ConfigService,
     private readonly usersService: UsersService,
+    @Inject(forwardRef(() => RepricerService))
+    private readonly repricerService: RepricerService,
   ) {}
 
   private async getOrgMemberUserIds(orgId: string): Promise<string[]> {
@@ -2274,14 +2279,11 @@ export class AmazonService {
     };
   }
 
-  private async getAmazonCredentialsForOrg(
-    orgId: string,
-    preferredUserId?: string,
-  ): Promise<SpApiCredentials> {
+  /** Canonical Amazon seller account for org SP-API calls (aggregate user ids, not all members). */
+  private async findAmazonSellerAccountForOrg(orgId: string, preferredUserId?: string) {
     const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
 
     // Prefer the currently-authenticated user's connection if present.
-    // This avoids "findFirst picks a different org member's stale creds" issues.
     const preferred =
       preferredUserId && userIds.includes(preferredUserId)
         ? await this.prisma.sellerAccount.findUnique({
@@ -2294,12 +2296,20 @@ export class AmazonService {
           })
         : null;
 
-    const account =
+    return (
       preferred ??
       (await this.prisma.sellerAccount.findFirst({
         where: { userId: { in: userIds }, marketplace: 'amazon' },
         orderBy: { updatedAt: 'desc' },
-      }));
+      }))
+    );
+  }
+
+  private async getAmazonCredentialsForOrg(
+    orgId: string,
+    preferredUserId?: string,
+  ): Promise<SpApiCredentials> {
+    const account = await this.findAmazonSellerAccountForOrg(orgId, preferredUserId);
     if (!account) {
       throw new NotFoundException(
         'Amazon account not linked. Please link your Amazon account first.',
@@ -2328,6 +2338,48 @@ export class AmazonService {
       );
     }
     return resolved;
+  }
+
+  /**
+   * SP-API credentials + seller id from the same linked account row (matches listing price refresh / sync).
+   */
+  async getOrgAmazonSpApiListingContext(
+    orgId: string,
+    preferredUserId?: string,
+  ): Promise<{ credentials: SpApiCredentials; sellerId: string | null }> {
+    const account = await this.findAmazonSellerAccountForOrg(orgId, preferredUserId);
+    if (!account) {
+      throw new NotFoundException(
+        'Amazon account not linked. Please link your Amazon account first.',
+      );
+    }
+    const creds = account.credentials as {
+      region?: 'na' | 'eu' | 'fe';
+      lwaClientId?: string;
+      lwaClientSecret?: string;
+      refreshToken?: string;
+      awsAccessKeyId?: string;
+      awsSecretAccessKey?: string;
+      awsRoleArn?: string;
+    };
+    const credentials = this.spApiCredentialsFromSellerAccountJson(creds ?? {});
+    if (
+      !creds ||
+      !credentials.lwaClientId ||
+      !credentials.lwaClientSecret ||
+      !credentials.refreshToken ||
+      !credentials.awsAccessKeyId ||
+      !credentials.awsSecretAccessKey
+    ) {
+      throw new NotFoundException(
+        'Amazon credentials are incomplete. Please relink your Amazon account.',
+      );
+    }
+    const sellerId =
+      account.sellerId != null && String(account.sellerId).trim()
+        ? String(account.sellerId).trim()
+        : null;
+    return { credentials, sellerId };
   }
 
   async getAmazonConnectionDebug(orgId: string, preferredUserId: string) {
@@ -12770,6 +12822,28 @@ try {
   }
 
   // Save aggregate totals (per SKU) into Inventory for every org Product with that SKU
+  const newlyInStockProductIds = new Set<string>();
+  const allTargetIds: string[] = [];
+  for (const agg of aggregateBySku.values()) {
+    const productTargets = await ensureOrgProductsForSku(agg.sellerSku, agg.asin ?? null);
+    for (const target of productTargets) {
+      allTargetIds.push(target.id);
+    }
+  }
+  const priorInvByProductId = new Map<string, { totalQty: number; availableQty: number }>();
+  if (allTargetIds.length > 0) {
+    const priorRows = await this.prisma.inventory.findMany({
+      where: { productId: { in: [...new Set(allTargetIds)] } },
+      select: { productId: true, totalQty: true, availableQty: true },
+    });
+    for (const row of priorRows) {
+      priorInvByProductId.set(row.productId, {
+        totalQty: Number(row.totalQty ?? 0),
+        availableQty: Number(row.availableQty ?? 0),
+      });
+    }
+  }
+
   for (const agg of aggregateBySku.values()) {
     const sku = agg.sellerSku;
     const productTargets = await ensureOrgProductsForSku(sku, agg.asin ?? null);
@@ -12792,6 +12866,16 @@ try {
     };
 
     for (const target of productTargets) {
+      const prior = priorInvByProductId.get(target.id);
+      const wasOutOfStock =
+        prior == null ||
+        ((prior.totalQty <= 0 || !Number.isFinite(prior.totalQty)) &&
+          (prior.availableQty <= 0 || !Number.isFinite(prior.availableQty)));
+      const nowInStock = totalQty > 0 || agg.fulfillable > 0;
+      if (wasOutOfStock && nowInStock) {
+        newlyInStockProductIds.add(target.id);
+      }
+
       await this.prisma.inventory.upsert({
         where: { productId: target.id },
         update: { userId: target.userId, ...invPayload },
@@ -12813,6 +12897,23 @@ try {
     where: { id: orgId },
     data: { lastFbaInventorySyncAt: now },
   });
+
+  try {
+    const auto = await this.repricerService.autoEnrollNewInStockSkus(orgId, {
+      onlyProductIds: [...newlyInStockProductIds],
+    });
+    if (auto.enrolled > 0) {
+      this.logger.log(
+        `[syncFbaInventory] auto-enrolled ${auto.enrolled} SKU(s) to repricer rule "${auto.ruleSetName ?? '?'}"`,
+      );
+    }
+  } catch (e) {
+    this.logger.warn(
+      `[syncFbaInventory] repricer auto-enroll failed for org ${orgId}: ${
+        e instanceof Error ? e.message : String(e)
+      }`,
+    );
+  }
 
   return {
     ok: true,

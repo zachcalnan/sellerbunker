@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { BullModule } from '@nestjs/bullmq';
 import { AmazonModule } from '../amazon/amazon.module';
 import { ClerkModule } from '../clerk/clerk.module';
@@ -15,11 +15,12 @@ import { RepricerSyncService } from './repricer-sync.service';
     PrismaModule,
     UsersModule,
     ClerkModule,
-    AmazonModule,
+    forwardRef(() => AmazonModule),
     BullModule.registerQueue({ name: 'repricer' }),
   ],
   controllers: [RepricerController],
   providers: [RepricerService, RepricerPasswordGuard, RepricerSyncService, RepricerProcessor],
+  exports: [RepricerService],
 })
 export class RepricerModule {}
 

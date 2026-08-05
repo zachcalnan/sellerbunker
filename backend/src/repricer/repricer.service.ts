@@ -1,9 +1,14 @@
-import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, Logger, forwardRef } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { UsersService } from '../users/users.service';
 import { AmazonSpApiClient, SpApiCredentials } from '../amazon/sp-api.client';
 import { AmazonService } from '../amazon/amazon.service';
+import {
+  isListingsGetRetryableError,
+  marketplaceIdToListingCurrency,
+  parseListingPatchMetaFromGetListingsItem,
+} from './repricer-listing-patch-meta.util';
 
 @Injectable()
 export class RepricerService {
@@ -13,6 +18,7 @@ export class RepricerService {
     private readonly prisma: PrismaService,
     private readonly usersService: UsersService,
     private readonly spApiClient: AmazonSpApiClient,
+    @Inject(forwardRef(() => AmazonService))
     private readonly amazonService: AmazonService,
   ) {}
 
@@ -351,6 +357,144 @@ export class RepricerService {
     });
 
     return { ok: true as const, selected: await this.getSelectedSkus(orgId) };
+  }
+
+  private static readonly REPRICER_AUTO_ENROLL_SYSTEM_SKUS = new Set([
+    'AMAZON_GENERIC',
+    'AMAZON_MULTI',
+  ]);
+
+  /** Resolve pricing preset for auto-enrolment (env name hint or "15% 6 months" style). */
+  private async resolveAutoEnrollRuleSet(orgId: string) {
+    const hint = (process.env.REPRICER_AUTO_ENROLL_RULE_NAME ?? '15% 6 months').trim();
+    if (!hint) return null;
+    const rows = await (this.prisma as any).repricerRuleSet.findMany({
+      where: { orgId },
+      orderBy: { updatedAt: 'desc' },
+    });
+    if (!rows?.length) return null;
+    const hintLower = hint.toLowerCase();
+    const exact = rows.find((r: { name?: string }) =>
+      String(r.name ?? '')
+        .trim()
+        .toLowerCase() === hintLower,
+    );
+    if (exact) return exact;
+    const contains = rows.find((r: { name?: string }) =>
+      String(r.name ?? '')
+        .toLowerCase()
+        .includes(hintLower),
+    );
+    if (contains) return contains;
+    const fuzzy = rows.find((r: { name?: string; rule1MinRoiPct?: unknown }) => {
+      const n = String(r.name ?? '').toLowerCase();
+      const roi = r.rule1MinRoiPct != null ? Number(r.rule1MinRoiPct) : null;
+      return (
+        (n.includes('15') || roi === 15) &&
+        (n.includes('6 month') || n.includes('6m') || n.includes('6 m'))
+      );
+    });
+    return fuzzy ?? null;
+  }
+
+  /**
+   * After FBA inventory sync: enrol SKUs that **just became in stock** and have **never** been in the
+   * repricer cohort (no existing `repricer_selected_skus` row — never creates or updates assignments).
+   * Uses {@link resolveAutoEnrollRuleSet} (default name hint: "15% 6 months").
+   * Opt out: REPRICER_AUTO_ENROLL_IN_STOCK=false
+   */
+  async autoEnrollNewInStockSkus(
+    orgId: string,
+    opts?: { onlyProductIds?: string[] },
+  ): Promise<{
+    ok: boolean;
+    enrolled: number;
+    ruleSetId: string | null;
+    ruleSetName: string | null;
+  }> {
+    const raw = (process.env.REPRICER_AUTO_ENROLL_IN_STOCK ?? 'true').toLowerCase();
+    if (['0', 'false', 'no', 'off'].includes(raw)) {
+      return { ok: true, enrolled: 0, ruleSetId: null, ruleSetName: null };
+    }
+
+    const onlyIds = [...new Set((opts?.onlyProductIds ?? []).map((id) => String(id).trim()).filter(Boolean))];
+    if (onlyIds.length === 0) {
+      return { ok: true, enrolled: 0, ruleSetId: null, ruleSetName: null };
+    }
+
+    const ruleSet = await this.resolveAutoEnrollRuleSet(orgId);
+    if (!ruleSet) {
+      this.logger.warn(
+        `[autoEnroll] org ${orgId.slice(0, 8)}… — no matching pricing rule (set REPRICER_AUTO_ENROLL_RULE_NAME or create "15% 6 months")`,
+      );
+      return { ok: true, enrolled: 0, ruleSetId: null, ruleSetName: null };
+    }
+
+    const userIds = await this.getOrgMemberUserIds(orgId);
+    if (!userIds.length) {
+      return { ok: true, enrolled: 0, ruleSetId: ruleSet.id, ruleSetName: ruleSet.name };
+    }
+
+    const already = await (this.prisma as any).repricerSelectedSku.findMany({
+      where: { orgId, productId: { in: onlyIds } },
+      select: { productId: true, ruleSetId: true },
+    });
+    const hasAnyRepricerRow = new Set<string>(
+      (already ?? []).map((r: { productId: string }) => String(r.productId)),
+    );
+
+    const candidates = await this.prisma.product.findMany({
+      where: {
+        id: { in: onlyIds },
+        userId: { in: userIds },
+        sku: { not: '' },
+        NOT: { sku: { in: [...RepricerService.REPRICER_AUTO_ENROLL_SYSTEM_SKUS] } },
+        asin: { not: null },
+        inventory: {
+          OR: [{ totalQty: { gt: 0 } }, { availableQty: { gt: 0 } }],
+        },
+      },
+      select: { id: true, sku: true, asin: true },
+    });
+
+    const toEnroll = candidates.filter((p) => {
+      if (hasAnyRepricerRow.has(p.id)) return false;
+      const sku = String(p.sku ?? '').trim();
+      const asin = String(p.asin ?? '').trim();
+      if (!sku || RepricerService.REPRICER_AUTO_ENROLL_SYSTEM_SKUS.has(sku)) return false;
+      return asin.length > 0;
+    });
+
+    if (toEnroll.length === 0) {
+      return {
+        ok: true,
+        enrolled: 0,
+        ruleSetId: ruleSet.id,
+        ruleSetName: ruleSet.name ?? null,
+      };
+    }
+
+    // Insert-only: never overwrite an existing repricer row or reassign a rule.
+    await (this.prisma as any).repricerSelectedSku.createMany({
+      data: toEnroll.map((p) => ({
+        orgId,
+        productId: p.id,
+        ruleSetId: String(ruleSet.id),
+        enabled: true,
+      })),
+      skipDuplicates: true,
+    });
+
+    this.logger.log(
+      `[autoEnroll] org ${orgId.slice(0, 8)}… enrolled ${toEnroll.length} newly in-stock SKU(s) (no prior rule) → "${ruleSet.name}"`,
+    );
+
+    return {
+      ok: true,
+      enrolled: toEnroll.length,
+      ruleSetId: ruleSet.id,
+      ruleSetName: ruleSet.name ?? null,
+    };
   }
 
   async setSelectedSkus(orgId: string, productIds: string[]) {
@@ -1613,57 +1757,8 @@ export class RepricerService {
     };
   }
 
-  private async getAmazonCredentialsForOrg(orgId: string): Promise<SpApiCredentials> {
-    const userIds = await this.getOrgMemberUserIds(orgId);
-    const account = await this.prisma.sellerAccount.findFirst({
-      where: { userId: { in: userIds }, marketplace: 'amazon' },
-      orderBy: { updatedAt: 'desc' },
-      select: { credentials: true },
-    });
-    if (!account) throw new BadRequestException('Amazon account not linked for this org');
-    const c = account.credentials as any;
-    const creds: SpApiCredentials = {
-      region: c?.region === 'na' || c?.region === 'eu' || c?.region === 'fe' ? c.region : 'eu',
-      lwaClientId: c?.lwaClientId,
-      lwaClientSecret: c?.lwaClientSecret,
-      refreshToken: c?.refreshToken,
-      awsAccessKeyId: c?.awsAccessKeyId,
-      awsSecretAccessKey: c?.awsSecretAccessKey,
-      awsRoleArn: process.env.AWS_ROLE_ARN,
-    };
-    if (
-      !creds.lwaClientId ||
-      !creds.lwaClientSecret ||
-      !creds.refreshToken ||
-      !creds.awsAccessKeyId ||
-      !creds.awsSecretAccessKey
-    ) {
-      throw new BadRequestException('Amazon credentials are incomplete; relink Amazon account');
-    }
-    return creds;
-  }
-
   private marketplaceIdToCurrency(marketplaceId: string): string {
-    const map: Record<string, string> = {
-      A1F83G8C2ARO7P: 'GBP',
-      A1PA6795UKMFR9: 'EUR',
-      A13V1IB3VIYZZH: 'EUR',
-      APJ6JRA9NG5V4: 'EUR',
-      A1RKKUPIHCS9HS: 'EUR',
-      A28R8C7NBKEWEA: 'EUR',
-      A1805IZSGTT6HS: 'EUR',
-      AMEN7PMS3EDWL: 'EUR',
-      A2NODRKZP88ZB9: 'SEK',
-      A1C3SOZRARQ6R3: 'PLN',
-      ATVPDKIKX0DER: 'USD',
-      A2EUQ1WTGCTBG2: 'CAD',
-      A1AM78C64UM0Y8: 'MXN',
-      A2Q3Y263D00KWC: 'BRL',
-      A1VC38T7YXB528: 'JPY',
-      A19VAU5U5O7RUS: 'SGD',
-      A39IBJ37TRP1C6: 'AUD',
-    };
-    return map[marketplaceId] ?? 'USD';
+    return marketplaceIdToListingCurrency(marketplaceId);
   }
 
   private parseListingPatchMeta(
@@ -1671,36 +1766,11 @@ export class RepricerService {
     fallbackMarketplaceId: string,
     fallbackProductType?: string | null,
   ): { marketplaceId: string; productType: string; currency: string } | null {
-    const payload = (res as any)?.payload ?? res;
-    if (!payload || typeof payload !== 'object') return null;
-    const summaries = (payload as any).summaries ?? (payload as any).Summaries;
-    let productType: string | null = null;
-    let marketplaceId = fallbackMarketplaceId;
-    if (Array.isArray(summaries) && summaries.length > 0) {
-      const s = summaries[0];
-      const pt = s?.productType ?? s?.product_type;
-      if (typeof pt === 'string' && pt.trim()) productType = pt.trim();
-      const mid = s?.marketplaceId ?? s?.marketplace_id;
-      if (typeof mid === 'string' && mid.trim()) marketplaceId = mid.trim();
-    }
-    if (!productType) {
-      const rootPt = (payload as any).productType ?? (payload as any).product_type;
-      if (typeof rootPt === 'string' && rootPt.trim()) productType = rootPt.trim();
-    }
-    if (!productType && typeof fallbackProductType === 'string' && fallbackProductType.trim()) {
-      productType = fallbackProductType.trim();
-    }
-    if (!productType) return null;
+    return parseListingPatchMetaFromGetListingsItem(res, fallbackMarketplaceId, fallbackProductType);
+  }
 
-    let currency = this.marketplaceIdToCurrency(marketplaceId);
-    const offers = (payload as any).offers ?? (payload as any).Offers;
-    if (Array.isArray(offers) && offers.length > 0) {
-      const price = offers[0]?.price ?? offers[0]?.Price;
-      const cur =
-        price?.currency ?? price?.CurrencyCode ?? price?.currencyCode ?? price?.Currency;
-      if (typeof cur === 'string' && cur.length === 3) currency = cur.toUpperCase();
-    }
-    return { marketplaceId, productType, currency };
+  private listingsGetRetryableError(e: unknown): boolean {
+    return isListingsGetRetryableError(e);
   }
 
   private async resolveListingPatchMeta(
@@ -1709,19 +1779,44 @@ export class RepricerService {
     sku: string,
     fallbackProductType?: string | null,
   ): Promise<{ marketplaceId: string; productType: string; currency: string } | null> {
-    const marketplaceIds = this.spApiClient.marketplaceIdsForListingPriceRefresh(creds.region);
+    const skuNorm = String(sku ?? '').trim();
+    if (!skuNorm) return null;
+    const defaultMid = this.defaultMarketplaceIdForRegion(creds.region);
+    const regionMids = this.spApiClient.marketplaceIdsForListingPriceRefresh(creds.region);
+    const marketplaceIds = [
+      defaultMid,
+      ...regionMids.filter((id) => id !== defaultMid),
+    ];
+    let lastErr: string | null = null;
     for (const mid of marketplaceIds) {
       try {
-        const res = await this.spApiClient.getListingsItem(creds, sellerId, sku, [mid], [
+        const res = await this.spApiClient.getListingsItem(creds, sellerId, skuNorm, [mid], [
           'summaries',
           'offers',
           'attributes',
         ]);
         const meta = this.parseListingPatchMeta(res, mid, fallbackProductType);
         if (meta) return meta;
-      } catch {
-        // try next marketplace
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        lastErr = msg;
+        if (this.listingsGetRetryableError(e)) continue;
+        this.logger.warn(
+          `[resolveListingPatchMeta] getListingsItem SKU=${skuNorm} marketplace=${mid}: ${msg}`,
+        );
       }
+    }
+    if (typeof fallbackProductType === 'string' && fallbackProductType.trim()) {
+      return {
+        marketplaceId: defaultMid,
+        productType: fallbackProductType.trim(),
+        currency: this.marketplaceIdToCurrency(defaultMid),
+      };
+    }
+    if (lastErr) {
+      this.logger.warn(
+        `[resolveListingPatchMeta] SKU=${skuNorm} failed all marketplaces; last error: ${lastErr}`,
+      );
     }
     return null;
   }
@@ -1732,13 +1827,30 @@ export class RepricerService {
     sku: string,
     nextPrice: number,
     fallbackProductType?: string | null,
+    opts?: { orgId?: string; asin?: string | null },
   ): Promise<unknown> {
-    const meta = await this.resolveListingPatchMeta(creds, sellerId, sku, fallbackProductType);
+    let meta = await this.resolveListingPatchMeta(creds, sellerId, sku, fallbackProductType);
+    if (!meta && opts?.orgId && opts?.asin?.trim()) {
+      const cat = await this.amazonService.fetchAndStoreCatalogCategoryForAsin(
+        opts.orgId,
+        '',
+        opts.asin.trim(),
+      );
+      if (cat.productType?.trim()) {
+        const mid = this.defaultMarketplaceIdForRegion(creds.region);
+        meta = {
+          marketplaceId: mid,
+          productType: cat.productType.trim(),
+          currency: this.marketplaceIdToCurrency(mid),
+        };
+      }
+    }
     if (!meta) {
       throw new Error(
-        'Could not load listing via getListingsItem in any marketplace for this region (SKU not found or incomplete summaries).',
+        'Could not resolve listing metadata for price update (Listings GET failed and no product type on file for this SKU).',
       );
     }
+    const skuNorm = String(sku ?? '').trim();
     const body = {
       productType: meta.productType,
       patches: [
@@ -1759,8 +1871,14 @@ export class RepricerService {
         },
       ],
     };
-    const res = await this.spApiClient.patchListingsItem(creds, sellerId, sku, meta.marketplaceId, body);
-    this.throwIfListingsPatchRejected(res, sku);
+    const res = await this.spApiClient.patchListingsItem(
+      creds,
+      sellerId,
+      skuNorm,
+      meta.marketplaceId,
+      body,
+    );
+    this.throwIfListingsPatchRejected(res, skuNorm);
     const issues = (res as any)?.issues ?? (res as any)?.Issues;
     if (Array.isArray(issues) && issues.length > 0) {
       this.logger.warn(
@@ -1859,15 +1977,10 @@ export class RepricerService {
     let marketplaceId = 'A1F83G8C2ARO7P';
     let sellerId: string | null = null;
     try {
-      creds = await this.getAmazonCredentialsForOrg(orgId);
+      const ctx = await this.amazonService.getOrgAmazonSpApiListingContext(orgId);
+      creds = ctx.credentials;
       marketplaceId = this.defaultMarketplaceIdForRegion(creds.region);
-      const userIds = await this.getOrgMemberUserIds(orgId);
-      const account = await this.prisma.sellerAccount.findFirst({
-        where: { userId: { in: userIds }, marketplace: 'amazon' },
-        orderBy: { updatedAt: 'desc' },
-        select: { sellerId: true },
-      });
-      sellerId = account?.sellerId ?? null;
+      sellerId = ctx.sellerId;
     } catch {
       creds = null;
     }
@@ -2365,6 +2478,7 @@ export class RepricerService {
                   sku,
                   nextPrice,
                   p?.productType != null ? String(p.productType) : null,
+                  { orgId, asin },
                 );
                 const feeAbs =
                   feeAtPriceModel(Number(nextPrice)) ??

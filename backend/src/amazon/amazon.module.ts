@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { BullModule } from '@nestjs/bullmq';
 import { AmazonController } from './amazon.controller';
 import { AmazonService } from './amazon.service';
@@ -11,6 +11,7 @@ import { AmazonSyncService } from './amazon-sync.service';
 import { AmazonSyncProcessor } from './amazon-sync.processor';
 import { AmazonExtendedHistoryBootstrap } from './amazon-extended-history.bootstrap';
 import { AmazonOrderLineFeeBackfillBootstrap } from './amazon-order-line-fee-backfill.bootstrap';
+import { RepricerModule } from '../repricer/repricer.module';
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { AmazonOrderLineFeeBackfillBootstrap } from './amazon-order-line-fee-bac
     RedisModule,
     ClerkModule,
     UsersModule,
+    forwardRef(() => RepricerModule),
     BullModule.registerQueue({
       name: 'amazon-sync',
     }),
