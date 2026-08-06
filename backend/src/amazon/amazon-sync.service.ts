@@ -588,20 +588,80 @@ export class AmazonSyncService implements OnModuleInit {
 
   /** Active Amazon sellers with a paid subscription — for scheduled order sync jobs. */
   async findAmazonSellerUserIdsForScheduledSync(): Promise<string[]> {
+    const allow = this.scheduledSyncEmailAllowlist();
     const accounts = await this.prisma.sellerAccount.findMany({
       where: this.subscribedAmazonSellerAccountWhere(),
-      select: { userId: true },
+      select: {
+        userId: true,
+        user: { select: { email: true } },
+      },
     });
-    return accounts.map((a) => a.userId);
+    let ids = accounts.map((a) => a.userId);
+    if (allow) {
+      ids = accounts
+        .filter((a) => allow.has(String(a.user?.email ?? '').toLowerCase()))
+        .map((a) => a.userId);
+      this.logger.log(
+        `[AmazonSync] scheduled sync email allowlist active (${[...allow].join(', ')}): ${ids.length} seller user(s)`,
+      );
+    }
+    return [...new Set(ids)];
+  }
+
+  /**
+   * Optional comma-separated login emails. When set, scheduled Amazon sync (and related batch
+   * jobs that use these helpers) only run for those accounts — useful on a personal VPS that
+   * still holds a multi-tenant DB dump.
+   */
+  private scheduledSyncEmailAllowlist(): Set<string> | null {
+    const raw = (process.env.AMAZON_SCHEDULED_SYNC_EMAILS ?? '').trim();
+    if (!raw) return null;
+    const set = new Set(
+      raw
+        .split(',')
+        .map((e) => e.trim().toLowerCase())
+        .filter((e) => e.length > 0),
+    );
+    return set.size > 0 ? set : null;
   }
 
   /** Orgs with a subscribed Amazon link — for inventory/shipments/listings batch jobs. */
   async findAmazonOrgIdsForScheduledSync(): Promise<string[]> {
-    const orgs = await this.prisma.organization.findMany({
-      where: this.subscribedAmazonOrgWhere(),
+    const allow = this.scheduledSyncEmailAllowlist();
+    if (!allow) {
+      const orgs = await this.prisma.organization.findMany({
+        where: this.subscribedAmazonOrgWhere(),
+        select: { id: true },
+      });
+      return orgs.map((o) => o.id);
+    }
+    const users = await this.prisma.user.findMany({
+      where: {
+        OR: [...allow].map((email) => ({
+          email: { equals: email, mode: 'insensitive' as const },
+        })),
+      },
       select: { id: true },
     });
-    return orgs.map((o) => o.id);
+    const userIds = users.map((u) => u.id);
+    if (!userIds.length) {
+      this.logger.warn(
+        `[AmazonSync] AMAZON_SCHEDULED_SYNC_EMAILS set but no matching users; skipping org batch sync`,
+      );
+      return [];
+    }
+    const memberships = await this.prisma.organizationMembership.findMany({
+      where: {
+        userId: { in: userIds },
+        organization: this.subscribedAmazonOrgWhere(),
+      },
+      select: { orgId: true },
+    });
+    const ids = [...new Set(memberships.map((m) => m.orgId))];
+    this.logger.log(
+      `[AmazonSync] scheduled org allowlist (${[...allow].join(', ')}): ${ids.length} org(s)`,
+    );
+    return ids;
   }
 
   /** True when the limited initial-sync job has written 100% to InitialSyncProgress. */

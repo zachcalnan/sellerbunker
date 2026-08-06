@@ -436,6 +436,7 @@ export default function RepricerPage() {
       productId?: string;
       sku: string;
       asin?: string | null;
+      imageUrl?: string | null;
       context?: unknown;
       kind: string;
       message: string;
@@ -1881,6 +1882,7 @@ export default function RepricerPage() {
             <table className="w-full text-left text-xs">
               <thead>
                 <tr className="border-b border-[var(--surface-border)] text-[10px] font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
+                  <th className="py-2 pr-2 w-10" />
                   <th className="py-2 pr-3">Time (last check)</th>
                   <th className="py-2 pr-3">ASIN</th>
                   <th className="py-2 pr-3">Event</th>
@@ -1908,6 +1910,23 @@ export default function RepricerPage() {
                       key={l.id}
                       className="border-b border-[var(--surface-border)] last:border-b-0"
                     >
+                      <td className="py-2 pr-2 align-middle">
+                        {l.imageUrl ? (
+                          <img
+                            src={l.imageUrl}
+                            alt={l.asin ?? l.sku}
+                            className="h-8 w-8 rounded-md object-cover ring-1 ring-[var(--surface-border)]"
+                            loading="lazy"
+                            referrerPolicy="no-referrer"
+                            title={l.asin ?? l.sku}
+                          />
+                        ) : (
+                          <div
+                            className="h-8 w-8 rounded-md bg-[var(--background)] ring-1 ring-[var(--surface-border)]"
+                            title={l.asin ?? l.sku}
+                          />
+                        )}
+                      </td>
                       <td className="py-2 pr-3 whitespace-nowrap text-[10px] text-[var(--muted-foreground)]">
                         {new Date(
                           l.lastCheckedAt ?? l.createdAt,
@@ -1966,7 +1985,7 @@ export default function RepricerPage() {
                 })}
                 {visibleLogs.length === 0 ? (
                   <tr>
-                    <td colSpan={5} className="py-4 text-sm">
+                    <td colSpan={6} className="py-4 text-sm">
                       {logsLoadErr ? (
                         <span className="text-amber-400">{logsLoadErr}</span>
                       ) : logsLoading ? (

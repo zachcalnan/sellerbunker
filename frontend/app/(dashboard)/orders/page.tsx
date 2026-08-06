@@ -205,8 +205,8 @@ export default function OrdersPage() {
         ) : null}
 
         <div className="mb-4 rounded-xl border border-[var(--surface-border)] bg-[var(--surface)] px-3 py-2.5">
-          <div className="flex flex-wrap items-center justify-start gap-6">
-            <div className="flex items-center gap-2">
+          <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-start sm:gap-6">
+            <div className="flex flex-wrap items-center gap-2">
               <label className="text-xs font-medium text-[var(--foreground)]">Period</label>
               <select
                 value={period}
@@ -218,7 +218,7 @@ export default function OrdersPage() {
                     setPeriodCustomEnd(defaultEnd);
                   }
                 }}
-                className="h-8 cursor-pointer rounded-lg border border-zinc-600 bg-black px-2.5 text-xs text-white outline-none focus:ring-2 focus:ring-sb-accent/40"
+                className="h-9 min-w-[10rem] flex-1 cursor-pointer rounded-lg border border-zinc-600 bg-black px-2.5 text-xs text-white outline-none focus:ring-2 focus:ring-sb-accent/40 sm:h-8 sm:flex-none"
               >
                 {DASHBOARD_RANGE_PERIOD_SELECT_OPTIONS.map(({ value, label }) => (
                   <option key={value} className="bg-black text-white" value={value}>
@@ -232,19 +232,19 @@ export default function OrdersPage() {
                     type="date"
                     value={periodCustomStart}
                     onChange={(e) => setPeriodCustomStart(e.target.value)}
-                    className="h-8 rounded-lg border border-zinc-600 bg-black px-2 text-xs text-white outline-none [color-scheme:dark]"
+                    className="h-9 rounded-lg border border-zinc-600 bg-black px-2 text-xs text-white outline-none [color-scheme:dark] sm:h-8"
                   />
                   <span className="text-[var(--muted-foreground)]">→</span>
                   <input
                     type="date"
                     value={periodCustomEnd}
                     onChange={(e) => setPeriodCustomEnd(e.target.value)}
-                    className="h-8 rounded-lg border border-zinc-600 bg-black px-2 text-xs text-white outline-none [color-scheme:dark]"
+                    className="h-9 rounded-lg border border-zinc-600 bg-black px-2 text-xs text-white outline-none [color-scheme:dark] sm:h-8"
                   />
                 </>
               ) : null}
             </div>
-            <div className="flex flex-wrap gap-5 sm:gap-6">
+            <div className="grid grid-cols-3 gap-3 sm:flex sm:flex-wrap sm:gap-5 md:gap-6">
               <div>
                 <span className="text-[10px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">Orders</span>
                 <div className="text-sm font-semibold tabular-nums text-[var(--foreground)]">
@@ -263,9 +263,10 @@ export default function OrdersPage() {
           </div>
         </div>
 
-        <div className="overflow-x-auto rounded-xl bg-[var(--surface)] ring-1 ring-[var(--surface-border)]">
+        <div className="rounded-xl bg-[var(--surface)] ring-1 ring-[var(--surface-border)]">
           <div className="min-w-0">
-            <div className="grid grid-cols-[36px_1fr_0.55fr_0.45fr_0.8fr_0.52fr_0.35fr_0.45fr_0.45fr_0.35fr_0.35fr] gap-1 bg-[var(--surface)] px-2.5 py-2 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
+            <div className="hidden overflow-x-auto md:block">
+              <div className="min-w-[960px] grid grid-cols-[36px_1fr_0.55fr_0.45fr_0.8fr_0.52fr_0.35fr_0.45fr_0.45fr_0.35fr_0.35fr] gap-1 bg-[var(--surface)] px-2.5 py-2 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
               <div />
               <div>Title</div>
               <div>SKU</div>
@@ -278,24 +279,118 @@ export default function OrdersPage() {
               <div className="text-center">ROI%</div>
               <div className="text-center">Stock</div>
             </div>
+            </div>
 
             {loading ? (
-              <div className="px-2.5 py-4 text-xs text-[var(--muted-foreground)]">
+              <div className="px-3 py-4 text-xs text-[var(--muted-foreground)]">
                 Loading…
               </div>
             ) : filtered.length === 0 ? (
-              <div className="px-2.5 py-4 text-xs text-[var(--muted-foreground)]">
+              <div className="px-3 py-4 text-xs text-[var(--muted-foreground)]">
                 No orders found.
               </div>
             ) : (
               <>
-                <div className="divide-y divide-[var(--surface-border)] bg-transparent">
+                <div className="divide-y divide-[var(--surface-border)] md:hidden">
+                  {paginated.map((r) => {
+                    const excluded = Boolean(r.excludedFromSales);
+                    return (
+                      <div key={`${r.id}-m`} className="px-3 py-3">
+                        <div className="flex items-start gap-3">
+                          <div className="shrink-0">
+                            {r.imageUrl ? (
+                              <img
+                                src={r.imageUrl}
+                                alt={r.title ?? r.sku}
+                                className="h-12 w-12 rounded-md object-cover ring-1 ring-[var(--surface-border)]"
+                                loading="lazy"
+                                referrerPolicy="no-referrer"
+                              />
+                            ) : (
+                              <div className="h-12 w-12 rounded-md bg-[var(--background)] ring-1 ring-[var(--surface-border)]" />
+                            )}
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="text-sm font-medium leading-snug text-[var(--foreground)]">
+                              {r.title ?? "—"}
+                              {r.orderStatusLabel ? (
+                                <span className="ml-1.5 text-[10px] font-semibold uppercase tracking-wide text-red-600">
+                                  {r.orderStatusLabel}
+                                </span>
+                              ) : null}
+                            </div>
+                            <div className="mt-0.5 text-xs text-[var(--muted-foreground)]">
+                              {formatDate(r.orderDate)}
+                              {r.fulfillmentType ? ` · ${r.fulfillmentType}` : ""}
+                              {" · "}
+                              <span className="font-mono">{r.orderId}</span>
+                            </div>
+                            <div className="mt-0.5 truncate text-xs text-[var(--muted-foreground)]">
+                              SKU {r.sku}
+                              {r.asin ? ` · ASIN ${r.asin}` : ""}
+                            </div>
+                            <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1.5 text-xs">
+                              <div>
+                                <span className="text-[var(--muted-foreground)]">Price </span>
+                                <span className={`font-semibold tabular-nums ${excluded ? "text-red-600" : "text-[var(--foreground)]"}`}>
+                                  {formatCurrency(r.salePrice)}
+                                </span>
+                                <span className="text-[var(--muted-foreground)]"> ×{r.quantity}</span>
+                              </div>
+                              <div>
+                                <span className="text-[var(--muted-foreground)]">Profit </span>
+                                <span className="font-semibold tabular-nums text-[var(--foreground)]">
+                                  {r.profit != null ? formatCurrency(r.profit) : "—"}
+                                </span>
+                              </div>
+                              <div>
+                                <span className="text-[var(--muted-foreground)]">ROI </span>
+                                <span className="font-semibold tabular-nums text-[var(--foreground)]">
+                                  {r.roiPct != null ? `${r.roiPct}%` : "—"}
+                                </span>
+                              </div>
+                              <div>
+                                <span className="text-[var(--muted-foreground)]">Stock </span>
+                                <span
+                                  className={`font-semibold tabular-nums ${
+                                    r.availableStock != null
+                                      ? r.availableStock <= 0
+                                        ? "text-red-600"
+                                        : "text-green-600"
+                                      : "text-[var(--foreground)]"
+                                  }`}
+                                >
+                                  {r.availableStock != null ? String(r.availableStock) : "—"}
+                                </span>
+                              </div>
+                              <div className="col-span-2">
+                                <span className="text-[var(--muted-foreground)]">Fees </span>
+                                {!excluded && r.amazonFeesTotal != null && Number.isFinite(r.amazonFeesTotal) ? (
+                                  <span className="tabular-nums text-[var(--foreground)]">
+                                    {formatCurrency(Math.abs(r.amazonFeesTotal))}
+                                    {r.feesSource === "finances" ? " · Settled" : null}
+                                    {r.feesSource === "estimate_sold" ? " · Sale est." : null}
+                                    {r.feesSource === "estimate" ? " · Est." : null}
+                                  </span>
+                                ) : (
+                                  <span className="text-[var(--muted-foreground)]">—</span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div className="hidden divide-y divide-[var(--surface-border)] overflow-x-auto bg-transparent md:block">
                   {paginated.map((r) => {
                     const excluded = Boolean(r.excludedFromSales);
                     return (
                     <div
                       key={r.id}
-                      className="grid grid-cols-[36px_1fr_0.55fr_0.45fr_0.8fr_0.52fr_0.35fr_0.45fr_0.45fr_0.35fr_0.35fr] items-center gap-1 px-2.5 py-2 min-w-0 text-[11px]"
+                      className="min-w-[960px] grid grid-cols-[36px_1fr_0.55fr_0.45fr_0.8fr_0.52fr_0.35fr_0.45fr_0.45fr_0.35fr_0.35fr] items-center gap-1 px-2.5 py-2 text-[11px]"
                     >
                       <div className="flex items-center justify-center shrink-0">
                         {r.imageUrl ? (

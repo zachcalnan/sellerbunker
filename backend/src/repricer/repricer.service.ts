@@ -1046,6 +1046,7 @@ export class RepricerService {
       productId: string;
       sku: string;
       asin?: string | null;
+      imageUrl?: string | null;
       kind: string;
       message: string;
       prevPrice: unknown;
@@ -1062,7 +1063,7 @@ export class RepricerService {
         orderBy: { createdAt: 'desc' },
         take,
         include: {
-          product: { select: { asin: true } },
+          product: { select: { asin: true, imageUrl: true } },
         },
       });
     } catch (e) {
@@ -1088,9 +1089,11 @@ export class RepricerService {
                 prev_price: unknown;
                 next_price: unknown;
                 created_at: Date;
+                asin: string | null;
+                image_url: string | null;
               }>
             >(Prisma.sql`
-              SELECT l.id, l.product_id, l.sku, l.kind, l.message, l.prev_price, l.next_price, l.created_at, p.asin
+              SELECT l.id, l.product_id, l.sku, l.kind, l.message, l.prev_price, l.next_price, l.created_at, p.asin, p.image_url
               FROM repricer_logs l
               LEFT JOIN products p ON p.id = l.product_id
               WHERE l.org_id = ${orgId} AND l.product_id = ${pid}
@@ -1103,6 +1106,7 @@ export class RepricerService {
                 product_id: string;
                 sku: string;
                 asin: string | null;
+                image_url: string | null;
                 kind: string;
                 message: string;
                 prev_price: unknown;
@@ -1110,7 +1114,7 @@ export class RepricerService {
                 created_at: Date;
               }>
             >(Prisma.sql`
-              SELECT l.id, l.product_id, l.sku, l.kind, l.message, l.prev_price, l.next_price, l.created_at, p.asin
+              SELECT l.id, l.product_id, l.sku, l.kind, l.message, l.prev_price, l.next_price, l.created_at, p.asin, p.image_url
               FROM repricer_logs l
               LEFT JOIN products p ON p.id = l.product_id
               WHERE l.org_id = ${orgId}
@@ -1122,6 +1126,7 @@ export class RepricerService {
           productId: r.product_id,
           sku: r.sku,
           asin: (r as any).asin ?? null,
+          imageUrl: (r as any).image_url ?? null,
           kind: r.kind,
           message: r.message,
           prevPrice: r.prev_price,
@@ -1156,6 +1161,7 @@ export class RepricerService {
         productId: r.productId,
         sku: r.sku,
         asin: (r as any)?.product?.asin ?? (r as any)?.asin ?? null,
+        imageUrl: (r as any)?.product?.imageUrl ?? (r as any)?.imageUrl ?? null,
         kind: r.kind,
         message: r.message,
         context: (r as any)?.context ?? null,
@@ -1183,8 +1189,32 @@ export class RepricerService {
       select: { orgId: true },
       distinct: ['orgId'],
     });
+    const allowRaw = (process.env.AMAZON_SCHEDULED_SYNC_EMAILS ?? '').trim();
+    let allowedOrgIds: Set<string> | null = null;
+    if (allowRaw) {
+      const emails = allowRaw
+        .split(',')
+        .map((e) => e.trim().toLowerCase())
+        .filter(Boolean);
+      if (emails.length) {
+        const users = await this.prisma.user.findMany({
+          where: {
+            OR: emails.map((email) => ({
+              email: { equals: email, mode: 'insensitive' as const },
+            })),
+          },
+          select: { id: true },
+        });
+        const memberships = await this.prisma.organizationMembership.findMany({
+          where: { userId: { in: users.map((u) => u.id) } },
+          select: { orgId: true },
+        });
+        allowedOrgIds = new Set(memberships.map((m) => String(m.orgId)));
+      }
+    }
     for (const r of rows ?? []) {
       const orgId = String(r.orgId);
+      if (allowedOrgIds && !allowedOrgIds.has(orgId)) continue;
       try {
         await this.runEngineForOrg(orgId, { dryRun: opts?.dryRun !== false });
       } catch {
