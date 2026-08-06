@@ -443,7 +443,7 @@ export default function ShipmentsPage() {
                   placeholder="Search by Shipment ID, name, status, FC…"
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
-                  className="min-w-[260px] max-w-md flex-1 rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--foreground)] placeholder:text-[var(--foreground)]/60 placeholder:opacity-100 focus:outline-none focus:ring-2 focus:ring-sb-accent"
+                  className="w-full min-w-0 max-w-md flex-1 rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--foreground)] placeholder:text-[var(--foreground)]/60 placeholder:opacity-100 focus:outline-none focus:ring-2 focus:ring-sb-accent sm:min-w-[260px]"
                   aria-label="Search shipments"
                 />
                 <button
@@ -472,48 +472,30 @@ export default function ShipmentsPage() {
               {notice}
             </div>
           )}
-          <div className="overflow-x-auto rounded-lg border border-[var(--surface-border)] bg-[var(--surface)]">
-            <div className={`grid ${gridCols} items-center gap-2 px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-[var(--muted-foreground)]`}>
-              <div aria-hidden />
-              <div>Items</div>
-              <div>Shipment ID</div>
-              <div className="pl-0.5">Status</div>
-              <div>Created</div>
-              <div>Checked in</div>
-              <div className="text-center">Days</div>
-              <div className="text-center">Sent</div>
-              <div className="text-center">Recv</div>
-              <div className="text-center">Missing</div>
-            </div>
-
+          <div className="rounded-lg border border-[var(--surface-border)] bg-[var(--surface)]">
             {loading ? (
               <div className="px-4 py-6 text-sm text-[var(--muted-foreground)]">Loading…</div>
             ) : filtered.length === 0 ? (
               <div className="px-4 py-6 text-sm text-[var(--muted-foreground)]">No shipments found.</div>
             ) : (
               <>
-                <div className="divide-y divide-[var(--surface-border)]">
+                {/* Mobile cards */}
+                <div className="divide-y divide-[var(--surface-border)] md:hidden">
                   {paginated.map((r) => {
                     const expanded = expandedId === r.id;
                     const itemCount = r.items?.length ?? r.itemLineCount ?? 0;
                     return (
-                      <div key={r.id}>
-                        <div
-                          role="button"
-                          tabIndex={0}
+                      <div
+                        key={`${r.id}-m`}
+                        className={r.unitsMissing > 0 ? "bg-red-500/5" : undefined}
+                      >
+                        <button
+                          type="button"
                           onClick={() => toggleExpand(r)}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter" || e.key === " ") {
-                              e.preventDefault();
-                              toggleExpand(r);
-                            }
-                          }}
                           aria-expanded={expanded}
-                          className={`grid ${gridCols} w-full cursor-pointer items-center gap-2 px-4 py-3 text-left text-sm min-w-0 transition-colors hover:bg-[var(--surface-hover)] focus:outline-none focus:ring-2 focus:ring-inset focus:ring-sb-accent ${
-                            expanded ? "bg-[var(--surface-hover)]/50" : ""
-                          } ${r.unitsMissing > 0 ? "bg-red-500/5" : ""}`}
+                          className="flex w-full cursor-pointer items-start gap-3 px-3 py-3 text-left"
                         >
-                          <div className="flex items-center justify-center text-[var(--muted-foreground)]">
+                          <div className="pt-1 text-[var(--muted-foreground)]">
                             <svg
                               className={`h-4 w-4 transition-transform ${expanded ? "rotate-90" : ""}`}
                               fill="none"
@@ -524,65 +506,76 @@ export default function ShipmentsPage() {
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                             </svg>
                           </div>
-                          <div className="py-0.5">
-                            <ShipmentItemThumbnails items={r.items ?? []} />
-                          </div>
-                          <div className="min-w-0">
-                            <div className="truncate font-mono text-[var(--foreground)]" title={r.shipmentId}>
-                              {r.shipmentId}
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="min-w-0">
+                                <div className="truncate font-mono text-sm font-medium text-[var(--foreground)]">
+                                  {r.shipmentId}
+                                </div>
+                                <div className="mt-0.5 text-xs text-[var(--muted-foreground)]">
+                                  {r.transportStatus ?? r.shipmentStatus ?? "—"}
+                                  {r.destinationFulfillmentCenterId
+                                    ? ` · FC ${r.destinationFulfillmentCenterId}`
+                                    : ""}
+                                </div>
+                              </div>
+                              <ShipmentItemThumbnails items={r.items ?? []} max={3} />
                             </div>
-                            <div className="text-[10px] text-[var(--muted-foreground)]">
-                              FC: {r.destinationFulfillmentCenterId ?? "—"}
-                              {itemCount > 0 ? ` · ${itemCount} SKU${itemCount !== 1 ? "s" : ""}` : ""}
+                            <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1.5 text-xs">
+                              <div>
+                                <span className="text-[var(--muted-foreground)]">Created </span>
+                                <span className="tabular-nums text-[var(--foreground)]">
+                                  {r.createdDate != null ? formatDate(r.createdDate) : "—"}
+                                </span>
+                              </div>
+                              <div>
+                                <span className="text-[var(--muted-foreground)]">Checked in </span>
+                                <span className="tabular-nums text-[var(--foreground)]">
+                                  {r.checkedInDate != null
+                                    ? formatDate(r.checkedInDate)
+                                    : r.receivedDate
+                                      ? formatDate(r.receivedDate)
+                                      : "—"}
+                                </span>
+                              </div>
+                              <div>
+                                <span className="text-[var(--muted-foreground)]">Sent </span>
+                                <span className="font-semibold tabular-nums text-[var(--foreground)]">
+                                  {r.unitsSent}
+                                </span>
+                                <span className="text-[var(--muted-foreground)]"> · Recv </span>
+                                <span className="font-semibold tabular-nums text-[var(--foreground)]">
+                                  {r.unitsReceived}
+                                </span>
+                              </div>
+                              <div>
+                                <span className="text-[var(--muted-foreground)]">Missing </span>
+                                <span
+                                  className={`font-semibold tabular-nums ${
+                                    r.unitsMissing > 0
+                                      ? "text-red-600 dark:text-red-400"
+                                      : "text-green-600 dark:text-green-400"
+                                  }`}
+                                >
+                                  {r.unitsMissing}
+                                </span>
+                                {r.checkInDurationDays != null ? (
+                                  <span className="text-[var(--muted-foreground)]">
+                                    {" · "}
+                                    {r.checkInDurationDays}d
+                                  </span>
+                                ) : null}
+                              </div>
                             </div>
+                            {itemCount > 0 ? (
+                              <div className="mt-1 text-[10px] text-[var(--muted-foreground)]">
+                                {itemCount} SKU{itemCount !== 1 ? "s" : ""}
+                              </div>
+                            ) : null}
                           </div>
-                          <div className="truncate pl-0.5 text-[var(--foreground)]">
-                            {r.transportStatus ?? r.shipmentStatus ?? "—"}
-                          </div>
-                          <div className="text-[var(--foreground)]">
-                            {r.createdDate != null ? (
-                              <span title={r.createdDateSource === "name" ? "Parsed from shipment name" : undefined}>
-                                {formatDate(r.createdDate)}
-                                {r.createdDateSource === "name" && (
-                                  <span className="ml-0.5 text-[10px] text-[var(--muted-foreground)]">*</span>
-                                )}
-                              </span>
-                            ) : (
-                              <span className="text-[var(--muted-foreground)]">—</span>
-                            )}
-                          </div>
-                          <div className="min-w-[5.5rem] text-[var(--foreground)]">
-                            {r.checkedInDate != null ? (
-                              <span title={checkedInSourceLabel(r.checkedInDateSource) ?? undefined}>
-                                {formatDate(r.checkedInDate)}
-                              </span>
-                            ) : r.receivedDate ? (
-                              <span
-                                className="text-[var(--muted-foreground)]"
-                                title="Delivery to FC from Amazon transport data"
-                              >
-                                {formatDate(r.receivedDate)}
-                              </span>
-                            ) : (
-                              <span className="text-[var(--muted-foreground)]">—</span>
-                            )}
-                          </div>
-                          <div className="text-center text-[var(--foreground)] tabular-nums">
-                            {r.checkInDurationDays != null ? String(r.checkInDurationDays) : "—"}
-                          </div>
-                          <div className="text-center text-[var(--foreground)] tabular-nums">{r.unitsSent}</div>
-                          <div className="text-center text-[var(--foreground)] tabular-nums">{r.unitsReceived}</div>
-                          <div
-                            className={`text-center tabular-nums ${
-                              r.unitsMissing > 0 ? "text-red-600 dark:text-red-400" : "text-green-600 dark:text-green-400"
-                            }`}
-                          >
-                            {r.unitsMissing}
-                          </div>
-                        </div>
-
+                        </button>
                         {expanded && (
-                          <div className="border-t border-[var(--surface-border)] bg-[var(--surface-hover)]/20 px-4 py-3">
+                          <div className="border-t border-[var(--surface-border)] bg-[var(--surface-hover)]/20 px-3 py-3">
                             <p className="mb-2 text-xs font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
                               Unit breakdown
                             </p>
@@ -597,6 +590,131 @@ export default function ShipmentsPage() {
                       </div>
                     );
                   })}
+                </div>
+
+                {/* Desktop table */}
+                <div className="hidden overflow-x-auto md:block">
+                  <div
+                    className={`grid ${gridCols} items-center gap-2 px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-[var(--muted-foreground)]`}
+                  >
+                    <div aria-hidden />
+                    <div>Items</div>
+                    <div>Shipment ID</div>
+                    <div className="pl-0.5">Status</div>
+                    <div>Created</div>
+                    <div>Checked in</div>
+                    <div className="text-center">Days</div>
+                    <div className="text-center">Sent</div>
+                    <div className="text-center">Recv</div>
+                    <div className="text-center">Missing</div>
+                  </div>
+
+                  <div className="divide-y divide-[var(--surface-border)]">
+                    {paginated.map((r) => {
+                      const expanded = expandedId === r.id;
+                      const itemCount = r.items?.length ?? r.itemLineCount ?? 0;
+                      return (
+                        <div key={r.id}>
+                          <div
+                            role="button"
+                            tabIndex={0}
+                            onClick={() => toggleExpand(r)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter" || e.key === " ") {
+                                e.preventDefault();
+                                toggleExpand(r);
+                              }
+                            }}
+                            aria-expanded={expanded}
+                            className={`grid ${gridCols} w-full cursor-pointer items-center gap-2 px-4 py-3 text-left text-sm min-w-0 transition-colors hover:bg-[var(--surface-hover)] focus:outline-none focus:ring-2 focus:ring-inset focus:ring-sb-accent ${
+                              expanded ? "bg-[var(--surface-hover)]/50" : ""
+                            } ${r.unitsMissing > 0 ? "bg-red-500/5" : ""}`}
+                          >
+                            <div className="flex items-center justify-center text-[var(--muted-foreground)]">
+                              <svg
+                                className={`h-4 w-4 transition-transform ${expanded ? "rotate-90" : ""}`}
+                                fill="none"
+                                stroke="currentColor"
+                                viewBox="0 0 24 24"
+                                aria-hidden
+                              >
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                              </svg>
+                            </div>
+                            <div className="py-0.5">
+                              <ShipmentItemThumbnails items={r.items ?? []} />
+                            </div>
+                            <div className="min-w-0">
+                              <div className="truncate font-mono text-[var(--foreground)]" title={r.shipmentId}>
+                                {r.shipmentId}
+                              </div>
+                              <div className="text-[10px] text-[var(--muted-foreground)]">
+                                FC: {r.destinationFulfillmentCenterId ?? "—"}
+                                {itemCount > 0 ? ` · ${itemCount} SKU${itemCount !== 1 ? "s" : ""}` : ""}
+                              </div>
+                            </div>
+                            <div className="truncate pl-0.5 text-[var(--foreground)]">
+                              {r.transportStatus ?? r.shipmentStatus ?? "—"}
+                            </div>
+                            <div className="text-[var(--foreground)]">
+                              {r.createdDate != null ? (
+                                <span title={r.createdDateSource === "name" ? "Parsed from shipment name" : undefined}>
+                                  {formatDate(r.createdDate)}
+                                  {r.createdDateSource === "name" && (
+                                    <span className="ml-0.5 text-[10px] text-[var(--muted-foreground)]">*</span>
+                                  )}
+                                </span>
+                              ) : (
+                                <span className="text-[var(--muted-foreground)]">—</span>
+                              )}
+                            </div>
+                            <div className="min-w-[5.5rem] text-[var(--foreground)]">
+                              {r.checkedInDate != null ? (
+                                <span title={checkedInSourceLabel(r.checkedInDateSource) ?? undefined}>
+                                  {formatDate(r.checkedInDate)}
+                                </span>
+                              ) : r.receivedDate ? (
+                                <span
+                                  className="text-[var(--muted-foreground)]"
+                                  title="Delivery to FC from Amazon transport data"
+                                >
+                                  {formatDate(r.receivedDate)}
+                                </span>
+                              ) : (
+                                <span className="text-[var(--muted-foreground)]">—</span>
+                              )}
+                            </div>
+                            <div className="text-center text-[var(--foreground)] tabular-nums">
+                              {r.checkInDurationDays != null ? String(r.checkInDurationDays) : "—"}
+                            </div>
+                            <div className="text-center text-[var(--foreground)] tabular-nums">{r.unitsSent}</div>
+                            <div className="text-center text-[var(--foreground)] tabular-nums">{r.unitsReceived}</div>
+                            <div
+                              className={`text-center tabular-nums ${
+                                r.unitsMissing > 0 ? "text-red-600 dark:text-red-400" : "text-green-600 dark:text-green-400"
+                              }`}
+                            >
+                              {r.unitsMissing}
+                            </div>
+                          </div>
+
+                          {expanded && (
+                            <div className="border-t border-[var(--surface-border)] bg-[var(--surface-hover)]/20 px-4 py-3">
+                              <p className="mb-2 text-xs font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
+                                Unit breakdown
+                              </p>
+                              {detailLoadingId === r.shipmentId && (
+                                <p className="mb-2 text-sm text-[var(--muted-foreground)]">
+                                  Loading per-SKU breakdown from Amazon…
+                                </p>
+                              )}
+                              <ShipmentItemsBreakdown row={r} />
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
 
                 {totalPages > 1 && (

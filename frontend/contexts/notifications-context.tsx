@@ -8,12 +8,57 @@ const SYNC_PROGRESS_API_OVERRIDE = process.env.NEXT_PUBLIC_SYNC_PROGRESS_API ?? 
 const FLASH_DISMISSED_KEY = "topbar-notification-flash-dismissed";
 const COGS_ROI_DISMISSED_KEY = "topbar_cogs_roi_dismissed";
 const COGS_PROFIT_DISMISSED_KEY = "topbar_cogs_profit_dismissed";
-const MISSING_UNITS_DISMISSED_IDS_KEY = "topbar_missing_units_dismissed_ids";
+/** shipmentId → dismissedAt epoch ms. Survives sessions; pruned when checked in or after 7 days. */
+const MISSING_UNITS_DISMISSED_MAP_KEY = "topbar_missing_units_dismissed_map_v2";
+const MISSING_UNITS_DISMISS_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const INITIAL_SYNC_DISMISSED_KEY = "sellerbunker_initial_sync_dismissed";
 const INITIAL_SYNC_PENDING_KEY = "sellerbunker_initial_sync_pending";
 const SYNC_PROGRESS_API_KEY = "sellerbunker_sync_progress_api";
 const SYNC_STARTED_AT_KEY = "sellerbunker_sync_started_at";
 const SYNC_STARTED_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+type MissingShipmentDismissMap = Record<string, number>;
+
+function loadMissingShipmentDismissMap(): MissingShipmentDismissMap {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = localStorage.getItem(MISSING_UNITS_DISMISSED_MAP_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const out: MissingShipmentDismissMap = {};
+    for (const [id, at] of Object.entries(parsed as Record<string, unknown>)) {
+      const n = typeof at === "number" ? at : Number(at);
+      if (typeof id === "string" && id && Number.isFinite(n) && n > 0) out[id] = n;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function saveMissingShipmentDismissMap(map: MissingShipmentDismissMap) {
+  try {
+    localStorage.setItem(MISSING_UNITS_DISMISSED_MAP_KEY, JSON.stringify(map));
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Drop dismissals for shipments no longer missing (checked in) or older than 7 days. */
+function pruneMissingShipmentDismissMap(
+  map: MissingShipmentDismissMap,
+  stillMissingIds: Set<string>,
+  now = Date.now(),
+): MissingShipmentDismissMap {
+  const next: MissingShipmentDismissMap = {};
+  for (const [id, at] of Object.entries(map)) {
+    if (!stillMissingIds.has(id)) continue; // checked in / resolved → never re-notify from this dismiss
+    if (now - at >= MISSING_UNITS_DISMISS_TTL_MS) continue; // expired → may show again
+    next[id] = at;
+  }
+  return next;
+}
 
 type SyncStage = "core" | "fees" | "complete";
 
@@ -62,12 +107,9 @@ type NotificationsContextValue = {
   setFlashingDismissed: (v: boolean) => void;
   missingCount: number | null;
   missingUnitsShipments: Array<{ shipmentId: string; missingUnits: number; sentDate: string | null; shipmentName: string | null }>;
-  dismissedMissingShipmentIds: Set<string>;
-  setDismissedMissingShipmentIds: (fn: (prev: Set<string>) => Set<string>) => void;
-  cogsRoiDismissed: boolean;
-  setCogsRoiDismissed: (v: boolean) => void;
-  cogsProfitDismissed: boolean;
-  setCogsProfitDismissed: (v: boolean) => void;
+  dismissMissingShipment: (shipmentId: string) => void;
+  cogsTipsDismissed: boolean;
+  setCogsTipsDismissed: (v: boolean) => void;
   syncProgress: number | null;
   syncStage: SyncStage;
   syncPhase: string | null;
@@ -101,28 +143,23 @@ export function NotificationsProvider({ children }: { children: React.ReactNode 
     if (typeof window === "undefined") return false;
     return sessionStorage.getItem(FLASH_DISMISSED_KEY) === "1";
   });
-  const [cogsRoiDismissed, setCogsRoiDismissed] = useState(() => {
+  const [cogsTipsDismissed, setCogsTipsDismissed] = useState(() => {
     if (typeof window === "undefined") return false;
-    return sessionStorage.getItem(COGS_ROI_DISMISSED_KEY) === "1";
-  });
-  const [cogsProfitDismissed, setCogsProfitDismissed] = useState(() => {
-    if (typeof window === "undefined") return false;
-    return sessionStorage.getItem(COGS_PROFIT_DISMISSED_KEY) === "1";
+    try {
+      return (
+        sessionStorage.getItem(COGS_ROI_DISMISSED_KEY) === "1" &&
+        sessionStorage.getItem(COGS_PROFIT_DISMISSED_KEY) === "1"
+      );
+    } catch {
+      return false;
+    }
   });
   const [missingUnitsShipments, setMissingUnitsShipments] = useState<
     Array<{ shipmentId: string; missingUnits: number; sentDate: string | null; shipmentName: string | null }>
   >([]);
-  const [dismissedMissingShipmentIds, setDismissedMissingShipmentIds] = useState<Set<string>>(() => {
-    if (typeof window === "undefined") return new Set();
-    try {
-      const raw = sessionStorage.getItem(MISSING_UNITS_DISMISSED_IDS_KEY);
-      if (!raw) return new Set();
-      const arr = JSON.parse(raw) as unknown;
-      return new Set(Array.isArray(arr) ? arr.filter((id): id is string => typeof id === "string") : []);
-    } catch {
-      return new Set();
-    }
-  });
+  const [missingShipmentDismissMap, setMissingShipmentDismissMap] = useState<MissingShipmentDismissMap>(() =>
+    loadMissingShipmentDismissMap(),
+  );
   const [syncProgress, setSyncProgress] = useState<number | null>(null);
   const [syncStage, setSyncStage] = useState<SyncStage>("complete");
   const [syncPhase, setSyncPhase] = useState<string | null>(null);
@@ -201,6 +238,19 @@ export function NotificationsProvider({ children }: { children: React.ReactNode 
     return () => clearTimeout(t);
   }, [isSignedIn, fetchMissing]);
 
+  // Once all COGS are filled, allow the tip to show again if gaps return later.
+  useEffect(() => {
+    if (missingCount === 0 && cogsTipsDismissed) {
+      setCogsTipsDismissed(false);
+      try {
+        sessionStorage.removeItem(COGS_ROI_DISMISSED_KEY);
+        sessionStorage.removeItem(COGS_PROFIT_DISMISSED_KEY);
+      } catch {
+        /* ignore */
+      }
+    }
+  }, [missingCount, cogsTipsDismissed]);
+
   const fetchMissingUnitsSummary = useCallback(async () => {
     if (!isSignedIn) return;
     try {
@@ -219,6 +269,14 @@ export function NotificationsProvider({ children }: { children: React.ReactNode 
         }>;
       };
       setMissingUnitsShipments(Array.isArray(data.shipments) ? data.shipments : []);
+      const stillMissing = new Set(
+        (Array.isArray(data.shipments) ? data.shipments : []).map((s) => s.shipmentId),
+      );
+      setMissingShipmentDismissMap((prev) => {
+        const pruned = pruneMissingShipmentDismissMap(prev, stillMissing);
+        saveMissingShipmentDismissMap(pruned);
+        return pruned;
+      });
     } catch {
       setMissingUnitsShipments([]);
     }
@@ -364,10 +422,36 @@ export function NotificationsProvider({ children }: { children: React.ReactNode 
     }
   }, [isSignedIn, getToken]);
 
+  const dismissMissingShipment = useCallback((shipmentId: string) => {
+    setMissingShipmentDismissMap((prev) => {
+      const next = { ...prev, [shipmentId]: Date.now() };
+      saveMissingShipmentDismissMap(next);
+      return next;
+    });
+  }, []);
+
+  const setCogsTipsDismissedPersist = useCallback((v: boolean) => {
+    setCogsTipsDismissed(v);
+    if (v) {
+      try {
+        sessionStorage.setItem(COGS_ROI_DISMISSED_KEY, "1");
+        sessionStorage.setItem(COGS_PROFIT_DISMISSED_KEY, "1");
+      } catch {
+        /* ignore */
+      }
+    }
+  }, []);
+
   const hasMissing = (missingCount ?? 0) > 0;
-  const visibleMissingShipments = missingUnitsShipments.filter((s) => !dismissedMissingShipmentIds.has(s.shipmentId));
+  const nowMs = Date.now();
+  const visibleMissingShipments = missingUnitsShipments.filter((s) => {
+    const at = missingShipmentDismissMap[s.shipmentId];
+    if (at == null) return true;
+    return nowMs - at >= MISSING_UNITS_DISMISS_TTL_MS;
+  });
   const hasMissingUnits = visibleMissingShipments.length > 0;
-  const hasNotifications = hasMissing || !cogsRoiDismissed || !cogsProfitDismissed || hasMissingUnits;
+  const showCogsNotification = hasMissing && !cogsTipsDismissed;
+  const hasNotifications = showCogsNotification || hasMissingUnits;
   const syncInProgress = isSyncInProgress(syncStage, syncProgress);
   const visibleSyncProgress = syncProgress ?? 0;
   const noSyncDataYet = isSignedIn && syncProgress === null;
@@ -422,12 +506,9 @@ export function NotificationsProvider({ children }: { children: React.ReactNode 
     setFlashingDismissed,
     missingCount,
     missingUnitsShipments,
-    dismissedMissingShipmentIds,
-    setDismissedMissingShipmentIds,
-    cogsRoiDismissed,
-    setCogsRoiDismissed,
-    cogsProfitDismissed,
-    setCogsProfitDismissed,
+    dismissMissingShipment,
+    cogsTipsDismissed,
+    setCogsTipsDismissed: setCogsTipsDismissedPersist,
     syncProgress,
     syncStage,
     syncPhase,

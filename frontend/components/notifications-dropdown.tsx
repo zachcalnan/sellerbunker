@@ -6,9 +6,6 @@ import { createPortal } from "react-dom";
 import { useNotifications, formatSentDate } from "@/contexts/notifications-context";
 
 const FLASH_DISMISSED_KEY = "topbar-notification-flash-dismissed";
-const COGS_ROI_DISMISSED_KEY = "topbar_cogs_roi_dismissed";
-const COGS_PROFIT_DISMISSED_KEY = "topbar_cogs_profit_dismissed";
-const MISSING_UNITS_DISMISSED_IDS_KEY = "topbar_missing_units_dismissed_ids";
 
 export function NotificationsDropdown({ variant = "full" }: { variant?: "full" | "iconOnly" }) {
   const [hovering, setHovering] = useState(false);
@@ -29,11 +26,9 @@ export function NotificationsDropdown({ variant = "full" }: { variant?: "full" |
     setFlashingDismissed,
     missingCount,
     visibleMissingShipments,
-    setDismissedMissingShipmentIds,
-    cogsRoiDismissed,
-    setCogsRoiDismissed,
-    cogsProfitDismissed,
-    setCogsProfitDismissed,
+    dismissMissingShipment,
+    cogsTipsDismissed,
+    setCogsTipsDismissed,
     visibleSyncProgress,
     syncTitle,
     syncDetail,
@@ -49,6 +44,10 @@ export function NotificationsDropdown({ variant = "full" }: { variant?: "full" |
   // Desktop: click only. Mobile (iconOnly): click or hover
   const showPanel = notificationsOpen || (hovering && iconOnly);
 
+  const showCogsCard = (missingCount ?? 0) > 0 && !cogsTipsDismissed;
+  const hasAlertBody =
+    visibleMissingShipments.length > 0 || showCogsCard;
+
   useEffect(() => {
     if (!showPanel) {
       queueMicrotask(() => setPanelFadedIn(false));
@@ -61,8 +60,6 @@ export function NotificationsDropdown({ variant = "full" }: { variant?: "full" |
   // useLayoutEffect so position is set before paint — avoids layout shift on first open
   useLayoutEffect(() => {
     if (!showPanel || typeof document === "undefined") return;
-    const padding = 12;
-    const minPanelWidth = 420;
     const mobileBreakpoint = 768;
     const updatePosition = () => {
       const el = notificationsRef.current;
@@ -217,7 +214,7 @@ export function NotificationsDropdown({ variant = "full" }: { variant?: "full" |
             />
             <div
               ref={notificationsPanelRef}
-              className={`z-[10001] min-w-0 max-w-[calc(100vw-2rem)] rounded-lg border border-[var(--surface-border)] bg-[var(--surface)] px-6 py-4 text-sm shadow-lg transition-opacity duration-200 ease-out md:min-w-[800px] ${panelFadedIn ? "opacity-100" : "opacity-0"}`}
+              className={`z-[10001] max-h-[min(70vh,520px)] min-w-0 max-w-[calc(100vw-2rem)] overflow-y-auto rounded-xl border border-[var(--surface-border)] bg-[var(--surface)] px-4 py-3 text-sm shadow-lg transition-opacity duration-200 ease-out md:min-w-[380px] md:max-w-[420px] md:px-5 md:py-4 ${panelFadedIn ? "opacity-100" : "opacity-0"}`}
               style={
                 panelPosition.centered
                   ? {
@@ -236,8 +233,26 @@ export function NotificationsDropdown({ variant = "full" }: { variant?: "full" |
               role="dialog"
               aria-label="Notifications"
             >
+            <div className="mb-3 flex items-center justify-between gap-2">
+              <h2 className="text-sm font-semibold text-[var(--foreground)]">Notifications</h2>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setNotificationsOpen(false);
+                  setHovering(false);
+                }}
+                className="cursor-pointer rounded-md p-1 text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/10 hover:text-[var(--foreground)]"
+                aria-label="Close"
+              >
+                <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
             {showSyncBox && (
-              <div className="mb-3 border-b border-[var(--surface-border)] pb-3">
+              <div className="mb-3 rounded-lg border border-[var(--surface-border)] bg-[var(--background)]/40 px-3 py-2.5">
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-xs font-medium text-[var(--foreground)]">{syncTitle}</span>
                   {syncComplete && (
@@ -258,7 +273,7 @@ export function NotificationsDropdown({ variant = "full" }: { variant?: "full" |
                 </div>
                 <div className="mt-1.5 flex items-center gap-1.5">
                   <div
-                    className={`h-2 min-w-0 flex-1 overflow-hidden rounded-full ${syncComplete ? "bg-sb-accent/30" : "bg-sb-accent/20"}`}
+                    className={`h-1.5 min-w-0 flex-1 overflow-hidden rounded-full ${syncComplete ? "bg-sb-accent/30" : "bg-sb-accent/20"}`}
                   >
                     <div
                       className={`h-full rounded-full transition-all duration-300 ${
@@ -296,105 +311,113 @@ export function NotificationsDropdown({ variant = "full" }: { variant?: "full" |
                   )}
                 </div>
                 {syncDetail && (
-                  <p className="mt-1 text-[11px] text-[var(--muted-foreground)]">{syncDetail}</p>
+                  <p className="mt-1 text-[11px] leading-snug text-[var(--muted-foreground)]">{syncDetail}</p>
                 )}
               </div>
             )}
-            {missingCount != null ? (
-              (missingCount > 0 || !cogsRoiDismissed || !cogsProfitDismissed || visibleMissingShipments.length > 0) ? (
-                <div className="flex flex-col gap-2">
-                  {visibleMissingShipments.map((s) => (
-                    <div key={s.shipmentId} className="flex items-start justify-between gap-2">
-                      <p className="text-sm text-[var(--foreground)]">
-                        You have {s.missingUnits} unit{s.missingUnits === 1 ? "" : "s"} missing
-                        {s.sentDate ? `, sent on ${formatSentDate(s.sentDate)}` : ""}.
-                      </p>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setDismissedMissingShipmentIds((prev) => {
-                            const next = new Set(prev);
-                            next.add(s.shipmentId);
-                            try {
-                              sessionStorage.setItem(
-                                MISSING_UNITS_DISMISSED_IDS_KEY,
-                                JSON.stringify([...next])
-                              );
-                            } catch {}
-                            return next;
-                          });
-                        }}
-                        className="shrink-0 cursor-pointer rounded p-0.5 text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/10 hover:text-[var(--foreground)]"
-                        aria-label="Dismiss"
-                      >
-                        <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                        </svg>
-                      </button>
-                    </div>
-                  ))}
-                  {missingCount > 0 && (
-                    <div className="flex flex-col gap-1">
-                      <p className="text-[var(--foreground)]">
-                        You are missing {missingCount} COGs SKU input{missingCount === 1 ? "" : "s"}.
-                      </p>
-                      <Link
-                        href={`/cost-of-goods?${new URLSearchParams({ missing: "1" }).toString()}`}
-                        className="text-sm font-medium text-[var(--foreground)] underline underline-offset-2 hover:no-underline"
-                      >
-                        Fix now
-                      </Link>
-                    </div>
-                  )}
-                  {!cogsRoiDismissed && (
-                    <div className="flex items-start justify-between gap-2">
-                      <p className="text-sm text-[var(--foreground)]">ROI not accurate until COGS filled.</p>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setCogsRoiDismissed(true);
-                          try {
-                            sessionStorage.setItem(COGS_ROI_DISMISSED_KEY, "1");
-                          } catch {}
-                        }}
-                        className="shrink-0 cursor-pointer rounded p-0.5 text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/10 hover:text-[var(--foreground)]"
-                        aria-label="Dismiss"
-                      >
-                        <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                        </svg>
-                      </button>
-                    </div>
-                  )}
-                  {!cogsProfitDismissed && (
-                    <div className="flex items-start justify-between gap-2">
-                      <p className="text-sm text-[var(--foreground)]">Profit not accurate until COGs filled out.</p>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setCogsProfitDismissed(true);
-                          try {
-                            sessionStorage.setItem(COGS_PROFIT_DISMISSED_KEY, "1");
-                          } catch {}
-                        }}
-                        className="shrink-0 cursor-pointer rounded p-0.5 text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/10 hover:text-[var(--foreground)]"
-                        aria-label="Dismiss"
-                      >
-                        <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                        </svg>
-                      </button>
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <p className="text-[var(--muted-foreground)]">No notifications.</p>
-              )
-            ) : (
+
+            {missingCount == null ? (
               <p className="text-[var(--muted-foreground)]">Loading…</p>
+            ) : hasAlertBody || showSyncBox ? (
+              <div className="flex flex-col gap-2.5">
+                {visibleMissingShipments.map((s) => (
+                  <div
+                    key={s.shipmentId}
+                    className="rounded-lg border border-amber-500/25 bg-amber-500/5 px-3 py-2.5"
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="text-xs font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-400">
+                          Late / missing shipment
+                        </p>
+                        <p className="mt-1 text-sm text-[var(--foreground)]">
+                          <span className="font-semibold tabular-nums">{s.missingUnits}</span>
+                          {" unit"}
+                          {s.missingUnits === 1 ? "" : "s"}
+                          {" not received"}
+                          {s.sentDate ? (
+                            <span className="text-[var(--muted-foreground)]">
+                              {" · sent "}
+                              {formatSentDate(s.sentDate)}
+                            </span>
+                          ) : null}
+                        </p>
+                        <p className="mt-0.5 truncate font-mono text-[11px] text-[var(--muted-foreground)]">
+                          {s.shipmentName || s.shipmentId}
+                        </p>
+                        <Link
+                          href="/shipments"
+                          className="mt-2 inline-block text-xs font-medium text-[var(--foreground)] underline underline-offset-2 hover:no-underline"
+                          onClick={() => {
+                            setNotificationsOpen(false);
+                            setHovering(false);
+                          }}
+                        >
+                          View shipments
+                        </Link>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          dismissMissingShipment(s.shipmentId);
+                        }}
+                        className="shrink-0 cursor-pointer rounded p-1 text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/10 hover:text-[var(--foreground)]"
+                        aria-label="Dismiss for one week"
+                        title="Hide for 1 week (won’t return if checked in)"
+                      >
+                        <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </button>
+                    </div>
+                  </div>
+                ))}
+
+                {showCogsCard && (
+                  <div className="rounded-lg border border-[var(--surface-border)] bg-[var(--background)]/40 px-3 py-2.5">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="text-xs font-semibold uppercase tracking-wide text-[var(--muted-foreground)]">
+                          Cost of goods
+                        </p>
+                        <p className="mt-1 text-sm text-[var(--foreground)]">
+                          Missing{" "}
+                          <span className="font-semibold tabular-nums">{missingCount}</span>
+                          {" SKU"}
+                          {missingCount === 1 ? "" : "s"}
+                          {" — profit and ROI won’t be accurate until filled."}
+                        </p>
+                        <Link
+                          href={`/cost-of-goods?${new URLSearchParams({ missing: "1" }).toString()}`}
+                          className="mt-2 inline-block text-xs font-medium text-[var(--foreground)] underline underline-offset-2 hover:no-underline"
+                          onClick={() => {
+                            setNotificationsOpen(false);
+                            setHovering(false);
+                          }}
+                        >
+                          Fix now
+                        </Link>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setCogsTipsDismissed(true);
+                        }}
+                        className="shrink-0 cursor-pointer rounded p-1 text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/10 hover:text-[var(--foreground)]"
+                        aria-label="Dismiss"
+                      >
+                        <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <p className="text-[var(--muted-foreground)]">No notifications.</p>
             )}
           </div>
           </>,

@@ -1106,11 +1106,11 @@ function CostOfGoodsInner() {
   const { backgroundClass } = useDisplaySettings();
 
   return (
-    <div className={`min-h-screen w-full ${backgroundClass} px-4 py-6`}>
-      <div className="mb-4 rounded-xl border border-[var(--surface-border)] bg-[var(--surface)] px-4 py-3">
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div>
-            <h1 className="text-2xl font-semibold text-[var(--foreground)]">
+    <div className={`min-h-screen w-full ${backgroundClass} px-3 py-4 sm:px-4 sm:py-6`}>
+      <div className="mb-4 rounded-xl border border-[var(--surface-border)] bg-[var(--surface)] px-3 py-3 sm:px-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-start sm:justify-between sm:gap-4">
+          <div className="min-w-0">
+            <h1 className="text-xl font-semibold text-[var(--foreground)] sm:text-2xl">
               Cost of Goods
             </h1>
             <p className="mt-1 text-sm text-[var(--muted-foreground)]">
@@ -1118,7 +1118,7 @@ function CostOfGoodsInner() {
               Profit uses the latest entry per SKU.
             </p>
           </div>
-          <div className="flex shrink-0 flex-col items-end sm:ml-auto">
+          <div className="flex shrink-0 flex-col items-stretch sm:items-end sm:ml-auto">
             {!fixedCostsFormOpen ? (
               <>
                 <button
@@ -1187,7 +1187,7 @@ function CostOfGoodsInner() {
                     {section.value.map((it, idx) => (
                       <div
                         key={it.id}
-                        className="flex flex-wrap items-center gap-2 rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-2 py-2"
+                        className="flex flex-col gap-2 rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-2 py-2 sm:flex-row sm:flex-wrap sm:items-center"
                       >
                         <input
                           value={it.name}
@@ -1199,8 +1199,9 @@ function CostOfGoodsInner() {
                             })
                           }
                           placeholder="Name (e.g. SellerAmp)"
-                          className="min-w-[10rem] flex-1 rounded border border-[var(--surface-border)] bg-[var(--background)] px-2 py-1.5 text-sm text-[var(--foreground)]"
+                          className="w-full min-w-0 flex-1 rounded border border-[var(--surface-border)] bg-[var(--background)] px-2 py-1.5 text-sm text-[var(--foreground)] sm:min-w-[10rem]"
                         />
+                        <div className="flex flex-wrap items-center gap-2">
                         <input
                           type="number"
                           min={0}
@@ -1265,6 +1266,7 @@ function CostOfGoodsInner() {
                         >
                           Remove
                         </button>
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -1405,7 +1407,7 @@ function CostOfGoodsInner() {
 
         {showForm ? (
           <div
-            className="fixed inset-0 z-50 flex cursor-pointer items-start justify-center bg-black/40 backdrop-blur-sm p-4 md:items-center"
+            className="fixed inset-0 z-50 flex cursor-pointer items-start justify-center bg-black/40 backdrop-blur-sm p-3 sm:p-4 md:items-center"
             role="dialog"
             aria-modal="true"
             onMouseDown={(e) => {
@@ -1416,8 +1418,8 @@ function CostOfGoodsInner() {
             }}
           >
             <div className="w-full max-w-3xl cursor-default overflow-hidden rounded-xl bg-[var(--background)] text-[var(--foreground)] ring-1 ring-[var(--surface-border)]">
-              <div className="flex items-center justify-between gap-4 border-b border-[var(--surface-border)] bg-[var(--surface)] px-4 py-3">
-                <div className="min-w-0">
+              <div className="flex items-start justify-between gap-3 border-b border-[var(--surface-border)] bg-[var(--surface)] px-3 py-3 sm:items-center sm:gap-4 sm:px-4">
+                <div className="min-w-0 flex-1">
                   {selectedProduct ? (
                     <div className="flex min-w-0 items-center gap-3">
                       <div className="aspect-square h-9 w-9 shrink-0 overflow-hidden rounded-md bg-[var(--surface)] ring-1 ring-[var(--surface-border)]">
@@ -1454,7 +1456,7 @@ function CostOfGoodsInner() {
                     </div>
                   )}
                 </div>
-                <div className="flex items-center gap-3">
+                <div className="hidden items-center gap-3 sm:flex">
                   <span className="text-xs font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
                     Fulfilment
                   </span>
@@ -1488,7 +1490,7 @@ function CostOfGoodsInner() {
                 </button>
               </div>
 
-              <div className="max-h-[80vh] overflow-auto p-4">
+              <div className="max-h-[min(85dvh,80vh)] overflow-auto p-3 sm:p-4">
                 <div className="grid gap-3 md:grid-cols-3">
                   {!selectedProduct ? (
                     <div className="md:col-span-3">
@@ -1553,7 +1555,7 @@ function CostOfGoodsInner() {
                     </div>
                   ) : null}
 
-                  <div className="md:col-span-3 grid grid-cols-2 gap-x-8 gap-y-0 min-w-0">
+                  <div className="md:col-span-3 grid grid-cols-1 gap-3 min-w-0 sm:grid-cols-2 sm:gap-x-8 sm:gap-y-0">
                     <div className="min-w-0 flex flex-col">
                       <div className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
                         Purchase date
@@ -1594,8 +1596,8 @@ function CostOfGoodsInner() {
                     </div>
                   </div>
 
-                  {/* Unit, Delivery, Prep on one line - full width of modal */}
-                  <div className="md:col-span-3 grid w-full grid-cols-3 gap-3 min-w-0 mt-5">
+                  {/* Unit, Delivery, Prep — stack on mobile */}
+                  <div className="md:col-span-3 grid w-full grid-cols-1 gap-3 min-w-0 mt-5 sm:grid-cols-3">
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center justify-between gap-1">
                         <label className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
@@ -2034,7 +2036,7 @@ function CostOfGoodsInner() {
                   ) : null}
                 </div>
               ) : (
-                <div className="grid gap-3 p-4 sm:grid-cols-2">
+                <div className="grid grid-cols-1 gap-3 p-3 sm:p-4 md:grid-cols-2">
                   {paginatedSkuItems.map((p) => {
                     const entry = p.latestCostEntry;
                     const showCompleteCogs =
@@ -2050,7 +2052,7 @@ function CostOfGoodsInner() {
                         key={p.id}
                         className="flex items-start gap-3 rounded-lg border border-[var(--surface-border)] bg-[var(--surface)] p-3"
                       >
-                        <div className="h-10 w-10 shrink-0 overflow-hidden rounded-md bg-[var(--surface)] ring-1 ring-[var(--surface-border)]">
+                        <div className="h-12 w-12 shrink-0 overflow-hidden rounded-md bg-[var(--surface)] ring-1 ring-[var(--surface-border)]">
                           {p.imageUrl ? (
                             // eslint-disable-next-line @next/next/no-img-element
                             <img
@@ -2063,65 +2065,74 @@ function CostOfGoodsInner() {
                           ) : null}
                         </div>
                         <div className="min-w-0 flex-1">
-                          <div className="truncate text-sm font-medium text-[var(--foreground)]">
+                          <div className="line-clamp-2 text-sm font-medium leading-snug text-[var(--foreground)]">
                             {p.title ?? "—"}
                           </div>
-                          <div className="mt-0.5 font-mono text-xs text-[var(--muted-foreground)]">
+                          <div className="mt-0.5 truncate font-mono text-xs text-[var(--muted-foreground)]">
                             {p.sku}
                             {p.asin ? ` · ${p.asin}` : ""}
                           </div>
-                          <div className="mt-1 text-xs text-[var(--muted-foreground)]">
-                            <span className="font-medium text-[var(--foreground)]">
-                              Stock {fmtQty(p.totalQty)}
-                            </span>{" "}
-                            units
-                          </div>
-                          {cogsFilter !== "missing" &&
-                          p.revenue != null &&
-                          p.units != null ? (
-                            <div className="mt-1 text-xs text-[var(--muted-foreground)]">
-                              {p.units} units · £{p.revenue.toFixed(2)} revenue
+                          <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
+                            <div>
+                              <span className="text-[var(--muted-foreground)]">Stock </span>
+                              <span className="font-semibold tabular-nums text-[var(--foreground)]">
+                                {fmtQty(p.totalQty)}
+                              </span>
                             </div>
-                          ) : null}
+                            {cogsFilter !== "missing" &&
+                            p.revenue != null &&
+                            p.units != null ? (
+                              <div>
+                                <span className="text-[var(--muted-foreground)]">Sold </span>
+                                <span className="font-semibold tabular-nums text-[var(--foreground)]">
+                                  {p.units}
+                                </span>
+                                <span className="text-[var(--muted-foreground)]">
+                                  {" · £"}
+                                  {p.revenue.toFixed(2)}
+                                </span>
+                              </div>
+                            ) : null}
+                          </div>
 
                           {showCompleteCogs ? (
                             <div className="mt-2">
                               <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-sm">
-                                <span className="font-medium text-[var(--foreground)] tabular-nums">
+                                <span className="font-semibold text-[var(--foreground)] tabular-nums">
                                   {formatCurrency(
                                     entry.unitCostIncVat,
                                     entry.currency,
                                   )}
                                 </span>
                                 <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
-                                  inc VAT
+                                  unit inc VAT
                                 </span>
-                                <span className="text-xs text-[var(--muted-foreground)]">
-                                  ·{" "}
-                                  {new Date(
-                                    entry.purchaseDate,
-                                  ).toLocaleDateString("en-GB", {
+                              </div>
+                              <div className="mt-0.5 text-xs text-[var(--muted-foreground)]">
+                                {new Date(entry.purchaseDate).toLocaleDateString(
+                                  "en-GB",
+                                  {
                                     day: "numeric",
                                     month: "short",
                                     year: "numeric",
-                                  })}
-                                </span>
+                                  },
+                                )}
                                 {(entry.deliveryCostIncVat > 0 ||
                                   entry.prepCostIncVat > 0) && (
-                                  <span className="text-xs text-[var(--muted-foreground)]">
-                                    · Line total{" "}
-                                    <span className="tabular-nums">
+                                  <>
+                                    {" · Line "}
+                                    <span className="tabular-nums text-[var(--foreground)]">
                                       {formatCurrency(
                                         entry.totalCostIncVat,
                                         entry.currency,
                                       )}
                                     </span>
-                                  </span>
+                                  </>
                                 )}
                               </div>
                               <button
                                 type="button"
-                                className="mt-1 cursor-pointer rounded-lg bg-sb-accent px-3 py-1.5 text-xs font-medium text-black"
+                                className="mt-2 w-full cursor-pointer rounded-lg bg-sb-accent px-3 py-2 text-xs font-medium text-black sm:w-auto sm:py-1.5"
                                 onClick={() => beginEdit(entry)}
                               >
                                 View / edit COGS
@@ -2144,7 +2155,7 @@ function CostOfGoodsInner() {
                               </p>
                               <button
                                 type="button"
-                                className="mt-1 cursor-pointer rounded-lg bg-sb-accent px-3 py-1.5 text-xs font-medium text-black"
+                                className="mt-1 w-full cursor-pointer rounded-lg bg-sb-accent px-3 py-2 text-xs font-medium text-black sm:w-auto sm:py-1.5"
                                 onClick={() => {
                                   setEditingEntry(null);
                                   setShowForm(true);
@@ -2157,7 +2168,7 @@ function CostOfGoodsInner() {
                           ) : (
                             <button
                               type="button"
-                              className="mt-2 cursor-pointer rounded-lg bg-sb-accent px-3 py-1.5 text-xs font-medium text-black"
+                              className="mt-2 w-full cursor-pointer rounded-lg bg-sb-accent px-3 py-2 text-xs font-medium text-black sm:w-auto sm:py-1.5"
                               onClick={() => {
                                 setEditingEntry(null);
                                 setShowForm(true);
