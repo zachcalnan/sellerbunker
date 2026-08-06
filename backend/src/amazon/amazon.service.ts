@@ -32,6 +32,9 @@ import {
   parseFinancesShipmentItemFeesBreakdown,
   parseFinancesShipmentItemFeesSignedTotal,
 } from './finances-item-fee-parse.util';
+import {
+  parseFeesEstimateBreakdown as parseProductFeesEstimateBreakdown,
+} from './product-fees-estimate-parse.util';
 import { eligibilityFromListingsRestrictionsBody } from './asin-selling-eligibility.util';
 import {
   avgDailyUnitsInStock,
@@ -13597,128 +13600,37 @@ try {
     return null;
   }
 
-  /** Parse fee breakdown from Product Fees API: total, referral, FBA, and digital service fee from FeeDetailList. */
+  /** Parse fee breakdown from Product Fees API (FinalFee / post-promotion; see product-fees-estimate-parse.util). */
   private parseFeesEstimateBreakdown(res: any): {
     total: number | null;
     referralFee: number | null;
     fbaFee: number | null;
     digitalServiceFee: number | null;
   } {
-    const result = res?.payload?.FeesEstimateResult ?? res?.FeesEstimateResult ?? res;
-    if (!result) return { total: null, referralFee: null, fbaFee: null, digitalServiceFee: null };
-    const fees = result.FeesEstimate ?? result.feesEstimate;
-    if (!fees) return { total: null, referralFee: null, fbaFee: null, digitalServiceFee: null };
-
-    const moneyToNum = (m: any): number => {
-      if (m == null) return 0;
-      const a = m.Amount ?? m.amount ?? m.CurrencyAmount ?? (typeof m.CurrencyAmount === 'object' ? m.CurrencyAmount?.Amount : null);
-      if (typeof a === 'number' && Number.isFinite(a)) return a;
-      if (typeof a === 'string') return parseFloat(a) || 0;
-      return 0;
-    };
-
-    const list = fees.FeeDetailList ?? fees.feeDetailList;
-    let referralFee: number | null = null;
-    let fbaFee: number | null = null;
-    let digitalServiceFee: number | null = null;
-
-    const normType = (t: unknown) => String(t ?? '').replace(/\s+/g, '').toUpperCase();
-    const isReferralType = (t: string) => t === 'REFERRALFEE' || t.endsWith('REFERRALFEE');
-    const isDigitalType = (t: string) =>
-      t === 'VARIABLECLOSINGFEE' || t === 'DIGITALSERVICEFEE' || t.includes('DIGITALSERVICE');
-    const isFbaLeafType = (t: string) => t === 'FBAFEES' || t.startsWith('FBA');
-
-    /** Classify only leaf rows so we never add parent + IncludedFeeDetailList (avoids double-counting totals). */
-    let referralSum = 0;
-    let fbaSum = 0;
-    let digitalSum = 0;
-    let otherLeafSum = 0;
-    const visitFeeLeaves = (nodes: any[] | undefined) => {
-      if (!Array.isArray(nodes)) return;
-      for (const item of nodes) {
-        const included = item.IncludedFeeDetailList ?? item.includedFeeDetailList;
-        if (Array.isArray(included) && included.length > 0) {
-          visitFeeLeaves(included);
-          continue;
-        }
-        const feeType = normType(item.FeeType ?? item.feeType ?? '');
-        const amount = moneyToNum(item.FeeAmount ?? item.feeAmount ?? item.FinalFee ?? item.finalFee);
-        if (!Number.isFinite(amount)) continue;
-        if (isReferralType(feeType)) referralSum += amount;
-        else if (isDigitalType(feeType)) digitalSum += amount;
-        else if (isFbaLeafType(feeType)) fbaSum += amount;
-        else otherLeafSum += amount;
-      }
-    };
-
-    if (Array.isArray(list) && list.length > 0) {
-      visitFeeLeaves(list);
-    }
-
-    // Authoritative total: Amazon's rollup first (matches Seller Central), then leaf-sum helper, then sum of classified leaves.
-    let authoritativeTotal: number | null = null;
-    const totalEst = fees.TotalFeesEstimate ?? fees.totalFeesEstimate;
-    if (totalEst != null) {
-      const t = Math.abs(moneyToNum(totalEst));
-      if (Number.isFinite(t) && t > 0) authoritativeTotal = t;
-    }
-    if (authoritativeTotal == null || authoritativeTotal < 1e-9) {
+    const parsed = parseProductFeesEstimateBreakdown(res);
+    // If TotalFeesEstimate missing but leaves empty, fall back to legacy amount helper.
+    if (
+      (parsed.total == null || parsed.total < 1e-9) &&
+      parsed.referralFee == null &&
+      parsed.fbaFee == null
+    ) {
       const fromApiSum = this.parseFeesEstimateAmount(res);
-      if (fromApiSum != null && Number.isFinite(fromApiSum)) {
-        const t = Math.abs(fromApiSum);
-        if (t > 0) authoritativeTotal = t;
+      if (fromApiSum != null && Number.isFinite(fromApiSum) && Math.abs(fromApiSum) > 0) {
+        return {
+          total: Math.abs(fromApiSum),
+          referralFee: null,
+          fbaFee: null,
+          digitalServiceFee: null,
+        };
       }
     }
-    const leafPartsAbs =
-      Math.abs(referralSum) + Math.abs(fbaSum) + Math.abs(digitalSum) + Math.abs(otherLeafSum);
-    if (authoritativeTotal == null || authoritativeTotal < 1e-9) {
-      if (leafPartsAbs > 0) authoritativeTotal = leafPartsAbs;
-    }
-
-    // Scale classified buckets to match authoritative total (handles aggregate rows we skipped on leaves).
-    let refM = Math.abs(referralSum);
-    let fbaM = Math.abs(fbaSum);
-    let digM = Math.abs(digitalSum);
-    let othM = Math.abs(otherLeafSum);
-    const parts = refM + fbaM + digM + othM;
-    if (authoritativeTotal != null && parts > 1e-9) {
-      const diff = Math.abs(authoritativeTotal - parts);
-      if (diff > 0.02) {
-        const scale = authoritativeTotal / parts;
-        refM *= scale;
-        fbaM *= scale;
-        digM *= scale;
-        othM *= scale;
-      }
-    }
-    // Bucket uncategorized Amazon line fees with FBA for storage (no separate column).
-    fbaM += othM;
-
-    if (refM > 1e-6) referralFee = refM;
-    if (fbaM > 1e-6) fbaFee = fbaM;
-    if (digM > 1e-6) digitalServiceFee = digM;
-
-    const totalMag =
-      authoritativeTotal != null && Number.isFinite(authoritativeTotal) && authoritativeTotal > 0
-        ? authoritativeTotal
-        : parts > 0
-          ? parts
-          : null;
-
-    return {
-      total: totalMag,
-      referralFee:
-        referralFee != null && Number.isFinite(referralFee) ? Math.abs(referralFee) : referralFee,
-      fbaFee: fbaFee != null && Number.isFinite(fbaFee) ? Math.abs(fbaFee) : fbaFee,
-      digitalServiceFee:
-        digitalServiceFee != null && Number.isFinite(digitalServiceFee)
-          ? Math.abs(digitalServiceFee)
-          : digitalServiceFee,
-    };
+    return parsed;
   }
 
   /**
-   * Latest Finances-backed order line per product (for repricer margin alignment with Orders).
+   * Latest order-line fee snapshot per product for repricer margin alignment with Orders.
+   * Prefers settled Finances breakdown; falls back to indicative at-sale estimate breakdown
+   * so min-ROI floors update as soon as estimate fees land (before settlement).
    */
   async getLatestFinancesFeeSnapshotsForProducts(
     userIds: string[],
@@ -13733,6 +13645,7 @@ try {
         settledReferralFeeTotal: number | null;
         settledFbaFeeTotal: number | null;
         settledDigitalServiceFeeTotal: number | null;
+        feesSource: 'finances' | 'order_estimate';
       }
     >
   > {
@@ -13745,6 +13658,7 @@ try {
         settledReferralFeeTotal: number | null;
         settledFbaFeeTotal: number | null;
         settledDigitalServiceFeeTotal: number | null;
+        feesSource: 'finances' | 'order_estimate';
       }
     >();
     if (!userIds.length || !productIds.length) return out;
@@ -13755,9 +13669,13 @@ try {
         quantity: number;
         revenue_total: unknown;
         amazon_fees_total: unknown;
+        fees_source: string;
         settled_referral_fee_total: unknown;
         settled_fba_fee_total: unknown;
         settled_digital_service_fee_total: unknown;
+        at_sale_estimate_referral_fee_total: unknown;
+        at_sale_estimate_fba_fee_total: unknown;
+        at_sale_estimate_digital_service_fee_total: unknown;
       }>
     >(Prisma.sql`
       SELECT DISTINCT ON ("product_id")
@@ -13765,15 +13683,32 @@ try {
         "quantity",
         "revenue_total",
         "amazon_fees_total",
+        "fees_source",
         "settled_referral_fee_total",
         "settled_fba_fee_total",
-        "settled_digital_service_fee_total"
+        "settled_digital_service_fee_total",
+        "at_sale_estimate_referral_fee_total",
+        "at_sale_estimate_fba_fee_total",
+        "at_sale_estimate_digital_service_fee_total"
       FROM "order_items"
       WHERE "user_id" IN (${Prisma.join(userIds)})
         AND "product_id" IN (${Prisma.join(productIds)})
-        AND "fees_source" = 'finances'
-        AND "settled_referral_fee_total" IS NOT NULL
-      ORDER BY "product_id", "order_date" DESC
+        AND (
+          ("fees_source" = 'finances' AND "settled_referral_fee_total" IS NOT NULL)
+          OR (
+            "fees_source" IN ('estimate', 'estimate_sold')
+            AND "at_sale_estimate_referral_fee_total" IS NOT NULL
+            AND "amazon_fees_total" IS NOT NULL
+            AND ABS("amazon_fees_total") > 0.009
+          )
+        )
+      ORDER BY
+        "product_id",
+        CASE
+          WHEN "fees_source" = 'finances' AND "settled_referral_fee_total" IS NOT NULL THEN 0
+          ELSE 1
+        END,
+        "order_date" DESC
     `);
 
     for (const r of rows ?? []) {
@@ -13788,13 +13723,23 @@ try {
         const n = Number(v);
         return Number.isFinite(n) ? n : null;
       };
+      const isFinances =
+        String(r.fees_source ?? '') === 'finances' &&
+        r.settled_referral_fee_total != null;
       out.set(pid, {
         quantity: qty,
         revenueTotal: rev,
         amazonFeesTotal: fees,
-        settledReferralFeeTotal: toNullableNum(r.settled_referral_fee_total),
-        settledFbaFeeTotal: toNullableNum(r.settled_fba_fee_total),
-        settledDigitalServiceFeeTotal: toNullableNum(r.settled_digital_service_fee_total),
+        settledReferralFeeTotal: isFinances
+          ? toNullableNum(r.settled_referral_fee_total)
+          : toNullableNum(r.at_sale_estimate_referral_fee_total),
+        settledFbaFeeTotal: isFinances
+          ? toNullableNum(r.settled_fba_fee_total)
+          : toNullableNum(r.at_sale_estimate_fba_fee_total),
+        settledDigitalServiceFeeTotal: isFinances
+          ? toNullableNum(r.settled_digital_service_fee_total)
+          : toNullableNum(r.at_sale_estimate_digital_service_fee_total),
+        feesSource: isFinances ? 'finances' : 'order_estimate',
       });
     }
     return out;
@@ -13930,8 +13875,9 @@ try {
           continue;
         }
         const feeType = normType(item.FeeType ?? item.feeType ?? '');
+        // Prefer FinalFee (post FeePromotion) — same as product-fees-estimate-parse.util.
         const rawAmt = moneyToNum(
-          item.FeeAmount ?? item.feeAmount ?? item.FinalFee ?? item.finalFee,
+          item.FinalFee ?? item.finalFee ?? item.FeeAmount ?? item.feeAmount,
         );
         if (!Number.isFinite(rawAmt)) continue;
         const mag = Math.abs(rawAmt);

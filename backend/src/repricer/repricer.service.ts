@@ -9,6 +9,10 @@ import {
   marketplaceIdToListingCurrency,
   parseListingPatchMetaFromGetListingsItem,
 } from './repricer-listing-patch-meta.util';
+import {
+  parseFeesEstimateBreakdownForRepricerFloor,
+  parseFeesEstimateListingPrice,
+} from '../amazon/product-fees-estimate-parse.util';
 
 @Injectable()
 export class RepricerService {
@@ -1215,21 +1219,29 @@ export class RepricerService {
       const n = typeof v === 'number' ? v : Number(String(v));
       return Number.isFinite(n) ? n : null;
     };
-    const ref = Math.abs(toNum(product.estimatedReferralFeePerUnit) ?? 0);
-    const fba = Math.abs(toNum(product.estimatedFbaFeePerUnit) ?? 0);
-    const digStored = Math.abs(toNum(product.estimatedDigitalServiceFeePerUnit) ?? 0);
 
-    // Price the referral estimate was computed at (Product Fees API echoes PriceToEstimateFees).
-    let priceAtEstimate: number | null = null;
-    const raw = product.feeEstimateRawJson as any;
-    if (raw) {
-      const feeResult = raw?.payload?.FeesEstimateResult ?? raw?.FeesEstimateResult ?? raw;
-      const pp =
-        feeResult?.FeesEstimateIdentifier?.PriceToEstimateFees?.ListingPrice ??
-        feeResult?.feesEstimateIdentifier?.priceToEstimateFees?.listingPrice;
-      const amt = pp?.Amount ?? pp?.amount;
-      const n = typeof amt === 'number' ? amt : typeof amt === 'string' ? parseFloat(amt) : null;
-      if (n != null && Number.isFinite(n) && n > 0) priceAtEstimate = n;
+    // Prefer re-parsing feeEstimateRawJson for the ROI floor:
+    // - referral = FinalFee (true category %)
+    // - FBA = FeeAmount (pre-promo) so temporary FBA promotions are not banked on
+    let ref = Math.abs(toNum(product.estimatedReferralFeePerUnit) ?? 0);
+    let fba = Math.abs(toNum(product.estimatedFbaFeePerUnit) ?? 0);
+    let digStored = Math.abs(toNum(product.estimatedDigitalServiceFeePerUnit) ?? 0);
+    const priceAtEstimate: number | null = parseFeesEstimateListingPrice(
+      product.feeEstimateRawJson,
+    );
+    const fromRaw = product.feeEstimateRawJson
+      ? parseFeesEstimateBreakdownForRepricerFloor(product.feeEstimateRawJson)
+      : null;
+    if (fromRaw && (fromRaw.referralFee != null || fromRaw.fbaFee != null)) {
+      if (fromRaw.referralFee != null && fromRaw.referralFee > 1e-9) {
+        ref = Math.abs(fromRaw.referralFee);
+      }
+      if (fromRaw.fbaFee != null) {
+        fba = Math.abs(fromRaw.fbaFee);
+      }
+      if (fromRaw.digitalServiceFee != null && fromRaw.digitalServiceFee > 1e-9) {
+        digStored = Math.abs(fromRaw.digitalServiceFee);
+      }
     }
 
     let referralRate: number | null = null;
@@ -1277,12 +1289,13 @@ export class RepricerService {
     settledReferralFeeTotal?: number | null;
     settledFbaFeeTotal?: number | null;
     settledDigitalServiceFeeTotal?: number | null;
+    feesSource?: 'finances' | 'order_estimate';
   }): {
     k: number;
     b: number;
     referralRate: number | null;
     flatFeePerUnit: number;
-    source: 'finances_breakdown' | 'finances_total';
+    source: 'finances_breakdown' | 'finances_total' | 'order_estimate';
   } | null {
     const qty = Math.max(1, Math.floor(Number(snap.quantity) || 1));
     const rev = Math.abs(Number(snap.revenueTotal));
@@ -1301,6 +1314,9 @@ export class RepricerService {
         ? Math.abs(Number(snap.settledDigitalServiceFeeTotal)) / qty
         : 0;
 
+    const breakdownSource =
+      snap.feesSource === 'order_estimate' ? 'order_estimate' : 'finances_breakdown';
+
     if (refMag > 1e-9 && rev > 1e-9) {
       const referralRate = refMag / rev;
       if (Number.isFinite(referralRate) && referralRate > 0 && referralRate < 0.95) {
@@ -1309,7 +1325,7 @@ export class RepricerService {
           b: fbaMag + digMag,
           referralRate,
           flatFeePerUnit,
-          source: 'finances_breakdown',
+          source: breakdownSource,
         };
       }
     }
@@ -1319,7 +1335,7 @@ export class RepricerService {
       b: flatFeePerUnit,
       referralRate: null,
       flatFeePerUnit,
-      source: 'finances_total',
+      source: snap.feesSource === 'order_estimate' ? 'order_estimate' : 'finances_total',
     };
   }
 
@@ -1965,6 +1981,7 @@ export class RepricerService {
               settledReferralFeeTotal: number | null;
               settledFbaFeeTotal: number | null;
               settledDigitalServiceFeeTotal: number | null;
+              feesSource: 'finances' | 'order_estimate';
             }
           >();
 
@@ -2081,6 +2098,9 @@ export class RepricerService {
           minSellerRatingCount != null);
 
       // Rule expiry + cooldown gates.
+      // Cooldown still blocks competitive drops / at-target churn, but we always compute bounds so
+      // a later fee update (order estimate or Finances) can raise price through cooldown when the
+      // listing sits under the min ROI / profit floor.
       const ruleEndsAt = preset.rule1EndsAt ? new Date(preset.rule1EndsAt) : null;
       const ruleExpired =
         ruleEndsAt != null && !Number.isNaN(ruleEndsAt.getTime()) && ruleEndsAt.getTime() < Date.now();
@@ -2117,36 +2137,57 @@ export class RepricerService {
         financesSnapRow?.settledReferralFeeTotal != null
           ? this.repricerFeeModelFromFinancesSnapshot(financesSnapRow)
           : null;
-      // Price-aware fee from Product Fees when no settled Finances history exists.
+      // Price-aware fee from Product Fees (referral FinalFee + pre-promo FBA FeeAmount).
       const productFeeModel = this.repricerFeeModel({
         estimatedReferralFeePerUnit: (p as any)?.estimatedReferralFeePerUnit,
         estimatedFbaFeePerUnit: (p as any)?.estimatedFbaFeePerUnit,
         estimatedDigitalServiceFeePerUnit: (p as any)?.estimatedDigitalServiceFeePerUnit,
         feeEstimateRawJson: (p as any)?.feeEstimateRawJson,
       });
-      const activeFeeModel = financesFeeModel ?? productFeeModel;
-      const useLinearFee =
+      const settledFinances = financesSnapRow?.feesSource === 'finances' && financesFeeModel != null;
+      // Settled Finances = real money. Until then, take the more expensive of order-estimate vs
+      // conservative product fees so FBA promos / thin estimates cannot collapse the ROI floor.
+      let activeFeeModel = financesFeeModel ?? productFeeModel;
+      let useLinearFee =
         financesFeeModel != null
           ? financesFeeModel.k > 1e-9
           : productFeeModel.referralRate != null;
+      if (!settledFinances && financesFeeModel != null && productFeeModel.referralRate != null) {
+        const probe =
+          current != null && Number.isFinite(current) && current > 0 ? current : 100;
+        const feeOrder = Math.abs(financesFeeModel.k * probe + financesFeeModel.b);
+        const feeProd = Math.abs(productFeeModel.k * probe + productFeeModel.b);
+        if (feeProd >= feeOrder - 1e-9) {
+          activeFeeModel = productFeeModel;
+          useLinearFee = true;
+        }
+      }
       const feeAtPriceModel = (price: number): number | null => {
+        let fromActive: number | null = null;
         if (useLinearFee && Number.isFinite(price)) {
-          return Math.abs(activeFeeModel.k * price + activeFeeModel.b);
+          fromActive = Math.abs(activeFeeModel.k * price + activeFeeModel.b);
+        } else if (financesFeeModel != null) {
+          fromActive = financesFeeModel.flatFeePerUnit;
+        } else {
+          const out = this.amazonService.repricerAmazonFeePerUnitFromProduct(
+            {
+              currentListedPrice: price,
+              estimatedReferralFeePerUnit: (p as any)?.estimatedReferralFeePerUnit,
+              estimatedFbaFeePerUnit: (p as any)?.estimatedFbaFeePerUnit,
+              estimatedDigitalServiceFeePerUnit: (p as any)?.estimatedDigitalServiceFeePerUnit,
+              estimatedAmazonFeePerUnit: p?.estimatedAmazonFeePerUnit,
+            },
+            financesSnapRow,
+          );
+          fromActive = out != null && Number.isFinite(out) ? Math.abs(out) : null;
         }
-        if (financesFeeModel != null) {
-          return financesFeeModel.flatFeePerUnit;
+        if (settledFinances) return fromActive;
+        let fromProduct: number | null = null;
+        if (productFeeModel.referralRate != null && Number.isFinite(price)) {
+          fromProduct = Math.abs(productFeeModel.k * price + productFeeModel.b);
         }
-        const out = this.amazonService.repricerAmazonFeePerUnitFromProduct(
-          {
-            currentListedPrice: price,
-            estimatedReferralFeePerUnit: (p as any)?.estimatedReferralFeePerUnit,
-            estimatedFbaFeePerUnit: (p as any)?.estimatedFbaFeePerUnit,
-            estimatedDigitalServiceFeePerUnit: (p as any)?.estimatedDigitalServiceFeePerUnit,
-            estimatedAmazonFeePerUnit: p?.estimatedAmazonFeePerUnit,
-          },
-          financesSnapRow,
-        );
-        return out != null && Number.isFinite(out) ? Math.abs(out) : null;
+        if (fromActive != null && fromProduct != null) return Math.max(fromActive, fromProduct);
+        return fromActive ?? fromProduct;
       };
       const fee = feeAtPriceModel(
         current != null && Number.isFinite(current) && current > 0 ? current : 0,
@@ -2187,10 +2228,6 @@ export class RepricerService {
       } else if (knownOutOfStock) {
         gateReason = 'out_of_stock';
         message = 'No change: out of stock — repricer only adjusts in-stock listings.';
-        nextPrice = current;
-      } else if (inCooldown) {
-        gateReason = 'cooldown';
-        message = `No change: within cooldown window (${cooldownMinutes}m since last change).`;
         nextPrice = current;
       } else if (!bounds) {
         message = this.isSuspiciousCogs(costRaw, current)
@@ -2453,17 +2490,55 @@ export class RepricerService {
           )}m of ${smartDelayMinutes}m).`;
         }
 
-        if (skipNoBuyBox) {
+        // Cooldown: block flat/down moves. Allow upward raises when updated fees push the
+        // min ROI / profit floor above the current list price (estimate or settled feedback).
+        if (
+          inCooldown &&
+          !skipNoBuyBox &&
+          nextPrice != null &&
+          current != null &&
+          Number.isFinite(nextPrice) &&
+          Number.isFinite(current)
+        ) {
+          const nextPence = Math.round(nextPrice * 100);
+          const curPence = Math.round(current * 100);
+          if (nextPence <= curPence) {
+            gateReason = 'cooldown';
+            message = `No change: within cooldown window (${cooldownMinutes}m since last change).`;
+            nextPrice = current;
+          } else {
+            gateReason = gateReason ?? 'fee_floor_raise';
+          }
+        }
+
+        const skipWouldRaiseFloor =
+          skipNoBuyBox &&
+          nextPrice != null &&
+          current != null &&
+          Number.isFinite(nextPrice) &&
+          Math.round(Number(nextPrice) * 100) > Math.round(Number(current) * 100);
+
+        if (skipNoBuyBox && !skipWouldRaiseFloor) {
           message = skipMessageOverride ?? RepricerService.SKIP_NO_BUY_BOX_UNCHANGED_MSG;
           nextPrice = current;
-        } else if (nextPrice != null && nextPrice !== current) {
+        } else if (
+          nextPrice != null &&
+          current != null &&
+          Number.isFinite(nextPrice) &&
+          Math.round(Number(nextPrice) * 100) !== Math.round(Number(current) * 100)
+        ) {
+          if (skipWouldRaiseFloor) {
+            gateReason = 'fee_floor_raise';
+          }
           const refLabel =
             priceRef === 'best_offer'
               ? 'bestOffer'
               : priceRef === 'next_best_offer'
                 ? 'nextBest'
                 : 'buyBox';
-          const detail = `${strategy || 'bounds-only'}${refPrice != null ? `, ${refLabel}=${refPrice.toFixed(2)}` : ''}`;
+          const detail = skipWouldRaiseFloor
+            ? 'fee_floor_raise'
+            : `${strategy || 'bounds-only'}${refPrice != null ? `, ${refLabel}=${refPrice.toFixed(2)}` : ''}`;
           const isLive = opts?.dryRun === false;
           if (isLive) {
             if (!creds || !sellerId) {
