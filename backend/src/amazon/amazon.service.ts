@@ -34,6 +34,7 @@ import {
 } from './finances-item-fee-parse.util';
 import {
   parseFeesEstimateBreakdown as parseProductFeesEstimateBreakdown,
+  parseFeesEstimateBreakdownForRepricerFloor,
 } from './product-fees-estimate-parse.util';
 import { eligibilityFromListingsRestrictionsBody } from './asin-selling-eligibility.util';
 import {
@@ -1802,6 +1803,7 @@ export class AmazonService {
       estimatedFbaFeePerUnit?: unknown;
       estimatedDigitalServiceFeePerUnit?: unknown;
       estimatedAmazonFeePerUnit?: unknown;
+      feeEstimateRawJson?: unknown;
     } | null,
     quantityOrdered: number,
   ): {
@@ -1812,6 +1814,29 @@ export class AmazonService {
   } | null {
     if (!product) return null;
     const qty = quantityOrdered > 0 ? quantityOrdered : 1;
+
+    // Prefer raw Product Fees with pre-promo FBA so order estimates match the ROI floor.
+    const floor = product.feeEstimateRawJson
+      ? parseFeesEstimateBreakdownForRepricerFloor(product.feeEstimateRawJson)
+      : null;
+    if (floor && (floor.referralFee != null || floor.fbaFee != null)) {
+      const rPu = Math.abs(floor.referralFee ?? 0);
+      const fPu = Math.abs(floor.fbaFee ?? 0);
+      let dPu = Math.abs(floor.digitalServiceFee ?? 0);
+      if (dPu < 1e-9 && (rPu > 0 || fPu > 0)) {
+        dPu = Math.round((rPu + fPu) * 0.02 * 100) / 100;
+      }
+      const perUnit = rPu + fPu + dPu;
+      if (perUnit > 1e-9) {
+        return {
+          itemFees: -Math.abs(Number((perUnit * qty).toFixed(2))),
+          referralLine: rPu > 1e-9 ? -Math.abs(Number((rPu * qty).toFixed(2))) : null,
+          fbaLine: fPu > 1e-9 ? -Math.abs(Number((fPu * qty).toFixed(2))) : null,
+          digitalLine: dPu > 1e-9 ? -Math.abs(Number((dPu * qty).toFixed(2))) : null,
+        };
+      }
+    }
+
     const r =
       product.estimatedReferralFeePerUnit != null
         ? Number(product.estimatedReferralFeePerUnit)
@@ -1996,6 +2021,7 @@ export class AmazonService {
       estimatedFbaFeePerUnit?: unknown;
       estimatedDigitalServiceFeePerUnit?: unknown;
       estimatedAmazonFeePerUnit?: unknown;
+      feeEstimateRawJson?: unknown;
     } | null,
     quantityOrdered: number,
     orderDate: Date,
@@ -5164,6 +5190,7 @@ export class AmazonService {
                 estimatedFbaFeePerUnit?: unknown;
                 estimatedDigitalServiceFeePerUnit?: unknown;
                 estimatedAmazonFeePerUnit?: unknown;
+                feeEstimateRawJson?: unknown;
               },
               quantityOrdered,
               orderDate,
@@ -5182,6 +5209,7 @@ export class AmazonService {
                   estimatedFbaFeePerUnit: true,
                   estimatedDigitalServiceFeePerUnit: true,
                   estimatedAmazonFeePerUnit: true,
+                  feeEstimateRawJson: true,
                 },
               });
               const fromDb = this.orderItemFeeEstimateScStyleFromProduct(
@@ -9503,10 +9531,36 @@ export class AmazonService {
         return n > 0 ? -Math.abs(n) : n;
       };
       // Use order item stored fees when present; else product's saved estimate (so we always pick up estimates from DB).
-      const estPerUnit = fees?.amazonFeePerUnit ?? toNum(product?.estimatedAmazonFeePerUnit) ?? null;
-      const estReferral = fees?.referralPerUnit ?? toNum(product?.estimatedReferralFeePerUnit) ?? null;
-      const estFba = fees?.fbaPerUnit ?? toNum(product?.estimatedFbaFeePerUnit) ?? null;
-      const estDigital = fees?.digitalServicePerUnit ?? toNum(product?.estimatedDigitalServiceFeePerUnit) ?? null;
+      let estPerUnit = fees?.amazonFeePerUnit ?? toNum(product?.estimatedAmazonFeePerUnit) ?? null;
+      let estReferral = fees?.referralPerUnit ?? toNum(product?.estimatedReferralFeePerUnit) ?? null;
+      let estFba = fees?.fbaPerUnit ?? toNum(product?.estimatedFbaFeePerUnit) ?? null;
+      let estDigital =
+        fees?.digitalServicePerUnit ?? toNum(product?.estimatedDigitalServiceFeePerUnit) ?? null;
+      // Prefer Product Fees raw JSON with pre-promo FBA (FeeAmount) so temporary FBA promotions
+      // cannot understate estimate fees / inflate ROI on Orders while Finances is pending.
+      const floorFromRaw = product?.feeEstimateRawJson
+        ? parseFeesEstimateBreakdownForRepricerFloor(product.feeEstimateRawJson)
+        : null;
+      if (floorFromRaw && (floorFromRaw.referralFee != null || floorFromRaw.fbaFee != null)) {
+        if (floorFromRaw.referralFee != null && floorFromRaw.referralFee > 1e-9) {
+          estReferral = floorFromRaw.referralFee;
+        }
+        if (floorFromRaw.fbaFee != null) {
+          estFba = floorFromRaw.fbaFee;
+        }
+        if (floorFromRaw.digitalServiceFee != null && floorFromRaw.digitalServiceFee > 1e-9) {
+          estDigital = floorFromRaw.digitalServiceFee;
+        } else if (
+          (estReferral != null && estReferral > 1e-9) ||
+          (estFba != null && estFba > 1e-9)
+        ) {
+          estDigital =
+            Math.round((Math.abs(estReferral ?? 0) + Math.abs(estFba ?? 0)) * 0.02 * 100) / 100;
+        }
+        const parts =
+          Math.abs(estReferral ?? 0) + Math.abs(estFba ?? 0) + Math.abs(estDigital ?? 0);
+        if (parts > 1e-9) estPerUnit = parts;
+      }
       // Use settled total when we have it (finances); otherwise use estimated total (estimated per unit × qty); else conservative fallback so ROI isn't overstated.
       let feesForDisplay =
         settledFees !== 0
@@ -9605,7 +9659,11 @@ export class AmazonService {
         referralFeeTotal = atBd.r !== 0 ? atBd.r : null;
         fbaFeeTotal = atBd.f !== 0 ? atBd.f : null;
         digitalServiceFeeTotal = atBd.d !== 0 ? atBd.d : null;
-      } else if (!hasSettledBreakdown && feesSource !== 'finances') {
+      } else if (
+        !hasSettledBreakdown &&
+        feesSource !== 'finances' &&
+        !hasSaleEstimateSnap
+      ) {
         if (estReferral != null && Number.isFinite(estReferral)) {
           referralFeeTotal = Math.round(-Math.abs(estReferral * qty) * 100) / 100;
         }
@@ -14555,6 +14613,7 @@ try {
               estimatedFbaFeePerUnit?: unknown;
               estimatedDigitalServiceFeePerUnit?: unknown;
               estimatedAmazonFeePerUnit?: unknown;
+              feeEstimateRawJson?: unknown;
             },
             quantityOrdered,
           );
@@ -14571,6 +14630,7 @@ try {
                 estimatedFbaFeePerUnit: true,
                 estimatedDigitalServiceFeePerUnit: true,
                 estimatedAmazonFeePerUnit: true,
+                feeEstimateRawJson: true,
               },
             });
             const fromDb = this.orderItemFeeEstimateFromPreSaleProduct(
