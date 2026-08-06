@@ -15,6 +15,7 @@ import { getMarketplaceIanaTimeZone } from "@/lib/marketplace-timezone";
 import { marketplaceLocalDateAnchors } from "@/lib/marketplace-date-anchors";
 import { SignInButtonWithReturn } from "@/components/sign-in-button-with-return";
 import { getDevImpersonationHeaders } from "@/lib/impersonation";
+import { downloadOrderInvoicePdf } from "@/lib/download-order-invoice";
 
 type OrderRow = {
   id: string;
@@ -161,6 +162,23 @@ export default function OrdersPage() {
   const formatCurrency = (n: number) =>
     new Intl.NumberFormat(undefined, { style: "currency", currency: selectedCurrency, minimumFractionDigits: 2 }).format(n);
 
+  const downloadInvoiceForOrder = (orderId: string) => {
+    const lines = rows.filter((r) => r.orderId === orderId);
+    downloadOrderInvoicePdf(
+      lines.map((r) => ({
+        orderId: r.orderId,
+        orderDate: r.orderDate,
+        sku: r.sku,
+        asin: r.asin,
+        title: r.title,
+        quantity: r.quantity,
+        salePrice: r.salePrice,
+        fulfillmentType: r.fulfillmentType ?? null,
+      })),
+      selectedCurrency || "GBP",
+    );
+  };
+
   const { backgroundClass } = useDisplaySettings();
 
   return (
@@ -266,7 +284,7 @@ export default function OrdersPage() {
         <div className="rounded-xl bg-[var(--surface)] ring-1 ring-[var(--surface-border)]">
           <div className="min-w-0">
             <div className="hidden overflow-x-auto md:block">
-              <div className="min-w-[960px] grid grid-cols-[36px_1fr_0.55fr_0.45fr_0.8fr_0.52fr_0.35fr_0.45fr_0.45fr_0.35fr_0.35fr] gap-1 bg-[var(--surface)] px-2.5 py-2 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
+              <div className="min-w-[960px] grid grid-cols-[36px_1fr_0.55fr_0.45fr_0.8fr_0.52fr_0.35fr_0.45fr_0.45fr_0.35fr_0.35fr_72px] gap-1 bg-[var(--surface)] px-2.5 py-2 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
               <div />
               <div>Title</div>
               <div>SKU</div>
@@ -278,6 +296,7 @@ export default function OrdersPage() {
               <div className="text-center">Profit</div>
               <div className="text-center">ROI%</div>
               <div className="text-center">Stock</div>
+              <div className="text-center">Invoice</div>
             </div>
             </div>
 
@@ -377,6 +396,13 @@ export default function OrdersPage() {
                                 )}
                               </div>
                             </div>
+                            <button
+                              type="button"
+                              onClick={() => downloadInvoiceForOrder(r.orderId)}
+                              className="mt-3 w-full cursor-pointer rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-3 py-2 text-xs font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/5"
+                            >
+                              Download invoice PDF
+                            </button>
                           </div>
                         </div>
                       </div>
@@ -390,7 +416,7 @@ export default function OrdersPage() {
                     return (
                     <div
                       key={r.id}
-                      className="min-w-[960px] grid grid-cols-[36px_1fr_0.55fr_0.45fr_0.8fr_0.52fr_0.35fr_0.45fr_0.45fr_0.35fr_0.35fr] items-center gap-1 px-2.5 py-2 text-[11px]"
+                      className="min-w-[960px] grid grid-cols-[36px_1fr_0.55fr_0.45fr_0.8fr_0.52fr_0.35fr_0.45fr_0.45fr_0.35fr_0.35fr_72px] items-center gap-1 px-2.5 py-2 text-[11px]"
                     >
                       <div className="flex items-center justify-center shrink-0">
                         {r.imageUrl ? (
@@ -484,6 +510,16 @@ export default function OrdersPage() {
                         }`}
                       >
                         {r.availableStock != null ? String(r.availableStock) : "—"}
+                      </div>
+                      <div className="flex justify-center">
+                        <button
+                          type="button"
+                          onClick={() => downloadInvoiceForOrder(r.orderId)}
+                          className="cursor-pointer rounded-md border border-[var(--surface-border)] bg-[var(--background)] px-2 py-1 text-[10px] font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/5"
+                          title="Download PDF invoice for this Amazon order"
+                        >
+                          PDF
+                        </button>
                       </div>
                     </div>
                     );
