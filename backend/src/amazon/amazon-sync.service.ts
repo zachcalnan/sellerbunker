@@ -653,7 +653,7 @@ export class AmazonSyncService implements OnModuleInit {
     const memberships = await this.prisma.organizationMembership.findMany({
       where: {
         userId: { in: userIds },
-        organization: this.subscribedAmazonOrgWhere(),
+        org: this.subscribedAmazonOrgWhere(),
       },
       select: { orgId: true },
     });
