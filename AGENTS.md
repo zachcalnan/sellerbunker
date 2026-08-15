@@ -24,6 +24,15 @@ When changing anything under `backend/src/amazon/` that touches **settled fees**
 
 7. **Orders UI** is production data only: `GET /api/amazon/orders` (`listOrders`). Do not wire the customer Orders page to `dev/*` Finances JSON or manual backfill buttons — keep those on dev/admin routes for debugging.
 
+## Personal VPS deploy (Cloud / mobile agents)
+
+Live site is the Hetzner VPS (`www.sellerbunker.com`), **not** auto-deployed from GitHub push alone.
+
+1. Runtime secrets (Cursor dashboard → Cloud Agents): `VPS_SSH_PRIVATE_KEY` (required), optional `VPS_SSH_HOST` / `VPS_SSH_USER`.
+2. After code is committed on the working branch, deploy with:
+   `bash scripts/vps-deploy-from-agent.sh`
+3. That script bundles the branch, uploads to the VPS, `git reset --hard`, then runs `deploy/scripts/update-app.sh` (Docker rebuild). Do **not** force-push or wipe Postgres volumes.
+
 ## Handing work to an agent without “days in chat”
 
 - Open a **single thread** with: goal, **order id** example, **Seller Central screenshot or numbers**, and “run `npx jest finances-item-fee-parse.util.spec.ts` until green”.
