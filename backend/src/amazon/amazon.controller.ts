@@ -1072,6 +1072,23 @@ ping() {
   }
 
   /**
+   * Search org listings by ASIN / SKU / title (DB only — no OpenAI).
+   * Example: GET /api/amazon/products/search?q=otamatone&take=20
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Get('products/search')
+  async searchProducts(
+    @Req() req: { user: { orgId: string } },
+    @Query('q') q?: string,
+    @Query('take') take?: string,
+  ) {
+    const takeN = Number(take ?? 20);
+    return this.amazonService.searchProducts(req.user.orgId, q ?? '', {
+      take: Number.isFinite(takeN) ? takeN : 20,
+    });
+  }
+
+  /**
    * Update Cost of Goods (per-unit) for a product.
    *
    * Example:

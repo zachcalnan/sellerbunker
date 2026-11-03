@@ -7291,6 +7291,56 @@ export class AmazonService {
   }
 
   /**
+   * Search org listings by ASIN / SKU / title (DB only — no OpenAI).
+   */
+  async searchProducts(
+    orgId: string,
+    query: string,
+    opts?: { take?: number },
+  ): Promise<
+    Array<{
+      id: string;
+      sku: string;
+      asin: string | null;
+      title: string | null;
+      imageUrl: string | null;
+      costOfGoods: number | null;
+    }>
+  > {
+    const q = (query ?? '').trim();
+    if (q.length < 2) return [];
+    const take = Math.max(1, Math.min(40, opts?.take ?? 20));
+    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
+    if (userIds.length === 0) return [];
+
+    const products = await this.prisma.product.findMany({
+      where: {
+        userId: { in: userIds },
+        OR: [
+          { asin: { contains: q, mode: 'insensitive' } },
+          { sku: { contains: q, mode: 'insensitive' } },
+          { title: { contains: q, mode: 'insensitive' } },
+        ],
+      },
+      orderBy: [{ updatedAt: 'desc' }],
+      take,
+      select: {
+        id: true,
+        sku: true,
+        asin: true,
+        title: true,
+        imageUrl: true,
+        costOfGoods: true,
+      },
+    });
+    return products.map((p) => ({
+      ...p,
+      costOfGoods: p.costOfGoods == null ? null : Number(p.costOfGoods),
+    }));
+  }
+
+
+  /**
    * Sort product IDs by available stock (desc) then sales revenue (desc) for COGS tab.
    */
   private async sortProductIdsByStockAndRevenue(
