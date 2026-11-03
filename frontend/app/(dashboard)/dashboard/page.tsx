@@ -1463,7 +1463,17 @@ function RecentOrders({
                     >
                       {revenue != null && Number.isFinite(revenue) ? formatCurrency(revenue, currency, 2) : "—"}
                     </span>
-                    <span className="w-16 text-center">
+                    <span
+                      className={`w-16 text-center ${
+                        row.profit != null && Number.isFinite(row.profit)
+                          ? row.profit > 0
+                            ? "text-green-600"
+                            : row.profit < 0
+                              ? "text-red-500"
+                              : ""
+                          : ""
+                      }`}
+                    >
                       {row.profit != null && Number.isFinite(row.profit) ? formatCurrency(row.profit, currency, 2) : "—"}
                     </span>
                     <span className="w-9 text-center">
