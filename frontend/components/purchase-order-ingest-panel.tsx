@@ -20,7 +20,7 @@ type SheetLinksResponse = {
   prepInbound: SheetLink | null;
 };
 
-/** Manual / screenshot purchase entry → COGS ledger + Google Sheets. */
+/** Compact purchase entry trigger → modal for COGS ledger + Google Sheets. */
 export function PurchaseOrderIngestPanel({
   onFinished,
 }: {
@@ -219,47 +219,10 @@ export function PurchaseOrderIngestPanel({
   );
 
   return (
-    <div className="rounded-xl border border-[var(--surface-border)] bg-[var(--surface)] px-3 py-3 sm:px-4">
-      <div className="mb-3 min-w-0">
-        <h2 className="text-sm font-semibold text-[var(--foreground)] sm:text-base">
-          Log a purchase
-        </h2>
-        <p className="mt-0.5 text-xs text-[var(--muted-foreground)] sm:text-sm">
-          Search your listings for the ASIN, fill qty and cost, then confirm —
-          updates SellerBunker COGS and your purchase sheets. Tick{" "}
-          <span className="font-medium text-[var(--foreground)]">
-            Search with AI
-          </span>{" "}
-          only if you want a screenshot read (uses OpenAI).
-        </p>
-        {sheetLinks?.purchaseSheet?.url || sheetLinks?.prepInbound?.url ? (
-          <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs sm:text-sm">
-            <span className="text-[var(--muted-foreground)]">Sheets:</span>
-            {sheetLinks.purchaseSheet?.url ? (
-              <a
-                href={sheetLinks.purchaseSheet.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="font-medium text-sb-accent hover:underline"
-              >
-                Purchase sheet ↗
-              </a>
-            ) : null}
-            {sheetLinks.prepInbound?.url ? (
-              <a
-                href={sheetLinks.prepInbound.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="font-medium text-sb-accent hover:underline"
-              >
-                Prep inbound ↗
-              </a>
-            ) : null}
-          </div>
-        ) : null}
-      </div>
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-xl border border-[var(--surface-border)] bg-[var(--surface)] px-3 py-2.5 sm:px-4">
       <CogsScreenshotIngest
-        variant="page"
+        variant="button"
+        triggerLabel="Log a purchase"
         onExtract={extractPurchaseScreenshot}
         onLoadQuota={loadScreenshotQuota}
         onSearchListings={searchListings}
@@ -268,6 +231,30 @@ export function PurchaseOrderIngestPanel({
           await onFinished?.();
         }}
       />
+      {sheetLinks?.purchaseSheet?.url || sheetLinks?.prepInbound?.url ? (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[var(--muted-foreground)] sm:text-sm">
+          {sheetLinks.purchaseSheet?.url ? (
+            <a
+              href={sheetLinks.purchaseSheet.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="font-medium text-sb-accent hover:underline"
+            >
+              Purchase sheet ↗
+            </a>
+          ) : null}
+          {sheetLinks.prepInbound?.url ? (
+            <a
+              href={sheetLinks.prepInbound.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="font-medium text-sb-accent hover:underline"
+            >
+              Prep inbound ↗
+            </a>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }

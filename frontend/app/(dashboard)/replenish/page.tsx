@@ -289,8 +289,9 @@ function ReplenishInner() {
             Replenish
           </h1>
           <p className="mt-1 text-sm text-[var(--muted-foreground)]">
-            Log supplier buys below, then use suggestions sorted by out of stock
-            first, then most sold, then estimated profit.
+            Best-selling products from your order data, sorted by out of stock
+            first, then most sold, then estimated profit. Use Log a purchase to
+            add buys to COGS and your sheets.
           </p>
           <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center">
             <input

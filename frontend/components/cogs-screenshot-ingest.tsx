@@ -114,8 +114,10 @@ type Props = {
   onLoadQuota?: () => Promise<VisionQuota>;
   /** Optional: search org listings by ASIN/SKU/title (no OpenAI). */
   onSearchListings?: (query: string) => Promise<ListingHit[]>;
-  /** "page" = always-visible panel (Replenish). Default "button" opens a modal. */
+  /** "page" = always-visible panel. Default "button" opens a modal. */
   variant?: "button" | "page";
+  /** Label for the collapsed trigger (button variant only). */
+  triggerLabel?: string;
 };
 
 const MAX_EDGE = 1024;
@@ -288,12 +290,14 @@ export function CogsScreenshotIngest({
   onLoadQuota,
   onSearchListings,
   variant = "button",
+  triggerLabel = "From screenshot",
 }: Props) {
   const isPage = variant === "page";
   const [open, setOpen] = useState(isPage);
   const [busy, setBusy] = useState(false);
   const [extractBusy, setExtractBusy] = useState(false);
-  const [useAiSearch, setUseAiSearch] = useState(!isPage);
+  // Manual entry first; tick “Search with AI” only when needed.
+  const [useAiSearch, setUseAiSearch] = useState(false);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [draft, setDraft] = useState<ExtractDraft | null>(
     isPage ? blankDraft() : null,
@@ -572,13 +576,12 @@ export function CogsScreenshotIngest({
                   id="cogs-screenshot-title"
                   className="text-lg font-semibold text-[var(--foreground)]"
                 >
-                  Log purchase from screenshot
+                  Log a purchase
                 </h2>
                 <p className="mt-1 text-xs text-[var(--muted-foreground)]">
-                  Drop an order confirmation. We match the title to your
-                  listings when possible; use Open in SAS if you need to
-                  confirm the ASIN — always verify before submit. Choosing
-                  PREP CENTER also adds the lines to Blue30 Inbound.
+                  Fill supplier, order, qty and cost — or tick Search with AI
+                  to read a screenshot. Updates COGS and your purchase sheets.
+                  PREP CENTER also adds lines to Blue30 Inbound.
                 </p>
               </div>
               <button
@@ -1202,11 +1205,12 @@ export function CogsScreenshotIngest({
           onClick={() => {
             setOpen(true);
             reset();
+            startManualEntry();
           }}
-          title="Drop an order confirmation screenshot to fill COGS"
-          className="min-h-10 w-full cursor-pointer rounded-lg border border-teal-600/35 bg-teal-500/15 px-3 py-2 text-sm font-semibold text-teal-900 hover:bg-teal-500/25 dark:text-teal-200 sm:w-auto"
+          title="Log a purchase manually or from a screenshot"
+          className="min-h-10 w-full cursor-pointer rounded-lg bg-sb-accent px-3 py-2 text-sm font-semibold text-black hover:opacity-90 sm:w-auto"
         >
-          From screenshot
+          {triggerLabel}
         </button>
       ) : null}
 
