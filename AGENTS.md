@@ -29,8 +29,9 @@ When changing anything under `backend/src/amazon/` that touches **settled fees**
 Live site is the Hetzner VPS (`www.sellerbunker.com`), **not** auto-deployed from GitHub push alone.
 
 1. Runtime secrets (Cursor dashboard → Cloud Agents): `VPS_SSH_PRIVATE_KEY` (required), optional `VPS_SSH_HOST` / `VPS_SSH_USER`.
-2. After code is committed on the working branch, deploy with:
+2. After shipping code on the working branch, deploy with:
    `bash scripts/vps-deploy-from-agent.sh`
+   Agents should run this **without waiting to be asked** once changes are committed/pushed (see `.cursor/rules/auto-deploy-vps.mdc`).
 3. That script bundles the branch, uploads to the VPS, `git reset --hard`, then runs `deploy/scripts/update-app.sh` (Docker rebuild). Do **not** force-push or wipe Postgres volumes.
 
 ## Handing work to an agent without “days in chat”

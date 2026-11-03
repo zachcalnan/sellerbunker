@@ -550,12 +550,51 @@ function HomeInner() {
     }
   }, [isSignedIn, getToken, baseUrl, prevSummaryRangeForApi, selectedMarketplaceId]);
 
+  /** Order-line rings only for short windows — long ranges stay on account/summary (much faster). */
+  const useOrderLineRings = useMemo(() => {
+    if (rangePreset === "all" || rangePreset === "6m" || rangePreset === "12m") {
+      return false;
+    }
+    if (rangePreset === "custom" || hasCustomRangeInUrl) {
+      const startY = parseYmdParts(effectiveStart);
+      const endY = parseYmdParts(effectiveEnd);
+      if (!startY || !endY) return false;
+      const days =
+        Math.round(
+          (Date.UTC(endY.y, endY.m - 1, endY.d) -
+            Date.UTC(startY.y, startY.m - 1, startY.d)) /
+            86400000,
+        ) + 1;
+      return days > 0 && days <= 45;
+    }
+    return true;
+  }, [
+    rangePreset,
+    hasCustomRangeInUrl,
+    effectiveStart,
+    effectiveEnd,
+  ]);
+
+  const ordersSinceForRings = useMemo(() => {
+    if (!useOrderLineRings) return null;
+    // Include prior period so vs-previous deltas stay accurate.
+    return prevSummaryRangeForApi?.start ?? summaryRangeForApi.start;
+  }, [useOrderLineRings, prevSummaryRangeForApi?.start, summaryRangeForApi.start]);
+
   const fetchOrdersForRings = useCallback(async () => {
     if (!isSignedIn) return;
+    if (!useOrderLineRings || !ordersSinceForRings) {
+      setOrderRowsForRings([]);
+      setOrdersLoadedForRings(false);
+      return;
+    }
     try {
       const token = await getToken({ template: "backend" });
       const url = new URL(`${baseUrl}/api/amazon/orders`);
       if (devImpersonate) url.searchParams.set("impersonate", devImpersonate);
+      url.searchParams.set("since", ordersSinceForRings);
+      // Cap enrichment work; short windows rarely need more than this.
+      url.searchParams.set("limit", "4000");
       const res = await fetch(url.toString(), {
         headers: {
           Authorization: `Bearer ${token}`,
@@ -577,10 +616,17 @@ function HomeInner() {
       setOrderRowsForRings([]);
       setOrdersLoadedForRings(false);
     }
-  }, [isSignedIn, getToken, baseUrl, selectedMarketplaceId]);
+  }, [
+    isSignedIn,
+    getToken,
+    baseUrl,
+    selectedMarketplaceId,
+    useOrderLineRings,
+    ordersSinceForRings,
+    devImpersonate,
+  ]);
 
-  // Initial load: fetch orders first (fast + visible), then summary silently.
-  // This avoids the first paint being blocked by the full dashboard fan-out.
+  // Initial load: summary + scoped orders in parallel (hot-sync no longer blocks the API).
   useEffect(() => {
     if (!isSignedIn) {
       setSummary(null);
@@ -591,9 +637,7 @@ function HomeInner() {
     }
     let cancelled = false;
     const run = async () => {
-      await fetchOrdersForRings();
-      if (cancelled) return;
-      await fetchSummary({ silent: true });
+      await Promise.all([fetchOrdersForRings(), fetchSummary({ silent: true })]);
       if (cancelled) return;
       // Defer prev-period compare so it never blocks first paint.
       setTimeout(() => {
@@ -770,7 +814,8 @@ function HomeInner() {
 
   const hasCostData = summary?.hasCostData ?? false;
   const showProfitNumbers =
-    (ordersLoadedForRings && summary != null) || hasCostData;
+    (summary != null && (!useOrderLineRings || ordersLoadedForRings)) ||
+    hasCostData;
   // Profit / sales / units: same aggregation as Orders tab when order list has loaded
   const profit =
     displaySummary != null
@@ -1311,6 +1356,7 @@ function RecentOrders({
         const token = await getToken({ template: "backend" });
         const url = new URL(`${baseUrl}/api/amazon/orders`);
         if (devImpersonate) url.searchParams.set("impersonate", devImpersonate);
+        url.searchParams.set("limit", String(Math.max(maxRows, 20)));
         const res = await fetch(url.toString(), {
           headers: {
             Authorization: `Bearer ${token}`,

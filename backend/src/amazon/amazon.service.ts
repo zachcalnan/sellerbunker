@@ -9216,8 +9216,20 @@ export class AmazonService {
    * get Ref/FBA/Dig (and the shown fee total) re-shaped using that sale’s fee % of revenue, scaled by
    * current unit price vs the reference (same price → qty-only scale).
    */
-  async listOrders(orgId: string, marketplaceId?: string) {
-    await this.ensureRecentOrdersSyncedForOrg(orgId);
+  async listOrders(
+    orgId: string,
+    marketplaceId?: string,
+    opts?: { since?: string; limit?: number; awaitHotSync?: boolean },
+  ) {
+    // Default: kick Amazon hot-sync in the background so the UI is not blocked on SP-API.
+    if (opts?.awaitHotSync === true) {
+      await this.ensureRecentOrdersSyncedForOrg(orgId);
+    } else {
+      void this.ensureRecentOrdersSyncedForOrg(orgId).catch((err) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.logger.warn(`[listOrders] background hot-sync failed orgId=${orgId}: ${msg}`);
+      });
+    }
 
     const marketplaceFilter = this.resolveMarketplaceFilter(marketplaceId);
     let userIds: string[];
@@ -9233,11 +9245,30 @@ export class AmazonService {
       this.logger.log(`[listOrders] returning []: no org members for orgId=${orgId}`);
       return [];
     }
+
+    const sinceRaw = typeof opts?.since === 'string' ? opts.since.trim() : '';
+    const sinceDate =
+      sinceRaw && /^\d{4}-\d{2}-\d{2}/.test(sinceRaw)
+        ? new Date(`${sinceRaw.slice(0, 10)}T00:00:00.000Z`)
+        : null;
+    const limit =
+      opts?.limit != null && Number.isFinite(opts.limit) && opts.limit > 0
+        ? Math.min(Math.floor(opts.limit), 20_000)
+        : null;
+
     let items: any[] = [];
     try {
       items = await this.prisma.orderItem.findMany({
-        where: { userId: { in: userIds }, marketplace: marketplaceFilter as any },
+        where: {
+          userId: { in: userIds },
+          marketplace: marketplaceFilter as any,
+          ...(sinceDate && !Number.isNaN(sinceDate.getTime())
+            ? { orderDate: { gte: sinceDate } }
+            : {}),
+        },
         orderBy: [{ orderDate: 'desc' }],
+        // Over-fetch slightly when limiting so dedupe/placeholder drops still leave enough rows.
+        ...(limit != null ? { take: Math.min(limit * 3, 20_000) } : {}),
         select: {
           id: true,
           orderId: true,
@@ -9311,7 +9342,16 @@ export class AmazonService {
       (a, b) => this.canonicalOrderItemMs(b as any) - this.canonicalOrderItemMs(a as any),
     ) as typeof items;
 
-    this.logger.log(`[listOrders] orgId=${orgId} orderItemCount=${items.length}`);
+    // Cap before fee enrichment so dashboard/recent views stay cheap.
+    if (limit != null && items.length > limit) {
+      items = items.slice(0, limit) as typeof items;
+    }
+
+    this.logger.log(
+      `[listOrders] orgId=${orgId} orderItemCount=${items.length}` +
+        (sinceDate ? ` since=${sinceRaw.slice(0, 10)}` : '') +
+        (limit != null ? ` limit=${limit}` : ''),
+    );
     let listOrdersVatSettings: Awaited<
       ReturnType<AmazonService['getVatSettingsForOrg']>
     > = null;

@@ -359,8 +359,28 @@ ping() {
 
   @UseGuards(ClerkAuthGuard)
   @Get('orders')
-  listOrders(@Req() req: { user: { orgId: string; marketplaceId?: string } }) {
-    return this.amazonService.listOrders(req.user.orgId, req.user.marketplaceId);
+  listOrders(
+    @Req() req: { user: { orgId: string; marketplaceId?: string } },
+    @Query('since') since?: string,
+    @Query('limit') limitRaw?: string,
+    @Query('awaitHotSync') awaitHotSyncRaw?: string,
+  ) {
+    const limitParsed =
+      limitRaw != null && String(limitRaw).trim() !== ''
+        ? Number.parseInt(String(limitRaw), 10)
+        : undefined;
+    const awaitHotSync =
+      awaitHotSyncRaw === '1' ||
+      awaitHotSyncRaw === 'true' ||
+      awaitHotSyncRaw === 'yes';
+    return this.amazonService.listOrders(req.user.orgId, req.user.marketplaceId, {
+      since: since?.trim() || undefined,
+      limit:
+        limitParsed != null && Number.isFinite(limitParsed) && limitParsed > 0
+          ? limitParsed
+          : undefined,
+      awaitHotSync: awaitHotSync || undefined,
+    });
   }
 
   /**

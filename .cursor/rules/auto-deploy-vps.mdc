@@ -1,0 +1,15 @@
+---
+description: Auto-deploy Seller Bunker to the live VPS after shipping code changes
+alwaysApply: true
+---
+
+# Auto-deploy to live VPS
+
+When you finish a change set that should go live on `www.sellerbunker.com`:
+
+1. Commit (only if the user asked to commit, or they already asked for auto-ship / deploy-without-asking in this thread).
+2. Push to the working branch (`startup-edits` unless told otherwise).
+3. **Deploy without waiting to be asked:** run `bash scripts/vps-deploy-from-agent.sh` from the repo root.
+4. Tell the user live is updating / done — do not ask “want me to deploy?”
+
+Skip deploy only for pure docs/rules, unanswered local experiments, or when the user explicitly says not to deploy.

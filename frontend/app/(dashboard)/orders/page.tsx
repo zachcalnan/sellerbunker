@@ -69,6 +69,7 @@ export default function OrdersPage() {
       const token = await getToken({ template: "backend" });
       const url = new URL(`${baseUrl}/api/amazon/orders`);
       if (devImpersonate) url.searchParams.set("impersonate", devImpersonate);
+      // Full list for the Orders tab; hot-sync runs in the background (API default).
       const res = await fetch(url.toString(), {
         headers: {
           Authorization: `Bearer ${token}`,
