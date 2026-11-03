@@ -61,8 +61,14 @@ echo "==> Fetch + reset on VPS"
 "${SSH[@]}" "${USER_NAME}@${HOST}" bash -s <<EOF
 set -euo pipefail
 cd /opt/seller-dashboard
-git fetch origin
-git checkout "${BRANCH}"
+# Prefer the uploaded bundle when present (Cloud Agent / local deploy path).
+if [[ -f /root/seller-dashboard.bundle ]]; then
+  git fetch /root/seller-dashboard.bundle "${BRANCH}:refs/remotes/origin/${BRANCH}"
+else
+  git fetch origin
+fi
+# Untracked files left from older deploys can block checkout; force onto the branch.
+git checkout -f "${BRANCH}"
 git reset --hard "origin/${BRANCH}"
 git log -1 --oneline
 EOF
