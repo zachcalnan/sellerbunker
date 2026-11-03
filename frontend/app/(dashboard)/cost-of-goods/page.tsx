@@ -1205,6 +1205,10 @@ function CostOfGoodsInner() {
             <CogsScreenshotIngest
               onExtract={extractPurchaseScreenshot}
               onConfirm={confirmScreenshotIngest}
+              onFinished={async () => {
+                setSkip(0);
+                await load();
+              }}
             />
 
             <p className="mt-1 text-sm text-[var(--muted-foreground)]">
