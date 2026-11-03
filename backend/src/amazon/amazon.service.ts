@@ -7292,6 +7292,11 @@ export class AmazonService {
 
   /**
    * Search org listings by ASIN / SKU / title (DB only — no OpenAI).
+   *
+   * Products are unique on seller SKU, so the same ASIN can have several rows
+   * (relists / old SKUs). For the purchase picker we collapse to one row per
+   * ASIN, preferring the SKU with sales revenue, then stock, then COGS set.
+   * Exact SKU matches are never dropped.
    */
   async searchProducts(
     orgId: string,
@@ -7313,6 +7318,8 @@ export class AmazonService {
     const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
     if (userIds.length === 0) return [];
 
+    // Over-fetch so ASIN dedupe still fills `take` after collapsing.
+    const fetchTake = Math.min(100, Math.max(take * 5, take));
     const products = await this.prisma.product.findMany({
       where: {
         userId: { in: userIds },
@@ -7323,7 +7330,7 @@ export class AmazonService {
         ],
       },
       orderBy: [{ updatedAt: 'desc' }],
-      take,
+      take: fetchTake,
       select: {
         id: true,
         sku: true,
@@ -7331,10 +7338,80 @@ export class AmazonService {
         title: true,
         imageUrl: true,
         costOfGoods: true,
+        updatedAt: true,
       },
     });
-    return products.map((p) => ({
-      ...p,
+    if (products.length === 0) return [];
+
+    const productIds = products.map((p) => p.id);
+    const [invRows, revenueRows] = await Promise.all([
+      this.prisma.inventory.findMany({
+        where: { userId: { in: userIds }, productId: { in: productIds } },
+        select: { productId: true, availableQty: true },
+      }),
+      (this.prisma as any).orderItem.groupBy({
+        by: ['productId'],
+        where: {
+          userId: { in: userIds },
+          productId: { in: productIds },
+          marketplace: 'amazon',
+        },
+        _sum: { revenueTotal: true },
+      }),
+    ]);
+    const stockByProduct = new Map(
+      invRows.map((r) => [r.productId, r.availableQty ?? 0]),
+    );
+    const revenueByProduct = new Map(
+      Array.isArray(revenueRows)
+        ? revenueRows.map((r: any) => [
+            r.productId as string,
+            Number(r._sum?.revenueTotal ?? 0),
+          ])
+        : [],
+    );
+
+    const qLower = q.toLowerCase();
+    const score = (p: (typeof products)[number]) => {
+      const exactSku = p.sku.toLowerCase() === qLower ? 1 : 0;
+      const exactAsin = (p.asin ?? '').toLowerCase() === qLower ? 1 : 0;
+      const revenue = revenueByProduct.get(p.id) ?? 0;
+      const stock = stockByProduct.get(p.id) ?? 0;
+      const hasCogs = p.costOfGoods != null && Number(p.costOfGoods) > 0 ? 1 : 0;
+      return { exactSku, exactAsin, revenue, stock, hasCogs };
+    };
+
+    const ranked = [...products].sort((a, b) => {
+      const sa = score(a);
+      const sb = score(b);
+      if (sb.exactSku !== sa.exactSku) return sb.exactSku - sa.exactSku;
+      if (sb.exactAsin !== sa.exactAsin) return sb.exactAsin - sa.exactAsin;
+      if (sb.revenue !== sa.revenue) return sb.revenue - sa.revenue;
+      if (sb.stock !== sa.stock) return sb.stock - sa.stock;
+      if (sb.hasCogs !== sa.hasCogs) return sb.hasCogs - sa.hasCogs;
+      return b.updatedAt.getTime() - a.updatedAt.getTime();
+    });
+
+    const seenAsins = new Set<string>();
+    const out: typeof products = [];
+    for (const p of ranked) {
+      const asinKey = (p.asin ?? '').trim().toUpperCase();
+      const exactSku = p.sku.toLowerCase() === qLower;
+      // Keep every exact SKU hit; otherwise one winner per ASIN.
+      if (asinKey && !exactSku) {
+        if (seenAsins.has(asinKey)) continue;
+        seenAsins.add(asinKey);
+      }
+      out.push(p);
+      if (out.length >= take) break;
+    }
+
+    return out.map((p) => ({
+      id: p.id,
+      sku: p.sku,
+      asin: p.asin,
+      title: p.title,
+      imageUrl: p.imageUrl,
       costOfGoods: p.costOfGoods == null ? null : Number(p.costOfGoods),
     }));
   }
