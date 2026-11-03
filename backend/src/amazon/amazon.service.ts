@@ -17,6 +17,11 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { withPrismaTransientRetry } from '../prisma/database-transient-retry.util';
 import { LinkAmazonAccountDto } from './dto/link-amazon-account.dto';
+import {
+  effectiveUnitCostIncVatForPromo,
+  type SupplierPromoType,
+} from './supplier-order-promo.util';
+import type { IngestSupplierOrderDto } from './dto/ingest-supplier-order.dto';
 import { UsersService } from '../users/users.service';
 import {
   amountExVatFromIncl,
@@ -17087,5 +17092,393 @@ try {
       default:
         return 'na';
     }
+  }
+
+  /**
+   * Resolve the userId that owns purchase rows for API-key / bot ingest.
+   * Prefers explicit userId, then SELLERBUNKER_API_USER_ID, then first Amazon-linked org member.
+   */
+  async resolveSupplierOrderActingUserId(
+    orgId: string,
+    preferredUserId?: string,
+  ): Promise<string> {
+    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
+    const preferred = preferredUserId?.trim();
+    if (preferred && userIds.includes(preferred)) return preferred;
+
+    const envUser = (process.env.SELLERBUNKER_API_USER_ID ?? '').trim();
+    if (envUser && userIds.includes(envUser)) return envUser;
+
+    if (userIds.length === 0) {
+      throw new BadRequestException(
+        'No Amazon-linked org members found for purchase ingest',
+      );
+    }
+    return userIds[0];
+  }
+
+  /**
+   * Ingest a retail supplier order (e.g. Healf) into the COGS ledger.
+   * Idempotent on (productId, orderNumber) per line. Computes 4-for-3 unit cost when promo is set.
+   */
+  async ingestSupplierOrder(
+    orgId: string,
+    actingUserId: string,
+    dto: IngestSupplierOrderDto,
+  ): Promise<{
+    supplier: string;
+    orderNumber: string;
+    created: number;
+    skipped: number;
+    errors: Array<{ lineIndex: number; asin?: string; message: string }>;
+    lines: Array<{
+      lineIndex: number;
+      status: 'created' | 'skipped';
+      purchaseId?: string;
+      asin?: string;
+      sku?: string;
+      productTitle?: string | null;
+      unitCostIncVat?: number;
+    }>;
+  }> {
+    const supplier = dto.supplier.trim();
+    const orderNumber = dto.orderNumber.trim();
+    if (!supplier || !orderNumber) {
+      throw new BadRequestException('supplier and orderNumber are required');
+    }
+
+    const purchaseDate = new Date(dto.purchaseDate);
+    if (Number.isNaN(purchaseDate.getTime())) {
+      throw new BadRequestException('Invalid purchaseDate');
+    }
+
+    const promo: SupplierPromoType = dto.promo?.type ?? 'none';
+    const currency = (dto.currency ?? 'GBP').trim() || 'GBP';
+    const vatRatePct = Math.max(0, Number(dto.vatRatePct ?? 0) || 0);
+    const fulfilment = (dto.fulfilment ?? 'FBA').trim() || 'FBA';
+    const supplierLink = dto.supplierLink?.trim() || undefined;
+    const shipmentId = dto.shipmentId?.trim() || undefined;
+
+    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
+    const errors: Array<{ lineIndex: number; asin?: string; message: string }> =
+      [];
+    const lines: Array<{
+      lineIndex: number;
+      status: 'created' | 'skipped';
+      purchaseId?: string;
+      asin?: string;
+      sku?: string;
+      productTitle?: string | null;
+      unitCostIncVat?: number;
+    }> = [];
+    let created = 0;
+    let skipped = 0;
+
+    const normalizeAsin = (raw: string): string =>
+      raw.replace(/\s/g, '').toUpperCase();
+
+    for (let i = 0; i < dto.lines.length; i++) {
+      const lineIndex = i + 1;
+      const line = dto.lines[i];
+      const asinRaw = line.asin?.trim();
+      const skuNorm = line.sku?.trim() ?? '';
+      const asin = asinRaw ? normalizeAsin(asinRaw) : '';
+
+      if (!asin && !skuNorm) {
+        errors.push({
+          lineIndex,
+          message: 'Each line needs asin and/or sku',
+        });
+        continue;
+      }
+
+      let product: {
+        id: string;
+        userId: string;
+        title: string | null;
+        asin: string | null;
+      } | null = null;
+      const productSelect = {
+        id: true,
+        userId: true,
+        title: true,
+        asin: true,
+      } as const;
+      if (skuNorm) {
+        if (asin) {
+          product = await this.prisma.product.findFirst({
+            where: {
+              userId: { in: userIds },
+              sku: { equals: skuNorm, mode: 'insensitive' },
+              asin: { equals: asin, mode: 'insensitive' },
+            },
+            select: productSelect,
+          });
+        }
+        if (!product) {
+          product = await this.prisma.product.findFirst({
+            where: {
+              userId: { in: userIds },
+              sku: { equals: skuNorm, mode: 'insensitive' },
+            },
+            select: productSelect,
+          });
+        }
+      }
+      if (!product && asin) {
+        product = await this.prisma.product.findFirst({
+          where: {
+            userId: { in: userIds },
+            asin: { equals: asin, mode: 'insensitive' },
+          },
+          select: productSelect,
+        });
+      }
+
+      if (!product && dto.createProductIfMissing && asin) {
+        const ownerUserId = userIds.includes(actingUserId)
+          ? actingUserId
+          : userIds[0];
+        if (!ownerUserId) {
+          errors.push({
+            lineIndex,
+            asin,
+            message: 'No Amazon-linked user available to own a new product',
+          });
+          continue;
+        }
+        const createdSku =
+          skuNorm ||
+          `SUP-${asin.slice(-8).toUpperCase()}`.replace(/[^A-Z0-9-]/g, '');
+        const title = line.productTitle?.trim() || null;
+        try {
+          const upserted = await this.prisma.product.upsert({
+            where: {
+              userId_sku: { userId: ownerUserId, sku: createdSku },
+            },
+            create: {
+              userId: ownerUserId,
+              sku: createdSku,
+              asin,
+              title,
+            },
+            update: {
+              asin,
+              ...(title ? { title } : {}),
+            },
+            select: productSelect,
+          });
+          product = upserted;
+        } catch (e: unknown) {
+          const msg =
+            e instanceof Error ? e.message : 'Failed to create product';
+          errors.push({ lineIndex, asin, message: msg });
+          continue;
+        }
+      }
+
+      if (!product) {
+        errors.push({
+          lineIndex,
+          asin: asin || undefined,
+          message:
+            skuNorm && asin
+              ? 'No product with this SKU + ASIN in your account'
+              : skuNorm
+                ? 'No product with this SKU in your account'
+                : asin
+                  ? 'No product with this ASIN in your account (set createProductIfMissing or add the listing first)'
+                  : 'No product with this ASIN in your account',
+        });
+        continue;
+      }
+
+      // Prefer submitted ASIN; fall back to the matched product so sheet writes
+      // still work for SKU-only submits.
+      const resolvedAsin =
+        asin ||
+        (product.asin ? normalizeAsin(String(product.asin)) : '') ||
+        undefined;
+      const resolvedTitle =
+        line.productTitle?.trim() || product.title || null;
+
+      const qty = Math.max(1, Math.floor(Number(line.qty) || 1));
+      const qtyDelivered = Math.max(
+        0,
+        Math.floor(Number(line.qtyDelivered ?? qty) || qty),
+      );
+      const deliveryCostIncVat = Math.max(
+        0,
+        Number(line.deliveryCostIncVat ?? 0) || 0,
+      );
+      const prepCostIncVat = Math.max(0, Number(line.prepCostIncVat ?? 0) || 0);
+      const bundleSize = Math.max(1, Math.floor(Number(line.bundleSize ?? 1) || 1));
+
+      let unitCostIncVat = Number(line.unitCostIncVat ?? 0);
+      if (!Number.isFinite(unitCostIncVat) || unitCostIncVat <= 0) {
+        const rrp = Number(line.unitRrpIncVat ?? 0);
+        if (!Number.isFinite(rrp) || rrp <= 0) {
+          errors.push({
+            lineIndex,
+            asin: resolvedAsin,
+            message:
+              'Provide unitCostIncVat or unitRrpIncVat (with promo) for unit cost',
+          });
+          continue;
+        }
+        unitCostIncVat = effectiveUnitCostIncVatForPromo(qty, rrp, promo);
+      }
+
+      if (unitCostIncVat <= 0) {
+        errors.push({
+          lineIndex,
+          asin: resolvedAsin,
+          message: 'unitCostIncVat must be positive',
+        });
+        continue;
+      }
+
+      const existing = await (this.prisma as any).purchase.findFirst({
+        where: {
+          userId: product.userId,
+          productId: product.id,
+          orderNumber,
+        },
+        select: { id: true },
+      });
+      if (existing) {
+        skipped += 1;
+        lines.push({
+          lineIndex,
+          status: 'skipped',
+          purchaseId: existing.id,
+          asin: resolvedAsin,
+          sku: skuNorm || undefined,
+          productTitle: resolvedTitle,
+          unitCostIncVat,
+        });
+        continue;
+      }
+
+      try {
+        const createdRow = await this.createPurchase(orgId, product.userId, {
+          productId: product.id,
+          fulfilment,
+          supplier,
+          supplierLink,
+          bundleSize,
+          purchaseDate: purchaseDate.toISOString(),
+          orderNumber,
+          shipmentId,
+          qtyPurchased: qty,
+          qtyDelivered,
+          currency,
+          vatRatePct,
+          unitCostIncVat,
+          deliveryCostIncVat,
+          prepCostIncVat,
+        });
+        created += 1;
+        lines.push({
+          lineIndex,
+          status: 'created',
+          purchaseId: createdRow.id,
+          asin: resolvedAsin,
+          sku: skuNorm || undefined,
+          productTitle: resolvedTitle,
+          unitCostIncVat,
+        });
+      } catch (e: unknown) {
+        const msg =
+          e instanceof Error
+            ? e.message
+            : typeof e === 'string'
+              ? e
+              : 'Failed to create purchase';
+        errors.push({ lineIndex, asin: resolvedAsin, message: msg });
+      }
+    }
+
+    return {
+      supplier,
+      orderNumber,
+      created,
+      skipped,
+      errors,
+      lines,
+    };
+  }
+
+  /**
+   * Export purchase ledger rows in the same shape as COGS bulk-upload / spreadsheet columns.
+   */
+  async exportPurchasesAsSpreadsheetRows(
+    orgId: string,
+    opts?: { supplier?: string; since?: string; take?: number },
+  ): Promise<{ rows: Record<string, unknown>[]; total: number }> {
+    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
+    const supplierFilter = opts?.supplier?.trim();
+    const sinceRaw = opts?.since?.trim();
+    let sinceDate: Date | undefined;
+    if (sinceRaw) {
+      sinceDate = new Date(sinceRaw);
+      if (Number.isNaN(sinceDate.getTime())) {
+        throw new BadRequestException('Invalid since date');
+      }
+    }
+
+    const take = Math.max(1, Math.min(5000, Number(opts?.take ?? 2000) || 2000));
+
+    const purchases = await (this.prisma as any).purchase.findMany({
+      where: {
+        userId: { in: userIds },
+        ...(supplierFilter
+          ? { supplier: { equals: supplierFilter, mode: 'insensitive' } }
+          : {}),
+        ...(sinceDate ? { purchaseDate: { gte: sinceDate } } : {}),
+      },
+      orderBy: { purchaseDate: 'desc' },
+      take,
+      select: {
+        purchaseDate: true,
+        orderNumber: true,
+        supplier: true,
+        supplierLink: true,
+        shipmentId: true,
+        qtyPurchased: true,
+        qtyDelivered: true,
+        currency: true,
+        vatRatePct: true,
+        unitCostIncVat: true,
+        deliveryCostIncVat: true,
+        prepCostIncVat: true,
+        fulfilment: true,
+        bundleSize: true,
+        product: { select: { asin: true, sku: true } },
+      },
+    });
+
+    const rows = purchases.map((p: any) => ({
+      asin: p.product?.asin ?? '',
+      sku: p.product?.sku ?? '',
+      unitCostIncVat: Number(p.unitCostIncVat ?? 0),
+      purchaseDate: p.purchaseDate
+        ? new Date(p.purchaseDate).toISOString().slice(0, 10)
+        : '',
+      orderNumber: p.orderNumber ?? '',
+      supplier: p.supplier ?? '',
+      supplierLink: p.supplierLink ?? '',
+      shipmentId: p.shipmentId ?? '',
+      qtyPurchased: p.qtyPurchased ?? 0,
+      qtyDelivered: p.qtyDelivered ?? 0,
+      currency: p.currency ?? 'GBP',
+      vatRatePct: Number(p.vatRatePct ?? 0),
+      deliveryCostIncVat: Number(p.deliveryCostIncVat ?? 0),
+      prepCostIncVat: Number(p.prepCostIncVat ?? 0),
+      fulfilment: p.fulfilment ?? 'FBA',
+      bundleSize: p.bundleSize ?? 1,
+    }));
+
+    return { rows, total: rows.length };
   }
 }

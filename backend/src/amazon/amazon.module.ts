@@ -13,6 +13,12 @@ import { AmazonOrdersHotSyncProcessor } from './amazon-orders-hot-sync.processor
 import { AmazonExtendedHistoryBootstrap } from './amazon-extended-history.bootstrap';
 import { AmazonOrderLineFeeBackfillBootstrap } from './amazon-order-line-fee-backfill.bootstrap';
 import { RepricerModule } from '../repricer/repricer.module';
+import { GoogleSheetsClient } from './google-sheets.client';
+import { PurchaseSheetOrderWriteService } from './purchase-sheet-order-write.service';
+import { PurchaseSheetCheckoutAddressService } from './purchase-sheet-checkout-address.service';
+import { PurchaseScreenshotExtractService } from './purchase-screenshot-extract.service';
+import { ProductFinderService } from './product-finder.service';
+import { PrepCenterInboundSheetService } from './prep-center-inbound-sheet.service';
 import { PushModule } from '../push/push.module';
 
 @Module({
@@ -38,7 +44,20 @@ import { PushModule } from '../push/push.module';
     AmazonOrdersHotSyncProcessor,
     AmazonExtendedHistoryBootstrap,
     AmazonOrderLineFeeBackfillBootstrap,
+    GoogleSheetsClient,
+    PurchaseSheetOrderWriteService,
+    PurchaseSheetCheckoutAddressService,
+    PurchaseScreenshotExtractService,
+    ProductFinderService,
+    PrepCenterInboundSheetService,
   ],
-  exports: [AmazonService, AmazonSpApiClient, AmazonSyncService],
+  exports: [
+    AmazonService,
+    AmazonSpApiClient,
+    AmazonSyncService,
+    PurchaseSheetOrderWriteService,
+    PurchaseSheetCheckoutAddressService,
+    PrepCenterInboundSheetService,
+  ],
 })
 export class AmazonModule {}

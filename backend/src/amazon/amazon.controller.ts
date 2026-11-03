@@ -18,6 +18,17 @@ import { ConfigService } from '@nestjs/config';
 import { AmazonService } from './amazon.service';
 import { LinkAmazonAccountDto } from './dto/link-amazon-account.dto';
 import { CreatePurchaseDto } from './dto/create-purchase.dto';
+import type { CheckoutAddressProfile } from './purchase-sheet-checkout-address.util';
+import { buildPrepInboundLinesFromIngest } from './prep-center-inbound-sheet.util';
+import { PrepCenterInboundSheetService } from './prep-center-inbound-sheet.service';
+import { ProductFinderService } from './product-finder.service';
+import { PurchaseScreenshotExtractService } from './purchase-screenshot-extract.service';
+import { PurchaseSheetCheckoutAddressService } from './purchase-sheet-checkout-address.service';
+import { buildPurchaseSheetLinesFromIngest } from './purchase-sheet-ingest.util';
+import { PurchaseSheetOrderWriteService } from './purchase-sheet-order-write.service';
+import { ProductFinderSearchDto } from './dto/product-finder-search.dto';
+import { IngestSupplierOrderDto } from './dto/ingest-supplier-order.dto';
+import { ExtractPurchaseScreenshotDto } from './dto/extract-purchase-screenshot.dto';
 import { UpdatePurchaseDto } from './dto/update-purchase.dto';
 import { ClerkAuthGuard } from '../auth/clerk-auth.guard';
 import { ApiKeyGuard } from '../auth/api-key.guard';
@@ -32,6 +43,11 @@ export class AmazonController {
     private readonly amazonSyncService: AmazonSyncService,
     private readonly amazonSyncProcessor: AmazonSyncProcessor,
     private readonly configService: ConfigService,
+    private readonly purchaseSheetOrderWrite: PurchaseSheetOrderWriteService,
+    private readonly purchaseSheetCheckoutAddress: PurchaseSheetCheckoutAddressService,
+    private readonly purchaseScreenshotExtract: PurchaseScreenshotExtractService,
+    private readonly productFinder: ProductFinderService,
+    private readonly prepCenterInboundSheet: PrepCenterInboundSheetService,
   ) {}
 
   @Get('ping')
@@ -1373,4 +1389,307 @@ ping() {
 
   // NOTE: sandbox/orders is temporarily disabled until wired for
   // per-user credentials. You can re-enable it later if needed.
+
+  /**
+   * Product Finder: similar winnable SKUs from YOUR catalog using eligibility,
+   * stored fees, sales history, and deal-price profit gates. No Keepa; AI optional.
+   * Example: POST /api/amazon/product-finder/search
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Post('product-finder/search')
+  async productFinderSearch(
+    @Req() req: { user: { orgId: string; userId: string } },
+    @Body() dto: ProductFinderSearchDto,
+  ) {
+    return this.productFinder.search(
+      req.user.orgId,
+      req.user.userId,
+      dto,
+    );
+  }
+
+  /**
+   * Vision extract: screenshot → draft supplier order fields (no DB/sheet write).
+   * Example: POST /api/amazon/cost-of-goods/screenshot-extract
+   * Body: { imageBase64, mimeType?, hint? }
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Post('cost-of-goods/screenshot-extract')
+  async extractPurchaseScreenshot(
+    @Req() req: { user: { orgId: string; userId: string } },
+    @Body() dto: ExtractPurchaseScreenshotDto,
+  ) {
+    return this.purchaseScreenshotExtract.extractFromImage({
+      imageBase64: dto.imageBase64,
+      mimeType: dto.mimeType,
+      hint: dto.hint,
+      orgId: req.user.orgId,
+    });
+  }
+
+  /**
+   * UTC-day screenshot AI quota for the org (does not consume).
+   * Example: GET /api/amazon/cost-of-goods/screenshot-extract/quota
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Get('cost-of-goods/screenshot-extract/quota')
+  async purchaseScreenshotQuota(
+    @Req() req: { user: { orgId: string; userId: string } },
+  ) {
+    return this.purchaseScreenshotExtract.getDailyQuota(req.user.orgId);
+  }
+
+  /**
+   * Supplier order bot: ingest a retail purchase (e.g. Healf) into the COGS ledger.
+   * Idempotent per (ASIN/SKU, orderNumber). Computes 4-for-3 unit cost when promo is set.
+   *
+   * Example: POST /api/amazon/supplier-orders/ingest
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Post('supplier-orders/ingest')
+  async ingestSupplierOrder(
+    @Req() req: { user: { orgId: string; userId: string } },
+    @Body() dto: IngestSupplierOrderDto,
+  ) {
+    const ledger = await this.amazonService.ingestSupplierOrder(
+      req.user.orgId,
+      req.user.userId,
+      dto,
+    );
+    const sheetLines = buildPurchaseSheetLinesFromIngest({
+      ledgerLines: ledger.lines,
+      dtoLines: dto.lines,
+      promoType: dto.promo?.type,
+      supplierLink: dto.supplierLink,
+      shipDestination: dto.shipDestination,
+    });
+    const sheetInput = {
+      supplier: dto.supplier,
+      orderNumber: dto.orderNumber,
+      purchaseDate: dto.purchaseDate,
+      courierTracking: dto.courierTracking,
+      lines: sheetLines,
+    };
+    const sheet = await this.purchaseSheetOrderWrite.appendPurchaseOrder(
+      sheetInput,
+    );
+    const blue30Copy =
+      await this.purchaseSheetOrderWrite.appendBlue30CopySheet(sheetInput);
+    const prepInbound = await this.prepCenterInboundSheet.appendIfPrepCenter({
+      supplier: dto.supplier,
+      orderNumber: dto.orderNumber,
+      purchaseDate: dto.purchaseDate,
+      courierTracking: dto.courierTracking,
+      shipDestination: dto.shipDestination,
+      lines: buildPrepInboundLinesFromIngest({
+        ledgerLines: ledger.lines,
+        dtoLines: dto.lines,
+      }),
+    });
+    return { ledger, sheet, blue30Copy, prepInbound };
+  }
+
+  /**
+   * Supplier order bot (server-to-server): same as ingest, no Clerk JWT.
+   * Headers: `x-api-key: ${SELLERBUNKER_API_KEY}`
+   * Env: SELLERBUNKER_API_KEY, SELLERBUNKER_API_ORG_ID, optional SELLERBUNKER_API_USER_ID
+   */
+  @UseGuards(ApiKeyGuard)
+  @Post('supplier-orders/ingest-api-key')
+  async ingestSupplierOrderApiKey(@Body() dto: IngestSupplierOrderDto) {
+    const orgId = (process.env.SELLERBUNKER_API_ORG_ID ?? '').trim();
+    if (!orgId) {
+      throw new BadRequestException('SELLERBUNKER_API_ORG_ID is required');
+    }
+    const userId = await this.amazonService.resolveSupplierOrderActingUserId(
+      orgId,
+    );
+    const ledger = await this.amazonService.ingestSupplierOrder(
+      orgId,
+      userId,
+      dto,
+    );
+    const sheetLines = buildPurchaseSheetLinesFromIngest({
+      ledgerLines: ledger.lines,
+      dtoLines: dto.lines,
+      promoType: dto.promo?.type,
+      supplierLink: dto.supplierLink,
+      shipDestination: dto.shipDestination,
+    });
+    const sheetInput = {
+      supplier: dto.supplier,
+      orderNumber: dto.orderNumber,
+      purchaseDate: dto.purchaseDate,
+      courierTracking: dto.courierTracking,
+      lines: sheetLines,
+    };
+    const sheet = await this.purchaseSheetOrderWrite.appendPurchaseOrder(
+      sheetInput,
+    );
+    const blue30Copy =
+      await this.purchaseSheetOrderWrite.appendBlue30CopySheet(sheetInput);
+    const prepInbound = await this.prepCenterInboundSheet.appendIfPrepCenter({
+      supplier: dto.supplier,
+      orderNumber: dto.orderNumber,
+      purchaseDate: dto.purchaseDate,
+      courierTracking: dto.courierTracking,
+      shipDestination: dto.shipDestination,
+      lines: buildPrepInboundLinesFromIngest({
+        ledgerLines: ledger.lines,
+        dtoLines: dto.lines,
+      }),
+    });
+    return { ledger, sheet, blue30Copy, prepInbound };
+  }
+
+  /**
+   * Click-through URLs for the configured purchase workbook and prep inbound sheet.
+   * Example: GET /api/amazon/sheets/links
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Get('sheets/links')
+  getSheetLinks() {
+    const purchaseId =
+      this.configService.get<string>('GOOGLE_SHEETS_SPREADSHEET_ID')?.trim() ||
+      '';
+    const prepId =
+      this.configService
+        .get<string>('GOOGLE_SHEETS_PREP_INBOUND_SPREADSHEET_ID')
+        ?.trim() || '';
+    const toUrl = (id: string) =>
+      id
+        ? `https://docs.google.com/spreadsheets/d/${encodeURIComponent(id)}`
+        : null;
+    return {
+      purchaseSheet: purchaseId
+        ? {
+            label: 'Purchase sheet',
+            spreadsheetId: purchaseId,
+            url: toUrl(purchaseId),
+          }
+        : null,
+      prepInbound: prepId
+        ? {
+            label: 'Prep inbound',
+            spreadsheetId: prepId,
+            url: toUrl(prepId),
+          }
+        : null,
+    };
+  }
+
+  /**
+   * Check whether the Blue30 prep-centre Inbound sheet is readable by the
+   * Google service account (share as Editor with the returned email).
+   * Example: GET /api/amazon/dev/prep-inbound-sheet-access
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Get('dev/prep-inbound-sheet-access')
+  async getPrepInboundSheetAccess() {
+    return this.prepCenterInboundSheet.checkAccess();
+  }
+
+  /**
+   * Checkout bot: all ship-to profiles from purchase sheet COPY SHEET tabs.
+   * Example: GET /api/amazon/dev/checkout-addresses
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Get('dev/checkout-addresses')
+  async getCheckoutAddresses() {
+    return this.purchaseSheetCheckoutAddress.getAllCheckoutAddresses();
+  }
+
+  /**
+   * Checkout bot: one ship-to profile (blue30 | home | ep_center | rep_center).
+   * Example: GET /api/amazon/dev/checkout-address?profile=blue30
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Get('dev/checkout-address')
+  async getCheckoutAddress(@Query('profile') profile?: string) {
+    const p = (profile?.trim().toLowerCase() || 'blue30') as CheckoutAddressProfile;
+    const allowed: CheckoutAddressProfile[] = [
+      'blue30',
+      'home',
+      'ep_center',
+      'rep_center',
+    ];
+    if (!allowed.includes(p)) {
+      throw new BadRequestException(
+        `profile must be one of: ${allowed.join(', ')}`,
+      );
+    }
+    return this.purchaseSheetCheckoutAddress.getCheckoutAddress(p);
+  }
+
+  /** @deprecated Use dev/checkout-address?profile=blue30 */
+  @UseGuards(ClerkAuthGuard)
+  @Get('dev/blue30-checkout-address')
+  async getBlue30CheckoutAddress() {
+    return this.purchaseSheetCheckoutAddress.getCheckoutAddress('blue30');
+  }
+
+  /**
+   * Export purchase ledger rows (spreadsheet / bulk-upload compatible JSON or CSV).
+   * Example: GET /api/amazon/supplier-orders/export?format=csv&supplier=Healf
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Get('supplier-orders/export')
+  async exportSupplierOrders(
+    @Req() req: { user: { orgId: string } },
+    @Query('format') format?: string,
+    @Query('supplier') supplier?: string,
+    @Query('since') since?: string,
+    @Query('take') take?: string,
+    @Res({ passthrough: true }) res?: Response,
+  ) {
+    const takeN = Number(take ?? 2000);
+    const { rows } = await this.amazonService.exportPurchasesAsSpreadsheetRows(
+      req.user.orgId,
+      {
+        supplier: supplier?.trim() || undefined,
+        since: since?.trim() || undefined,
+        take: Number.isFinite(takeN) ? takeN : 2000,
+      },
+    );
+
+    if ((format ?? '').toLowerCase() === 'csv') {
+      const headers = [
+        'asin',
+        'sku',
+        'unitCostIncVat',
+        'purchaseDate',
+        'orderNumber',
+        'supplier',
+        'supplierLink',
+        'qtyPurchased',
+        'qtyDelivered',
+        'deliveryCostIncVat',
+        'prepCostIncVat',
+        'vatRatePct',
+        'currency',
+        'fulfilment',
+        'bundleSize',
+        'shipmentId',
+      ];
+      const escape = (v: unknown) => {
+        const s = v == null ? '' : String(v);
+        if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+        return s;
+      };
+      const lines = [
+        headers.join(','),
+        ...rows.map((row) =>
+          headers.map((h) => escape((row as Record<string, unknown>)[h])).join(','),
+        ),
+      ];
+      res?.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res?.setHeader(
+        'Content-Disposition',
+        'attachment; filename="purchases-export.csv"',
+      );
+      return lines.join('\n');
+    }
+
+    return { rows, total: rows.length };
+  }
 }
