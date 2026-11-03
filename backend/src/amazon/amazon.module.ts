@@ -9,9 +9,11 @@ import { ClerkModule } from '../clerk/clerk.module';
 import { UsersModule } from '../users/users.module';
 import { AmazonSyncService } from './amazon-sync.service';
 import { AmazonSyncProcessor } from './amazon-sync.processor';
+import { AmazonOrdersHotSyncProcessor } from './amazon-orders-hot-sync.processor';
 import { AmazonExtendedHistoryBootstrap } from './amazon-extended-history.bootstrap';
 import { AmazonOrderLineFeeBackfillBootstrap } from './amazon-order-line-fee-backfill.bootstrap';
 import { RepricerModule } from '../repricer/repricer.module';
+import { PushModule } from '../push/push.module';
 
 @Module({
   imports: [
@@ -20,9 +22,12 @@ import { RepricerModule } from '../repricer/repricer.module';
     ClerkModule,
     UsersModule,
     forwardRef(() => RepricerModule),
-    BullModule.registerQueue({
-      name: 'amazon-sync',
-    }),
+    PushModule,
+    BullModule.registerQueue(
+      { name: 'amazon-sync' },
+      // Separate queue so listing-price / fee jobs cannot starve sale push.
+      { name: 'amazon-orders-hot' },
+    ),
   ],
   controllers: [AmazonController],
   providers: [
@@ -30,6 +35,7 @@ import { RepricerModule } from '../repricer/repricer.module';
     AmazonSpApiClient,
     AmazonSyncService,
     AmazonSyncProcessor,
+    AmazonOrdersHotSyncProcessor,
     AmazonExtendedHistoryBootstrap,
     AmazonOrderLineFeeBackfillBootstrap,
   ],

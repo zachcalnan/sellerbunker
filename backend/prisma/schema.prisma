@@ -37,6 +37,7 @@ model User {
   initialSyncProgress InitialSyncProgress?
   activeOrg      Organization?            @relation("ActiveOrg", fields: [activeOrgId], references: [id])
   asinSellingEligibilities AsinSellingEligibility[]
+  pushSubscriptions PushSubscription[]
 
   @@map("users")
 }
@@ -171,8 +172,29 @@ model Organization {
   fixedCostsOtherItems   Json?                   @map("fixed_costs_other_items")
   members                OrganizationMembership[]
   usersWithActiveOrg     User[]                   @relation("ActiveOrg")
+  pushSubscriptions      PushSubscription[]
 
   @@map("organizations")
+}
+
+/// Browser Web Push subscription (per device). Requires Home Screen install on iOS.
+model PushSubscription {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  orgId     String?  @map("org_id")
+  endpoint  String
+  p256dh    String
+  auth      String
+  userAgent String?  @map("user_agent")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  org       Organization? @relation(fields: [orgId], references: [id], onDelete: SetNull)
+
+  @@unique([userId, endpoint])
+  @@index([userId])
+  @@index([orgId])
+  @@map("push_subscriptions")
 }
 
 model OrganizationMembership {

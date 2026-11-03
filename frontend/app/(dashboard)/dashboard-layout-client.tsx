@@ -17,6 +17,9 @@ import { CogsPromptModal } from "@/components/cogs-prompt-modal";
 import { MarketplaceProvider } from "@/contexts/marketplace-context";
 import { StripeCheckoutButton } from "@/components/stripe-checkout-button";
 import { PostSignupWelcomeBanner } from "@/components/post-signup-welcome-banner";
+import { PushPermissionPrompt } from "@/components/push-permission-prompt";
+import { AppUpdateReload } from "@/components/app-update-reload";
+import { SalePushToast } from "@/components/sale-push-toast";
 import { useState } from "react";
 
 function DashboardLayoutInner({
@@ -79,9 +82,12 @@ function DashboardLayoutInner({
 
   return (
     <>
+      <AppUpdateReload />
+      <SalePushToast />
       <VatOnboardingModal />
       <MarketplaceOnboardingModal />
       <CogsPromptModal />
+      <PushPermissionPrompt />
       <NotificationsProvider>
         <MobileNav />
         <div className="hidden md:fixed md:inset-y-0 md:left-0 md:z-10 md:flex md:w-56">

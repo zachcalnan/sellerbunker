@@ -12,6 +12,7 @@ export class AmazonSyncService implements OnModuleInit {
   private readonly logger = new Logger(AmazonSyncService.name);
   constructor(
     @InjectQueue('amazon-sync') private readonly queue: Queue,
+    @InjectQueue('amazon-orders-hot') private readonly ordersHotQueue: Queue,
     private readonly redis: RedisService,
     private readonly prisma: PrismaService,
   ) {}
@@ -21,10 +22,11 @@ export class AmazonSyncService implements OnModuleInit {
     stableJobId: string,
     data: Record<string, unknown>,
     logPrefix: string,
-    opts?: { delay?: number; lockDurationMs?: number },
+    opts?: { delay?: number; lockDurationMs?: number; queue?: Queue },
   ): Promise<void> {
+    const queue = opts?.queue ?? this.queue;
     let jobId = stableJobId;
-    const existingJob = await this.queue.getJob(stableJobId);
+    const existingJob = await queue.getJob(stableJobId);
     if (existingJob) {
       const state = await existingJob.getState();
       if (state === 'active') {
@@ -49,7 +51,7 @@ export class AmazonSyncService implements OnModuleInit {
       }
     }
 
-    await this.queue.add(jobName, data, {
+    await queue.add(jobName, data, {
       attempts: 5,
       backoff: {
         type: 'exponential',
@@ -83,8 +85,9 @@ export class AmazonSyncService implements OnModuleInit {
       return;
     }
 
+    // Default 30s so new-sale push alerts land quickly.
     const ordersHotEveryMs =
-      Number(process.env.AMAZON_ORDERS_HOT_SYNC_EVERY_MS) || 5 * 60 * 1000;
+      Number(process.env.AMAZON_ORDERS_HOT_SYNC_EVERY_MS) || 30 * 1000;
     const ordersFullSyncCron =
       process.env.AMAZON_ORDERS_FULL_SYNC_CRON ?? '0 2 * * *';
     const inventorySyncCron =
@@ -100,7 +103,14 @@ export class AmazonSyncService implements OnModuleInit {
     const listingPriceColdCron =
       process.env.LISTING_PRICE_REFRESH_COLD_CRON ?? '0 7 * * *';
 
-    await this.queue.add(
+    // Sale hot-sync lives on its own queue so heavy amazon-sync jobs cannot starve it.
+    await this.removeAllRepeatablesNamed(this.queue, 'orders-hot-sync');
+    await this.removeRepeatablesNamedExcept(
+      this.ordersHotQueue,
+      'orders-hot-sync',
+      ordersHotEveryMs,
+    );
+    await this.ordersHotQueue.add(
       'orders-hot-sync',
       {},
       {
@@ -177,6 +187,8 @@ export class AmazonSyncService implements OnModuleInit {
       'listing-price-refresh-hot',
       {},
       {
+        // Below orders-hot-sync so sale alerts are not starved.
+        priority: 5,
         repeat: { every: listingPriceHotEveryMs },
         jobId: 'listing-price-refresh-hot',
       },
@@ -219,6 +231,66 @@ export class AmazonSyncService implements OnModuleInit {
       await this.queue.removeRepeatable(jobName, { every: everyMs });
     } catch {
       /* no legacy job */
+    }
+  }
+
+  /** Remove every repeatable with this name from a queue. */
+  private async removeAllRepeatablesNamed(
+    queue: Queue,
+    jobName: string,
+  ): Promise<void> {
+    try {
+      const jobs = await queue.getRepeatableJobs();
+      for (const j of jobs) {
+        if (j.name !== jobName) continue;
+        try {
+          await queue.removeRepeatableByKey(j.key);
+          this.logger.log(
+            `Removed repeatable ${jobName} every=${j.every ?? j.pattern ?? '?'} from ${queue.name}`,
+          );
+        } catch {
+          /* already gone */
+        }
+      }
+    } catch (e) {
+      this.logger.warn(
+        `removeAllRepeatablesNamed(${jobName}) failed: ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+      );
+    }
+  }
+
+  /**
+   * Remove all repeatable jobs with `jobName` whose `every` is not `keepEveryMs`.
+   * Prevents stale 60s/5m hot-sync schedulers from piling up.
+   */
+  private async removeRepeatablesNamedExcept(
+    queue: Queue,
+    jobName: string,
+    keepEveryMs: number,
+  ): Promise<void> {
+    try {
+      const jobs = await queue.getRepeatableJobs();
+      for (const j of jobs) {
+        if (j.name !== jobName) continue;
+        const every = Number(j.every);
+        if (Number.isFinite(every) && every === keepEveryMs) continue;
+        try {
+          await queue.removeRepeatableByKey(j.key);
+          this.logger.log(
+            `Removed legacy repeatable ${jobName} every=${j.every ?? j.pattern ?? '?'} from ${queue.name}`,
+          );
+        } catch {
+          /* already gone */
+        }
+      }
+    } catch (e) {
+      this.logger.warn(
+        `removeRepeatablesNamedExcept(${jobName}) failed: ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+      );
     }
   }
 
@@ -588,80 +660,20 @@ export class AmazonSyncService implements OnModuleInit {
 
   /** Active Amazon sellers with a paid subscription — for scheduled order sync jobs. */
   async findAmazonSellerUserIdsForScheduledSync(): Promise<string[]> {
-    const allow = this.scheduledSyncEmailAllowlist();
     const accounts = await this.prisma.sellerAccount.findMany({
       where: this.subscribedAmazonSellerAccountWhere(),
-      select: {
-        userId: true,
-        user: { select: { email: true } },
-      },
+      select: { userId: true },
     });
-    let ids = accounts.map((a) => a.userId);
-    if (allow) {
-      ids = accounts
-        .filter((a) => allow.has(String(a.user?.email ?? '').toLowerCase()))
-        .map((a) => a.userId);
-      this.logger.log(
-        `[AmazonSync] scheduled sync email allowlist active (${[...allow].join(', ')}): ${ids.length} seller user(s)`,
-      );
-    }
-    return [...new Set(ids)];
-  }
-
-  /**
-   * Optional comma-separated login emails. When set, scheduled Amazon sync (and related batch
-   * jobs that use these helpers) only run for those accounts — useful on a personal VPS that
-   * still holds a multi-tenant DB dump.
-   */
-  private scheduledSyncEmailAllowlist(): Set<string> | null {
-    const raw = (process.env.AMAZON_SCHEDULED_SYNC_EMAILS ?? '').trim();
-    if (!raw) return null;
-    const set = new Set(
-      raw
-        .split(',')
-        .map((e) => e.trim().toLowerCase())
-        .filter((e) => e.length > 0),
-    );
-    return set.size > 0 ? set : null;
+    return accounts.map((a) => a.userId);
   }
 
   /** Orgs with a subscribed Amazon link — for inventory/shipments/listings batch jobs. */
   async findAmazonOrgIdsForScheduledSync(): Promise<string[]> {
-    const allow = this.scheduledSyncEmailAllowlist();
-    if (!allow) {
-      const orgs = await this.prisma.organization.findMany({
-        where: this.subscribedAmazonOrgWhere(),
-        select: { id: true },
-      });
-      return orgs.map((o) => o.id);
-    }
-    const users = await this.prisma.user.findMany({
-      where: {
-        OR: [...allow].map((email) => ({
-          email: { equals: email, mode: 'insensitive' as const },
-        })),
-      },
+    const orgs = await this.prisma.organization.findMany({
+      where: this.subscribedAmazonOrgWhere(),
       select: { id: true },
     });
-    const userIds = users.map((u) => u.id);
-    if (!userIds.length) {
-      this.logger.warn(
-        `[AmazonSync] AMAZON_SCHEDULED_SYNC_EMAILS set but no matching users; skipping org batch sync`,
-      );
-      return [];
-    }
-    const memberships = await this.prisma.organizationMembership.findMany({
-      where: {
-        userId: { in: userIds },
-        org: this.subscribedAmazonOrgWhere(),
-      },
-      select: { orgId: true },
-    });
-    const ids = [...new Set(memberships.map((m) => m.orgId))];
-    this.logger.log(
-      `[AmazonSync] scheduled org allowlist (${[...allow].join(', ')}): ${ids.length} org(s)`,
-    );
-    return ids;
+    return orgs.map((o) => o.id);
   }
 
   /** True when the limited initial-sync job has written 100% to InitialSyncProgress. */
@@ -815,6 +827,7 @@ export class AmazonSyncService implements OnModuleInit {
         `orders-hot-nudge-${userId}`,
         { userId },
         `[orders-hot-nudge] userId=${userId.slice(0, 8)}…`,
+        { queue: this.ordersHotQueue },
       );
     }
   }

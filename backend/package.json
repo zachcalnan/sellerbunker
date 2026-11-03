@@ -52,13 +52,16 @@
     "class-validator": "^0.14.3",
     "dotenv": "^17.2.4",
     "ioredis": "^5.8.2",
+    "jpeg-js": "^0.4.4",
     "passport": "^0.7.0",
     "passport-jwt": "^4.0.1",
+    "pngjs": "^7.0.0",
     "prisma": "^5.22.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
     "selling-partner-api": "^1.0.0",
-    "stripe": "^20.4.0"
+    "stripe": "^20.4.0",
+    "web-push": "^3.6.7"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3.2.0",
@@ -69,7 +72,9 @@
     "@types/express": "^5.0.0",
     "@types/jest": "^30.0.0",
     "@types/node": "^22.10.7",
+    "@types/pngjs": "^6.0.5",
     "@types/supertest": "^6.0.2",
+    "@types/web-push": "^3.6.4",
     "eslint": "^9.18.0",
     "eslint-config-prettier": "^10.0.1",
     "eslint-plugin-prettier": "^5.2.2",

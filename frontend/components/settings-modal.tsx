@@ -10,6 +10,7 @@ import {
   type BackgroundTheme,
 } from "@/contexts/display-settings-context";
 import { useMarketplace } from "@/contexts/marketplace-context";
+import { ensureWebPushSubscription } from "@/lib/web-push-subscribe";
 
 const VAT_TYPES = [
   { value: "NON_VAT_REGISTERED", label: "Non VAT registered" },
@@ -97,7 +98,13 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
   const [displayRingColor, setDisplayRingColor] = useState(ringColor);
   const [displayApplied, setDisplayApplied] = useState(false);
 
-  type SectionKey = "details" | "marketplaces" | "vat" | "display" | "subscription";
+  type SectionKey =
+    | "details"
+    | "marketplaces"
+    | "vat"
+    | "display"
+    | "notifications"
+    | "subscription";
   const [openSection, setOpenSection] = useState<SectionKey | null>(null);
   const [faqModalOpen, setFaqModalOpen] = useState(false);
   const [amazonSellerId, setAmazonSellerId] = useState<string | null | "loading">(null);
@@ -108,6 +115,9 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
   const [cancelSubscriptionLoading, setCancelSubscriptionLoading] = useState(false);
   const [cancelSubscriptionError, setCancelSubscriptionError] = useState<string | null>(null);
   const [detectingMarketplaces, setDetectingMarketplaces] = useState(false);
+  const [pushBusy, setPushBusy] = useState(false);
+  const [pushTestBusy, setPushTestBusy] = useState(false);
+  const [pushMessage, setPushMessage] = useState<string | null>(null);
 
   const loadVat = useCallback(async () => {
     setVatLoading(true);
@@ -666,6 +676,125 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
               )}
             </div>
             </div>
+            )}
+          </section>
+
+          {/* Push notifications */}
+          <section className="border-b border-[var(--surface-border)]">
+            <button
+              type="button"
+              onClick={() =>
+                setOpenSection((s) => (s === "notifications" ? null : "notifications"))
+              }
+              className="flex w-full items-center justify-between px-4 py-3 text-left hover:bg-[var(--foreground)]/5"
+              aria-expanded={openSection === "notifications"}
+            >
+              <h3 className="text-sm font-semibold uppercase tracking-wider text-[var(--foreground)]">
+                Notifications
+              </h3>
+              <svg
+                className={`h-5 w-5 shrink-0 text-[var(--muted-foreground)] transition-transform ${openSection === "notifications" ? "rotate-180" : ""}`}
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+              </svg>
+            </button>
+            {openSection === "notifications" && (
+              <div className="border-t border-[var(--surface-border)] px-4 pb-4 pt-2 space-y-3">
+                <p className="text-sm text-[var(--muted-foreground)]">
+                  Get a phone alert on new sales, low stock (1 left), and delayed FBA
+                  shipments. On iPhone you must open SellerBunker from the Home Screen
+                  icon.
+                </p>
+                {pushMessage ? (
+                  <p className="text-sm text-[var(--foreground)]">{pushMessage}</p>
+                ) : null}
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    disabled={pushBusy}
+                    onClick={() => {
+                      void (async () => {
+                        setPushBusy(true);
+                        setPushMessage(null);
+                        try {
+                          localStorage.removeItem("sb_push_prompt_dismissed_v1");
+                          const result = await ensureWebPushSubscription({
+                            getToken: async () =>
+                              getToken({ template: "backend" }),
+                          });
+                          if (!result.ok) {
+                            setPushMessage(result.reason);
+                            return;
+                          }
+                          localStorage.setItem("sb_push_subscribed_v1", "1");
+                          setPushMessage(
+                            "Alerts enabled on this device. Tap Send test to confirm.",
+                          );
+                        } catch (e) {
+                          setPushMessage(
+                            e instanceof Error
+                              ? e.message
+                              : "Could not enable alerts.",
+                          );
+                        } finally {
+                          setPushBusy(false);
+                        }
+                      })();
+                    }}
+                    className="rounded-lg bg-white px-3 py-2 text-sm font-medium text-black disabled:opacity-60"
+                  >
+                    {pushBusy ? "Enabling…" : "Enable alerts"}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={pushTestBusy}
+                    onClick={() => {
+                      void (async () => {
+                        setPushTestBusy(true);
+                        setPushMessage(null);
+                        try {
+                          const token = await getToken({ template: "backend" });
+                          if (!token) {
+                            setPushMessage("Sign in again, then retry.");
+                            return;
+                          }
+                          const res = await fetch(`${BASE_URL}/api/push/test`, {
+                            method: "POST",
+                            headers: { Authorization: `Bearer ${token}` },
+                          });
+                          const body = (await res.json().catch(() => ({}))) as {
+                            ok?: boolean;
+                            sent?: number;
+                            error?: string;
+                          };
+                          if (!res.ok || !body.ok) {
+                            setPushMessage(
+                              body.error ??
+                                "Test failed — enable alerts on this device first.",
+                            );
+                            return;
+                          }
+                          setPushMessage(
+                            `Test sent to ${body.sent ?? 1} device(s). Check your lock screen.`,
+                          );
+                        } catch (e) {
+                          setPushMessage(
+                            e instanceof Error ? e.message : "Test push failed.",
+                          );
+                        } finally {
+                          setPushTestBusy(false);
+                        }
+                      })();
+                    }}
+                    className="rounded-lg border border-[var(--surface-border)] px-3 py-2 text-sm font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/5 disabled:opacity-60"
+                  >
+                    {pushTestBusy ? "Sending…" : "Send test"}
+                  </button>
+                </div>
+              </div>
             )}
           </section>
 

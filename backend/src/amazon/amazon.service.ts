@@ -57,7 +57,10 @@ import {
   resolveShipmentCheckedIn,
   sameCalendarDay,
 } from './shipment-date.util';
+import { isFbaShipmentDelayed } from './shipment-status.util';
 import { RepricerService } from '../repricer/repricer.service';
+import { PushService } from '../push/push.service';
+import { toPushIconUrl, toSaleCardUrl } from '../push/push-image.util';
 
 /** When we have no settled fees and no product fee estimate, use this share of revenue as fee so profit/ROI are not overstated. */
 const DEFAULT_AMAZON_FEE_RATE_WHEN_UNKNOWN = 0.35;
@@ -94,7 +97,171 @@ export class AmazonService {
     private readonly usersService: UsersService,
     @Inject(forwardRef(() => RepricerService))
     private readonly repricerService: RepricerService,
+    private readonly pushService: PushService,
   ) {}
+
+  private async resolveOrgIdForUser(userId: string): Promise<string | null> {
+    try {
+      const membership = await this.prisma.organizationMembership.findFirst({
+        where: { userId },
+        select: { orgId: true },
+        orderBy: { createdAt: 'asc' },
+      });
+      return membership?.orgId ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async notifyNewSalePush(
+    userId: string,
+    args: {
+      amazonOrderId: string;
+      sku: string | null;
+      asin: string | null;
+      amount: number;
+      quantity?: number | null;
+      profit?: number | null;
+      title?: string | null;
+      imageUrl?: string | null;
+      status?: string | null;
+    },
+  ): Promise<void> {
+    const orgId = await this.resolveOrgIdForUser(userId);
+    const money = (n: number) =>
+      `£${n.toLocaleString('en-GB', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      })}`;
+
+    let imageUrl = (args.imageUrl ?? '').trim() || null;
+    let title = (args.title ?? '').trim() || null;
+    let profit = args.profit ?? null;
+
+    if (args.sku || args.asin) {
+      try {
+        const product = await this.prisma.product.findFirst({
+          where: {
+            userId,
+            OR: [
+              ...(args.sku ? [{ sku: args.sku }] : []),
+              ...(args.asin ? [{ asin: args.asin }] : []),
+            ],
+          },
+          select: {
+            title: true,
+            imageUrl: true,
+            costOfGoods: true,
+            estimatedAmazonFeePerUnit: true,
+          },
+          orderBy: { updatedAt: 'desc' },
+        });
+        if (product) {
+          if (!title && product.title?.trim()) title = product.title.trim();
+          if (!imageUrl && product.imageUrl?.trim()) {
+            imageUrl = product.imageUrl.trim();
+          }
+          if (
+            profit == null &&
+            Number.isFinite(args.amount) &&
+            args.amount > 0 &&
+            product.costOfGoods != null
+          ) {
+            const qty = Math.max(1, Number(args.quantity) || 1);
+            const cogs = Number(product.costOfGoods) * qty;
+            const feesEst =
+              product.estimatedAmazonFeePerUnit != null
+                ? Number(product.estimatedAmazonFeePerUnit) * qty
+                : 0;
+            profit = Number((args.amount - cogs - feesEst).toFixed(2));
+          }
+        }
+      } catch {
+        // Best-effort enrichment — still send a basic sale alert.
+      }
+    }
+
+    const pushIcon =
+      toPushIconUrl(imageUrl) ?? 'https://www.sellerbunker.com/icon-192.png';
+
+    const shortTitle = (() => {
+      const raw = title || args.sku || args.asin || 'New sale';
+      return raw.length > 36 ? `${raw.slice(0, 33)}…` : raw;
+    })();
+
+    const profitLabel =
+      profit != null && Number.isFinite(profit)
+        ? `${money(profit)} profit`
+        : Number.isFinite(args.amount) && args.amount > 0
+          ? `${money(args.amount)} sale`
+          : 'New sale';
+
+    const saleCard = toSaleCardUrl({
+      imageUrl,
+      profitLabel,
+      title: shortTitle,
+    });
+
+    const payload = {
+      title: shortTitle,
+      body: profitLabel,
+      url: '/orders',
+      tag: `sale-${args.amazonOrderId}`,
+      icon: pushIcon,
+      image: saleCard,
+      badge: 'https://www.sellerbunker.com/favicon-48x48.png',
+      profitLabel,
+    };
+
+    if (!orgId) {
+      await this.pushService.notifyUser(userId, payload);
+      return;
+    }
+    await this.pushService.notifyOrg(orgId, payload, {
+      dedupeKey: `sale:${args.amazonOrderId}`,
+      dedupeTtlSec: 60 * 60 * 48,
+      alsoUserIds: [userId],
+    });
+  }
+
+  private async notifyLowStockPush(
+    orgId: string,
+    args: { sku: string; asin: string | null },
+  ): Promise<void> {
+    const label = args.asin || args.sku;
+    await this.pushService.notifyOrg(
+      orgId,
+      {
+        title: 'Low stock',
+        body: `${label} is down to 1 unit`,
+        url: '/inventory',
+        tag: `lowstock-${args.sku}`,
+      },
+      {
+        dedupeKey: `lowstock:${orgId}:${args.sku}`,
+        dedupeTtlSec: 60 * 60 * 12,
+      },
+    );
+  }
+
+  private async notifyShipmentDelayedPush(
+    orgId: string,
+    args: { shipmentId: string; status: string | null },
+  ): Promise<void> {
+    await this.pushService.notifyOrg(
+      orgId,
+      {
+        title: 'Shipment delayed',
+        body: `${args.shipmentId} still ${args.status ?? 'in transit'} past expected delivery`,
+        url: '/shipments',
+        tag: `ship-delay-${args.shipmentId}`,
+      },
+      {
+        dedupeKey: `shipdelay:${orgId}:${args.shipmentId}`,
+        dedupeTtlSec: 60 * 60 * 24 * 3,
+      },
+    );
+  }
 
   private async getOrgMemberUserIds(orgId: string): Promise<string[]> {
     return this.usersService.getOrgMemberUserIds(orgId);
@@ -5032,6 +5199,7 @@ export class AmazonService {
         orderBy: { updatedAt: 'desc' },
         select: { id: true },
       });
+      const isNewAmazonOrder = !existingOrderRow;
       const persistedOrder = existingOrderRow
         ? await withPrismaTransientRetry<{ id: string }>(() =>
             (this.prisma as any).order.update({
@@ -5042,6 +5210,44 @@ export class AmazonService {
         : await withPrismaTransientRetry<{ id: string }>(() =>
             (this.prisma as any).order.create({ data: createData }),
           );
+
+      if (isNewAmazonOrder) {
+        const st = String(apiOrderStatus ?? '').toLowerCase();
+        const cancelled =
+          st.includes('cancel') || st.includes('unfulfillable');
+        // Pending orders sometimes lack OrderTotal yet — still notify on new sync.
+        if (
+          !cancelled &&
+          (Number(totalAmount) > 0 || Boolean(selectedSku || selectedAsin))
+        ) {
+          const titleFromProduct =
+            typeof (selectedProduct as { title?: string | null })?.title ===
+            'string'
+              ? String((selectedProduct as { title?: string | null }).title)
+              : null;
+          const imageFromProduct =
+            typeof (selectedProduct as { imageUrl?: string | null })
+              ?.imageUrl === 'string'
+              ? String(
+                  (selectedProduct as { imageUrl?: string | null }).imageUrl,
+                )
+              : null;
+          void this.notifyNewSalePush(userId, {
+            amazonOrderId,
+            sku: selectedSku,
+            asin: selectedAsin,
+            amount: Number(totalAmount) || 0,
+            quantity: Number(quantity) || 1,
+            profit:
+              computedTotalProfit != null
+                ? Number(computedTotalProfit.toFixed(2))
+                : null,
+            title: titleFromProduct,
+            imageUrl: imageFromProduct,
+            status: apiOrderStatus != null ? String(apiOrderStatus) : null,
+          }).catch(() => undefined);
+        }
+      }
 
       // Persist accurate line items for per-product profitability.
       // If we don't have orderItems (e.g. call failed), we skip creating OrderItem rows.
@@ -12312,6 +12518,47 @@ export class AmazonService {
 
     await reportProgress(100, 100);
     this.logger.log(`[syncShipments] done: synced=${synced} errors=${errors.length}${errors.length ? ` [${errors.join('; ')}]` : ''}`);
+
+    // Push once per delayed in-flight shipment (past Amazon delivery date).
+    try {
+      const userIds = await this.getOrgAmazonShipmentReadUserIds(orgId);
+      if (userIds.length > 0) {
+        const recent = await this.prisma.shipment.findMany({
+          where: {
+            userId: { in: userIds },
+            shipmentStatus: { in: ['SHIPPED', 'IN_TRANSIT'] },
+          },
+          select: {
+            shipmentId: true,
+            shipmentStatus: true,
+            deliveryDate: true,
+            pickupDate: true,
+          },
+          take: 200,
+        });
+        for (const s of recent) {
+          if (
+            isFbaShipmentDelayed({
+              shipmentStatus: s.shipmentStatus,
+              deliveryDate: s.deliveryDate,
+              pickupDate: s.pickupDate,
+            })
+          ) {
+            void this.notifyShipmentDelayedPush(orgId, {
+              shipmentId: s.shipmentId,
+              status: s.shipmentStatus,
+            }).catch(() => undefined);
+          }
+        }
+      }
+    } catch (e) {
+      this.logger.warn(
+        `[syncShipments] delay push scan failed: ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+      );
+    }
+
     return { synced, errors, rawResponses };
   }
 
@@ -12975,6 +13222,17 @@ try {
       const nowInStock = totalQty > 0 || agg.fulfillable > 0;
       if (wasOutOfStock && nowInStock) {
         newlyInStockProductIds.add(target.id);
+      }
+
+      const priorAvail =
+        prior?.availableQty != null && Number.isFinite(prior.availableQty)
+          ? prior.availableQty
+          : null;
+      if (priorAvail != null && priorAvail > 1 && agg.fulfillable === 1) {
+        void this.notifyLowStockPush(orgId, {
+          sku: String(sku),
+          asin: agg.asin != null ? String(agg.asin) : null,
+        }).catch(() => undefined);
       }
 
       await this.prisma.inventory.upsert({
