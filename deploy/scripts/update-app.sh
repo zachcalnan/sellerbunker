@@ -19,12 +19,13 @@ fi
 cd "${ROOT_DIR}"
 
 echo "==> git fetch / pull"
-git fetch --all --prune
+# Only pull from origin (bundle / primary remote). Extra remotes like github may be unauthenticated.
+git fetch origin --prune
 if [[ -n "${BRANCH}" ]]; then
   git checkout "${BRANCH}"
   git pull --ff-only origin "${BRANCH}"
 else
-  git pull --ff-only
+  git pull --ff-only origin
 fi
 
 echo "==> Rebuild and restart"
