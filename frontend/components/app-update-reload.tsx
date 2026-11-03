@@ -8,7 +8,7 @@ import {
 
 /**
  * iOS Home Screen PWAs keep a stale shell after deploys. When the baked
- * build id changes, force a single full reload so nav (e.g. Purchases) appears.
+ * build id changes, force a single full reload so nav updates appear.
  */
 export function AppUpdateReload() {
   useEffect(() => {

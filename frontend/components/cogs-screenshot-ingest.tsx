@@ -114,7 +114,7 @@ type Props = {
   onLoadQuota?: () => Promise<VisionQuota>;
   /** Optional: search org listings by ASIN/SKU/title (no OpenAI). */
   onSearchListings?: (query: string) => Promise<ListingHit[]>;
-  /** "page" = always-visible panel (Purchases). Default "button" opens a modal. */
+  /** "page" = always-visible panel (Replenish). Default "button" opens a modal. */
   variant?: "button" | "page";
 };
 

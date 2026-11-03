@@ -5,10 +5,8 @@ import { useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { useDisplaySettings } from "@/contexts/display-settings-context";
 import { useMarketplace } from "@/contexts/marketplace-context";
-import { formatApiErrorMessage } from "@/lib/format-api-error";
 import { getDevImpersonationHeaders } from "@/lib/impersonation";
 import { CogsBulkUpload } from "@/components/cogs-bulk-upload";
-import { CogsScreenshotIngest } from "@/components/cogs-screenshot-ingest";
 import { RedirectToSignInWithReturn } from "@/components/redirect-to-sign-in-with-return";
 
 type ProductRow = {
@@ -497,92 +495,6 @@ function CostOfGoodsInner() {
     }
   };
 
-
-  const extractPurchaseScreenshot = async (body: {
-    imageBase64: string;
-    mimeType: string;
-    hint?: string;
-  }) => {
-    const token = await getToken({ template: "backend" });
-    if (!token) throw new Error("Not authenticated.");
-    const res = await fetch(
-      `${baseUrl}/api/amazon/cost-of-goods/screenshot-extract`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-          ...getDevImpersonationHeaders(devImpersonate),
-        },
-        body: JSON.stringify(body),
-      },
-    );
-    if (!res.ok) {
-      const msg = await res.text();
-      throw new Error(
-        formatApiErrorMessage(msg, "Screenshot extract failed."),
-      );
-    }
-    return (await res.json()) as {
-      draft: {
-        supplier: string;
-        orderNumber: string;
-        purchaseDate: string;
-        currency: string;
-        vatRatePct: number;
-        fulfilment: string;
-        supplierLink?: string;
-        promo?: { type: "none" | "buy_3_get_1_free" };
-        lines: Array<{
-          productTitle?: string;
-          asin?: string;
-          sku?: string;
-          qty: number;
-          unitRrpIncVat?: number;
-          unitCostIncVat?: number;
-          lineTotalIncVat?: number;
-          deliveryCostIncVat?: number;
-          prepCostIncVat?: number;
-        }>;
-        warnings: string[];
-      };
-      model: string;
-    };
-  };
-
-  const confirmScreenshotIngest = async (payload: Record<string, unknown>) => {
-    const token = await getToken({ template: "backend" });
-    if (!token) throw new Error("Not authenticated.");
-    const res = await fetch(`${baseUrl}/api/amazon/supplier-orders/ingest`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-        ...getDevImpersonationHeaders(devImpersonate),
-      },
-      body: JSON.stringify(payload),
-    });
-    if (!res.ok) {
-      const msg = await res.text();
-      throw new Error(
-        formatApiErrorMessage(msg, "Purchase ingest failed."),
-      );
-    }
-    return (await res.json()) as {
-      ledger: {
-        created: number;
-        skipped: number;
-        errors: Array<{ lineIndex: number; asin?: string; message: string }>;
-      };
-      sheet?: {
-        ok?: boolean;
-        appended?: number;
-        skippedDuplicate?: number;
-        errors?: string[];
-        tabTitle?: string;
-      };
-    };
-  };
 
   const canPrev = skip > 0;
   const canNext = skip + entries.length < entriesTotal;
@@ -1202,18 +1114,10 @@ function CostOfGoodsInner() {
             <h1 className="text-xl font-semibold text-[var(--foreground)] sm:text-2xl">
               Cost of Goods
             </h1>
-            <CogsScreenshotIngest
-              onExtract={extractPurchaseScreenshot}
-              onConfirm={confirmScreenshotIngest}
-              onFinished={async () => {
-                setSkip(0);
-                await load();
-              }}
-            />
-
             <p className="mt-1 text-sm text-[var(--muted-foreground)]">
               Log inbound cost entries per SKU (unit, delivery, prep, VAT).
-              Profit uses the latest entry per SKU.
+              Profit uses the latest entry per SKU. Supplier buys with sheet
+              sync live on Replenish.
             </p>
           </div>
           <div className="flex shrink-0 flex-col items-stretch sm:items-end sm:ml-auto">

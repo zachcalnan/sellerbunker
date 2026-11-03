@@ -1,10 +1,11 @@
 "use client";
 
 import { useAuth, SignedIn, SignedOut } from "@clerk/nextjs";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { useDisplaySettings } from "@/contexts/display-settings-context";
 import { useMarketplace } from "@/contexts/marketplace-context";
+import { PurchaseOrderIngestPanel } from "@/components/purchase-order-ingest-panel";
 import { SignInButtonWithReturn } from "@/components/sign-in-button-with-return";
 import { getDevImpersonationHeaders } from "@/lib/impersonation";
 
@@ -75,7 +76,7 @@ function formatDate(iso: string | null): string {
       });
 }
 
-export default function ReplenishPage() {
+function ReplenishInner() {
   const baseUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
   const { isSignedIn, getToken } = useAuth();
   const { selectedMarketplaceId, selectedCurrency } = useMarketplace();
@@ -288,7 +289,8 @@ export default function ReplenishPage() {
             Replenish
           </h1>
           <p className="mt-1 text-sm text-[var(--muted-foreground)]">
-            Best-selling products from your existing order data, sorted by out of stock first, then most sold, then estimated profit.
+            Log supplier buys below, then use suggestions sorted by out of stock
+            first, then most sold, then estimated profit.
           </p>
           <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center">
             <input
@@ -301,6 +303,8 @@ export default function ReplenishPage() {
             />
           </div>
         </div>
+
+        <PurchaseOrderIngestPanel onFinished={load} />
 
         {!loading && smart.length > 0 && (
           <div className="rounded-xl border border-[var(--surface-border)] bg-[var(--surface)] px-4 py-3">
@@ -941,5 +945,19 @@ export default function ReplenishPage() {
         )}
       </SignedIn>
     </div>
+  );
+}
+
+export default function ReplenishPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="w-full px-6 py-10 text-sm text-[var(--muted-foreground)]">
+          Loading…
+        </div>
+      }
+    >
+      <ReplenishInner />
+    </Suspense>
   );
 }
