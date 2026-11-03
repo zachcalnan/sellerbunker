@@ -777,6 +777,48 @@ function ReplenishInner() {
 
                   <div className="mt-3 rounded-lg border border-[var(--surface-border)] bg-[var(--background)] p-3">
                     <div className="text-[11px] font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
+                      Supplier
+                    </div>
+                    {detailsItem.supplier || detailsItem.supplierLink ? (
+                      <div className="mt-2 space-y-2">
+                        {detailsItem.supplier ? (
+                          <div className="text-sm text-[var(--foreground)]">
+                            {detailsItem.supplier}
+                          </div>
+                        ) : null}
+                        {detailsItem.supplierLink ? (
+                          <a
+                            href={detailsItem.supplierLink}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex max-w-full items-center gap-1.5 break-all rounded-lg bg-sb-accent px-3 py-2 text-sm font-semibold text-black hover:opacity-90"
+                          >
+                            Open supplier link
+                            <span aria-hidden className="shrink-0 text-xs">
+                              ↗
+                            </span>
+                          </a>
+                        ) : (
+                          <p className="text-xs text-[var(--muted-foreground)]">
+                            No supplier URL on the latest purchase for this SKU.
+                          </p>
+                        )}
+                        {detailsItem.supplierLink ? (
+                          <p className="break-all text-[11px] text-[var(--muted-foreground)]">
+                            {detailsItem.supplierLink}
+                          </p>
+                        ) : null}
+                      </div>
+                    ) : (
+                      <p className="mt-1 text-xs text-[var(--muted-foreground)]">
+                        No supplier saved for this SKU yet — log a purchase with
+                        a supplier link to see it here.
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="mt-3 rounded-lg border border-[var(--surface-border)] bg-[var(--background)] p-3">
+                    <div className="text-[11px] font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
                       COGS (latest ledger entry)
                     </div>
                     {detailsItem.latestCogsEntry ? (
