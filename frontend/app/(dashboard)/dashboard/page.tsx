@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import Link from "next/link";
 import {
@@ -26,6 +26,7 @@ import { parseYmdParts, subtractCivilDays } from "@/lib/marketplace-timezone";
 import { StripeCheckoutButton } from "@/components/stripe-checkout-button";
 import { DISCORD_INVITE_URL } from "@/lib/discord-invite";
 import { getDevImpersonationHeaders } from "@/lib/impersonation";
+import { sellerAmpSasLookupUrl } from "@/lib/selleramp";
 
 type AccountSummary = {
   marketplace: string;
@@ -1321,7 +1322,6 @@ export default function Home() {
     </Suspense>
   );
 }
-
 type RecentOrdersProps = {
   baseUrl: string;
   isSignedIn: boolean | undefined;
@@ -1405,12 +1405,14 @@ function RecentOrders({
         </p>
       )}
       {!loading && !error && orders.length > 0 && (
-        <div className="max-h-44 w-full overflow-y-auto overflow-x-hidden">
-          <div className="min-w-0 w-full pr-2">
-            {/* Header: title area left, Price/Profit/ROI grouped right (centered under headers) */}
-            <div className="flex w-full items-center gap-2 border-b border-[var(--surface-border)] pb-1 pt-0 text-[9px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
+        <div className="max-h-72 w-full overflow-y-auto overflow-x-hidden sm:max-h-44">
+          <div className="min-w-0 w-full pr-1 sm:pr-2">
+            {/* Desktop header only — mobile uses labelled metric grid */}
+            <div className="hidden w-full items-center gap-2 border-b border-[var(--surface-border)] pb-1 pt-0 text-[9px] font-medium uppercase tracking-wider text-[var(--muted-foreground)] sm:flex">
               <span className="min-w-0 flex-1">Product</span>
               <div className="flex shrink-0 items-center justify-end gap-1 pl-2">
+                <span className="w-12 text-center text-white">Qty</span>
+                <span className="w-12 text-center text-white">Stock</span>
                 <span className="w-16 text-center text-white">Price</span>
                 <span className="w-16 text-center text-white">Profit</span>
                 <span className="w-9 text-center text-white">ROI</span>
@@ -1420,64 +1422,142 @@ function RecentOrders({
               const revenue = row.salePrice * row.quantity;
               const title = row.title?.trim() || "—";
               const excluded = Boolean(row.excludedFromSales);
+              const stock = row.availableStock;
+              const stockTone =
+                stock == null
+                  ? "text-[var(--muted-foreground)]"
+                  : stock <= 0
+                    ? "text-red-600"
+                    : stock <= 5
+                      ? "text-amber-600"
+                      : "text-emerald-600";
+              const profitTone =
+                row.profit != null && Number.isFinite(row.profit)
+                  ? row.profit > 0
+                    ? "text-green-600"
+                    : row.profit < 0
+                      ? "text-red-500"
+                      : "text-[var(--foreground)]"
+                  : "text-[var(--foreground)]";
               return (
                 <div
                   key={row.id}
-                  className="flex w-full min-w-0 flex-col gap-0.5 border-b border-[var(--surface-border)] py-1.5 last:border-b-0 sm:flex-row sm:items-center sm:gap-2"
+                  className="w-full min-w-0 border-b border-[var(--surface-border)] py-2 last:border-b-0 sm:flex sm:items-center sm:gap-2 sm:py-1.5"
                 >
-                  <div className="min-w-0 flex-1">
-                    <div className="flex min-w-0 items-baseline gap-2">
-                      <div className="truncate text-[10px] font-medium leading-tight text-[var(--foreground)]" title={row.title ?? undefined}>
-                        {title}
-                      </div>
-                      {row.orderStatusLabel ? (
-                        <span className="shrink-0 text-[9px] font-semibold uppercase tracking-wide text-red-600">
-                          {row.orderStatusLabel}
-                        </span>
-                      ) : null}
+                  <div className="flex min-w-0 flex-1 items-start gap-2">
+                    <div className="h-9 w-9 shrink-0 overflow-hidden rounded bg-[var(--surface)] ring-1 ring-[var(--surface-border)] sm:mt-0.5 sm:h-5 sm:w-5">
+                      {row.imageUrl ? (
+                        <img src={row.imageUrl} alt="" className="h-full w-full object-cover" />
+                      ) : (
+                        <div className="flex h-full w-full items-center justify-center text-[8px]">—</div>
+                      )}
                     </div>
-                    <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[9px] text-[var(--muted-foreground)]">
-                      <div className="h-5 w-5 shrink-0 overflow-hidden rounded bg-[var(--surface)] ring-1 ring-[var(--surface-border)]">
-                        {row.imageUrl ? (
-                          <img src={row.imageUrl} alt="" className="h-full w-full object-cover" />
-                        ) : (
-                          <div className="flex h-full w-full items-center justify-center text-[8px]">—</div>
-                        )}
+                    <div className="min-w-0 flex-1">
+                      <div className="flex min-w-0 items-baseline gap-2">
+                        <div
+                          className="line-clamp-2 text-[11px] font-medium leading-tight text-[var(--foreground)] sm:line-clamp-1 sm:truncate sm:text-[10px]"
+                          title={row.title ?? undefined}
+                        >
+                          {title}
+                        </div>
+                        {row.orderStatusLabel ? (
+                          <span className="shrink-0 text-[9px] font-semibold uppercase tracking-wide text-red-600">
+                            {row.orderStatusLabel}
+                          </span>
+                        ) : null}
                       </div>
-                      <span className="truncate">
+                      <div className="mt-0.5 truncate text-[9px] text-[var(--muted-foreground)]">
                         {formatDate(row.orderDate)}
                         <span className="mx-1">·</span>
                         {row.sku}
-                        <span className="mx-1">·</span>
-                        {row.asin ?? "—"}
-                        <span className="mx-1">·</span>
-                        Qty {row.quantity}
-                        <span className="mx-1">·</span>
-                        Stock {row.availableStock != null ? row.availableStock : "—"}
-                      </span>
+                        {row.asin ? (
+                          <>
+                            <span className="mx-1">·</span>
+                            <span className="hidden xs:inline sm:inline">{row.asin}</span>
+                            <span className="mx-1 hidden sm:inline">·</span>
+                            <a
+                              href={sellerAmpSasLookupUrl(row.asin)}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="font-semibold text-sb-accent hover:underline"
+                              title="Open in SellerAmp SAS"
+                            >
+                              SAS
+                            </a>
+                          </>
+                        ) : null}
+                      </div>
+
+                      {/* Mobile metrics — always show Qty + remaining stock */}
+                      <div className="mt-1.5 grid grid-cols-5 gap-1 text-[10px] tabular-nums sm:hidden">
+                        <div>
+                          <div className="text-[8px] uppercase tracking-wider text-[var(--muted-foreground)]">
+                            Qty
+                          </div>
+                          <div className="font-semibold text-[var(--foreground)]">{row.quantity}</div>
+                        </div>
+                        <div>
+                          <div className="text-[8px] uppercase tracking-wider text-[var(--muted-foreground)]">
+                            Stock
+                          </div>
+                          <div className={`font-semibold ${stockTone}`}>
+                            {stock != null ? stock : "—"}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-[8px] uppercase tracking-wider text-[var(--muted-foreground)]">
+                            Price
+                          </div>
+                          <div
+                            className={`font-semibold ${excluded ? "text-red-600" : "text-[var(--foreground)]"}`}
+                          >
+                            {Number.isFinite(revenue) ? formatCurrency(revenue, currency, 2) : "—"}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-[8px] uppercase tracking-wider text-[var(--muted-foreground)]">
+                            Profit
+                          </div>
+                          <div className={`font-semibold ${profitTone}`}>
+                            {row.profit != null && Number.isFinite(row.profit)
+                              ? formatCurrency(row.profit, currency, 2)
+                              : "—"}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-[8px] uppercase tracking-wider text-[var(--muted-foreground)]">
+                            ROI
+                          </div>
+                          <div className="font-semibold text-[var(--foreground)]">
+                            {row.roiPct != null && Number.isFinite(row.roiPct)
+                              ? `${row.roiPct.toFixed(0)}%`
+                              : "—"}
+                          </div>
+                        </div>
+                      </div>
                     </div>
                   </div>
-                  <div className="flex shrink-0 items-center justify-end gap-1 pl-2 text-[10px] tabular-nums font-medium text-white">
+
+                  {/* Desktop metrics — Qty/Stock never buried in truncated meta */}
+                  <div className="hidden shrink-0 items-center justify-end gap-1 pl-2 text-[10px] font-medium tabular-nums text-white sm:flex">
+                    <span className="w-12 text-center text-[var(--foreground)]">{row.quantity}</span>
+                    <span className={`w-12 text-center ${stockTone}`}>
+                      {stock != null ? stock : "—"}
+                    </span>
                     <span
                       className={`w-16 text-center ${excluded ? "font-semibold text-red-600" : ""}`}
                     >
-                      {revenue != null && Number.isFinite(revenue) ? formatCurrency(revenue, currency, 2) : "—"}
+                      {Number.isFinite(revenue) ? formatCurrency(revenue, currency, 2) : "—"}
                     </span>
-                    <span
-                      className={`w-16 text-center ${
-                        row.profit != null && Number.isFinite(row.profit)
-                          ? row.profit > 0
-                            ? "text-green-600"
-                            : row.profit < 0
-                              ? "text-red-500"
-                              : ""
-                          : ""
-                      }`}
-                    >
-                      {row.profit != null && Number.isFinite(row.profit) ? formatCurrency(row.profit, currency, 2) : "—"}
+                    <span className={`w-16 text-center ${profitTone}`}>
+                      {row.profit != null && Number.isFinite(row.profit)
+                        ? formatCurrency(row.profit, currency, 2)
+                        : "—"}
                     </span>
                     <span className="w-9 text-center">
-                      {row.roiPct != null && Number.isFinite(row.roiPct) ? `${row.roiPct.toFixed(1)}%` : "—"}
+                      {row.roiPct != null && Number.isFinite(row.roiPct)
+                        ? `${row.roiPct.toFixed(1)}%`
+                        : "—"}
                     </span>
                   </div>
                 </div>
@@ -1488,6 +1568,8 @@ function RecentOrders({
       )}
     </div>
   );
+}
+
 }
 
 type TopSellerRow = {
