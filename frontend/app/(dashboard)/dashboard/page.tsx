@@ -1570,8 +1570,6 @@ function RecentOrders({
   );
 }
 
-}
-
 type TopSellerRow = {
   productId: string;
   sku: string | null;
