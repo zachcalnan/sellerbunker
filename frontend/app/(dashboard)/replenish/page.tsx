@@ -9,18 +9,6 @@ import { PurchaseOrderIngestPanel } from "@/components/purchase-order-ingest-pan
 import { SignInButtonWithReturn } from "@/components/sign-in-button-with-return";
 import { getDevImpersonationHeaders } from "@/lib/impersonation";
 
-type ReplenishRow = {
-  productId: string;
-  imageUrl: string | null;
-  title: string | null;
-  sku: string;
-  asin: string | null;
-  lastSold: string | null;
-  outOfStock: boolean;
-  unitsSold: number;
-  estimatedProfit: number;
-};
-
 type SmartReplenishRow = {
   productId: string;
   imageUrl: string | null;
@@ -61,20 +49,7 @@ type SmartReplenishRow = {
   rationale: string;
 };
 
-const PAGE_SIZE = 12;
 const SMART_PAGE_SIZE = 12;
-
-function formatDate(iso: string | null): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime())
-    ? "—"
-    : d.toLocaleDateString("en-GB", {
-        day: "2-digit",
-        month: "2-digit",
-        year: "numeric",
-      });
-}
 
 function ReplenishInner() {
   const baseUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
@@ -85,12 +60,10 @@ function ReplenishInner() {
   const SMART_PERIOD_DAYS = 30;
   const SMART_SNOOZE_DAYS = 7;
 
-  const [rows, setRows] = useState<ReplenishRow[]>([]);
   const [smart, setSmart] = useState<SmartReplenishRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  const [page, setPage] = useState(1);
   const [smartPage, setSmartPage] = useState(1);
 
   const [smartTargetCoverDays, setSmartTargetCoverDays] = useState(45);
@@ -109,11 +82,7 @@ function ReplenishInner() {
     setError(null);
     try {
       const token = await getToken({ template: "backend" });
-      const url = new URL(`${baseUrl}/api/amazon/replenish`);
-      url.searchParams.set("limit", "10000");
-      if (devImpersonate) url.searchParams.set("impersonate", devImpersonate);
       const smartUrl = new URL(`${baseUrl}/api/amazon/replenish/smart`);
-      // Fetch a larger pool and paginate client-side so Smart and Standard pages are independent.
       smartUrl.searchParams.set("take", "200");
       smartUrl.searchParams.set("periodDays", String(SMART_PERIOD_DAYS));
       smartUrl.searchParams.set("targetCoverDays", String(smartTargetCoverDays));
@@ -127,32 +96,20 @@ function ReplenishInner() {
         ...(selectedMarketplaceId ? { "x-marketplace-id": selectedMarketplaceId } : {}),
       };
 
-      const [res, smartRes] = await Promise.all([
-        fetch(url.toString(), {
-          headers,
-          credentials: "include",
-        }),
-        fetch(smartUrl.toString(), {
-          headers,
-          credentials: "include",
-        }),
-      ]);
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || `Request failed (${res.status})`);
+      const smartRes = await fetch(smartUrl.toString(), {
+        headers,
+        credentials: "include",
+      });
+      if (!smartRes.ok) {
+        const text = await smartRes.text();
+        throw new Error(text || `Request failed (${smartRes.status})`);
       }
-      const data = (await res.json()) as ReplenishRow[];
-      setRows(data);
-
-      if (smartRes.ok) {
-        const smartData = (await smartRes.json()) as SmartReplenishRow[];
-        setSmart(Array.isArray(smartData) ? smartData : []);
-      } else {
-        setSmart([]);
-      }
+      const smartData = (await smartRes.json()) as SmartReplenishRow[];
+      setSmart(Array.isArray(smartData) ? smartData : []);
     } catch (e) {
       const message = e instanceof Error ? e.message : "Error";
       setError(message === "Failed to fetch" ? "Could not reach the API. Ensure the backend is running." : message);
+      setSmart([]);
     } finally {
       setLoading(false);
     }
@@ -168,23 +125,12 @@ function ReplenishInner() {
 
   useEffect(() => {
     if (!isSignedIn) {
-      setRows([]);
+      setSmart([]);
       setError(null);
       return;
     }
     void load();
   }, [isSignedIn, load]);
-
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return rows;
-    return rows.filter(
-      (r) =>
-        r.sku.toLowerCase().includes(q) ||
-        (r.asin ?? "").toLowerCase().includes(q) ||
-        (r.title ?? "").toLowerCase().includes(q)
-    );
-  }, [rows, query]);
 
   const smartFiltered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -237,13 +183,6 @@ function ReplenishInner() {
     );
   }, [smartStatusActiveByProductId, smartStatusLoaded]);
 
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
-  const safePage = Math.min(page, totalPages);
-  const paginated = useMemo(
-    () => filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE),
-    [filtered, safePage]
-  );
-
   const smartTotalPages = Math.max(1, Math.ceil(smartFiltered.length / SMART_PAGE_SIZE));
   const smartSafePage = Math.min(smartPage, smartTotalPages);
   const smartPaginated = useMemo(
@@ -256,7 +195,6 @@ function ReplenishInner() {
   );
 
   useEffect(() => {
-    setPage(1);
     setSmartPage(1);
   }, [query]);
 
@@ -289,9 +227,8 @@ function ReplenishInner() {
             Replenish
           </h1>
           <p className="mt-1 text-sm text-[var(--muted-foreground)]">
-            Best-selling products from your order data, sorted by out of stock
-            first, then most sold, then estimated profit. Use Log a purchase to
-            add buys to COGS and your sheets.
+            Smart restock suggestions from sales velocity, inbound stock, profit
+            and ROI. Use Log a purchase to add buys to COGS and your sheets.
           </p>
           <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center">
             <input
@@ -885,107 +822,11 @@ function ReplenishInner() {
           <div className="py-6 text-center text-sm text-[var(--muted-foreground)]">
             Loading…
           </div>
-        ) : filtered.length === 0 ? (
+        ) : smart.length === 0 ? (
           <div className="rounded-lg border border-[var(--surface-border)] bg-[var(--surface)] px-4 py-6 text-center text-sm text-[var(--muted-foreground)]">
-            No products with orders found in your database.
+            No smart replenishment suggestions for your current targets.
           </div>
-        ) : (
-          <>
-          <div className="rounded-xl border border-[var(--surface-border)] bg-[var(--surface)] px-4 py-3">
-            <h2 className="text-sm font-semibold text-[var(--foreground)]">
-              Standard replenishment
-            </h2>
-            <p className="mt-0.5 text-xs text-[var(--muted-foreground)]">
-              Out-of-stock SKUs ranked by recent sales (from your order history).
-            </p>
-
-            <div className="mt-3 grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-              {paginated.map((r) => (
-                <div
-                  key={r.productId}
-                  className="flex flex-col overflow-hidden rounded-lg border border-[var(--surface-border)] bg-[var(--surface)]"
-                >
-                  <div className="relative flex h-40 shrink-0 items-center justify-center bg-[var(--background)] p-3">
-                    {r.imageUrl ? (
-                      <img
-                        src={r.imageUrl}
-                        alt=""
-                        className="max-h-full w-auto max-w-full object-contain"
-                      />
-                    ) : (
-                      <span className="text-xs text-[var(--muted-foreground)]">
-                        No image
-                      </span>
-                    )}
-                    {r.outOfStock && (
-                      <span className="absolute right-2 top-2 rounded bg-red-500/90 px-2 py-0.5 text-[10px] font-medium text-white">
-                        Out of stock
-                      </span>
-                    )}
-                  </div>
-                  <div className="flex flex-1 flex-col gap-1.5 p-3">
-                    <div className="line-clamp-2 min-h-[2.5rem] text-sm font-medium text-[var(--foreground)]">
-                      {r.title ?? r.sku}
-                    </div>
-                    <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-[var(--muted-foreground)]">
-                      <span>SKU: <span className="font-mono text-[var(--foreground)]">{r.sku}</span></span>
-                      {r.asin && (
-                        <span>ASIN: <span className="font-mono text-[var(--foreground)]">{r.asin}</span></span>
-                      )}
-                    </div>
-                    <div className="mt-1 text-xs text-[var(--muted-foreground)]">
-                      Last sold: {formatDate(r.lastSold)}
-                    </div>
-                    <div className="mt-auto flex gap-3 pt-1 text-xs">
-                      <span className="tabular-nums text-[var(--foreground)]">
-                        {r.unitsSold} sold
-                      </span>
-                      <span className="tabular-nums text-[var(--muted-foreground)]">
-                        Profit: {new Intl.NumberFormat(undefined, { style: "currency", currency: selectedCurrency }).format(r.estimatedProfit)}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-          {totalPages > 1 && (
-            <div className="flex items-center justify-between gap-4 border-t border-[var(--surface-border)] pt-4">
-              <div className="text-sm text-[var(--muted-foreground)]">
-                Page {safePage} of {totalPages}
-                <span className="ml-2">
-                  ({(safePage - 1) * PAGE_SIZE + 1}–
-                  {Math.min(safePage * PAGE_SIZE, filtered.length)} of {filtered.length})
-                </span>
-              </div>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => setPage((p) => Math.max(1, p - 1))}
-                  disabled={safePage <= 1}
-                  className="flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--surface-border)] bg-transparent text-[var(--foreground)] hover:bg-[var(--foreground)]/5 disabled:pointer-events-none disabled:opacity-40"
-                  aria-label="Previous page"
-                >
-                  <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-                  </svg>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                  disabled={safePage >= totalPages}
-                  className="flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--surface-border)] bg-transparent text-[var(--foreground)] hover:bg-[var(--foreground)]/5 disabled:pointer-events-none disabled:opacity-40"
-                  aria-label="Next page"
-                >
-                  <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                  </svg>
-                </button>
-              </div>
-            </div>
-          )}
-          </>
-        )}
+        ) : null}
       </SignedIn>
     </div>
   );
