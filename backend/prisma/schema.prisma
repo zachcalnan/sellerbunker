@@ -25,6 +25,7 @@ model User {
   affiliateCommissions    AffiliateCommission[]
   inventoryByMarketplace InventoryByMarketplace[]
   inventory      Inventory[]
+  inventoryAvailabilityDays InventoryAvailabilityDay[]
   orderItems     OrderItem[]
   orders         Order[]
   orgMemberships OrganizationMembership[]
@@ -273,6 +274,7 @@ model Product {
   updatedAt                  DateTime    @updatedAt @map("updated_at")
   inventory   Inventory?
   inventoryByMarketplace InventoryByMarketplace[]
+  inventoryAvailabilityDays InventoryAvailabilityDay[]
   orderItems  OrderItem[]
   orders      Order[]
   repricerSelectedSkus RepricerSelectedSku[]
@@ -432,6 +434,26 @@ model InventoryByMarketplace {
   @@unique([productId, marketplaceId])
   @@index([userId])
   @@map("inventory_by_marketplace")
+}
+
+/// One row per product per UTC calendar day: Amazon fulfillable qty as of that day's inventory sync.
+/// Used for smart replenish demand = unitsSold / days(availableQty > 0).
+model InventoryAvailabilityDay {
+  id           String   @id @default(uuid())
+  userId       String   @map("user_id")
+  productId    String   @map("product_id")
+  day          DateTime @map("day") @db.Date
+  availableQty Int      @map("available_qty")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([productId, day])
+  @@index([userId, day])
+  @@index([productId, day])
+  @@map("inventory_availability_days")
 }
 
 

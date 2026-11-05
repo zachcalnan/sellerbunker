@@ -1,41 +1,47 @@
 import {
-  estimateInStockDaysForVelocity,
-  inclusiveUtcDaySpan,
+  avgDailyUnitsInStock,
+  resolveInStockDaysForVelocity,
 } from './replenish-velocity.util';
 
 describe('replenish-velocity.util', () => {
-  const windowStart = new Date('2026-05-01T00:00:00.000Z');
-  const now = new Date('2026-05-30T12:00:00.000Z');
-
-  it('uses in-stock span not full calendar window when sales cluster at end', () => {
-    const orderDates = Array.from({ length: 10 }, (_, i) =>
-      new Date(Date.UTC(2026, 4, 21 + i, 15, 0, 0)),
-    );
-    const inStockDays = estimateInStockDaysForVelocity({
-      unitsSold: 20,
-      orderDates,
+  it('uses observed Amazon available days when coverage is enough', () => {
+    // 1 unit sold over 5 days available → 0.2/day
+    const inStockDays = resolveInStockDaysForVelocity({
       windowDays: 30,
-      windowStart,
-      effectiveStock: 5,
-      now,
+      observedDays: 30,
+      observedInStockDays: 5,
     });
-    expect(inStockDays).toBe(10);
-    expect(20 / inStockDays).toBe(2);
+    expect(inStockDays).toBe(5);
+    expect(avgDailyUnitsInStock(1, inStockDays, 0)).toBeCloseTo(0.2);
   });
 
-  it('uses first-to-last sale span when currently out of stock', () => {
-    const orderDates = [
-      new Date('2026-05-05T10:00:00.000Z'),
-      new Date('2026-05-25T10:00:00.000Z'),
-    ];
-    const inStockDays = estimateInStockDaysForVelocity({
-      unitsSold: 6,
-      orderDates,
+  it('falls back to full window when snapshot history is thin', () => {
+    const inStockDays = resolveInStockDaysForVelocity({
       windowDays: 30,
-      windowStart,
-      effectiveStock: 0,
-      now,
+      observedDays: 2,
+      observedInStockDays: 1,
     });
-    expect(inStockDays).toBe(inclusiveUtcDaySpan(orderDates[0]!, orderDates[1]!));
+    expect(inStockDays).toBe(30);
+    expect(avgDailyUnitsInStock(1, inStockDays, 0)).toBeCloseTo(1 / 30);
+  });
+
+  it('falls back to full window when no snapshots', () => {
+    expect(
+      resolveInStockDaysForVelocity({
+        windowDays: 30,
+        observedDays: null,
+        observedInStockDays: null,
+      }),
+    ).toBe(30);
+  });
+
+  it('does not inflate a single sale to 1 unit/day without availability history', () => {
+    // Old sale-span heuristic would have returned 1 day → demand 1/day.
+    const inStockDays = resolveInStockDaysForVelocity({
+      windowDays: 30,
+      observedDays: null,
+      observedInStockDays: null,
+    });
+    expect(avgDailyUnitsInStock(1, inStockDays, 0)).toBeCloseTo(1 / 30);
   });
 });

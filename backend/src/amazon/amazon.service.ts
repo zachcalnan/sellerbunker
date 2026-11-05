@@ -44,7 +44,8 @@ import {
 import { eligibilityFromListingsRestrictionsBody } from './asin-selling-eligibility.util';
 import {
   avgDailyUnitsInStock,
-  estimateInStockDaysForVelocity,
+  resolveInStockDaysForVelocity,
+  utcDayDate,
 } from './replenish-velocity.util';
 import {
   correctStaleStoredLineRevenue,
@@ -6819,6 +6820,16 @@ export class AmazonService {
       });
     }
 
+    // Ensure today's Amazon availability is recorded from current inventory, then
+    // load historical days so demand = unitsSold / days(availableQty > 0).
+    await this.recordInventoryAvailabilityDaysFromCurrentStock(userIds);
+    const availabilityByAsin = await this.loadAsinAvailabilityDays({
+      userIds,
+      asins,
+      sinceLong,
+      sinceShort,
+    });
+
     const out: Array<any> = [];
     for (const asin of asins) {
       const prod = productByAsin.get(asin);
@@ -6843,21 +6854,21 @@ export class AmazonService {
       const inboundQty = inboundStages > 0 ? inboundStages : inv.inboundStored;
       const effectiveStock = Math.max(0, inv.fulfillable + inboundQty);
 
-      const inStockDaysShort = estimateInStockDaysForVelocity({
-        unitsSold: unitsVShort,
-        orderDates: vel.short.dates,
+      const avail = availabilityByAsin.get(asin) ?? {
+        observedDaysShort: 0,
+        inStockDaysShort: 0,
+        observedDaysLong: 0,
+        inStockDaysLong: 0,
+      };
+      const inStockDaysShort = resolveInStockDaysForVelocity({
         windowDays: velocityShortDays,
-        windowStart: sinceShort,
-        effectiveStock,
-        now,
+        observedDays: avail.observedDaysShort,
+        observedInStockDays: avail.inStockDaysShort,
       });
-      const inStockDaysLong = estimateInStockDaysForVelocity({
-        unitsSold: unitsVLong,
-        orderDates: vel.long.dates,
+      const inStockDaysLong = resolveInStockDaysForVelocity({
         windowDays: velocityLongDays,
-        windowStart: sinceLong,
-        effectiveStock,
-        now,
+        observedDays: avail.observedDaysLong,
+        observedInStockDays: avail.inStockDaysLong,
       });
       const avgDailyShort = avgDailyUnitsInStock(
         unitsVShort,
@@ -6975,8 +6986,13 @@ export class AmazonService {
       const score = baseScore * expectedProfitMultiplier;
 
       const rationaleParts: string[] = [];
+      const availSource =
+        avail.observedDaysShort >= Math.min(7, velocityShortDays) &&
+        avail.inStockDaysShort > 0
+          ? 'amazon-available'
+          : 'window-fallback';
       rationaleParts.push(
-        `demand=${(Math.round(avgDaily * 100) / 100).toFixed(2)}/day (in-stock days: ${inStockDaysShort}/${velocityShortDays})`,
+        `demand=${(Math.round(avgDaily * 100) / 100).toFixed(2)}/day (${availSource} days: ${inStockDaysShort}/${velocityShortDays})`,
       );
       rationaleParts.push(
         `stock=${effectiveStock} (target ${targetStockRounded})`,
@@ -12695,6 +12711,137 @@ export class AmazonService {
   }
 
   /**
+   * Upsert today's UTC inventory availability snapshot from current Inventory rows.
+   * One observation per product/day — used for replenish demand = units / available days.
+   */
+  private async recordInventoryAvailabilityDaysFromCurrentStock(
+    userIds: string[],
+  ): Promise<void> {
+    if (!userIds.length) return;
+    const day = utcDayDate(new Date());
+    const rows = await this.prisma.inventory.findMany({
+      where: { userId: { in: userIds } },
+      select: { userId: true, productId: true, availableQty: true },
+    });
+    if (!rows.length) return;
+
+    const chunkSize = 100;
+    for (let i = 0; i < rows.length; i += chunkSize) {
+      const chunk = rows.slice(i, i + chunkSize);
+      await Promise.all(
+        chunk.map((r) =>
+          (this.prisma as any).inventoryAvailabilityDay.upsert({
+            where: {
+              productId_day: { productId: r.productId, day },
+            },
+            create: {
+              userId: r.userId,
+              productId: r.productId,
+              day,
+              availableQty: Math.max(0, Number(r.availableQty ?? 0)),
+            },
+            update: {
+              userId: r.userId,
+              availableQty: Math.max(0, Number(r.availableQty ?? 0)),
+            },
+          }),
+        ),
+      );
+    }
+  }
+
+  /**
+   * Per-ASIN count of observed snapshot days and days with fulfillable > 0
+   * inside the short (≤30d default) and long velocity windows.
+   */
+  private async loadAsinAvailabilityDays(opts: {
+    userIds: string[];
+    asins: string[];
+    sinceLong: Date;
+    sinceShort: Date;
+  }): Promise<
+    Map<
+      string,
+      {
+        observedDaysShort: number;
+        inStockDaysShort: number;
+        observedDaysLong: number;
+        inStockDaysLong: number;
+      }
+    >
+  > {
+    const out = new Map<
+      string,
+      {
+        observedDaysShort: number;
+        inStockDaysShort: number;
+        observedDaysLong: number;
+        inStockDaysLong: number;
+      }
+    >();
+    if (!opts.userIds.length || !opts.asins.length) return out;
+
+    const sinceLongDay = utcDayDate(opts.sinceLong);
+    const sinceShortDay = utcDayDate(opts.sinceShort);
+
+    const rows = await (this.prisma as any).inventoryAvailabilityDay.findMany({
+      where: {
+        userId: { in: opts.userIds },
+        day: { gte: sinceLongDay },
+        product: { asin: { in: opts.asins } },
+      },
+      select: {
+        day: true,
+        availableQty: true,
+        product: { select: { asin: true } },
+      },
+    });
+
+    type DayAgg = { maxAvail: number };
+    const byAsinDay = new Map<string, Map<string, DayAgg>>();
+    for (const r of rows ?? []) {
+      const asin = String(r?.product?.asin ?? '').trim();
+      if (!asin) continue;
+      const dayRaw = r.day instanceof Date ? r.day : new Date(r.day);
+      if (Number.isNaN(dayRaw.getTime())) continue;
+      const dayKey = dayRaw.toISOString().slice(0, 10);
+      let dayMap = byAsinDay.get(asin);
+      if (!dayMap) {
+        dayMap = new Map();
+        byAsinDay.set(asin, dayMap);
+      }
+      const avail = Math.max(0, Number(r.availableQty ?? 0));
+      const prev = dayMap.get(dayKey);
+      if (!prev || avail > prev.maxAvail) {
+        dayMap.set(dayKey, { maxAvail: avail });
+      }
+    }
+
+    for (const [asin, dayMap] of byAsinDay) {
+      let observedDaysShort = 0;
+      let inStockDaysShort = 0;
+      let observedDaysLong = 0;
+      let inStockDaysLong = 0;
+      for (const [dayKey, agg] of dayMap) {
+        const dayDate = new Date(`${dayKey}T00:00:00.000Z`);
+        observedDaysLong += 1;
+        if (agg.maxAvail > 0) inStockDaysLong += 1;
+        if (dayDate >= sinceShortDay) {
+          observedDaysShort += 1;
+          if (agg.maxAvail > 0) inStockDaysShort += 1;
+        }
+      }
+      out.set(asin, {
+        observedDaysShort,
+        inStockDaysShort,
+        observedDaysLong,
+        inStockDaysLong,
+      });
+    }
+    return out;
+  }
+
+  /**
    * Fetch FBA inventory summaries from SP-API and upsert Inventory rows
    * for products we already know about in this org (matched by SKU).
    * @param opts.maxPages - If set (e.g. 1), only fetch this many pages per marketplace. Used for initial sync to get a minimal set quickly.
@@ -13382,6 +13529,17 @@ try {
   this.logger.log(`[syncFbaInventory] wrote ${writtenCount} inventory row(s) for org ${orgId}`);
   if (writtenCount === 0) {
     this.logger.warn(`[syncFbaInventory] FBA API returned no inventory for this org – check credentials and that the seller has FBA inventory. Existing DB rows are not deleted.`);
+  }
+
+  try {
+    const snapUserIds = await this.getOrgAmazonAggregateUserIds(orgId);
+    await this.recordInventoryAvailabilityDaysFromCurrentStock(snapUserIds);
+  } catch (e) {
+    this.logger.warn(
+      `[syncFbaInventory] availability day snapshot failed for org ${orgId}: ${
+        e instanceof Error ? e.message : String(e)
+      }`,
+    );
   }
 
   await this.prisma.organization.update({
