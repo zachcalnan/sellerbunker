@@ -135,26 +135,6 @@ function ReplenishIcon({ className }: { className?: string }) {
   );
 }
 
-function FbmOrdersIcon({ className }: { className?: string }) {
-  return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className={className}
-      aria-hidden
-    >
-      <path d="M6 2L3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z" />
-      <line x1="3" y1="6" x2="21" y2="6" />
-      <path d="M16 10a4 4 0 0 1-8 0" />
-    </svg>
-  );
-}
-
 function RepricerIcon({ className }: { className?: string }) {
   return (
     <svg
@@ -576,15 +556,6 @@ export function MobileNav() {
                   <ReplenishIcon className="h-4 w-4 shrink-0" />
                   Replenish
                 </Link>
-
-                <div
-                  title="Coming soon"
-                  className="flex cursor-not-allowed items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium text-[var(--muted-foreground)] opacity-70 blur-[0.5px] transition-all hover:opacity-90 hover:blur-0"
-                  aria-disabled="true"
-                >
-                  <FbmOrdersIcon className="h-4 w-4 shrink-0" />
-                  FBM Orders
-                </div>
 
                 <Link
                   href={withImpersonateParam("/repricer", devImpersonate)}
