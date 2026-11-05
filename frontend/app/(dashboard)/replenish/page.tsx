@@ -1,7 +1,14 @@
 "use client";
 
 import { useAuth, SignedIn, SignedOut } from "@clerk/nextjs";
-import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import {
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
 import { useSearchParams } from "next/navigation";
 import { useDisplaySettings } from "@/contexts/display-settings-context";
 import { useMarketplace } from "@/contexts/marketplace-context";
@@ -49,7 +56,54 @@ type SmartReplenishRow = {
   rationale: string;
 };
 
-const SMART_PAGE_SIZE = 12;
+type SnoozeStatus = "replenished" | "unavailable";
+
+const SMART_PAGE_SIZE = 25;
+const URGENT_COVER_DAYS = 7;
+const MONEY = (n: number, currency: string) =>
+  new Intl.NumberFormat(undefined, { style: "currency", currency }).format(n);
+
+function isUrgent(row: SmartReplenishRow): boolean {
+  if ((row.effectiveStock ?? 0) <= 0) return true;
+  if (row.daysOfCover == null) return false;
+  return row.daysOfCover <= URGENT_COVER_DAYS;
+}
+
+function isGoodBuyNow(row: SmartReplenishRow): boolean {
+  // Sale / clearance buys that no longer clear targets at last cost.
+  if (
+    row.expectedProfitPerUnitAtLastBuy != null &&
+    Number.isFinite(row.expectedProfitPerUnitAtLastBuy)
+  ) {
+    return row.expectedProfitPerUnitAtLastBuy > 0;
+  }
+  // No last-buy cost: still allow if max target buy exists (unknown ≠ bad).
+  return true;
+}
+
+function FilterChip({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`rounded-lg border px-2.5 py-1.5 text-xs font-medium transition ${
+        active
+          ? "border-sb-accent bg-sb-accent/15 text-[var(--foreground)]"
+          : "border-[var(--surface-border)] bg-[var(--background)] text-[var(--muted-foreground)] hover:bg-[var(--foreground)]/5"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
 
 function ReplenishInner() {
   const baseUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
@@ -65,6 +119,12 @@ function ReplenishInner() {
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [smartPage, setSmartPage] = useState(1);
+  const [buyQtyByProductId, setBuyQtyByProductId] = useState<Record<string, number>>({});
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  const [filterUrgent, setFilterUrgent] = useState(false);
+  const [filterHasSupplier, setFilterHasSupplier] = useState(false);
+  const [filterGoodBuy, setFilterGoodBuy] = useState(true);
 
   const [smartTargetCoverDays, setSmartTargetCoverDays] = useState(45);
   const [smartTargetProfitPerUnit, setSmartTargetProfitPerUnit] = useState(1);
@@ -73,7 +133,7 @@ function ReplenishInner() {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [detailsItem, setDetailsItem] = useState<SmartReplenishRow | null>(null);
   const [smartStatusByProductId, setSmartStatusByProductId] = useState<
-    Record<string, { status: "replenished" | "unavailable"; untilMs: number } | undefined>
+    Record<string, { status: SnoozeStatus; untilMs: number } | undefined>
   >({});
   const [smartStatusLoaded, setSmartStatusLoaded] = useState(false);
 
@@ -108,7 +168,11 @@ function ReplenishInner() {
       setSmart(Array.isArray(smartData) ? smartData : []);
     } catch (e) {
       const message = e instanceof Error ? e.message : "Error";
-      setError(message === "Failed to fetch" ? "Could not reach the API. Ensure the backend is running." : message);
+      setError(
+        message === "Failed to fetch"
+          ? "Could not reach the API. Ensure the backend is running."
+          : message,
+      );
       setSmart([]);
     } finally {
       setLoading(false);
@@ -132,20 +196,9 @@ function ReplenishInner() {
     void load();
   }, [isSignedIn, load]);
 
-  const smartFiltered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return smart;
-    return smart.filter(
-      (r) =>
-        r.sku.toLowerCase().includes(q) ||
-        (r.asin ?? "").toLowerCase().includes(q) ||
-        (r.title ?? "").toLowerCase().includes(q)
-    );
-  }, [smart, query]);
-
   const smartNow = Date.now();
   const smartStatusActiveByProductId = useMemo(() => {
-    const out: Record<string, { status: "replenished" | "unavailable"; untilMs: number }> = {};
+    const out: Record<string, { status: SnoozeStatus; untilMs: number }> = {};
     for (const [productId, v] of Object.entries(smartStatusByProductId)) {
       if (!v) continue;
       if (v.untilMs > smartNow) out[productId] = v;
@@ -163,7 +216,7 @@ function ReplenishInner() {
     try {
       const parsed = JSON.parse(raw) as Record<
         string,
-        { status: "replenished" | "unavailable"; untilMs: number }
+        { status: SnoozeStatus; untilMs: number }
       >;
       if (!parsed || typeof parsed !== "object") return;
       setSmartStatusByProductId(parsed);
@@ -176,12 +229,39 @@ function ReplenishInner() {
   useEffect(() => {
     if (typeof window === "undefined") return;
     if (!smartStatusLoaded) return;
-    // Persist, but only active entries.
     window.localStorage.setItem(
       "sb.smartReplenishStatus.v1",
-      JSON.stringify(smartStatusActiveByProductId)
+      JSON.stringify(smartStatusActiveByProductId),
     );
   }, [smartStatusActiveByProductId, smartStatusLoaded]);
+
+  const snoozedCount = useMemo(
+    () => Object.keys(smartStatusActiveByProductId).length,
+    [smartStatusActiveByProductId],
+  );
+
+  const smartFiltered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return smart.filter((r) => {
+      // Ordered / Skip hide the row for 7 days.
+      if (smartStatusActiveByProductId[r.productId]) return false;
+      if (q) {
+        const hay = `${r.sku} ${r.asin ?? ""} ${r.title ?? ""}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      if (filterUrgent && !isUrgent(r)) return false;
+      if (filterHasSupplier && !(r.supplierLink || r.supplier)) return false;
+      if (filterGoodBuy && !isGoodBuyNow(r)) return false;
+      return true;
+    });
+  }, [
+    smart,
+    query,
+    smartStatusActiveByProductId,
+    filterUrgent,
+    filterHasSupplier,
+    filterGoodBuy,
+  ]);
 
   const smartTotalPages = Math.max(1, Math.ceil(smartFiltered.length / SMART_PAGE_SIZE));
   const smartSafePage = Math.min(smartPage, smartTotalPages);
@@ -189,14 +269,26 @@ function ReplenishInner() {
     () =>
       smartFiltered.slice(
         (smartSafePage - 1) * SMART_PAGE_SIZE,
-        smartSafePage * SMART_PAGE_SIZE
+        smartSafePage * SMART_PAGE_SIZE,
       ),
     [smartFiltered, smartSafePage],
   );
 
   useEffect(() => {
     setSmartPage(1);
-  }, [query]);
+  }, [query, filterUrgent, filterHasSupplier, filterGoodBuy]);
+
+  useEffect(() => {
+    setBuyQtyByProductId((prev) => {
+      const next = { ...prev };
+      for (const row of smart) {
+        if (next[row.productId] == null) {
+          next[row.productId] = Math.max(1, Math.round(row.suggestedBuyQty || 1));
+        }
+      }
+      return next;
+    });
+  }, [smart]);
 
   const { backgroundClass } = useDisplaySettings();
 
@@ -204,6 +296,31 @@ function ReplenishInner() {
     const n = Number(raw);
     if (!Number.isFinite(n)) return null;
     return Math.max(min, Math.min(max, n));
+  };
+
+  const snooze = (productId: string, status: SnoozeStatus) => {
+    const untilMs = Date.now() + SMART_SNOOZE_DAYS * 24 * 60 * 60 * 1000;
+    setSmartStatusByProductId((prev) => ({
+      ...prev,
+      [productId]: { status, untilMs },
+    }));
+  };
+
+  const copyQtyAndOpenSupplier = async (row: SmartReplenishRow) => {
+    const qty = buyQtyByProductId[row.productId] ?? row.suggestedBuyQty;
+    const clip = [String(qty), row.asin ?? row.sku, row.title ?? ""]
+      .filter(Boolean)
+      .join(" · ");
+    try {
+      await navigator.clipboard.writeText(clip);
+      setCopiedId(row.productId);
+      window.setTimeout(() => setCopiedId((id) => (id === row.productId ? null : id)), 1500);
+    } catch {
+      // ignore clipboard failures
+    }
+    if (row.supplierLink) {
+      window.open(row.supplierLink, "_blank", "noopener,noreferrer");
+    }
   };
 
   return (
@@ -223,350 +340,309 @@ function ReplenishInner() {
 
       <SignedIn>
         <div className="rounded-xl border border-[var(--surface-border)] bg-[var(--surface)] px-4 py-3">
-          <h1 className="text-xl font-semibold text-[var(--foreground)]">
-            Replenish
-          </h1>
-          <p className="mt-1 text-sm text-[var(--muted-foreground)]">
-            Smart restock suggestions from sales velocity, inbound stock, profit
-            and ROI. Use Log a purchase to add buys to COGS and your sheets.
-          </p>
-          <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0">
+              <h1 className="text-xl font-semibold text-[var(--foreground)]">Replenish</h1>
+              <p className="mt-1 text-sm text-[var(--muted-foreground)]">
+                Compact reorder queue — open supplier, buy, mark Ordered. Skip hides sale junk for{" "}
+                {SMART_SNOOZE_DAYS} days.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setTargetsOpen(true)}
+              className="rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-3 py-2 text-xs font-semibold text-[var(--foreground)] hover:bg-[var(--foreground)]/5"
+            >
+              Targets ({smartTargetCoverDays}d cover)
+            </button>
+          </div>
+
+          <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:flex-wrap">
             <input
               type="search"
-              placeholder="Search by SKU, ASIN or title…"
+              placeholder="Search SKU, ASIN or title…"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               className="max-w-md rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-sb-accent"
               aria-label="Search replenish list"
             />
+            <div className="flex flex-wrap gap-2">
+              <FilterChip active={filterUrgent} onClick={() => setFilterUrgent((v) => !v)}>
+                Urgent (≤{URGENT_COVER_DAYS}d / OOS)
+              </FilterChip>
+              <FilterChip
+                active={filterHasSupplier}
+                onClick={() => setFilterHasSupplier((v) => !v)}
+              >
+                Has supplier
+              </FilterChip>
+              <FilterChip active={filterGoodBuy} onClick={() => setFilterGoodBuy((v) => !v)}>
+                Hide bad buys
+              </FilterChip>
+            </div>
           </div>
+          {snoozedCount > 0 && (
+            <p className="mt-2 text-xs text-[var(--muted-foreground)]">
+              {snoozedCount} item{snoozedCount === 1 ? "" : "s"} hidden for {SMART_SNOOZE_DAYS}{" "}
+              days (Ordered / Skip).
+            </p>
+          )}
         </div>
 
         <PurchaseOrderIngestPanel onFinished={load} />
 
-        {!loading && smart.length > 0 && (
-          <div className="rounded-xl border border-[var(--surface-border)] bg-[var(--surface)] px-4 py-3">
-            <div className="flex flex-col items-start gap-3">
-              <div className="min-w-0">
-                <h2 className="text-sm font-semibold text-[var(--foreground)]">
-                  Smart replenishment
-                </h2>
-                <p className="mt-0.5 text-xs text-[var(--muted-foreground)]">
-                  Suggestions based on sales velocity, inbound pipeline, profit and ROI. Target cover:{" "}
-                  <span className="font-medium text-[var(--foreground)]">
-                    {smartTargetCoverDays}d
-                  </span>
-                </p>
-                <div className="mt-2">
-                  <button
-                    type="button"
-                    onClick={() => setTargetsOpen(true)}
-                    className="rounded-lg border border-white/40 bg-white/10 px-3 py-2 text-xs font-semibold text-[var(--foreground)] shadow-sm hover:bg-white/15 focus:outline-none focus:ring-2 focus:ring-sb-accent"
-                  >
+        {targetsOpen && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Smart replenishment targets"
+            onMouseDown={(e) => {
+              if (e.target === e.currentTarget) setTargetsOpen(false);
+            }}
+          >
+            <div className="w-full max-w-lg rounded-xl border border-[var(--surface-border)] bg-[var(--surface)] p-4 shadow-lg">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-sm font-semibold text-[var(--foreground)]">
                     Smart replenishment targets
-                  </button>
+                  </div>
+                  <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                    Adjust targets and suggestions update.
+                  </div>
                 </div>
+                <button
+                  type="button"
+                  onClick={() => setTargetsOpen(false)}
+                  className="flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--surface-border)] bg-[var(--background)] text-[var(--foreground)] hover:bg-[var(--foreground)]/5"
+                  aria-label="Close targets"
+                >
+                  <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M6 18L18 6M6 6l12 12"
+                    />
+                  </svg>
+                </button>
+              </div>
+
+              <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                <label className="flex flex-col gap-1">
+                  <span className="text-[11px] font-medium text-[var(--muted-foreground)]">
+                    Target cover (days)
+                  </span>
+                  <input
+                    inputMode="numeric"
+                    value={String(smartTargetCoverDays)}
+                    onChange={(e) => {
+                      const v = clampNum(e.target.value, { min: 7, max: 180 });
+                      if (v == null) return;
+                      setSmartTargetCoverDays(Math.round(v));
+                    }}
+                    className="h-9 rounded-lg border border-[var(--surface-border)] bg-white px-3 text-sm text-black focus:outline-none focus:ring-2 focus:ring-sb-accent dark:bg-white"
+                  />
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span className="text-[11px] font-medium text-[var(--muted-foreground)]">
+                    Target ROI (%)
+                  </span>
+                  <input
+                    inputMode="decimal"
+                    value={String(smartTargetRoiPct)}
+                    onChange={(e) => {
+                      const v = clampNum(e.target.value, { min: 0, max: 1000 });
+                      if (v == null) return;
+                      setSmartTargetRoiPct(Math.round(v * 100) / 100);
+                    }}
+                    className="h-9 rounded-lg border border-[var(--surface-border)] bg-white px-3 text-sm text-black focus:outline-none focus:ring-2 focus:ring-sb-accent dark:bg-white"
+                  />
+                </label>
+                <label className="flex flex-col gap-1 sm:col-span-2">
+                  <span className="text-[11px] font-medium text-[var(--muted-foreground)]">
+                    Target profit / unit
+                  </span>
+                  <input
+                    inputMode="decimal"
+                    value={String(smartTargetProfitPerUnit)}
+                    onChange={(e) => {
+                      const v = clampNum(e.target.value, { min: 0, max: 9999 });
+                      if (v == null) return;
+                      setSmartTargetProfitPerUnit(Math.round(v * 100) / 100);
+                    }}
+                    className="h-9 rounded-lg border border-[var(--surface-border)] bg-white px-3 text-sm text-black focus:outline-none focus:ring-2 focus:ring-sb-accent dark:bg-white"
+                  />
+                </label>
+              </div>
+
+              <div className="mt-4 flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => setTargetsOpen(false)}
+                  className="rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-3 py-2 text-xs font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/5"
+                >
+                  Done
+                </button>
               </div>
             </div>
+          </div>
+        )}
 
-            {targetsOpen && (
-              <div
-                className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
-                role="dialog"
-                aria-modal="true"
-                aria-label="Smart replenishment targets"
-                onMouseDown={(e) => {
-                  if (e.target === e.currentTarget) setTargetsOpen(false);
-                }}
-              >
-                <div className="w-full max-w-lg rounded-xl border border-[var(--surface-border)] bg-[var(--surface)] p-4 shadow-lg">
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <div className="text-sm font-semibold text-[var(--foreground)]">
-                        Smart replenishment targets
-                      </div>
-                      <div className="mt-1 text-xs text-[var(--muted-foreground)]">
-                        Adjust targets and the suggestions (and max buy targets) will update.
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setTargetsOpen(false)}
-                      className="flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--surface-border)] bg-[var(--background)] text-[var(--foreground)] hover:bg-[var(--foreground)]/5"
-                      aria-label="Close targets"
-                    >
-                      <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                      </svg>
-                    </button>
-                  </div>
+        {error && (
+          <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-2 text-sm text-red-600 dark:text-red-400">
+            {error}
+          </div>
+        )}
 
-                  <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                    <label className="flex flex-col gap-1">
-                      <span className="text-[11px] font-medium text-[var(--muted-foreground)]">
-                        Target cover (days)
-                      </span>
-                      <input
-                        inputMode="numeric"
-                        value={String(smartTargetCoverDays)}
-                        onChange={(e) => {
-                          const v = clampNum(e.target.value, { min: 7, max: 180 });
-                          if (v == null) return;
-                          setSmartTargetCoverDays(Math.round(v));
-                        }}
-                        className="h-9 rounded-lg border border-[var(--surface-border)] bg-white px-3 text-sm text-black focus:outline-none focus:ring-2 focus:ring-sb-accent dark:bg-white"
-                      />
-                    </label>
+        {loading ? (
+          <div className="py-6 text-center text-sm text-[var(--muted-foreground)]">Loading…</div>
+        ) : smart.length === 0 ? (
+          <div className="rounded-lg border border-[var(--surface-border)] bg-[var(--surface)] px-4 py-6 text-center text-sm text-[var(--muted-foreground)]">
+            No smart replenishment suggestions for your current targets.
+          </div>
+        ) : smartFiltered.length === 0 ? (
+          <div className="rounded-lg border border-[var(--surface-border)] bg-[var(--surface)] px-4 py-6 text-center text-sm text-[var(--muted-foreground)]">
+            Nothing left in this queue
+            {filterGoodBuy ? " (bad buys hidden)" : ""}
+            {snoozedCount > 0 ? ` — ${snoozedCount} snoozed` : ""}. Try clearing filters.
+          </div>
+        ) : (
+          <div className="overflow-hidden rounded-xl border border-[var(--surface-border)] bg-[var(--surface)]">
+            <div className="border-b border-[var(--surface-border)] px-4 py-2 text-xs text-[var(--muted-foreground)]">
+              {smartFiltered.length} to reorder
+              {filterGoodBuy ? " · hiding loss-making last buys" : ""}
+            </div>
 
-                    <label className="flex flex-col gap-1">
-                      <span className="text-[11px] font-medium text-[var(--muted-foreground)]">
-                        Target ROI (%)
-                      </span>
-                      <input
-                        inputMode="decimal"
-                        value={String(smartTargetRoiPct)}
-                        onChange={(e) => {
-                          const v = clampNum(e.target.value, { min: 0, max: 1000 });
-                          if (v == null) return;
-                          setSmartTargetRoiPct(Math.round(v * 100) / 100);
-                        }}
-                        className="h-9 rounded-lg border border-[var(--surface-border)] bg-white px-3 text-sm text-black focus:outline-none focus:ring-2 focus:ring-sb-accent dark:bg-white"
-                      />
-                    </label>
-
-                    <label className="flex flex-col gap-1 sm:col-span-2">
-                      <span className="text-[11px] font-medium text-[var(--muted-foreground)]">
-                        Target profit / unit
-                      </span>
-                      <input
-                        inputMode="decimal"
-                        value={String(smartTargetProfitPerUnit)}
-                        onChange={(e) => {
-                          const v = clampNum(e.target.value, { min: 0, max: 9999 });
-                          if (v == null) return;
-                          setSmartTargetProfitPerUnit(Math.round(v * 100) / 100);
-                        }}
-                        className="h-9 rounded-lg border border-[var(--surface-border)] bg-white px-3 text-sm text-black focus:outline-none focus:ring-2 focus:ring-sb-accent dark:bg-white"
-                      />
-                    </label>
-                  </div>
-
-                  <div className="mt-4 flex items-center justify-end gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setTargetsOpen(false)}
-                      className="rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-3 py-2 text-xs font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/5"
-                    >
-                      Done
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {smartPaginated.map((s, idx) => {
-                const active = smartStatusActiveByProductId[s.productId];
-                const isRepl = active?.status === "replenished";
-                const isUnav = active?.status === "unavailable";
-                const cardBorder = isRepl
-                  ? "border-emerald-500/70"
-                  : isUnav
-                    ? "border-red-500/70"
-                    : "border-[var(--surface-border)]";
-                const cardOpacity = active ? "opacity-50" : "opacity-100";
+            <ul className="divide-y divide-[var(--surface-border)]">
+              {smartPaginated.map((s) => {
+                const qty = buyQtyByProductId[s.productId] ?? s.suggestedBuyQty;
+                const urgent = isUrgent(s);
+                const badBuy = !isGoodBuyNow(s);
                 return (
-                <div
-                  key={s.productId}
-                  className={`flex cursor-pointer gap-3 rounded-lg border bg-[var(--background)] p-3 ${cardBorder} ${cardOpacity} hover:bg-[var(--foreground)]/5`}
-                  onClick={(e) => {
-                    const target = e.target as HTMLElement | null;
-                    if (target?.closest("button, a")) return;
-                    setDetailsItem(s);
-                    setDetailsOpen(true);
-                  }}
-                >
-                  <div className="flex h-12 w-12 items-center justify-center overflow-hidden rounded-md border border-[var(--surface-border)] bg-[var(--surface)]">
-                    {s.imageUrl ? (
-                      <img src={s.imageUrl} alt="" className="h-full w-full object-contain" />
-                    ) : (
-                      <span className="text-[10px] text-[var(--muted-foreground)]">No image</span>
-                    )}
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="line-clamp-1 text-xs font-medium text-[var(--foreground)]">
-                        {s.title ?? s.sku}
+                  <li
+                    key={s.productId}
+                    className="flex flex-col gap-2 px-3 py-2.5 hover:bg-[var(--foreground)]/[0.03] sm:flex-row sm:items-center sm:gap-3"
+                  >
+                    <button
+                      type="button"
+                      className="flex min-w-0 flex-1 items-center gap-3 text-left"
+                      onClick={() => {
+                        setDetailsItem(s);
+                        setDetailsOpen(true);
+                      }}
+                    >
+                      <div className="flex h-11 w-11 shrink-0 items-center justify-center overflow-hidden rounded-md border border-[var(--surface-border)] bg-[var(--background)]">
+                        {s.imageUrl ? (
+                          <img src={s.imageUrl} alt="" className="h-full w-full object-contain" />
+                        ) : (
+                          <span className="text-[9px] text-[var(--muted-foreground)]">—</span>
+                        )}
                       </div>
-                      <span className="shrink-0 rounded-md border border-[var(--surface-border)] bg-[var(--surface)] px-2 py-0.5 text-[10px] font-semibold text-[var(--muted-foreground)]">
-                        Rank #{(smartSafePage - 1) * SMART_PAGE_SIZE + idx + 1}
-                      </span>
-                    </div>
-                    {s.asin && (
-                      <div className="mt-0.5 text-[11px] text-[var(--muted-foreground)]">
-                        ASIN{" "}
-                        <span className="font-mono text-[var(--foreground)]">
-                          {s.asin}
-                        </span>
-                      </div>
-                    )}
-                    <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-[var(--muted-foreground)]">
-                      <span className="tabular-nums">
-                        Suggest{" "}
-                        <span className="font-semibold tabular-nums text-emerald-400">
-                          {s.suggestedBuyQty}
-                        </span>
-                      </span>
-                      <span className="tabular-nums">
-                        Stock{" "}
-                        <span className="text-[var(--foreground)]">
-                          {s.effectiveStock}
-                        </span>
-                        {" → "}
-                        <span className="text-[var(--foreground)]">
-                          {s.targetStockUnits ?? "—"}
-                        </span>
-                      </span>
-                      {s.daysOfCover != null && (
-                        <span className="tabular-nums">
-                          Current cover{" "}
-                          <span className="text-[var(--foreground)]">
-                            {s.daysOfCover}d
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                          <span className="line-clamp-1 text-sm font-medium text-[var(--foreground)]">
+                            {s.title ?? s.sku}
                           </span>
-                        </span>
-                      )}
-                      {s.roi != null && (
-                        <span className="tabular-nums">
-                          ROI{" "}
-                          <span className="text-[var(--foreground)]">
-                            {Math.round(s.roi * 100)}%
-                          </span>
-                        </span>
-                      )}
-                      {s.lastBuyUnitCostIncVat != null && (
-                        <span className="tabular-nums">
-                          Last buy{" "}
-                          <span className="text-[var(--foreground)]">
-                            {new Intl.NumberFormat(undefined, { style: "currency", currency: selectedCurrency }).format(s.lastBuyUnitCostIncVat)}
-                          </span>
-                        </span>
-                      )}
-                      {s.lastSold != null && Number.isFinite(s.lastSold) && (
-                        <span className="tabular-nums">
-                          Last sold{" "}
-                          <span className="text-[var(--foreground)]">
-                            {new Intl.NumberFormat(undefined, { style: "currency", currency: selectedCurrency }).format(s.lastSold)}
-                          </span>
-                        </span>
-                      )}
-                      {s.maxBuyPriceBreakEvenPerUnit != null && (
-                        <span className="tabular-nums">
-                          Max buy (break-even){" "}
-                          <span className="text-[var(--foreground)]">
-                            {new Intl.NumberFormat(undefined, { style: "currency", currency: selectedCurrency }).format(s.maxBuyPriceBreakEvenPerUnit)}
-                          </span>
-                        </span>
-                      )}
-                      {s.maxBuyPriceForTargetsPerUnit != null && (
-                        <span className="tabular-nums">
-                          Target buy ≤{" "}
-                          <span className="text-[var(--foreground)]">
-                            {new Intl.NumberFormat(undefined, { style: "currency", currency: selectedCurrency }).format(s.maxBuyPriceForTargetsPerUnit)}
-                          </span>
-                        </span>
-                      )}
-                    </div>
-                    {(s.supplier || s.expectedProfitTotalAtLastBuy != null) && (
-                      <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-[var(--muted-foreground)]">
-                        {s.supplier && (
-                          <span className="line-clamp-1">
-                            Supplier{" "}
+                          {urgent && (
+                            <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700 dark:text-amber-300">
+                              Urgent
+                            </span>
+                          )}
+                          {badBuy && (
+                            <span className="rounded bg-red-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-red-600 dark:text-red-400">
+                              Bad at last buy
+                            </span>
+                          )}
+                        </div>
+                        <div className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-[var(--muted-foreground)]">
+                          {s.asin && (
+                            <span className="font-mono text-[var(--foreground)]">{s.asin}</span>
+                          )}
+                          <span className="tabular-nums">
+                            Cover{" "}
                             <span className="text-[var(--foreground)]">
+                              {s.daysOfCover != null ? `${s.daysOfCover}d` : "—"}
+                            </span>
+                          </span>
+                          <span className="tabular-nums">
+                            Stock{" "}
+                            <span className="text-[var(--foreground)]">{s.effectiveStock}</span>
+                          </span>
+                          {s.maxBuyPriceForTargetsPerUnit != null && (
+                            <span className="tabular-nums">
+                              Max buy{" "}
+                              <span className="text-[var(--foreground)]">
+                                {MONEY(s.maxBuyPriceForTargetsPerUnit, selectedCurrency)}
+                              </span>
+                            </span>
+                          )}
+                          {s.supplier && (
+                            <span className="line-clamp-1">
                               {s.supplier}
                             </span>
-                          </span>
-                        )}
-                        {s.supplierLink && (
-                          <a
-                            href={s.supplierLink}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="text-[11px] font-medium text-sb-accent hover:underline"
-                          >
-                            Supplier link
-                          </a>
-                        )}
-                        {s.expectedProfitTotalAtLastBuy != null && (
-                          <span className="tabular-nums">
-                            Exp. profit{" "}
-                            <span className="text-[var(--foreground)]">
-                              {new Intl.NumberFormat(undefined, { style: "currency", currency: selectedCurrency }).format(s.expectedProfitTotalAtLastBuy)}
-                            </span>
-                          </span>
-                        )}
+                          )}
+                        </div>
                       </div>
-                    )}
-                    <div className="mt-2 flex items-center justify-between gap-3">
-                      <div className="min-w-0 flex-1 truncate text-[11px] text-[var(--muted-foreground)]">
-                        demand={(Math.round((s.avgDailyUnits ?? 0) * 100) / 100).toFixed(2)}/day • stock=
-                        {Math.max(0, Math.round((s.fulfillableQty ?? 0) + (s.inboundQty ?? 0)))} •
-                        {s.daysOfCover != null ? ` cover≈${Math.round(s.daysOfCover)}d` : ""}
-                      </div>
+                    </button>
 
-                      <div className="flex shrink-0 items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            const untilMs = Date.now() + SMART_SNOOZE_DAYS * 24 * 60 * 60 * 1000;
-                            setSmartStatusByProductId((prev) => {
-                              const curr = prev[s.productId];
-                              if (curr?.status === "replenished" && curr.untilMs > Date.now()) {
-                                const next = { ...prev };
-                                delete next[s.productId];
-                                return next;
-                              }
-                              return { ...prev, [s.productId]: { status: "replenished", untilMs } };
-                            });
+                    <div className="flex shrink-0 flex-wrap items-center gap-2 sm:justify-end">
+                      <label className="flex items-center gap-1.5 text-[11px] text-[var(--muted-foreground)]">
+                        Qty
+                        <input
+                          inputMode="numeric"
+                          value={String(qty)}
+                          onChange={(e) => {
+                            const v = clampNum(e.target.value, { min: 1, max: 5000 });
+                            if (v == null) return;
+                            setBuyQtyByProductId((prev) => ({
+                              ...prev,
+                              [s.productId]: Math.round(v),
+                            }));
                           }}
-                          className="rounded-md bg-emerald-500 px-2 py-1 text-[10px] font-semibold text-white hover:bg-emerald-600"
-                        >
-                          Replenished
-                        </button>
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            const untilMs = Date.now() + SMART_SNOOZE_DAYS * 24 * 60 * 60 * 1000;
-                            setSmartStatusByProductId((prev) => {
-                              const curr = prev[s.productId];
-                              if (curr?.status === "unavailable" && curr.untilMs > Date.now()) {
-                                const next = { ...prev };
-                                delete next[s.productId];
-                                return next;
-                              }
-                              return { ...prev, [s.productId]: { status: "unavailable", untilMs } };
-                            });
-                          }}
-                          className="rounded-md bg-red-500 px-2 py-1 text-[10px] font-semibold text-white hover:bg-red-600"
-                        >
-                          Unavailable
-                        </button>
-                        {active && (
-                          <span className="text-[10px] text-[var(--muted-foreground)]">
-                            Snoozed {SMART_SNOOZE_DAYS}d
-                          </span>
-                        )}
-                      </div>
+                          className="h-8 w-16 rounded-md border border-[var(--surface-border)] bg-[var(--background)] px-2 text-sm tabular-nums text-[var(--foreground)] focus:outline-none focus:ring-2 focus:ring-sb-accent"
+                          aria-label={`Buy quantity for ${s.sku}`}
+                        />
+                      </label>
+
+                      <button
+                        type="button"
+                        onClick={() => void copyQtyAndOpenSupplier(s)}
+                        disabled={!s.supplierLink}
+                        title={
+                          s.supplierLink
+                            ? "Copy qty + ASIN, open supplier"
+                            : "No supplier link saved"
+                        }
+                        className="rounded-md bg-sb-accent px-2.5 py-1.5 text-[11px] font-semibold text-black hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        {copiedId === s.productId ? "Copied" : "Buy"}
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => snooze(s.productId, "replenished")}
+                        className="rounded-md bg-emerald-500 px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-emerald-600"
+                      >
+                        Ordered
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => snooze(s.productId, "unavailable")}
+                        className="rounded-md border border-[var(--surface-border)] bg-[var(--background)] px-2.5 py-1.5 text-[11px] font-semibold text-[var(--foreground)] hover:bg-[var(--foreground)]/5"
+                        title={`Hide for ${SMART_SNOOZE_DAYS} days`}
+                      >
+                        Skip
+                      </button>
                     </div>
-                  </div>
-                </div>
+                  </li>
                 );
               })}
-            </div>
+            </ul>
 
             {smartTotalPages > 1 && (
-              <div className="mt-4 flex items-center justify-between gap-4 border-t border-[var(--surface-border)] pt-4">
+              <div className="flex items-center justify-between gap-4 border-t border-[var(--surface-border)] px-4 py-3">
                 <div className="text-sm text-[var(--muted-foreground)]">
                   Page {smartSafePage} of {smartTotalPages}
                   <span className="ml-2">
@@ -581,10 +657,15 @@ function ReplenishInner() {
                     onClick={() => setSmartPage((p) => Math.max(1, p - 1))}
                     disabled={smartSafePage <= 1}
                     className="flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--surface-border)] bg-transparent text-[var(--foreground)] hover:bg-[var(--foreground)]/5 disabled:pointer-events-none disabled:opacity-40"
-                    aria-label="Previous smart page"
+                    aria-label="Previous page"
                   >
                     <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M15 19l-7-7 7-7"
+                      />
                     </svg>
                   </button>
                   <button
@@ -592,241 +673,194 @@ function ReplenishInner() {
                     onClick={() => setSmartPage((p) => Math.min(smartTotalPages, p + 1))}
                     disabled={smartSafePage >= smartTotalPages}
                     className="flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--surface-border)] bg-transparent text-[var(--foreground)] hover:bg-[var(--foreground)]/5 disabled:pointer-events-none disabled:opacity-40"
-                    aria-label="Next smart page"
+                    aria-label="Next page"
                   >
                     <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M9 5l7 7-7 7"
+                      />
                     </svg>
                   </button>
                 </div>
               </div>
             )}
+          </div>
+        )}
 
-            {detailsOpen && detailsItem && (
-              <div
-                className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
-                role="dialog"
-                aria-modal="true"
-                aria-label="Smart replenishment details"
-                onMouseDown={(e) => {
-                  if (e.target === e.currentTarget) setDetailsOpen(false);
-                }}
-              >
-                <div className="w-full max-w-2xl rounded-xl border border-[var(--surface-border)] bg-[var(--surface)] p-4 shadow-lg">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="text-sm font-semibold text-[var(--foreground)]">
-                        {detailsItem.title ?? detailsItem.sku}
-                      </div>
-                      <div className="mt-1 text-xs text-[var(--muted-foreground)]">
-                        {detailsItem.asin ? (
-                          <>
-                            ASIN{" "}
-                            <span className="font-mono text-[var(--foreground)]">
-                              {detailsItem.asin}
-                            </span>
-                          </>
-                        ) : (
-                          <span className="font-mono">{detailsItem.sku}</span>
-                        )}
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setDetailsOpen(false)}
-                      className="flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--surface-border)] bg-[var(--background)] text-[var(--foreground)] hover:bg-[var(--foreground)]/5"
-                      aria-label="Close details"
-                    >
-                      <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                      </svg>
-                    </button>
+        {detailsOpen && detailsItem && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Smart replenishment details"
+            onMouseDown={(e) => {
+              if (e.target === e.currentTarget) setDetailsOpen(false);
+            }}
+          >
+            <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-[var(--surface-border)] bg-[var(--surface)] p-4 shadow-lg">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-sm font-semibold text-[var(--foreground)]">
+                    {detailsItem.title ?? detailsItem.sku}
                   </div>
-
-                  <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                    <div className="rounded-lg border border-[var(--surface-border)] bg-[var(--background)] p-3">
-                      <div className="text-[11px] font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
-                        Suggested restock
-                      </div>
-                      <div className="mt-1 text-sm text-[var(--foreground)]">
-                        Buy{" "}
-                        <span className="font-semibold tabular-nums text-emerald-400">
-                          {detailsItem.suggestedBuyQty}
-                        </span>{" "}
-                        units
-                      </div>
-                      <div className="mt-1 text-xs text-[var(--muted-foreground)]">
-                        Current stock{" "}
-                        <span className="tabular-nums text-[var(--foreground)]">
-                          {detailsItem.effectiveStock}
-                        </span>{" "}
-                        · Target stock{" "}
-                        <span className="tabular-nums text-[var(--foreground)]">
-                          {detailsItem.targetStockUnits ?? "—"}
+                  <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                    {detailsItem.asin ? (
+                      <>
+                        ASIN{" "}
+                        <span className="font-mono text-[var(--foreground)]">
+                          {detailsItem.asin}
                         </span>
-                      </div>
-                      <div className="mt-1 text-xs text-[var(--muted-foreground)]">
-                        Current cover{" "}
-                        <span className="tabular-nums text-[var(--foreground)]">
-                          {detailsItem.daysOfCover ?? "—"}d
-                        </span>{" "}
-                        · Target cover{" "}
-                        <span className="tabular-nums text-[var(--foreground)]">
-                          {smartTargetCoverDays}d
-                        </span>
-                      </div>
-                    </div>
-
-                    <div className="rounded-lg border border-[var(--surface-border)] bg-[var(--background)] p-3">
-                      <div className="text-[11px] font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
-                        Pricing caps
-                      </div>
-                      <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-[var(--muted-foreground)]">
-                        {detailsItem.maxBuyPriceBreakEvenPerUnit != null && (
-                          <span className="tabular-nums">
-                            Break-even{" "}
-                            <span className="text-[var(--foreground)]">
-                              {new Intl.NumberFormat(undefined, { style: "currency", currency: selectedCurrency }).format(detailsItem.maxBuyPriceBreakEvenPerUnit)}
-                            </span>
-                          </span>
-                        )}
-                        {detailsItem.maxBuyPriceForTargetsPerUnit != null && (
-                          <span className="tabular-nums">
-                            Targets{" "}
-                            <span className="text-[var(--foreground)]">
-                              {new Intl.NumberFormat(undefined, { style: "currency", currency: selectedCurrency }).format(detailsItem.maxBuyPriceForTargetsPerUnit)}
-                            </span>
-                          </span>
-                        )}
-                      </div>
-                      <div className="mt-1 text-xs text-[var(--muted-foreground)]">
-                        Targets: profit/unit{" "}
-                        <span className="tabular-nums text-[var(--foreground)]">
-                          {new Intl.NumberFormat(undefined, { style: "currency", currency: selectedCurrency }).format(smartTargetProfitPerUnit)}
-                        </span>{" "}
-                        · ROI{" "}
-                        <span className="tabular-nums text-[var(--foreground)]">
-                          {smartTargetRoiPct}%
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="mt-3 rounded-lg border border-[var(--surface-border)] bg-[var(--background)] p-3">
-                    <div className="text-[11px] font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
-                      Supplier
-                    </div>
-                    {detailsItem.supplier || detailsItem.supplierLink ? (
-                      <div className="mt-2 space-y-2">
-                        {detailsItem.supplier ? (
-                          <div className="text-sm text-[var(--foreground)]">
-                            {detailsItem.supplier}
-                          </div>
-                        ) : null}
-                        {detailsItem.supplierLink ? (
-                          <a
-                            href={detailsItem.supplierLink}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="inline-flex max-w-full items-center gap-1.5 break-all rounded-lg bg-sb-accent px-3 py-2 text-sm font-semibold text-black hover:opacity-90"
-                          >
-                            Open supplier link
-                            <span aria-hidden className="shrink-0 text-xs">
-                              ↗
-                            </span>
-                          </a>
-                        ) : (
-                          <p className="text-xs text-[var(--muted-foreground)]">
-                            No supplier URL on the latest purchase for this SKU.
-                          </p>
-                        )}
-                        {detailsItem.supplierLink ? (
-                          <p className="break-all text-[11px] text-[var(--muted-foreground)]">
-                            {detailsItem.supplierLink}
-                          </p>
-                        ) : null}
-                      </div>
+                      </>
                     ) : (
-                      <p className="mt-1 text-xs text-[var(--muted-foreground)]">
-                        No supplier saved for this SKU yet — log a purchase with
-                        a supplier link to see it here.
-                      </p>
-                    )}
-                  </div>
-
-                  <div className="mt-3 rounded-lg border border-[var(--surface-border)] bg-[var(--background)] p-3">
-                    <div className="text-[11px] font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
-                      COGS (latest ledger entry)
-                    </div>
-                    {detailsItem.latestCogsEntry ? (
-                      <div className="mt-1 text-xs text-[var(--muted-foreground)]">
-                        <div className="flex flex-wrap gap-x-3 gap-y-1">
-                          <span className="tabular-nums">
-                            Unit{" "}
-                            <span className="text-[var(--foreground)]">
-                              {new Intl.NumberFormat(undefined, { style: "currency", currency: selectedCurrency }).format(detailsItem.latestCogsEntry.unitCostIncVat)}
-                            </span>
-                          </span>
-                          <span className="tabular-nums">
-                            Delivery{" "}
-                            <span className="text-[var(--foreground)]">
-                              {new Intl.NumberFormat(undefined, { style: "currency", currency: selectedCurrency }).format(detailsItem.latestCogsEntry.deliveryCostIncVat)}
-                            </span>
-                          </span>
-                          <span className="tabular-nums">
-                            Prep{" "}
-                            <span className="text-[var(--foreground)]">
-                              {new Intl.NumberFormat(undefined, { style: "currency", currency: selectedCurrency }).format(detailsItem.latestCogsEntry.prepCostIncVat)}
-                            </span>
-                          </span>
-                          <span className="tabular-nums">
-                            Total{" "}
-                            <span className="text-[var(--foreground)]">
-                              {new Intl.NumberFormat(undefined, { style: "currency", currency: selectedCurrency }).format(detailsItem.latestCogsEntry.totalCostIncVat)}
-                            </span>
-                          </span>
-                        </div>
-                        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1">
-                          <span>Currency {detailsItem.latestCogsEntry.currency}</span>
-                          <span className="tabular-nums">VAT {detailsItem.latestCogsEntry.vatRatePct}%</span>
-                          <span className="tabular-nums">Bundle {detailsItem.latestCogsEntry.bundleSize}</span>
-                          <span className="tabular-nums">Qty purchased {detailsItem.latestCogsEntry.qtyPurchased}</span>
-                          <span className="tabular-nums">Qty delivered {detailsItem.latestCogsEntry.qtyDelivered}</span>
-                          <span>
-                            Date{" "}
-                            <span className="tabular-nums">
-                              {new Date(detailsItem.latestCogsEntry.purchaseDate).toLocaleDateString("en-GB")}
-                            </span>
-                          </span>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="mt-1 text-xs text-[var(--muted-foreground)]">
-                        No ledger entry found for this SKU.
-                      </div>
+                      <span className="font-mono">{detailsItem.sku}</span>
                     )}
                   </div>
                 </div>
+                <button
+                  type="button"
+                  onClick={() => setDetailsOpen(false)}
+                  className="flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--surface-border)] bg-[var(--background)] text-[var(--foreground)] hover:bg-[var(--foreground)]/5"
+                  aria-label="Close details"
+                >
+                  <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M6 18L18 6M6 6l12 12"
+                    />
+                  </svg>
+                </button>
               </div>
-            )}
+
+              <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                <div className="rounded-lg border border-[var(--surface-border)] bg-[var(--background)] p-3">
+                  <div className="text-[11px] font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
+                    Suggested restock
+                  </div>
+                  <div className="mt-1 text-sm text-[var(--foreground)]">
+                    Buy{" "}
+                    <span className="font-semibold tabular-nums text-emerald-400">
+                      {detailsItem.suggestedBuyQty}
+                    </span>{" "}
+                    units
+                  </div>
+                  <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                    Stock{" "}
+                    <span className="tabular-nums text-[var(--foreground)]">
+                      {detailsItem.effectiveStock}
+                    </span>{" "}
+                    → target{" "}
+                    <span className="tabular-nums text-[var(--foreground)]">
+                      {detailsItem.targetStockUnits ?? "—"}
+                    </span>
+                  </div>
+                  <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                    Cover{" "}
+                    <span className="tabular-nums text-[var(--foreground)]">
+                      {detailsItem.daysOfCover ?? "—"}d
+                    </span>{" "}
+                    · target {smartTargetCoverDays}d
+                  </div>
+                  <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                    {detailsItem.rationale}
+                  </div>
+                </div>
+
+                <div className="rounded-lg border border-[var(--surface-border)] bg-[var(--background)] p-3">
+                  <div className="text-[11px] font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
+                    Is this a good buy now?
+                  </div>
+                  <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                    Last buy{" "}
+                    <span className="tabular-nums text-[var(--foreground)]">
+                      {detailsItem.lastBuyUnitCostIncVat != null
+                        ? MONEY(detailsItem.lastBuyUnitCostIncVat, selectedCurrency)
+                        : "—"}
+                    </span>
+                  </div>
+                  <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                    Exp. profit / unit at last buy{" "}
+                    <span
+                      className={`tabular-nums ${
+                        (detailsItem.expectedProfitPerUnitAtLastBuy ?? 0) < 0
+                          ? "text-red-500"
+                          : "text-[var(--foreground)]"
+                      }`}
+                    >
+                      {detailsItem.expectedProfitPerUnitAtLastBuy != null
+                        ? MONEY(detailsItem.expectedProfitPerUnitAtLastBuy, selectedCurrency)
+                        : "—"}
+                    </span>
+                  </div>
+                  <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                    Max buy for targets{" "}
+                    <span className="tabular-nums text-[var(--foreground)]">
+                      {detailsItem.maxBuyPriceForTargetsPerUnit != null
+                        ? MONEY(detailsItem.maxBuyPriceForTargetsPerUnit, selectedCurrency)
+                        : "—"}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-3 rounded-lg border border-[var(--surface-border)] bg-[var(--background)] p-3">
+                <div className="text-[11px] font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
+                  Supplier
+                </div>
+                {detailsItem.supplier || detailsItem.supplierLink ? (
+                  <div className="mt-2 space-y-2">
+                    {detailsItem.supplier ? (
+                      <div className="text-sm text-[var(--foreground)]">{detailsItem.supplier}</div>
+                    ) : null}
+                    {detailsItem.supplierLink ? (
+                      <a
+                        href={detailsItem.supplierLink}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex rounded-lg bg-sb-accent px-3 py-2 text-sm font-semibold text-black hover:opacity-90"
+                      >
+                        Open supplier link
+                      </a>
+                    ) : (
+                      <p className="text-xs text-[var(--muted-foreground)]">No supplier URL saved.</p>
+                    )}
+                  </div>
+                ) : (
+                  <p className="mt-1 text-xs text-[var(--muted-foreground)]">
+                    No supplier saved — log a purchase with a supplier link.
+                  </p>
+                )}
+              </div>
+
+              <div className="mt-4 flex flex-wrap justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    snooze(detailsItem.productId, "unavailable");
+                    setDetailsOpen(false);
+                  }}
+                  className="rounded-md border border-[var(--surface-border)] bg-[var(--background)] px-3 py-2 text-xs font-semibold text-[var(--foreground)] hover:bg-[var(--foreground)]/5"
+                >
+                  Skip {SMART_SNOOZE_DAYS}d
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    snooze(detailsItem.productId, "replenished");
+                    setDetailsOpen(false);
+                  }}
+                  className="rounded-md bg-emerald-500 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-600"
+                >
+                  Ordered
+                </button>
+              </div>
+            </div>
           </div>
         )}
-
-        {error && (
-          <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-2 text-sm text-red-600 dark:text-red-400">
-            {error}
-          </div>
-        )}
-
-        {loading ? (
-          <div className="py-6 text-center text-sm text-[var(--muted-foreground)]">
-            Loading…
-          </div>
-        ) : smart.length === 0 ? (
-          <div className="rounded-lg border border-[var(--surface-border)] bg-[var(--surface)] px-4 py-6 text-center text-sm text-[var(--muted-foreground)]">
-            No smart replenishment suggestions for your current targets.
-          </div>
-        ) : null}
       </SignedIn>
     </div>
   );
@@ -836,9 +870,7 @@ export default function ReplenishPage() {
   return (
     <Suspense
       fallback={
-        <div className="w-full px-6 py-10 text-sm text-[var(--muted-foreground)]">
-          Loading…
-        </div>
+        <div className="w-full px-6 py-10 text-sm text-[var(--muted-foreground)]">Loading…</div>
       }
     >
       <ReplenishInner />
