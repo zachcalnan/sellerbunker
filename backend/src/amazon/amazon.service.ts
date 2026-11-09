@@ -6501,6 +6501,7 @@ export class AmazonService {
       maxBuyPriceForTargetsPerUnit: number | null;
       supplier: string | null;
       supplierLink: string | null;
+      latestPurchaseId: string | null;
       latestCogsEntry:
         | {
             purchaseDate: string;
@@ -6764,6 +6765,7 @@ export class AmazonService {
       },
       orderBy: [{ purchaseDate: 'desc' }, { updatedAt: 'desc' }],
       select: {
+        id: true,
         supplier: true,
         supplierLink: true,
         bundleSize: true,
@@ -6783,6 +6785,7 @@ export class AmazonService {
     const latestPurchaseByAsin = new Map<
       string,
       {
+        id: string;
         supplier: string | null;
         supplierLink: string | null;
         bundleSize: number;
@@ -6802,6 +6805,7 @@ export class AmazonService {
       if (!asin) continue;
       if (latestPurchaseByAsin.has(asin)) continue;
       latestPurchaseByAsin.set(asin, {
+        id: String(pr.id),
         supplier: pr.supplier ? String(pr.supplier) : null,
         supplierLink: pr.supplierLink ? String(pr.supplierLink) : null,
         bundleSize: Math.max(1, Number(pr.bundleSize ?? 1)),
@@ -7034,6 +7038,7 @@ export class AmazonService {
             : null,
         supplier: purchase?.supplier ?? null,
         supplierLink: purchase?.supplierLink ?? null,
+        latestPurchaseId: purchase?.id ?? null,
         latestCogsEntry: purchase
           ? {
               purchaseDate: purchase.purchaseDateIso,
@@ -16523,6 +16528,85 @@ try {
       deliveryCostIncVat: Number(created.deliveryCostIncVat ?? 0),
       prepCostIncVat: Number(created.prepCostIncVat ?? 0),
       totalCostIncVat: Number(created.totalCostIncVat ?? 0),
+    };
+  }
+
+  /**
+   * Attach / replace supplier URL on a product for Replenish Buy.
+   * Prefers updating the latest purchase; otherwise creates a zero-cost stub
+   * without syncing Product.costOfGoods.
+   */
+  async setProductSupplierLink(
+    orgId: string,
+    userId: string,
+    productId: string,
+    dto: { supplierLink: string; supplier?: string | null },
+  ): Promise<{
+    productId: string;
+    purchaseId: string;
+    supplier: string | null;
+    supplierLink: string;
+  }> {
+    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
+    const product = await this.prisma.product.findFirst({
+      where: { id: productId, userId: { in: userIds } },
+      select: { id: true },
+    });
+    if (!product) {
+      throw new NotFoundException('Product not found in org');
+    }
+
+    const supplierLink = dto.supplierLink.trim();
+    if (!supplierLink) {
+      throw new BadRequestException('supplierLink is required');
+    }
+    let supplier: string | null | undefined = dto.supplier;
+    if (supplier !== undefined) {
+      supplier = supplier?.trim() || null;
+    }
+
+    const latest = await (this.prisma as any).purchase.findFirst({
+      where: { productId, userId: { in: userIds } },
+      orderBy: [{ purchaseDate: 'desc' }, { updatedAt: 'desc' }],
+      select: { id: true, supplier: true, supplierLink: true },
+    });
+
+    if (latest?.id) {
+      const data: { supplierLink: string; supplier?: string | null } = {
+        supplierLink,
+      };
+      if (supplier !== undefined) data.supplier = supplier;
+      const updated = await (this.prisma as any).purchase.update({
+        where: { id: latest.id },
+        data,
+        select: { id: true, supplier: true, supplierLink: true },
+      });
+      return {
+        productId,
+        purchaseId: String(updated.id),
+        supplier: updated.supplier ? String(updated.supplier) : null,
+        supplierLink: String(updated.supplierLink ?? supplierLink),
+      };
+    }
+
+    const created = await this.createPurchase(orgId, userId, {
+      productId,
+      supplier: supplier ?? undefined,
+      supplierLink,
+      purchaseDate: new Date().toISOString(),
+      qtyPurchased: 0,
+      qtyDelivered: 0,
+      vatRatePct: 0,
+      unitCostIncVat: 0,
+      deliveryCostIncVat: 0,
+      prepCostIncVat: 0,
+      skipSyncProductCostOfGoods: true,
+    });
+    return {
+      productId,
+      purchaseId: String(created.id),
+      supplier: created.supplier ? String(created.supplier) : null,
+      supplierLink: String(created.supplierLink ?? supplierLink),
     };
   }
 

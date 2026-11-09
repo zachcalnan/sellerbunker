@@ -1117,6 +1117,37 @@ ping() {
   }
 
   /**
+   * Save / replace supplier link for a product (used from Replenish details).
+   * Updates the latest purchase row when one exists; otherwise creates a zero-cost
+   * ledger stub so the link is available for Buy without changing Product COGS.
+   *
+   * PATCH /api/amazon/products/:productId/supplier-link
+   * Body: { "supplierLink": "https://…", "supplier"?: "Name" }
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Patch('products/:productId/supplier-link')
+  async setProductSupplierLink(
+    @Req() req: { user: { orgId: string; userId: string } },
+    @Param('productId') productId: string,
+    @Body() body: { supplierLink?: string; supplier?: string },
+  ) {
+    const supplierLink = String(body?.supplierLink ?? '').trim();
+    if (!supplierLink) {
+      throw new BadRequestException('supplierLink is required');
+    }
+    return this.amazonService.setProductSupplierLink(
+      req.user.orgId,
+      req.user.userId,
+      productId,
+      {
+        supplierLink,
+        supplier:
+          body?.supplier != null ? String(body.supplier).trim() || null : undefined,
+      },
+    );
+  }
+
+  /**
    * Inventory (FBA): list current inventory snapshot for known products.
    *
    * Example: GET /api/amazon/inventory

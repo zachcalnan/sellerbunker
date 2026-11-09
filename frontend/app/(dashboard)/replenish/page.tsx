@@ -36,6 +36,7 @@ type SmartReplenishRow = {
   maxBuyPriceForTargetsPerUnit: number | null;
   supplier: string | null;
   supplierLink: string | null;
+  latestPurchaseId: string | null;
   latestCogsEntry:
     | {
         purchaseDate: string;
@@ -132,6 +133,10 @@ function ReplenishInner() {
   const [targetsOpen, setTargetsOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [detailsItem, setDetailsItem] = useState<SmartReplenishRow | null>(null);
+  const [newSupplierLink, setNewSupplierLink] = useState("");
+  const [newSupplierName, setNewSupplierName] = useState("");
+  const [savingSupplierLink, setSavingSupplierLink] = useState(false);
+  const [supplierLinkError, setSupplierLinkError] = useState<string | null>(null);
   const [smartStatusByProductId, setSmartStatusByProductId] = useState<
     Record<string, { status: SnoozeStatus; untilMs: number } | undefined>
   >({});
@@ -304,6 +309,71 @@ function ReplenishInner() {
       ...prev,
       [productId]: { status, untilMs },
     }));
+  };
+
+  const openDetails = (row: SmartReplenishRow) => {
+    setDetailsItem(row);
+    setNewSupplierLink("");
+    setNewSupplierName(row.supplier ?? "");
+    setSupplierLinkError(null);
+    setDetailsOpen(true);
+  };
+
+  const saveSupplierLink = async () => {
+    if (!detailsItem) return;
+    const link = newSupplierLink.trim();
+    if (!link) {
+      setSupplierLinkError("Paste a supplier URL");
+      return;
+    }
+    setSavingSupplierLink(true);
+    setSupplierLinkError(null);
+    try {
+      const token = await getToken({ template: "backend" });
+      const url = new URL(
+        `${baseUrl}/api/amazon/products/${encodeURIComponent(detailsItem.productId)}/supplier-link`,
+      );
+      if (devImpersonate) url.searchParams.set("impersonate", devImpersonate);
+      const res = await fetch(url.toString(), {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+          ...getDevImpersonationHeaders(devImpersonate),
+          ...(selectedMarketplaceId ? { "x-marketplace-id": selectedMarketplaceId } : {}),
+        },
+        credentials: "include",
+        body: JSON.stringify({
+          supplierLink: link,
+          supplier: newSupplierName.trim() || undefined,
+        }),
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || `Save failed (${res.status})`);
+      }
+      const saved = (await res.json()) as {
+        purchaseId: string;
+        supplier: string | null;
+        supplierLink: string;
+      };
+      const patch = {
+        supplier: saved.supplier ?? (newSupplierName.trim() || null),
+        supplierLink: saved.supplierLink,
+        latestPurchaseId: saved.purchaseId,
+      };
+      setSmart((prev) =>
+        prev.map((r) =>
+          r.productId === detailsItem.productId ? { ...r, ...patch } : r,
+        ),
+      );
+      setDetailsItem((prev) => (prev ? { ...prev, ...patch } : prev));
+      setNewSupplierLink("");
+    } catch (e) {
+      setSupplierLinkError(e instanceof Error ? e.message : "Could not save link");
+    } finally {
+      setSavingSupplierLink(false);
+    }
   };
 
   const copyQtyAndOpenSupplier = async (row: SmartReplenishRow) => {
@@ -527,10 +597,7 @@ function ReplenishInner() {
                     <button
                       type="button"
                       className="flex min-w-0 flex-1 items-center gap-3 text-left"
-                      onClick={() => {
-                        setDetailsItem(s);
-                        setDetailsOpen(true);
-                      }}
+                      onClick={() => openDetails(s)}
                     >
                       <div className="flex h-11 w-11 shrink-0 items-center justify-center overflow-hidden rounded-md border border-[var(--surface-border)] bg-[var(--background)]">
                         {s.imageUrl ? (
@@ -811,29 +878,70 @@ function ReplenishInner() {
                 <div className="text-[11px] font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
                   Supplier
                 </div>
-                {detailsItem.supplier || detailsItem.supplierLink ? (
-                  <div className="mt-2 space-y-2">
-                    {detailsItem.supplier ? (
-                      <div className="text-sm text-[var(--foreground)]">{detailsItem.supplier}</div>
-                    ) : null}
-                    {detailsItem.supplierLink ? (
-                      <a
-                        href={detailsItem.supplierLink}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="inline-flex rounded-lg bg-sb-accent px-3 py-2 text-sm font-semibold text-black hover:opacity-90"
+                <div className="mt-2 space-y-2">
+                  {detailsItem.supplier ? (
+                    <div className="text-sm text-[var(--foreground)]">{detailsItem.supplier}</div>
+                  ) : null}
+                  {detailsItem.supplierLink ? (
+                    <a
+                      href={detailsItem.supplierLink}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex rounded-lg bg-sb-accent px-3 py-2 text-sm font-semibold text-black hover:opacity-90"
+                    >
+                      Open supplier link
+                    </a>
+                  ) : (
+                    <p className="text-xs text-[var(--muted-foreground)]">
+                      No supplier link saved yet.
+                    </p>
+                  )}
+                </div>
+
+                <div className="mt-3 border-t border-[var(--surface-border)] pt-3">
+                  <div className="text-[11px] font-semibold text-[var(--foreground)]">
+                    Add new supplier link
+                  </div>
+                  <p className="mt-0.5 text-[11px] text-[var(--muted-foreground)]">
+                    Paste a product URL to replace the saved link for Buy.
+                  </p>
+                  <div className="mt-2 flex flex-col gap-2">
+                    <input
+                      type="url"
+                      placeholder="https://…"
+                      value={newSupplierLink}
+                      onChange={(e) => setNewSupplierLink(e.target.value)}
+                      className="h-9 w-full rounded-lg border border-[var(--surface-border)] bg-[var(--surface)] px-3 text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-sb-accent"
+                      aria-label="New supplier link"
+                    />
+                    <input
+                      type="text"
+                      placeholder="Supplier name (optional)"
+                      value={newSupplierName}
+                      onChange={(e) => setNewSupplierName(e.target.value)}
+                      className="h-9 w-full rounded-lg border border-[var(--surface-border)] bg-[var(--surface)] px-3 text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-sb-accent"
+                      aria-label="Supplier name"
+                    />
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void saveSupplierLink()}
+                        disabled={savingSupplierLink || !newSupplierLink.trim()}
+                        className="rounded-lg bg-sb-accent px-3 py-2 text-xs font-semibold text-black hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
                       >
-                        Open supplier link
-                      </a>
-                    ) : (
-                      <p className="text-xs text-[var(--muted-foreground)]">No supplier URL saved.</p>
+                        {savingSupplierLink ? "Saving…" : "Save link"}
+                      </button>
+                      {detailsItem.supplierLink && newSupplierLink.trim() && (
+                        <span className="text-[11px] text-[var(--muted-foreground)]">
+                          Replaces current link
+                        </span>
+                      )}
+                    </div>
+                    {supplierLinkError && (
+                      <p className="text-xs text-red-500">{supplierLinkError}</p>
                     )}
                   </div>
-                ) : (
-                  <p className="mt-1 text-xs text-[var(--muted-foreground)]">
-                    No supplier saved — log a purchase with a supplier link.
-                  </p>
-                )}
+                </div>
               </div>
 
               <div className="mt-4 flex flex-wrap justify-end gap-2">
