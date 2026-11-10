@@ -6525,7 +6525,7 @@ export class AmazonService {
     const marketplaceFilter = this.resolveMarketplaceFilter(opts.marketplaceId);
     const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
 
-    const take = Math.max(1, Math.min(200, Number(opts.take) || 20));
+    const take = Math.max(1, Math.min(2000, Number(opts.take) || 20));
     const velocityShortDays = Math.max(
       7,
       Math.min(180, Number(opts.velocityShortDays) || 30),
@@ -6909,7 +6909,8 @@ export class AmazonService {
 
       const passesProfit = avgProfitPerUnit >= minGrossProfitPerUnit;
       const passesRoi = roi == null ? true : roi >= minRoi;
-      if (!passesProfit || !passesRoi) continue;
+      // Keep covered / below-target SKUs in the list (searchable, ranked lower).
+      // Do not drop them just because buy qty is 0 or they miss profit/ROI gates.
 
       const targetStockUnits = avgDaily * (targetDaysOfCover + safetyDays);
       const targetStockRounded = Math.ceil(targetStockUnits);
@@ -6920,7 +6921,8 @@ export class AmazonService {
         buyQty = Math.ceil(rawBuy / casePack) * casePack;
         buyQty = Math.max(minOrderQty, Math.min(maxBuyUnits, Math.round(buyQty)));
       }
-      if (buyQty <= 0) continue;
+      const needsBuy = buyQty > 0;
+      const gatesOk = passesProfit && passesRoi;
 
       const coverScore = coverDays == null ? 0 : 1 / (1 + coverDays);
       const baseScore =
@@ -6987,7 +6989,12 @@ export class AmazonService {
             ? 0.0001
             : 1 + Math.min(2, expectedProfitPerUnitAtLastBuy / 5)
           : 1;
-      const score = baseScore * expectedProfitMultiplier;
+      // Needs-buy + gate-pass first; covered / below-gate ASINs stay searchable but sink.
+      const score =
+        baseScore *
+        expectedProfitMultiplier *
+        (needsBuy ? 1 : 1e-6) *
+        (gatesOk ? 1 : 1e-3);
 
       const rationaleParts: string[] = [];
       const availSource =
@@ -7002,6 +7009,8 @@ export class AmazonService {
         `stock=${effectiveStock} (target ${targetStockRounded})`,
       );
       if (coverDays != null) rationaleParts.push(`cover≈${Math.round(coverDays)}d`);
+      if (!needsBuy) rationaleParts.push('covered (no buy needed)');
+      if (!gatesOk) rationaleParts.push('below profit/ROI targets');
 
       out.push({
         productId: prod.id,
@@ -7066,7 +7075,12 @@ export class AmazonService {
       });
     }
 
-    out.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+    out.sort((a, b) => {
+      const aNeed = (a.suggestedBuyQty ?? 0) > 0 ? 1 : 0;
+      const bNeed = (b.suggestedBuyQty ?? 0) > 0 ? 1 : 0;
+      if (aNeed !== bNeed) return bNeed - aNeed;
+      return (b.score ?? 0) - (a.score ?? 0);
+    });
     return out.slice(0, take);
   }
 

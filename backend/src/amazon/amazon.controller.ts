@@ -993,7 +993,7 @@ ping() {
     const mp = Number(minProfitPerUnit ?? 0);
     const mr = Number(minRoi ?? 0);
     return this.amazonService.getSmartReplenishmentSuggestions(req.user.orgId, {
-      take: Number.isFinite(t) ? Math.max(1, Math.min(200, t)) : 20,
+      take: Number.isFinite(t) ? Math.max(1, Math.min(2000, t)) : 20,
       marketplaceId: req.user.marketplaceId,
       velocityShortDays: Number.isFinite(pd) ? Math.max(7, Math.min(180, pd)) : 30,
       targetDaysOfCover: Number.isFinite(cd) ? Math.max(7, Math.min(180, cd)) : 45,
@@ -1030,7 +1030,7 @@ ping() {
     const mp = Number(minProfitPerUnit ?? 0);
     const mr = Number(minRoi ?? 0);
     return this.amazonService.getSmartReplenishmentSuggestions(orgId, {
-      take: Number.isFinite(t) ? Math.max(1, Math.min(200, t)) : 20,
+      take: Number.isFinite(t) ? Math.max(1, Math.min(2000, t)) : 20,
       marketplaceId: marketplaceId?.trim() || undefined,
       velocityShortDays: Number.isFinite(pd) ? Math.max(7, Math.min(180, pd)) : 30,
       targetDaysOfCover: Number.isFinite(cd) ? Math.max(7, Math.min(180, cd)) : 45,

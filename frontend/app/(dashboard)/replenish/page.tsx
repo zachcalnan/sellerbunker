@@ -170,7 +170,7 @@ function ReplenishInner() {
     try {
       const token = await getToken({ template: "backend" });
       const smartUrl = new URL(`${baseUrl}/api/amazon/replenish/smart`);
-      smartUrl.searchParams.set("take", "200");
+      smartUrl.searchParams.set("take", "2000");
       smartUrl.searchParams.set("periodDays", String(SMART_PERIOD_DAYS));
       smartUrl.searchParams.set("targetCoverDays", String(smartTargetCoverDays));
       smartUrl.searchParams.set("minProfitPerUnit", String(smartTargetProfitPerUnit));
@@ -436,8 +436,8 @@ function ReplenishInner() {
             <div className="min-w-0">
               <h1 className="text-xl font-semibold text-[var(--foreground)]">Replenish</h1>
               <p className="mt-1 text-sm text-[var(--muted-foreground)]">
-                Compact reorder queue — open supplier, buy, mark Ordered. Skip hides sale junk for{" "}
-                {SMART_SNOOZE_DAYS} days.
+                Needs-buy first; covered / older ASINs stay on later pages — search finds them. Skip
+                hides for {SMART_SNOOZE_DAYS} days.
               </p>
             </div>
             <button
@@ -630,7 +630,9 @@ function ReplenishInner() {
         ) : (
           <div className="overflow-hidden rounded-xl border border-[var(--surface-border)] bg-[var(--surface)]">
             <div className="border-b border-[var(--surface-border)] px-4 py-2 text-xs text-[var(--muted-foreground)]">
-              {smartFiltered.length} to reorder
+              {smartFiltered.filter((r) => (r.suggestedBuyQty ?? 0) > 0).length} to reorder
+              {" · "}
+              {smartFiltered.length} shown (covered / older ASINs lower — search finds them)
               {filterGoodBuy ? " · hiding loss-making last buys" : ""}
             </div>
 
@@ -669,6 +671,11 @@ function ReplenishInner() {
                           {badBuy && (
                             <span className="rounded bg-red-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-red-600 dark:text-red-400">
                               Bad at last buy
+                            </span>
+                          )}
+                          {!urgent && (s.suggestedBuyQty ?? 0) <= 0 && (
+                            <span className="rounded bg-[var(--foreground)]/10 px-1.5 py-0.5 text-[10px] font-semibold text-[var(--muted-foreground)]">
+                              Covered
                             </span>
                           )}
                         </div>
