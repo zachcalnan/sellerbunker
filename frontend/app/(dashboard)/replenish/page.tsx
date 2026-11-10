@@ -678,12 +678,12 @@ function ReplenishInner() {
                         disabled={!s.supplierLink}
                         title={
                           s.supplierLink
-                            ? "Copy qty + ASIN, open supplier"
-                            : "No supplier link saved"
+                            ? "Copy qty + ASIN and open supplier link"
+                            : "No supplier link saved — add one in details"
                         }
-                        className="rounded-md bg-sb-accent px-2.5 py-1.5 text-[11px] font-semibold text-black hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+                        className="rounded-md bg-sky-500 px-2.5 py-1.5 text-[11px] font-bold text-white shadow-sm ring-1 ring-sky-300/50 hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-40"
                       >
-                        {copiedId === s.productId ? "Copied" : "Buy"}
+                        {copiedId === s.productId ? "Copied" : "Open supplier"}
                       </button>
 
                       <button
@@ -887,9 +887,10 @@ function ReplenishInner() {
                       href={detailsItem.supplierLink}
                       target="_blank"
                       rel="noreferrer"
-                      className="inline-flex rounded-lg bg-sb-accent px-3 py-2 text-sm font-semibold text-black hover:opacity-90"
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-sky-500 px-3 py-2.5 text-sm font-bold text-white shadow-sm ring-1 ring-sky-300/50 hover:bg-sky-400"
                     >
                       Open supplier link
+                      <span aria-hidden className="text-xs">↗</span>
                     </a>
                   ) : (
                     <p className="text-xs text-[var(--muted-foreground)]">
