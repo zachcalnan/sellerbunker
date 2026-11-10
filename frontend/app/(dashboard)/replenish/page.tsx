@@ -16,6 +16,7 @@ import { PurchaseOrderIngestPanel } from "@/components/purchase-order-ingest-pan
 import { DealCheckPanel } from "@/components/deal-check-panel";
 import { SignInButtonWithReturn } from "@/components/sign-in-button-with-return";
 import { getDevImpersonationHeaders } from "@/lib/impersonation";
+import { sellerAmpSasLookupUrl } from "@/lib/selleramp";
 
 type SmartReplenishRow = {
   productId: string;
@@ -858,6 +859,16 @@ function ReplenishInner() {
                         <span className="font-mono text-[var(--foreground)]">
                           {detailsItem.asin}
                         </span>
+                        <span className="mx-1.5">·</span>
+                        <a
+                          href={sellerAmpSasLookupUrl(detailsItem.asin)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="font-semibold text-sb-accent hover:underline"
+                          title="Open this ASIN in SellerAmp SAS"
+                        >
+                          SellerAmp
+                        </a>
                       </>
                     ) : (
                       <span className="font-mono">{detailsItem.sku}</span>
