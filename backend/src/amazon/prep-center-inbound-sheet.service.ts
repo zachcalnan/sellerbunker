@@ -299,6 +299,7 @@ export class PrepCenterInboundSheetService {
           quantity: qty,
           bundleOf: line.bundleOf,
           notes: input.notes?.trim() || 'SB bot',
+          addedToSc: line.addedToSc === true,
         }),
       );
       sheetRowNumbers.push(nextRow);

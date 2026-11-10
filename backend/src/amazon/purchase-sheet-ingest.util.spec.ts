@@ -33,7 +33,9 @@ describe('buildPurchaseSheetLinesFromIngest', () => {
         unitCostIncVat: 64.49,
         deliveryCostIncVat: 0,
         prepCostIncVat: undefined,
+        shipDestination: undefined,
         supplierLink: 'https://example.com/o/1',
+        notes: null,
       },
     ]);
   });

@@ -116,6 +116,19 @@ export class IngestSupplierOrderDto {
   @IsOptional()
   courierTracking?: string;
 
+  /** Free-text notes → CURRENT ORDERS Notes column. */
+  @IsString()
+  @IsOptional()
+  notes?: string;
+
+  /**
+   * When true (and shipDestination is PREP CENTER), also write `notes` onto
+   * the Blue30 Inbound Notes column. Purchase sheet always gets notes.
+   */
+  @IsBoolean()
+  @IsOptional()
+  copyNotesToPrepInbound?: boolean;
+
   @ValidateNested()
   @Type(() => SupplierOrderPromoDto)
   @IsOptional()

@@ -20,6 +20,8 @@ export type PurchaseSheetLineInput = {
   /** CURRENT ORDERS Home/Prep column: HOME | PREP CENTER */
   shipDestination?: 'HOME' | 'PREP CENTER' | string | null;
   supplierLink?: string | null;
+  /** Optional free-text note from Log a purchase. */
+  notes?: string | null;
 };
 
 export type AppendPurchaseOrderInput = {
@@ -27,6 +29,8 @@ export type AppendPurchaseOrderInput = {
   orderNumber: string;
   purchaseDate: string;
   courierTracking?: string | null;
+  /** Order-level notes applied to every CURRENT ORDERS row. */
+  notes?: string | null;
   lines: PurchaseSheetLineInput[];
 };
 
@@ -331,7 +335,10 @@ export class PurchaseSheetOrderWriteService {
         line.shipDestination,
       );
 
+      const userNotes =
+        line.notes?.trim() || input.notes?.trim() || '';
       const notes = [
+        userNotes || null,
         line.supplierLink?.trim() ? `Link: ${line.supplierLink.trim()}` : null,
         prep > 0 ? `Prep £${prep.toFixed(2)}` : null,
         'SB bot',

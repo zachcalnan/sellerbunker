@@ -17510,6 +17510,8 @@ try {
       sku?: string;
       productTitle?: string | null;
       unitCostIncVat?: number;
+      /** Matched an existing catalog listing before create-if-missing. */
+      alreadyOnAmazon?: boolean;
     }>;
   }> {
     const supplier = dto.supplier.trim();
@@ -17541,6 +17543,7 @@ try {
       sku?: string;
       productTitle?: string | null;
       unitCostIncVat?: number;
+      alreadyOnAmazon?: boolean;
     }> = [];
     let created = 0;
     let skipped = 0;
@@ -17605,6 +17608,9 @@ try {
           select: productSelect,
         });
       }
+
+      // Check catalog before create-if-missing — only then is "Added to SC" safe to tick.
+      const alreadyOnAmazon = product != null;
 
       if (!product && dto.createProductIfMissing && asin) {
         const ownerUserId = userIds.includes(actingUserId)
@@ -17736,6 +17742,7 @@ try {
           sku: skuNorm || undefined,
           productTitle: resolvedTitle,
           unitCostIncVat,
+          alreadyOnAmazon,
         });
       } catch (e: unknown) {
         const msg =

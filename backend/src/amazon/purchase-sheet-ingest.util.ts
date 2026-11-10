@@ -32,6 +32,7 @@ export type PurchaseSheetIngestLine = {
   prepCostIncVat?: number;
   shipDestination?: 'HOME' | 'PREP CENTER' | string | null;
   supplierLink?: string | null;
+  notes?: string | null;
 };
 
 /**
@@ -46,6 +47,7 @@ export function buildPurchaseSheetLinesFromIngest(opts: {
   promoType?: SupplierPromoType;
   supplierLink?: string | null;
   shipDestination?: 'HOME' | 'PREP CENTER' | string | null;
+  notes?: string | null;
 }): PurchaseSheetIngestLine[] {
   const promo: SupplierPromoType = opts.promoType ?? 'none';
   const out: PurchaseSheetIngestLine[] = [];
@@ -92,6 +94,7 @@ export function buildPurchaseSheetLinesFromIngest(opts: {
       prepCostIncVat: dtoLine?.prepCostIncVat,
       shipDestination: opts.shipDestination,
       supplierLink: opts.supplierLink,
+      notes: opts.notes?.trim() || null,
     });
   }
 

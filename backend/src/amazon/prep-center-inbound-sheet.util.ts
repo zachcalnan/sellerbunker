@@ -10,6 +10,8 @@ export type PrepInboundLineInput = {
   sku?: string | null;
   qty: number;
   bundleOf?: number | null;
+  /** Tick Blue30 "Added to SC" when the ASIN/SKU was already in the seller catalog. */
+  addedToSc?: boolean;
 };
 
 export type PrepInboundAppendInput = {
@@ -26,6 +28,8 @@ export type PrepInboundLedgerLine = {
   status: 'created' | 'skipped' | string;
   asin?: string;
   productTitle?: string | null;
+  /** True when product matched an existing Amazon listing before any create-if-missing. */
+  alreadyOnAmazon?: boolean;
 };
 
 export type PrepInboundDtoLine = {
@@ -74,6 +78,7 @@ export function buildPrepInboundLinesFromIngest(opts: {
       sku,
       qty,
       bundleOf: bundle,
+      addedToSc: ledgerLine.alreadyOnAmazon === true,
     });
   }
 
@@ -137,6 +142,8 @@ export function buildPrepInboundRowForHeader(
     quantity: number;
     bundleOf?: number | null;
     notes?: string;
+    /** When true, tick Blue30 "Added to SC" (listing already on Amazon). */
+    addedToSc?: boolean;
   },
   writableColumnLimit: number = PREP_INBOUND_WRITABLE_COLUMN_LIMIT,
 ): (string | number)[] {
@@ -183,6 +190,10 @@ export function buildPrepInboundRowForHeader(
     set(['Bundle Of', 'Bundle', 'Bundle Size'], data.bundleOf);
   }
   if (data.notes) set(['Notes', 'Note'], data.notes);
+  if (data.addedToSc) {
+    // Google Sheets checkbox columns accept TRUE.
+    set(['Added to SC', 'Added To SC', 'SC', 'Added to Seller Central'], 'TRUE');
+  }
   return row;
 }
 

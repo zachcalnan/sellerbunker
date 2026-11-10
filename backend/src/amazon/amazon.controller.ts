@@ -1510,12 +1510,14 @@ ping() {
       promoType: dto.promo?.type,
       supplierLink: dto.supplierLink,
       shipDestination: dto.shipDestination,
+      notes: dto.notes,
     });
     const sheetInput = {
       supplier: dto.supplier,
       orderNumber: dto.orderNumber,
       purchaseDate: dto.purchaseDate,
       courierTracking: dto.courierTracking,
+      notes: dto.notes,
       lines: sheetLines,
     };
     const sheet = await this.purchaseSheetOrderWrite.appendPurchaseOrder(
@@ -1523,12 +1525,17 @@ ping() {
     );
     const blue30Copy =
       await this.purchaseSheetOrderWrite.appendBlue30CopySheet(sheetInput);
+    const prepNotes =
+      dto.copyNotesToPrepInbound === true && dto.notes?.trim()
+        ? dto.notes.trim()
+        : undefined;
     const prepInbound = await this.prepCenterInboundSheet.appendIfPrepCenter({
       supplier: dto.supplier,
       orderNumber: dto.orderNumber,
       purchaseDate: dto.purchaseDate,
       courierTracking: dto.courierTracking,
       shipDestination: dto.shipDestination,
+      notes: prepNotes,
       lines: buildPrepInboundLinesFromIngest({
         ledgerLines: ledger.lines,
         dtoLines: dto.lines,
@@ -1563,12 +1570,14 @@ ping() {
       promoType: dto.promo?.type,
       supplierLink: dto.supplierLink,
       shipDestination: dto.shipDestination,
+      notes: dto.notes,
     });
     const sheetInput = {
       supplier: dto.supplier,
       orderNumber: dto.orderNumber,
       purchaseDate: dto.purchaseDate,
       courierTracking: dto.courierTracking,
+      notes: dto.notes,
       lines: sheetLines,
     };
     const sheet = await this.purchaseSheetOrderWrite.appendPurchaseOrder(
@@ -1576,12 +1585,17 @@ ping() {
     );
     const blue30Copy =
       await this.purchaseSheetOrderWrite.appendBlue30CopySheet(sheetInput);
+    const prepNotesApi =
+      dto.copyNotesToPrepInbound === true && dto.notes?.trim()
+        ? dto.notes.trim()
+        : undefined;
     const prepInbound = await this.prepCenterInboundSheet.appendIfPrepCenter({
       supplier: dto.supplier,
       orderNumber: dto.orderNumber,
       purchaseDate: dto.purchaseDate,
       courierTracking: dto.courierTracking,
       shipDestination: dto.shipDestination,
+      notes: prepNotesApi,
       lines: buildPrepInboundLinesFromIngest({
         ledgerLines: ledger.lines,
         dtoLines: dto.lines,

@@ -35,6 +35,10 @@ type ExtractDraft = {
   fulfilment: string;
   shipDestination?: "HOME" | "PREP CENTER";
   supplierLink?: string;
+  /** Free-text note → purchase sheet Notes. */
+  notes?: string;
+  /** When true, also write notes onto Blue30 Inbound (prep only). */
+  copyNotesToPrepInbound?: boolean;
   promo?: { type: "none" | "buy_3_get_1_free" };
   lines: ExtractLine[];
   warnings: string[];
@@ -171,6 +175,8 @@ function blankDraft(): ExtractDraft {
     vatRatePct: 0,
     fulfilment: "FBA",
     shipDestination: undefined,
+    notes: "",
+    copyNotesToPrepInbound: false,
     promo: { type: "none" },
     // Blank qty so manual entry can type 4 without fighting sticky 1.
     lines: [emptyLine({ qty: "" })],
@@ -380,6 +386,8 @@ export function CogsScreenshotIngest({
         });
         setDraft({
           ...res.draft,
+          notes: res.draft.notes ?? "",
+          copyNotesToPrepInbound: res.draft.copyNotesToPrepInbound ?? false,
           lines:
             res.draft.lines.length > 0
               ? res.draft.lines
@@ -464,6 +472,10 @@ export function CogsScreenshotIngest({
         fulfilment: draft.fulfilment || "FBA",
         shipDestination: draft.shipDestination,
         supplierLink: draft.supplierLink?.trim() || undefined,
+        notes: draft.notes?.trim() || undefined,
+        copyNotesToPrepInbound:
+          draft.shipDestination === "PREP CENTER" &&
+          draft.copyNotesToPrepInbound === true,
         promo: draft.promo?.type
           ? { type: draft.promo.type }
           : { type: "none" as const },
@@ -872,10 +884,46 @@ export function CogsScreenshotIngest({
                   </select>
                   <span className="text-[11px] text-[var(--muted-foreground)]">
                     PREP CENTER writes purchase sheet, BLUE30 COPY SHEET, and the
-                  Blue30 Inbound tab. HOME still updates purchase sheet + COPY
-                  SHEET.
+                    Blue30 Inbound tab. HOME still updates purchase sheet + COPY
+                    SHEET. If the ASIN/SKU is already on your Amazon catalog,
+                    Blue30 &quot;Added to SC&quot; is ticked automatically.
                   </span>
                 </label>
+
+                <label className="flex flex-col gap-0.5 text-xs text-[var(--muted-foreground)]">
+                  Notes
+                  <textarea
+                    value={draft.notes ?? ""}
+                    onChange={(e) =>
+                      setDraft((d) =>
+                        d ? { ...d, notes: e.target.value } : d,
+                      )
+                    }
+                    rows={2}
+                    placeholder="Optional — goes on the purchase sheet Notes column"
+                    className="rounded border border-[var(--surface-border)] bg-[var(--background)] px-2 py-1.5 text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)]"
+                  />
+                </label>
+
+                {draft.shipDestination === "PREP CENTER" ? (
+                  <label className="flex items-start gap-2 text-xs text-[var(--muted-foreground)]">
+                    <input
+                      type="checkbox"
+                      checked={draft.copyNotesToPrepInbound === true}
+                      onChange={(e) =>
+                        setDraft((d) =>
+                          d
+                            ? { ...d, copyNotesToPrepInbound: e.target.checked }
+                            : d,
+                        )
+                      }
+                      className="mt-0.5 h-3.5 w-3.5 rounded border-[var(--surface-border)]"
+                    />
+                    <span>
+                      Also copy notes to Blue30 prep (Inbound Notes column)
+                    </span>
+                  </label>
+                ) : null}
 
                 {draft.lines.map((line, idx) => (
                   <div

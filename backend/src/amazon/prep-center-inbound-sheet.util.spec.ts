@@ -53,6 +53,7 @@ describe('prep-center-inbound-sheet.util', () => {
         sku: 'OS1-BODY',
         qty: 4,
         bundleOf: 1,
+        addedToSc: false,
       },
       {
         asin: 'B07RM5DCYY',
@@ -60,6 +61,7 @@ describe('prep-center-inbound-sheet.util', () => {
         sku: 'OTA-10',
         qty: 10,
         bundleOf: null,
+        addedToSc: false,
       },
     ]);
   });
@@ -167,10 +169,60 @@ describe('prep-center-inbound-sheet.util', () => {
       asin: 'B08RYNPNXX',
       quantity: 4,
       notes: 'SB bot',
+      addedToSc: true,
     });
     expect(row).toHaveLength(12);
     expect(row[0]).toBe('8/5/2026');
     expect(row[5]).toBe('B08RYNPNXX');
+    expect(row[11]).toBe('TRUE'); // Added to SC — last writable col
+  });
+
+  it('does not tick Added to SC when listing was not already on Amazon', () => {
+    const header = [
+      'Date',
+      'Order Reference',
+      'Supplier',
+      'Amazon Product Name',
+      'ASIN',
+      'Quantity',
+      'Notes',
+      'Added to SC',
+    ];
+    const row = buildPrepInboundRowForHeader(header, {
+      date: '8/5/2026',
+      orderReference: '#R1',
+      supplier: 'Healf',
+      productName: 'OS-1',
+      asin: 'B08RYNPNXX',
+      quantity: 4,
+      addedToSc: false,
+    });
+    expect(row[7]).toBe('');
+  });
+
+  it('marks addedToSc from alreadyOnAmazon ledger flag', () => {
+    const lines = buildPrepInboundLinesFromIngest({
+      ledgerLines: [
+        {
+          lineIndex: 1,
+          status: 'created',
+          asin: 'B08RYNPNXX',
+          alreadyOnAmazon: true,
+        },
+        {
+          lineIndex: 2,
+          status: 'created',
+          asin: 'B07RM5DCFR',
+          alreadyOnAmazon: false,
+        },
+      ],
+      dtoLines: [
+        { asin: 'B08RYNPNXX', qty: 2 },
+        { asin: 'B07RM5DCFR', qty: 1 },
+      ],
+    });
+    expect(lines[0]?.addedToSc).toBe(true);
+    expect(lines[1]?.addedToSc).toBe(false);
   });
 
   it('finds next empty row after data, skipping spacer under header', () => {
