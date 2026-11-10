@@ -24,7 +24,7 @@ describe('buildPurchaseSheetRowForHeader', () => {
       units: 4,
       unitCost: 64.49,
       supplier: 'Healf',
-      notes: 'SB bot',
+      notes: 'Restock',
       homePrep: 'HOME',
     });
 
@@ -37,7 +37,7 @@ describe('buildPurchaseSheetRowForHeader', () => {
     expect(row[6]).toBe(64.49);
     expect(row[7]).toBe('No');
     expect(row[8]).toBe('Healf');
-    expect(row[9]).toBe('SB bot');
+    expect(row[9]).toBe('Restock');
     expect(row[10]).toBe('HOME');
   });
 

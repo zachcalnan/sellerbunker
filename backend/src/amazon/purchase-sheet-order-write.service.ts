@@ -341,7 +341,6 @@ export class PurchaseSheetOrderWriteService {
         userNotes || null,
         line.supplierLink?.trim() ? `Link: ${line.supplierLink.trim()}` : null,
         prep > 0 ? `Prep £${prep.toFixed(2)}` : null,
-        'SB bot',
       ]
         .filter(Boolean)
         .join(' | ');

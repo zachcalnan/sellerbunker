@@ -110,7 +110,7 @@ describe('prep-center-inbound-sheet.util', () => {
       sku: 'OS1-BODY',
       quantity: 4,
       bundleOf: 1,
-      notes: 'SB bot',
+      notes: 'Handle with care',
     });
     expect(row).toEqual([
       '8/5/2026',
@@ -122,7 +122,7 @@ describe('prep-center-inbound-sheet.util', () => {
       'OS1-BODY',
       4,
       1,
-      'SB bot',
+      'Handle with care',
     ]);
   });
 
@@ -168,7 +168,7 @@ describe('prep-center-inbound-sheet.util', () => {
       productName: 'OS-1',
       asin: 'B08RYNPNXX',
       quantity: 4,
-      notes: 'SB bot',
+      notes: 'Fragile',
       addedToSc: true,
     });
     expect(row).toHaveLength(12);

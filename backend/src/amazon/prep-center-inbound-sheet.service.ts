@@ -298,7 +298,7 @@ export class PrepCenterInboundSheetService {
           sku: line.sku?.trim() || undefined,
           quantity: qty,
           bundleOf: line.bundleOf,
-          notes: input.notes?.trim() || 'SB bot',
+          notes: input.notes?.trim() || undefined,
           addedToSc: line.addedToSc === true,
         }),
       );
