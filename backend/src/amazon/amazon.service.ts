@@ -17488,7 +17488,9 @@ try {
 
   /**
    * Ingest a retail supplier order (e.g. Healf) into the COGS ledger.
-   * Idempotent on (productId, orderNumber) per line. Computes 4-for-3 unit cost when promo is set.
+   * Always creates a new ledger row per line (no skip on existing orderNumber) so
+   * retries still land if a previous attempt only partially wrote sheets.
+   * Computes 4-for-3 unit cost when promo is set.
    */
   async ingestSupplierOrder(
     orgId: string,
@@ -17703,28 +17705,6 @@ try {
           lineIndex,
           asin: resolvedAsin,
           message: 'unitCostIncVat must be positive',
-        });
-        continue;
-      }
-
-      const existing = await (this.prisma as any).purchase.findFirst({
-        where: {
-          userId: product.userId,
-          productId: product.id,
-          orderNumber,
-        },
-        select: { id: true },
-      });
-      if (existing) {
-        skipped += 1;
-        lines.push({
-          lineIndex,
-          status: 'skipped',
-          purchaseId: existing.id,
-          asin: resolvedAsin,
-          sku: skuNorm || undefined,
-          productTitle: resolvedTitle,
-          unitCostIncVat,
         });
         continue;
       }

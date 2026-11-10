@@ -1489,7 +1489,7 @@ ping() {
 
   /**
    * Supplier order bot: ingest a retail purchase (e.g. Healf) into the COGS ledger.
-   * Idempotent per (ASIN/SKU, orderNumber). Computes 4-for-3 unit cost when promo is set.
+   * Always creates ledger rows (no duplicate skip). Computes 4-for-3 unit cost when promo is set.
    *
    * Example: POST /api/amazon/supplier-orders/ingest
    */

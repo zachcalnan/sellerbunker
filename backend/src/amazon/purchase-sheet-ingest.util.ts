@@ -37,9 +37,8 @@ export type PurchaseSheetIngestLine = {
 /**
  * Map supplier-order ingest ledger + DTO lines into purchase-sheet rows.
  *
- * Includes both `created` and `skipped` ledger lines so a retry can still
- * append to Google Sheets after the COGS ledger already exists (sheet has its
- * own Order Num + ASIN duplicate check).
+ * Includes both `created` and `skipped` ledger lines so sheet builders stay
+ * compatible with older ingest responses. Sheets always append (no duplicate skip).
  */
 export function buildPurchaseSheetLinesFromIngest(opts: {
   ledgerLines: IngestLedgerLineForSheet[];

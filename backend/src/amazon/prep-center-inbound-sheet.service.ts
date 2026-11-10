@@ -6,11 +6,9 @@ import { normalizeShipDestinationLabel } from './purchase-sheet-order-write.serv
 import {
   PREP_INBOUND_WRITABLE_COLUMN_LIMIT,
   buildPrepInboundRowForHeader,
-  collectPrepInboundExistingKeys,
   findPrepInboundHeaderRowIndex,
   findPrepInboundNextEmptyRow1Based,
   formatPrepInboundDate,
-  prepInboundDuplicateKey,
   type PrepInboundAppendInput,
 } from './prep-center-inbound-sheet.util';
 import { colIndexToA1 } from './purchase-sheet-cogs.util';
@@ -271,16 +269,11 @@ export class PrepCenterInboundSheetService {
       };
     }
 
-    const existingKeys = collectPrepInboundExistingKeys(
-      values,
-      headerRowIndex,
-      header,
-    );
     const dateStr = formatPrepInboundDate(input.purchaseDate);
     const orderRef = input.orderNumber.trim();
     const rowsToAppend: (string | number)[][] = [];
     const sheetRowNumbers: number[] = [];
-    let skippedDuplicate = 0;
+    const skippedDuplicate = 0;
     // INSERT_ROWS fails on Blue30 (protected check-in columns). Write into
     // the next empty intake row and only touch writable columns A–L.
     let nextRow = findPrepInboundNextEmptyRow1Based(
@@ -292,12 +285,6 @@ export class PrepCenterInboundSheetService {
     for (const line of input.lines) {
       const asin = line.asin.trim().toUpperCase();
       if (!asin) continue;
-      const key = prepInboundDuplicateKey(orderRef, asin);
-      if (existingKeys.has(key)) {
-        skippedDuplicate += 1;
-        continue;
-      }
-      existingKeys.add(key);
 
       const qty = Math.max(1, Math.floor(line.qty) || 1);
       rowsToAppend.push(

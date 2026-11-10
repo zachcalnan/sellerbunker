@@ -1,10 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { GoogleSheetsClient } from './google-sheets.client';
-import {
-  findAsinColumnIndex,
-  findHeaderColumnIndex,
-} from './purchase-sheet-cogs.util';
+import { findAsinColumnIndex } from './purchase-sheet-cogs.util';
 import { buildPurchaseSheetRowForHeader } from './purchase-sheet-row.util';
 import {
   buildBlue30CopyRowForHeader,
@@ -185,13 +182,6 @@ export class PurchaseSheetOrderWriteService {
 
     const header = (values[0] ?? []).map((h) => String(h ?? ''));
     const asinIdx = findAsinColumnIndex(header);
-    const orderIdx = findHeaderColumnIndex(header, [
-      'Order Reference',
-      'Order Ref',
-      'Order Num',
-      'Order Number',
-      'Order #',
-    ]);
     if (asinIdx < 0) {
       return {
         ok: false,
@@ -205,34 +195,16 @@ export class PurchaseSheetOrderWriteService {
       };
     }
 
-    const existingKeys = new Set<string>();
-    for (let r = 1; r < values.length; r++) {
-      const row = values[r] ?? [];
-      const asin = String(row[asinIdx] ?? '')
-        .trim()
-        .toUpperCase();
-      if (!asin) continue;
-      const orderNum =
-        orderIdx >= 0 ? String(row[orderIdx] ?? '').trim() : '';
-      existingKeys.add(`${orderNum}::${asin}`);
-    }
-
     const dateStr = formatBlue30CopyDate(input.purchaseDate);
     const orderRef = input.orderNumber.trim();
     const rowsToAppend: (string | number)[][] = [];
     const sheetRowNumbers: number[] = [];
-    let skippedDuplicate = 0;
+    const skippedDuplicate = 0;
     let nextRow = values.length + 1;
 
     for (const line of input.lines) {
       const asin = line.asin.trim().toUpperCase();
       if (!asin) continue;
-      const key = `${orderRef}::${asin}`;
-      if (existingKeys.has(key)) {
-        skippedDuplicate += 1;
-        continue;
-      }
-      existingKeys.add(key);
 
       const qty = Math.max(1, Math.floor(line.qty) || 1);
       rowsToAppend.push(
@@ -297,7 +269,7 @@ export class PurchaseSheetOrderWriteService {
 
   /**
    * Append purchase lines to CURRENT ORDERS on the shared Google Sheet.
-   * Skips rows when the same Order Num + ASIN already exists.
+   * Always appends (no Order Num + ASIN duplicate skip) so retries can catch misses.
    */
   async appendPurchaseOrder(
     input: AppendPurchaseOrderInput,
@@ -329,11 +301,6 @@ export class PurchaseSheetOrderWriteService {
 
     const header = (values[0] ?? []).map((h) => String(h ?? ''));
     const asinIdx = findAsinColumnIndex(header);
-    const orderIdx = findHeaderColumnIndex(header, [
-      'Order Num',
-      'Order Number',
-      'Order #',
-    ]);
     if (asinIdx < 0) {
       return {
         ok: false,
@@ -345,33 +312,15 @@ export class PurchaseSheetOrderWriteService {
       };
     }
 
-    const existingKeys = new Set<string>();
-    for (let r = 1; r < values.length; r++) {
-      const row = values[r] ?? [];
-      const asin = String(row[asinIdx] ?? '')
-        .trim()
-        .toUpperCase();
-      if (!asin) continue;
-      const orderNum =
-        orderIdx >= 0 ? String(row[orderIdx] ?? '').trim() : '';
-      existingKeys.add(`${orderNum}::${asin}`);
-    }
-
     const dateStr = this.formatSheetDate(input.purchaseDate);
     const rowsToAppend: (string | number)[][] = [];
     const sheetRowNumbers: number[] = [];
-    let skippedDuplicate = 0;
+    const skippedDuplicate = 0;
     let nextRow = values.length + 1;
 
     for (const line of input.lines) {
       const asin = line.asin.trim().toUpperCase();
       if (!asin) continue;
-      const key = `${input.orderNumber.trim()}::${asin}`;
-      if (existingKeys.has(key)) {
-        skippedDuplicate += 1;
-        continue;
-      }
-      existingKeys.add(key);
 
       const qty = Math.max(1, Math.floor(line.qty) || 1);
       const unit = Math.round((line.unitCostIncVat || 0) * 100) / 100;
