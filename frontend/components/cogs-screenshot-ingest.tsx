@@ -593,7 +593,6 @@ export function CogsScreenshotIngest({
                 <p className="mt-1 text-xs text-[var(--muted-foreground)]">
                   Fill supplier, order, qty and cost — or tick Search with AI
                   to read a screenshot. Updates COGS and your purchase sheets.
-                  PREP CENTER also adds lines to Blue30 Inbound.
                 </p>
               </div>
               <button
@@ -880,14 +879,8 @@ export function CogsScreenshotIngest({
                   >
                     <option value="">Select…</option>
                     <option value="HOME">HOME</option>
-                    <option value="PREP CENTER">PREP CENTER (also Blue30 Inbound)</option>
+                    <option value="PREP CENTER">PREP CENTER</option>
                   </select>
-                  <span className="text-[11px] text-[var(--muted-foreground)]">
-                    PREP CENTER writes purchase sheet, BLUE30 COPY SHEET, and the
-                    Blue30 Inbound tab. HOME still updates purchase sheet + COPY
-                    SHEET. If the ASIN/SKU is already on your Amazon catalog,
-                    Blue30 &quot;Added to SC&quot; is ticked automatically.
-                  </span>
                 </label>
 
                 <label className="flex flex-col gap-0.5 text-xs text-[var(--muted-foreground)]">
