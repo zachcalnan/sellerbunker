@@ -13,12 +13,17 @@ import {
 import type { Response } from 'express';
 import { ClerkAuthGuard } from '../auth/clerk-auth.guard';
 import { PushService } from './push.service';
+import { PushAlertService } from './push-alert.service';
+import { CreatePushAlertDto } from './dto/create-push-alert.dto';
 import { isAllowedPushImageUrl, toPushIconUrl, toSaleCardUrl } from './push-image.util';
 import { renderSalePushCard } from './sale-push-card.util';
 
 @Controller('push')
 export class PushController {
-  constructor(private readonly pushService: PushService) {}
+  constructor(
+    private readonly pushService: PushService,
+    private readonly pushAlerts: PushAlertService,
+  ) {}
 
   @Get('vapid-public-key')
   getVapidPublicKey() {
@@ -144,6 +149,24 @@ export class PushController {
     if (!endpoint) return { ok: false, error: 'Missing endpoint' };
     await this.pushService.removeSubscription(req.user.userId, endpoint);
     return { ok: true };
+  }
+
+  /**
+   * Schedule a reminder push (e.g. cancel free trial).
+   * Tap opens `url` when set. Requires push enabled on the device.
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Post('alerts')
+  async createAlert(
+    @Req() req: { user: { userId: string } },
+    @Body() body: CreatePushAlertDto,
+  ) {
+    return this.pushAlerts.createAlert(req.user.userId, {
+      fireAt: body.fireAt,
+      title: body.title,
+      body: body.body,
+      url: body.url,
+    });
   }
 
   /**

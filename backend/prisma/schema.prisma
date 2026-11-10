@@ -39,6 +39,7 @@ model User {
   activeOrg      Organization?            @relation("ActiveOrg", fields: [activeOrgId], references: [id])
   asinSellingEligibilities AsinSellingEligibility[]
   pushSubscriptions PushSubscription[]
+  pushAlerts        PushAlert[]
 
   @@map("users")
 }
@@ -196,6 +197,27 @@ model PushSubscription {
   @@index([userId])
   @@index([orgId])
   @@map("push_subscriptions")
+}
+
+/// Scheduled reminder push (e.g. cancel free trial). Fired via BullMQ delayed job.
+model PushAlert {
+  id        String    @id @default(uuid())
+  userId    String    @map("user_id")
+  fireAt    DateTime  @map("fire_at")
+  title     String
+  body      String
+  /// Absolute https URL opened when the notification is tapped (cancel page, etc.).
+  url       String?
+  status    String    @default("pending") // pending | sent | cancelled | failed
+  sentAt    DateTime? @map("sent_at")
+  jobId     String?   @map("job_id")
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status, fireAt])
+  @@index([status, fireAt])
+  @@map("push_alerts")
 }
 
 model OrganizationMembership {

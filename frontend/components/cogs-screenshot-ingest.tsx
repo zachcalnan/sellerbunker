@@ -1,8 +1,20 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useAuth } from "@clerk/nextjs";
 import { sellerAmpSasLookupUrl } from "@/lib/selleramp";
 import { coerceQty, sanitizeQtyDraft } from "@/lib/qty-input";
+import { getDevImpersonationHeaders } from "@/lib/impersonation";
+
+const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
+
+function defaultAlertLocalDatetime(daysAhead = 3): string {
+  const d = new Date();
+  d.setDate(d.getDate() + daysAhead);
+  d.setHours(9, 0, 0, 0);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
 
 type ListingCandidate = {
   asin: string;
@@ -298,6 +310,7 @@ export function CogsScreenshotIngest({
   variant = "button",
   triggerLabel = "From screenshot",
 }: Props) {
+  const { getToken } = useAuth();
   const isPage = variant === "page";
   const [open, setOpen] = useState(isPage);
   const [busy, setBusy] = useState(false);
@@ -314,6 +327,11 @@ export function CogsScreenshotIngest({
   const [localError, setLocalError] = useState<string | null>(null);
   const [result, setResult] = useState<IngestResult | null>(null);
   const [hint, setHint] = useState("");
+  const [alertEnabled, setAlertEnabled] = useState(false);
+  const [alertAtLocal, setAlertAtLocal] = useState(defaultAlertLocalDatetime);
+  const [alertNote, setAlertNote] = useState("Cancel membership / free trial");
+  const [alertUrl, setAlertUrl] = useState("");
+  const [alertStatus, setAlertStatus] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -340,6 +358,11 @@ export function CogsScreenshotIngest({
     setLocalError(null);
     setResult(null);
     setHint("");
+    setAlertEnabled(false);
+    setAlertAtLocal(defaultAlertLocalDatetime());
+    setAlertNote("Cancel membership / free trial");
+    setAlertUrl("");
+    setAlertStatus(null);
     if (inputRef.current) inputRef.current.value = "";
   }, [isPage]);
 
@@ -557,6 +580,51 @@ export function CogsScreenshotIngest({
           "COGS + purchase sheet updated, but no new Blue30 Inbound row was added (missing ASIN?).",
         );
       }
+      if (alertEnabled) {
+        try {
+          const token = await getToken({ template: "backend" });
+          if (!token) throw new Error("Not signed in for push alert");
+          const fireAt = new Date(alertAtLocal);
+          if (Number.isNaN(fireAt.getTime())) {
+            throw new Error("Invalid alert date/time");
+          }
+          const note = alertNote.trim() || "Reminder";
+          const link = alertUrl.trim() || draft.supplierLink?.trim() || "";
+          const alertRes = await fetch(`${API_BASE}/api/push/alerts`, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "Content-Type": "application/json",
+              ...getDevImpersonationHeaders(),
+            },
+            body: JSON.stringify({
+              fireAt: fireAt.toISOString(),
+              title: draft.supplier.trim()
+                ? `${draft.supplier.trim()} reminder`
+                : "Purchase reminder",
+              body: note,
+              ...(link ? { url: link } : {}),
+            }),
+          });
+          const alertJson = await alertRes.json().catch(() => ({}));
+          if (!alertRes.ok) {
+            const msg =
+              (alertJson as { message?: string | string[] })?.message ??
+              `Alert failed (${alertRes.status})`;
+            throw new Error(Array.isArray(msg) ? msg.join(", ") : String(msg));
+          }
+          setAlertStatus(
+            `Push alert set for ${fireAt.toLocaleString()} — tap opens the link (enable alerts in Settings if you haven’t).`,
+          );
+        } catch (alertErr) {
+          setAlertStatus(
+            alertErr instanceof Error
+              ? `Purchase saved, but alert failed: ${alertErr.message}`
+              : "Purchase saved, but alert failed.",
+          );
+        }
+      }
+
       if (r.ledger.created > 0 || r.ledger.skipped > 0) {
         await onFinished();
       }
@@ -917,6 +985,60 @@ export function CogsScreenshotIngest({
                     </span>
                   </label>
                 ) : null}
+
+                <div className="rounded-lg border border-[var(--surface-border)] bg-[var(--background)] p-3">
+                  <label className="flex items-start gap-2 text-xs font-medium text-[var(--foreground)]">
+                    <input
+                      type="checkbox"
+                      checked={alertEnabled}
+                      onChange={(e) => setAlertEnabled(e.target.checked)}
+                      className="mt-0.5 h-3.5 w-3.5 rounded border-[var(--surface-border)]"
+                    />
+                    <span>Add alert (phone push)</span>
+                  </label>
+                  {alertEnabled ? (
+                    <div className="mt-2 grid gap-2">
+                      <label className="flex flex-col gap-0.5 text-xs text-[var(--muted-foreground)]">
+                        When
+                        <input
+                          type="datetime-local"
+                          value={alertAtLocal}
+                          onChange={(e) => setAlertAtLocal(e.target.value)}
+                          className="rounded border border-[var(--surface-border)] bg-[var(--surface)] px-2 py-1.5 text-sm text-[var(--foreground)]"
+                        />
+                      </label>
+                      <label className="flex flex-col gap-0.5 text-xs text-[var(--muted-foreground)]">
+                        Note (shown on the push)
+                        <input
+                          type="text"
+                          value={alertNote}
+                          onChange={(e) => setAlertNote(e.target.value)}
+                          placeholder="Cancel membership / free trial"
+                          className="rounded border border-[var(--surface-border)] bg-[var(--surface)] px-2 py-1.5 text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)]"
+                        />
+                      </label>
+                      <label className="flex flex-col gap-0.5 text-xs text-[var(--muted-foreground)]">
+                        Open this link when tapped
+                        <input
+                          type="url"
+                          value={alertUrl}
+                          onChange={(e) => setAlertUrl(e.target.value)}
+                          placeholder="https://… account / cancel page"
+                          className="rounded border border-[var(--surface-border)] bg-[var(--surface)] px-2 py-1.5 text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)]"
+                        />
+                      </label>
+                      <p className="text-[10px] text-[var(--muted-foreground)]">
+                        Needs push enabled (Settings → Notifications). Defaults to
+                        ~3 days at 9:00.
+                      </p>
+                    </div>
+                  ) : null}
+                  {alertStatus ? (
+                    <p className="mt-2 text-[11px] text-[var(--muted-foreground)]">
+                      {alertStatus}
+                    </p>
+                  ) : null}
+                </div>
 
                 {draft.lines.map((line, idx) => (
                   <div

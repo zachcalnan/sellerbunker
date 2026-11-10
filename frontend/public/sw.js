@@ -1,4 +1,4 @@
-/* SellerBunker web push service worker — v10 (background sale alerts; no image prefetch) */
+/* SellerBunker web push service worker — v11 (external alert URLs open in new window) */
 self.addEventListener("install", (event) => {
   self.skipWaiting();
 });
@@ -105,19 +105,36 @@ self.addEventListener("push", (event) => {
 
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
-  const url =
+  const raw =
     (event.notification.data && event.notification.data.url) || "/orders";
+  const abs = absoluteUrl(raw) || raw;
+  let external = false;
+  try {
+    const u = new URL(abs, self.location.origin);
+    external = u.origin !== self.location.origin;
+  } catch (_) {}
+
   event.waitUntil(
-    self.clients
-      .matchAll({ type: "window", includeUncontrolled: true })
-      .then((clients) => {
-        for (const c of clients) {
-          if ("focus" in c) {
-            c.navigate(url);
-            return c.focus();
+    (async () => {
+      // Cancel-trial / supplier links: open the real site, don't navigate the PWA.
+      if (external && self.clients.openWindow) {
+        return self.clients.openWindow(abs);
+      }
+      const clients = await self.clients.matchAll({
+        type: "window",
+        includeUncontrolled: true,
+      });
+      for (const c of clients) {
+        if ("focus" in c) {
+          if (typeof c.navigate === "function") {
+            try {
+              await c.navigate(abs);
+            } catch (_) {}
           }
+          return c.focus();
         }
-        if (self.clients.openWindow) return self.clients.openWindow(url);
-      }),
+      }
+      if (self.clients.openWindow) return self.clients.openWindow(abs);
+    })(),
   );
 });
