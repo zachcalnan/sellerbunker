@@ -14626,6 +14626,54 @@ try {
     return null;
   }
 
+  /**
+   * FBA fee estimate for an ASIN at a hypothetical listing price (deal-check / ROI tools).
+   * Returns absolute total fees in major currency units, or null on failure.
+   */
+  async estimateFbaFeesForAsinAtPrice(
+    orgId: string,
+    opts: {
+      asin: string;
+      marketplaceId: string;
+      listingPrice: number;
+      currency?: string;
+    },
+  ): Promise<number | null> {
+    try {
+      const credentials = await this.getAmazonCredentialsForOrg(orgId);
+      const currency = (opts.currency ?? 'GBP').trim() || 'GBP';
+      const res = await this.spApiClient.getMyFeesEstimateForASIN(
+        credentials,
+        opts.asin,
+        {
+          marketplaceId: opts.marketplaceId,
+          isAmazonFulfilled: true,
+          listingPriceAmount: opts.listingPrice,
+          listingPriceCurrency: currency,
+          identifier: `deal-check-${opts.asin}-${Date.now()}`,
+        },
+      );
+      const breakdown = parseProductFeesEstimateBreakdown(res);
+      if (
+        breakdown.total != null &&
+        Number.isFinite(breakdown.total) &&
+        breakdown.total !== 0
+      ) {
+        return Math.round(Math.abs(breakdown.total) * 100) / 100;
+      }
+      const sum =
+        Math.abs(breakdown.referralFee ?? 0) +
+        Math.abs(breakdown.fbaFee ?? 0) +
+        Math.abs(breakdown.digitalServiceFee ?? 0);
+      return sum > 0 ? Math.round(sum * 100) / 100 : null;
+    } catch (err) {
+      this.logger.warn(
+        `estimateFbaFeesForAsinAtPrice failed for ${opts.asin}: ${(err as Error).message}`,
+      );
+      return null;
+    }
+  }
+
   /** Dev: return raw Product Fees API response for one SKU or ASIN to debug fee structure. */
   async devGetFeesEstimateRaw(
     orgId: string,

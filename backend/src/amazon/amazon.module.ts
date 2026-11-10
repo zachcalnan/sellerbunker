@@ -20,6 +20,8 @@ import { PurchaseScreenshotExtractService } from './purchase-screenshot-extract.
 import { ProductFinderService } from './product-finder.service';
 import { PrepCenterInboundSheetService } from './prep-center-inbound-sheet.service';
 import { PushModule } from '../push/push.module';
+import { KeepaClient } from './keepa.client';
+import { DealCheckService } from './deal-check.service';
 
 @Module({
   imports: [
@@ -50,6 +52,8 @@ import { PushModule } from '../push/push.module';
     PurchaseScreenshotExtractService,
     ProductFinderService,
     PrepCenterInboundSheetService,
+    KeepaClient,
+    DealCheckService,
   ],
   exports: [
     AmazonService,
@@ -58,6 +62,7 @@ import { PushModule } from '../push/push.module';
     PurchaseSheetOrderWriteService,
     PurchaseSheetCheckoutAddressService,
     PrepCenterInboundSheetService,
+    DealCheckService,
   ],
 })
 export class AmazonModule {}

@@ -30,6 +30,8 @@ import { ProductFinderSearchDto } from './dto/product-finder-search.dto';
 import { IngestSupplierOrderDto } from './dto/ingest-supplier-order.dto';
 import { ExtractPurchaseScreenshotDto } from './dto/extract-purchase-screenshot.dto';
 import { UpdatePurchaseDto } from './dto/update-purchase.dto';
+import { DealCheckDto } from './dto/deal-check.dto';
+import { DealCheckService } from './deal-check.service';
 import { ClerkAuthGuard } from '../auth/clerk-auth.guard';
 import { ApiKeyGuard } from '../auth/api-key.guard';
 import { AmazonSyncService } from './amazon-sync.service';
@@ -48,6 +50,7 @@ export class AmazonController {
     private readonly purchaseScreenshotExtract: PurchaseScreenshotExtractService,
     private readonly productFinder: ProductFinderService,
     private readonly prepCenterInboundSheet: PrepCenterInboundSheetService,
+    private readonly dealCheck: DealCheckService,
   ) {}
 
   @Get('ping')
@@ -936,6 +939,36 @@ ping() {
     const n = Number(limit ?? 5000);
     const safeLimit = Number.isFinite(n) ? Math.max(1, Math.min(10000, n)) : 5000;
     return this.amazonService.getReplenishProducts(req.user.orgId, safeLimit, req.user.marketplaceId);
+  }
+
+  /**
+   * Deal check / expected resale: Keepa marketplace New (or New FBA) history →
+   * good-case sell price, historical hit %, FBA fees, profit vs buy, 15% ROI gate.
+   *
+   * POST /api/amazon/deal-check  { asin, buyPrice, marketplaceId?, lookbackDays? }
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Post('deal-check')
+  async postDealCheck(
+    @Req() req: { user: { orgId: string; marketplaceId?: string } },
+    @Body() body: DealCheckDto,
+  ) {
+    const asin = String(body?.asin ?? '').trim();
+    const buyPrice = Number(body?.buyPrice);
+    if (!asin) throw new BadRequestException('asin is required');
+    if (!Number.isFinite(buyPrice) || buyPrice <= 0) {
+      throw new BadRequestException('buyPrice must be a positive number');
+    }
+    const lookbackRaw = Number(body?.lookbackDays);
+    return this.dealCheck.checkDeal(req.user.orgId, {
+      asin,
+      buyPrice,
+      marketplaceId:
+        String(body?.marketplaceId ?? '').trim() ||
+        req.user.marketplaceId ||
+        undefined,
+      lookbackDays: Number.isFinite(lookbackRaw) ? lookbackRaw : undefined,
+    });
   }
 
   /**
