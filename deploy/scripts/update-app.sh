@@ -28,8 +28,11 @@ else
   git pull --ff-only origin
 fi
 
-echo "==> Rebuild and restart"
-docker compose -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" up -d --build
+echo "==> Rebuild and restart (sequential builds — 4GB VPS OOM-safe)"
+# Parallel bake of backend+frontend OOMs this host; build one image at a time.
+docker compose -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" build backend
+docker compose -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" build frontend
+docker compose -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" up -d
 
 echo "==> Recent backend logs (Ctrl+C to stop following is not needed; showing last 80 lines)"
 docker compose -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" logs --tail=80 backend frontend caddy
