@@ -29,7 +29,17 @@ export type DealCheckPriceStats = {
   probabilityPct: number | null;
   minPrice: number | null;
   maxPrice: number | null;
+  /** December-only good band (75th), when enough Dec samples exist. */
+  decemberGoodResalePrice: number | null;
+  decemberSampleDays: number;
+  /** 0–1 blend weight toward December band used in goodResalePrice. */
+  decemberWeight: number;
 };
+
+/** Pull good/best targets toward December highs (Q4 peak season). */
+export const DECEMBER_BLEND_WEIGHT = 0.4;
+/** Need at least this many December in-stock days to apply the blend. */
+export const DECEMBER_MIN_SAMPLE_DAYS = 7;
 
 export type DealCheckEconomics = {
   buyPrice: number;
@@ -133,10 +143,10 @@ export function parseKeepaCsvPriceSeries(
  * Expand change-point history into one sample per calendar day (forward-fill).
  * Only days with a known in-stock price are included.
  */
-export function dailyForwardFillPrices(
+export function dailyForwardFillTimedPrices(
   series: TimedPrice[],
   opts: { lookbackDays: number; nowMs?: number },
-): number[] {
+): TimedPrice[] {
   if (series.length === 0) return [];
   const nowMs = opts.nowMs ?? Date.now();
   const lookbackDays = Math.max(7, Math.min(365, Math.floor(opts.lookbackDays)));
@@ -151,16 +161,42 @@ export function dailyForwardFillPrices(
   }
 
   const dayMs = 86_400_000;
-  const samples: number[] = [];
+  const samples: TimedPrice[] = [];
   for (let dayStart = startMs; dayStart <= nowMs; dayStart += dayMs) {
     const dayEnd = dayStart + dayMs;
     while (idx < series.length && series[idx].tMs < dayEnd) {
       last = series[idx].price;
       idx += 1;
     }
-    if (last != null && last > 0) samples.push(last);
+    if (last != null && last > 0) samples.push({ tMs: dayStart, price: last });
   }
   return samples;
+}
+
+export function dailyForwardFillPrices(
+  series: TimedPrice[],
+  opts: { lookbackDays: number; nowMs?: number },
+): number[] {
+  return dailyForwardFillTimedPrices(series, opts).map((s) => s.price);
+}
+
+function isUtcDecember(tMs: number): boolean {
+  return new Date(tMs).getUTCMonth() === 11;
+}
+
+/** Blend all-year band with December band: (1-w)*all + w*dec. */
+export function blendWithDecember(opts: {
+  allBand: number | null;
+  decemberBand: number | null;
+  weight?: number;
+}): number | null {
+  const w = Math.max(0, Math.min(1, opts.weight ?? DECEMBER_BLEND_WEIGHT));
+  const all = opts.allBand;
+  const dec = opts.decemberBand;
+  if (all == null && dec == null) return null;
+  if (all == null) return dec;
+  if (dec == null || w <= 0) return all;
+  return (1 - w) * all + w * dec;
 }
 
 export function percentileNearest(sortedAsc: number[], p: number): number | null {
@@ -202,20 +238,56 @@ export function computeDealCheckPriceStats(input: {
   goodPercentile?: number;
   /** Best-case percentile (default 0.9). */
   bestPercentile?: number;
+  /** 0–1 weight toward December band (default DECEMBER_BLEND_WEIGHT). */
+  decemberWeight?: number;
 }): DealCheckPriceStats {
-  const lookbackDays = input.lookbackDays ?? 180;
+  // 365d so November checks still see last December’s peak season.
+  const lookbackDays = input.lookbackDays ?? 365;
+  const decemberWeight = Math.max(
+    0,
+    Math.min(1, input.decemberWeight ?? DECEMBER_BLEND_WEIGHT),
+  );
   const { source, series } = pickKeepaPriceSeries(input.csv, input.domainId);
-  const daily = dailyForwardFillPrices(series, {
+  const timed = dailyForwardFillTimedPrices(series, {
     lookbackDays,
     nowMs: input.nowMs,
   });
+  const daily = timed.map((s) => s.price);
   const sorted = [...daily].sort((a, b) => a - b);
-  const goodRaw = percentileNearest(sorted, input.goodPercentile ?? 0.75);
-  const bestRaw = percentileNearest(sorted, input.bestPercentile ?? 0.9);
+  const goodAll = percentileNearest(sorted, input.goodPercentile ?? 0.75);
+  const bestAll = percentileNearest(sorted, input.bestPercentile ?? 0.9);
+
+  const decemberPrices = timed
+    .filter((s) => isUtcDecember(s.tMs))
+    .map((s) => s.price);
+  const decSorted = [...decemberPrices].sort((a, b) => a - b);
+  const hasDecember =
+    decSorted.length >= DECEMBER_MIN_SAMPLE_DAYS;
+  const goodDec = hasDecember
+    ? percentileNearest(decSorted, input.goodPercentile ?? 0.75)
+    : null;
+  const bestDec = hasDecember
+    ? percentileNearest(decSorted, input.bestPercentile ?? 0.9)
+    : null;
+
+  const appliedWeight = hasDecember ? decemberWeight : 0;
+  const goodBlended = blendWithDecember({
+    allBand: goodAll,
+    decemberBand: goodDec,
+    weight: appliedWeight,
+  });
+  const bestBlended = blendWithDecember({
+    allBand: bestAll,
+    decemberBand: bestDec,
+    weight: appliedWeight,
+  });
+
   const good =
-    goodRaw != null ? roundDealTarget(goodRaw, input.domainId) : null;
+    goodBlended != null ? roundDealTarget(goodBlended, input.domainId) : null;
   const best =
-    bestRaw != null ? roundDealTarget(bestRaw, input.domainId) : null;
+    bestBlended != null ? roundDealTarget(bestBlended, input.domainId) : null;
+  const decemberGood =
+    goodDec != null ? roundDealTarget(goodDec, input.domainId) : null;
 
   let probabilityPct: number | null = null;
   if (good != null && daily.length > 0) {
@@ -240,6 +312,9 @@ export function computeDealCheckPriceStats(input: {
     maxPrice: sorted.length
       ? Math.round(sorted[sorted.length - 1]! * 100) / 100
       : null,
+    decemberGoodResalePrice: decemberGood,
+    decemberSampleDays: decSorted.length,
+    decemberWeight: appliedWeight,
   };
 }
 

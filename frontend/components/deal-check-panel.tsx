@@ -17,6 +17,9 @@ export type DealCheckResult = {
   goodResalePrice: number | null;
   bestCaseResalePrice: number | null;
   probabilityPct: number | null;
+  decemberGoodResalePrice: number | null;
+  decemberSampleDays: number;
+  decemberWeight: number;
   feesAtGood: number | null;
   profitAtGood: number | null;
   roiAtGood: number | null;
@@ -100,7 +103,7 @@ export function DealCheckPanel({
           asin: a,
           buyPrice: buy,
           marketplaceId: marketplaceId || undefined,
-          lookbackDays: 180,
+          lookbackDays: 365,
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -225,6 +228,20 @@ export function DealCheckPanel({
                     <span className="tabular-nums text-[var(--foreground)]">
                       {MONEY(result.bestCaseResalePrice, result.currency)}
                     </span>
+                  </div>
+                )}
+              {result.decemberWeight > 0 &&
+                result.decemberGoodResalePrice != null && (
+                  <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                    December band{" "}
+                    <span className="tabular-nums text-[var(--foreground)]">
+                      {MONEY(result.decemberGoodResalePrice, result.currency)}
+                    </span>
+                    {" · "}
+                    {Math.round(result.decemberWeight * 100)}% weight
+                    {result.decemberSampleDays > 0
+                      ? ` (${result.decemberSampleDays} Dec days)`
+                      : ""}
                   </div>
                 )}
             </div>

@@ -9,6 +9,7 @@ import { AmazonService } from './amazon.service';
 import { KeepaClient } from './keepa.client';
 import {
   DEAL_CHECK_ROI_GATE,
+  DECEMBER_BLEND_WEIGHT,
   computeDealCheckEconomics,
   computeDealCheckPriceStats,
   currencyForKeepaDomain,
@@ -33,6 +34,9 @@ export type DealCheckResult = {
   bestCaseResalePrice: number | null;
   /** Historical share of days New/FBA ≥ goodResalePrice. */
   probabilityPct: number | null;
+  decemberGoodResalePrice: number | null;
+  decemberSampleDays: number;
+  decemberWeight: number;
   feesAtGood: number | null;
   profitAtGood: number | null;
   roiAtGood: number | null;
@@ -85,7 +89,7 @@ export class DealCheckService {
     const currency = currencyForKeepaDomain(domainId);
     const lookbackDays = Math.max(
       30,
-      Math.min(365, Math.floor(Number(input.lookbackDays) || 180)),
+      Math.min(365, Math.floor(Number(input.lookbackDays) || 365)),
     );
 
     const keepaRes = await this.keepa.fetchProduct({
@@ -150,6 +154,10 @@ export class DealCheckService {
       stats.source === 'keepa_new_fba'
         ? '3P New FBA history'
         : 'marketplace New history (3P; Amazon 1P excluded)';
+    const decNote =
+      stats.decemberWeight > 0 && stats.decemberGoodResalePrice != null
+        ? ` Blended ${Math.round(stats.decemberWeight * 100)}% toward December band (~${currency} ${stats.decemberGoodResalePrice}, ${stats.decemberSampleDays} Dec days).`
+        : ` No December blend (need Dec history in the window; weight ${Math.round(DECEMBER_BLEND_WEIGHT * 100)}% when available).`;
 
     return {
       asin,
@@ -168,6 +176,9 @@ export class DealCheckService {
       goodResalePrice: stats.goodResalePrice,
       bestCaseResalePrice: stats.bestCaseResalePrice,
       probabilityPct: stats.probabilityPct,
+      decemberGoodResalePrice: stats.decemberGoodResalePrice,
+      decemberSampleDays: stats.decemberSampleDays,
+      decemberWeight: stats.decemberWeight,
       feesAtGood: economics?.feesPerUnit ?? feesAtGood,
       profitAtGood: economics?.profitPerUnit ?? null,
       roiAtGood: economics?.roi ?? null,
@@ -180,7 +191,7 @@ export class DealCheckService {
         keepaRes.tokensConsumed != null
           ? Number(keepaRes.tokensConsumed)
           : null,
-      note: `Good resale = ~75th percentile of ${sourceLabel} over ${stats.lookbackDays}d (rounded). Probability = share of days at/above that level. ROI gate ${Math.round(DEAL_CHECK_ROI_GATE * 100)}%.`,
+      note: `Good resale = ~75th percentile of ${sourceLabel} over ${stats.lookbackDays}d (rounded).${decNote} Probability = share of days at/above that level. ROI gate ${Math.round(DEAL_CHECK_ROI_GATE * 100)}%.`,
     };
   }
 
