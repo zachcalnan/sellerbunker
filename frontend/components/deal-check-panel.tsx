@@ -21,6 +21,15 @@ export type DealCheckResult = {
   decemberSampleDays: number;
   decemberWeight: number;
   feesAtGood: number | null;
+  referralFeeAtGood?: number | null;
+  fbaFeeAtGood?: number | null;
+  digitalServiceFeeAtGood?: number | null;
+  feesIncludeVat?: boolean;
+  feeSource?:
+    | "product_fees_api"
+    | "stored_scaled"
+    | "heuristic"
+    | null;
   profitAtGood: number | null;
   roiAtGood: number | null;
   meetsRoiGate: boolean;
@@ -261,6 +270,7 @@ export function DealCheckPanel({
                   {result.feesAtGood != null
                     ? MONEY(result.feesAtGood, result.currency)
                     : "—"}
+                  {result.feesIncludeVat ? " inc VAT" : ""}
                   {result.usedFeeFallback ? " (est.)" : ""}
                 </span>
                 <span>
@@ -271,6 +281,25 @@ export function DealCheckPanel({
                   {result.meetsRoiGate ? " · ≥15% ✓" : " · below 15%"}
                 </span>
               </div>
+              {(result.referralFeeAtGood != null ||
+                result.fbaFeeAtGood != null ||
+                result.digitalServiceFeeAtGood != null) && (
+                <div className="mt-1 text-[11px] text-[var(--muted-foreground)]">
+                  {[
+                    result.referralFeeAtGood != null
+                      ? `Ref ${MONEY(result.referralFeeAtGood, result.currency)}`
+                      : null,
+                    result.fbaFeeAtGood != null
+                      ? `FBA ${MONEY(result.fbaFeeAtGood, result.currency)}`
+                      : null,
+                    result.digitalServiceFeeAtGood != null
+                      ? `DSF ${MONEY(result.digitalServiceFeeAtGood, result.currency)}`
+                      : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")}
+                </div>
+              )}
             </div>
 
             <div className="grid grid-cols-2 gap-2 text-xs text-[var(--muted-foreground)]">

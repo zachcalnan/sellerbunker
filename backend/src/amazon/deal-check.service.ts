@@ -8,6 +8,10 @@ import { PrismaService } from '../prisma/prisma.service';
 import { AmazonService } from './amazon.service';
 import { KeepaClient } from './keepa.client';
 import {
+  composeDealCheckFees,
+  marketplaceUsesDigitalServiceFee,
+} from './deal-check-fees.util';
+import {
   DEAL_CHECK_ROI_GATE,
   DECEMBER_BLEND_WEIGHT,
   computeDealCheckEconomics,
@@ -38,6 +42,15 @@ export type DealCheckResult = {
   decemberSampleDays: number;
   decemberWeight: number;
   feesAtGood: number | null;
+  referralFeeAtGood: number | null;
+  fbaFeeAtGood: number | null;
+  digitalServiceFeeAtGood: number | null;
+  feesIncludeVat: boolean;
+  feeSource:
+    | 'product_fees_api'
+    | 'stored_scaled'
+    | 'heuristic'
+    | null;
   profitAtGood: number | null;
   roiAtGood: number | null;
   meetsRoiGate: boolean;
@@ -111,24 +124,51 @@ export class DealCheckService {
 
     const good = stats.goodResalePrice;
     let feesAtGood: number | null = null;
+    let referralFeeAtGood: number | null = null;
+    let fbaFeeAtGood: number | null = null;
+    let digitalServiceFeeAtGood: number | null = null;
+    let feesIncludeVat = false;
+    let feeSource: DealCheckResult['feeSource'] = null;
     let usedFeeFallback = false;
 
+    const vatMeta = await this.resolveDealCheckVatMeta(orgId);
+
     if (good != null) {
-      const feeLive = await this.amazonService.estimateFbaFeesForAsinAtPrice(orgId, {
-        asin,
-        marketplaceId,
-        listingPrice: good,
-        currency,
-      });
-      if (feeLive != null && feeLive > 0) {
-        feesAtGood = feeLive;
+      const feeLive = await this.amazonService.estimateFbaFeesForAsinAtPrice(
+        orgId,
+        {
+          asin,
+          marketplaceId,
+          listingPrice: good,
+          currency,
+        },
+      );
+      if (feeLive != null && feeLive.total > 0) {
+        feesAtGood = feeLive.total;
+        referralFeeAtGood = feeLive.referralFee;
+        fbaFeeAtGood = feeLive.fbaFee;
+        digitalServiceFeeAtGood = feeLive.digitalServiceFee;
+        feesIncludeVat = feeLive.feesIncludeVat;
+        feeSource = 'product_fees_api';
       } else {
-        const scaled = await this.scaleStoredFees(orgId, asin, good);
+        const scaled = await this.scaleStoredFees(
+          orgId,
+          asin,
+          good,
+          marketplaceId,
+          vatMeta,
+        );
         if (scaled != null) {
           feesAtGood = scaled.fees;
+          referralFeeAtGood = scaled.referralFee;
+          fbaFeeAtGood = scaled.fbaFee;
+          digitalServiceFeeAtGood = scaled.digitalServiceFee;
+          feesIncludeVat = scaled.feesIncludeVat;
+          feeSource = 'stored_scaled';
           usedFeeFallback = scaled.fallback;
         } else {
           usedFeeFallback = true;
+          feeSource = 'heuristic';
           feesAtGood = Math.round(good * 0.35 * 100) / 100;
         }
       }
@@ -159,6 +199,19 @@ export class DealCheckService {
         ? ` Blended ${Math.round(stats.decemberWeight * 100)}% toward December band (~${currency} ${stats.decemberGoodResalePrice}, ${stats.decemberSampleDays} Dec days).`
         : ` No December blend (need Dec history in the window; weight ${Math.round(DECEMBER_BLEND_WEIGHT * 100)}% when available).`;
 
+    const feeNote =
+      feeSource === 'product_fees_api'
+        ? ` Fees from Amazon Product Fees estimate at good resale${
+            feesIncludeVat ? ' (inc. UK VAT on fees)' : ' (ex-VAT)'
+          }.`
+        : feeSource === 'stored_scaled'
+          ? ` Fees scaled from stored product fee estimate at good resale${
+              feesIncludeVat ? ' (inc. UK VAT on fees)' : ''
+            }.`
+          : feeSource === 'heuristic'
+            ? ' Fees are a coarse % fallback (Product Fees unavailable).'
+            : '';
+
     return {
       asin,
       title: product.title ? String(product.title) : null,
@@ -180,6 +233,11 @@ export class DealCheckService {
       decemberSampleDays: stats.decemberSampleDays,
       decemberWeight: stats.decemberWeight,
       feesAtGood: economics?.feesPerUnit ?? feesAtGood,
+      referralFeeAtGood,
+      fbaFeeAtGood,
+      digitalServiceFeeAtGood,
+      feesIncludeVat,
+      feeSource,
       profitAtGood: economics?.profitPerUnit ?? null,
       roiAtGood: economics?.roi ?? null,
       meetsRoiGate: economics?.meetsRoiGate ?? false,
@@ -191,15 +249,61 @@ export class DealCheckService {
         keepaRes.tokensConsumed != null
           ? Number(keepaRes.tokensConsumed)
           : null,
-      note: `Good resale = ~75th percentile of ${sourceLabel} over ${stats.lookbackDays}d (rounded).${decNote} Probability = share of days at/above that level. ROI gate ${Math.round(DEAL_CHECK_ROI_GATE * 100)}%.`,
+      note: `Good resale = ~75th percentile of ${sourceLabel} over ${stats.lookbackDays}d (rounded).${decNote} Probability = share of days at/above that level. ROI gate ${Math.round(DEAL_CHECK_ROI_GATE * 100)}%.${feeNote}`,
     };
+  }
+
+  private async resolveDealCheckVatMeta(orgId: string): Promise<{
+    includeFeeVat: boolean;
+    vatRatePct: number;
+  }> {
+    try {
+      const org = await (this.prisma as any).organization.findUnique({
+        where: { id: orgId },
+        select: {
+          vatRegistrationType: true,
+          vatEffectiveDate: true,
+          vatRatePct: true,
+        },
+      });
+      const vatRegistrationType =
+        org?.vatRegistrationType ?? 'NON_VAT_REGISTERED';
+      const vatEffectiveDate = org?.vatEffectiveDate
+        ? (org.vatEffectiveDate as Date)
+        : null;
+      const vatRatePct =
+        org?.vatRatePct != null && Number.isFinite(Number(org.vatRatePct))
+          ? Number(org.vatRatePct)
+          : 20;
+      const now = new Date();
+      let includeFeeVat = true;
+      if (vatRegistrationType === 'NON_VAT_REGISTERED') {
+        includeFeeVat = true;
+      } else if (vatEffectiveDate != null && now < vatEffectiveDate) {
+        includeFeeVat = true;
+      } else {
+        includeFeeVat = false;
+      }
+      return { includeFeeVat, vatRatePct };
+    } catch {
+      return { includeFeeVat: true, vatRatePct: 20 };
+    }
   }
 
   private async scaleStoredFees(
     orgId: string,
     asin: string,
     targetPrice: number,
-  ): Promise<{ fees: number; fallback: boolean } | null> {
+    marketplaceId: string,
+    vatMeta: { includeFeeVat: boolean; vatRatePct: number },
+  ): Promise<{
+    fees: number;
+    referralFee: number | null;
+    fbaFee: number | null;
+    digitalServiceFee: number | null;
+    feesIncludeVat: boolean;
+    fallback: boolean;
+  } | null> {
     const membershipUsers = await this.prisma.organizationMembership.findMany({
       where: { orgId },
       select: { userId: true },
@@ -246,18 +350,49 @@ export class DealCheckService {
       const referralRate = ref / listed;
       const scaledRef = referralRate * targetPrice;
       const scaledDsf =
-        dsf != null && listed > 0
-          ? (dsf / listed) * targetPrice
-          : targetPrice * 0.02;
+        dsf != null && listed > 0 ? (dsf / listed) * targetPrice : null;
       const fbaFee = fba ?? 0;
-      const fees = Math.round((scaledRef + fbaFee + scaledDsf) * 100) / 100;
-      return { fees, fallback: false };
+      const composed = composeDealCheckFees({
+        referralFee: scaledRef,
+        fbaFee,
+        digitalServiceFee: scaledDsf,
+        totalFromApi: null,
+        applyDigitalServiceFallback: marketplaceUsesDigitalServiceFee(
+          marketplaceId,
+        ),
+        includeFeeVat: vatMeta.includeFeeVat,
+        vatRatePct: vatMeta.vatRatePct,
+      });
+      if (!composed) return null;
+      return {
+        fees: composed.feesTotal,
+        referralFee: composed.referralFee,
+        fbaFee: composed.fbaFee,
+        digitalServiceFee: composed.digitalServiceFee,
+        feesIncludeVat: composed.feesIncludeVat,
+        fallback: false,
+      };
     }
 
     if (totalStored != null && listed != null && listed > 0) {
       const rate = totalStored / listed;
+      const scaledTotal = rate * targetPrice;
+      const composed = composeDealCheckFees({
+        referralFee: null,
+        fbaFee: null,
+        digitalServiceFee: null,
+        totalFromApi: scaledTotal,
+        applyDigitalServiceFallback: false,
+        includeFeeVat: vatMeta.includeFeeVat,
+        vatRatePct: vatMeta.vatRatePct,
+      });
+      if (!composed) return null;
       return {
-        fees: Math.round(rate * targetPrice * 100) / 100,
+        fees: composed.feesTotal,
+        referralFee: null,
+        fbaFee: null,
+        digitalServiceFee: null,
+        feesIncludeVat: composed.feesIncludeVat,
         fallback: true,
       };
     }

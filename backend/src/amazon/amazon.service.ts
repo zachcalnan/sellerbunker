@@ -41,6 +41,10 @@ import {
   parseFeesEstimateBreakdown as parseProductFeesEstimateBreakdown,
   parseFeesEstimateBreakdownForRepricerFloor,
 } from './product-fees-estimate-parse.util';
+import {
+  composeDealCheckFees,
+  marketplaceUsesDigitalServiceFee,
+} from './deal-check-fees.util';
 import { eligibilityFromListingsRestrictionsBody } from './asin-selling-eligibility.util';
 import {
   avgDailyUnitsInStock,
@@ -14642,7 +14646,8 @@ try {
 
   /**
    * FBA fee estimate for an ASIN at a hypothetical listing price (deal-check / ROI tools).
-   * Returns absolute total fees in major currency units, or null on failure.
+   * Uses Product Fees getMyFeesEstimateForASIN, then composes SellerAmp-style P&L fees
+   * (EU DSF fallback + UK fee VAT when the org is non–VAT-registered).
    */
   async estimateFbaFeesForAsinAtPrice(
     orgId: string,
@@ -14652,7 +14657,15 @@ try {
       listingPrice: number;
       currency?: string;
     },
-  ): Promise<number | null> {
+  ): Promise<{
+    total: number;
+    referralFee: number;
+    fbaFee: number;
+    digitalServiceFee: number;
+    feesIncludeVat: boolean;
+    usedDigitalServiceFallback: boolean;
+    source: 'product_fees_api';
+  } | null> {
     try {
       const credentials = await this.getAmazonCredentialsForOrg(orgId);
       const currency = (opts.currency ?? 'GBP').trim() || 'GBP';
@@ -14668,18 +14681,32 @@ try {
         },
       );
       const breakdown = parseProductFeesEstimateBreakdown(res);
-      if (
-        breakdown.total != null &&
-        Number.isFinite(breakdown.total) &&
-        breakdown.total !== 0
-      ) {
-        return Math.round(Math.abs(breakdown.total) * 100) / 100;
-      }
-      const sum =
-        Math.abs(breakdown.referralFee ?? 0) +
-        Math.abs(breakdown.fbaFee ?? 0) +
-        Math.abs(breakdown.digitalServiceFee ?? 0);
-      return sum > 0 ? Math.round(sum * 100) / 100 : null;
+      const vatSettings = await this.getVatSettingsForOrg(orgId);
+      const includeFeeVat = this.shouldShowAmazonFeesWithVatIncluded(
+        vatSettings,
+        new Date(),
+      );
+      const composed = composeDealCheckFees({
+        referralFee: breakdown.referralFee,
+        fbaFee: breakdown.fbaFee,
+        digitalServiceFee: breakdown.digitalServiceFee,
+        totalFromApi: breakdown.total,
+        applyDigitalServiceFallback: marketplaceUsesDigitalServiceFee(
+          opts.marketplaceId,
+        ),
+        includeFeeVat,
+        vatRatePct: vatSettings?.vatRatePct ?? 20,
+      });
+      if (!composed || composed.feesTotal < 1e-9) return null;
+      return {
+        total: composed.feesTotal,
+        referralFee: composed.referralFee,
+        fbaFee: composed.fbaFee,
+        digitalServiceFee: composed.digitalServiceFee,
+        feesIncludeVat: composed.feesIncludeVat,
+        usedDigitalServiceFallback: composed.usedDigitalServiceFallback,
+        source: 'product_fees_api',
+      };
     } catch (err) {
       this.logger.warn(
         `estimateFbaFeesForAsinAtPrice failed for ${opts.asin}: ${(err as Error).message}`,
