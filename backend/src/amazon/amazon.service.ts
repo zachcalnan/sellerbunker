@@ -52,6 +52,10 @@ import {
   parseCatalogItemTitle,
 } from './catalog-item-parse.util';
 import {
+  isBlankProductCatalogAttr,
+  parseFbaInventoryProductName,
+} from './fba-inventory-summary-parse.util';
+import {
   avgDailyUnitsInStock,
   resolveInStockDaysForVelocity,
   utcDayDate,
@@ -13168,6 +13172,8 @@ export class AmazonService {
     sellerSku: string;
     marketplaceId: string;
     asin: string | null;
+    /** Localized listing title from FBA InventorySummary.productName (qty 0 still included). */
+    productName: string | null;
     fulfillable: number;
     inbound: number;
     reservedCustomer: number;
@@ -13232,6 +13238,7 @@ const ingestInventorySummary = (
       sellerSku: sku,
       marketplaceId,
       asin: (s?.asin ?? s?.ASIN ?? null) as string | null,
+      productName: null as string | null,
       fulfillable: 0,
       inbound: 0,
       reservedCustomer: 0,
@@ -13270,6 +13277,10 @@ const ingestInventorySummary = (
     existing.expiredQty = uq?.expiredQuantity ?? uq?.ExpiredQuantity ?? 0;
     if (s?.asin != null || s?.ASIN != null) {
       existing.asin = (s?.asin ?? s?.ASIN ?? null) as string | null;
+    }
+    const productName = parseFbaInventoryProductName(s);
+    if (productName) {
+      existing.productName = productName;
     }
     existing.raw = s;
     inventoryBySku.set(key, existing);
@@ -13472,13 +13483,23 @@ try {
   const ensureOrgProductsForSku = async (
     sku: string,
     asin: string | null,
+    productName?: string | null,
   ): Promise<Array<{ id: string; userId: string }>> => {
+    const titleTrim =
+      typeof productName === 'string' && productName.trim()
+        ? productName.trim()
+        : null;
     const ownerProduct = await this.prisma.product.upsert({
       where: {
         userId_sku: { userId: ownerUserId, sku },
       },
       update: { asin: asin ?? undefined },
-      create: { userId: ownerUserId, sku, asin },
+      create: {
+        userId: ownerUserId,
+        sku,
+        asin,
+        ...(titleTrim ? { title: titleTrim } : {}),
+      },
     });
     bySku.set(sku, {
       id: ownerProduct.id,
@@ -13490,16 +13511,32 @@ try {
       targets.push({ id: ownerProduct.id, userId: ownerProduct.userId });
     }
     const seen = new Set<string>();
-    return targets.filter((t) => {
+    const uniqueTargets = targets.filter((t) => {
       if (seen.has(t.id)) return false;
       seen.add(t.id);
       return true;
     });
+    // FBA summaries include productName even for out-of-stock SKUs; fill blank titles
+    // without overwriting an existing catalog/order title.
+    if (titleTrim && uniqueTargets.length > 0) {
+      await this.prisma.product.updateMany({
+        where: {
+          id: { in: uniqueTargets.map((t) => t.id) },
+          OR: [{ title: null }, { title: '' }],
+        },
+        data: { title: titleTrim },
+      });
+    }
+    return uniqueTargets;
   };
 
   for (const row of inventoryBySku.values()) {
     const sku = row.sellerSku;
-    const productTargets = await ensureOrgProductsForSku(sku, row.asin ?? null);
+    const productTargets = await ensureOrgProductsForSku(
+      sku,
+      row.asin ?? null,
+      row.productName ?? null,
+    );
 
     const totalQty =
       row.fulfillable +
@@ -13551,6 +13588,7 @@ try {
     {
       sellerSku: string;
       asin: string | null;
+      productName: string | null;
       fulfillable: number;
       inbound: number;
       reservedCustomer: number;
@@ -13565,6 +13603,7 @@ try {
     const existing = aggregateBySku.get(row.sellerSku) ?? {
       sellerSku: row.sellerSku,
       asin: row.asin ?? null,
+      productName: row.productName ?? null,
       fulfillable: 0,
       inbound: 0,
       reservedCustomer: 0,
@@ -13573,6 +13612,13 @@ try {
       unfulfillable: 0,
       raw: [],
     };
+
+    if (!existing.productName && row.productName) {
+      existing.productName = row.productName;
+    }
+    if (!existing.asin && row.asin) {
+      existing.asin = row.asin;
+    }
 
     existing.fulfillable += row.fulfillable;
     existing.inbound += row.inbound;
@@ -13590,7 +13636,11 @@ try {
   const newlyInStockProductIds = new Set<string>();
   const allTargetIds: string[] = [];
   for (const agg of aggregateBySku.values()) {
-    const productTargets = await ensureOrgProductsForSku(agg.sellerSku, agg.asin ?? null);
+    const productTargets = await ensureOrgProductsForSku(
+      agg.sellerSku,
+      agg.asin ?? null,
+      agg.productName ?? null,
+    );
     for (const target of productTargets) {
       allTargetIds.push(target.id);
     }
@@ -13611,7 +13661,11 @@ try {
 
   for (const agg of aggregateBySku.values()) {
     const sku = agg.sellerSku;
-    const productTargets = await ensureOrgProductsForSku(sku, agg.asin ?? null);
+    const productTargets = await ensureOrgProductsForSku(
+      sku,
+      agg.asin ?? null,
+      agg.productName ?? null,
+    );
 
     const totalQty =
       agg.fulfillable +
@@ -13729,6 +13783,27 @@ try {
         sku: { not: '' },
         inventory: { isNot: null },
         OR: [{ estimatedAmazonFeeUpdatedAt: null }, { currentListedPrice: null }],
+      },
+    });
+  }
+
+  /**
+   * Products with an ASIN that still lack title and/or image (including empty string).
+   * Used after FBA inventory sync to decide whether to enqueue Catalog titles backfill.
+   */
+  async countProductsMissingTitleOrImage(orgId: string): Promise<number> {
+    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
+    if (userIds.length === 0) return 0;
+    return this.prisma.product.count({
+      where: {
+        userId: { in: userIds },
+        asin: { not: null },
+        OR: [
+          { title: null },
+          { title: '' },
+          { imageUrl: null },
+          { imageUrl: '' },
+        ],
       },
     });
   }
@@ -15726,10 +15801,16 @@ try {
       1000;
 
     const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
+    // Treat empty string the same as null — inventory stubs can land with blank attrs.
     const needsBackfill = {
       userId: { in: userIds },
       asin: { not: null },
-      OR: [{ title: null }, { imageUrl: null }],
+      OR: [
+        { title: null },
+        { title: '' },
+        { imageUrl: null },
+        { imageUrl: '' },
+      ],
     };
 
     // Prioritize products visible on dashboard: recent orders, top sellers, replenish
@@ -16022,8 +16103,10 @@ try {
         }
 
         const data: any = {};
-        if (p.title == null && title) data.title = title;
-        if (p.imageUrl == null && imageUrl) data.imageUrl = imageUrl;
+        if (isBlankProductCatalogAttr(p.title) && title) data.title = title;
+        if (isBlankProductCatalogAttr(p.imageUrl) && imageUrl) {
+          data.imageUrl = imageUrl;
+        }
 
         if (Object.keys(data).length === 0) {
           skipped += 1;

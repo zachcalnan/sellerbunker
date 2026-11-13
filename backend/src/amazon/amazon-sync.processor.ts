@@ -89,6 +89,22 @@ export class AmazonSyncProcessor extends WorkerHost {
       throw err;
     }
     try {
+      const missingTitles =
+        await this.amazonService.countProductsMissingTitleOrImage(orgId);
+      if (missingTitles > 0) {
+        await this.amazonSyncService.enqueueTitlesBackfill(orgId, userId);
+        this.logger.log(
+          `[post-initial-sync] enqueued titles-backfill (${missingTitles} product(s) missing title/image)`,
+        );
+      }
+    } catch (titleErr) {
+      const msg =
+        titleErr instanceof Error ? titleErr.message : String(titleErr);
+      this.logger.warn(
+        `[post-initial-sync] titles-backfill enqueue failed (non-fatal): ${msg}`,
+      );
+    }
+    try {
       await this.amazonService.syncShipments(orgId, userId);
       this.logger.log(`[post-initial-sync] shipments done`);
     } catch (shipErr) {
@@ -327,6 +343,14 @@ export class AmazonSyncProcessor extends WorkerHost {
             await this.amazonSyncService.enqueueFeeSyncForOrg(orgId);
             this.logger.log(
               `[AmazonSync] inventory-batch-sync: org ${orgId} — ${missingFees} SKU(s) still missing fee/list price; enqueued fee-sync`,
+            );
+          }
+          const missingTitles =
+            await this.amazonService.countProductsMissingTitleOrImage(orgId);
+          if (missingTitles > 0) {
+            await this.amazonSyncService.enqueueTitlesBackfillForOrg(orgId);
+            this.logger.log(
+              `[AmazonSync] inventory-batch-sync: org ${orgId} — ${missingTitles} product(s) missing title/image; enqueued titles-backfill`,
             );
           }
         } catch (e: any) {

@@ -1224,9 +1224,32 @@ ping() {
       );
     }
     this.logger.log(`Manual inventory sync requested (orgId=${req.user.orgId})`);
-    return this.amazonService.syncFbaInventory(req.user.orgId, req.user.userId, {
-      force: true,
-    });
+    const result = await this.amazonService.syncFbaInventory(
+      req.user.orgId,
+      req.user.userId,
+      { force: true },
+    );
+    try {
+      const missingTitles =
+        await this.amazonService.countProductsMissingTitleOrImage(
+          req.user.orgId,
+        );
+      if (missingTitles > 0) {
+        await this.amazonSyncService.enqueueTitlesBackfill(
+          req.user.orgId,
+          req.user.userId,
+        );
+        this.logger.log(
+          `Manual inventory sync: enqueued titles-backfill (${missingTitles} product(s) missing title/image)`,
+        );
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.logger.warn(
+        `Manual inventory sync: titles-backfill enqueue failed (non-fatal): ${msg}`,
+      );
+    }
+    return result;
   }
 
   /**

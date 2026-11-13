@@ -546,11 +546,25 @@ export class AmazonSyncService implements OnModuleInit {
     }
   }
 
-  /** Enqueue titles backfill to run in background after initial sync (Catalog API, 1 req per product). */
-  async enqueueTitlesBackfill(orgId: string, userId: string): Promise<void> {
+  /** Enqueue titles backfill to run in background after inventory sync (Catalog API, 1 req per product). */
+  async enqueueTitlesBackfill(
+    orgId: string,
+    userId: string,
+    options?: { limit?: number },
+  ): Promise<void> {
+    if (!(await this.userHasPaidAccess(userId))) {
+      this.logger.log(
+        `[enqueueTitlesBackfill] Skipping — no active subscription (userId=${userId.slice(0, 8)}…)`,
+      );
+      return;
+    }
     const limit = Math.min(
       300,
-      Math.max(0, Number(process.env.AMAZON_INITIAL_TITLES_BACKFILL_LIMIT) || 100),
+      Math.max(
+        0,
+        options?.limit ??
+          (Number(process.env.AMAZON_INITIAL_TITLES_BACKFILL_LIMIT) || 100),
+      ),
     );
     if (limit <= 0) return;
     this.logger.log(`Enqueuing titles-backfill job (orgId=${orgId}, limit=${limit})`);
@@ -560,6 +574,27 @@ export class AmazonSyncService implements OnModuleInit {
       { orgId, userId, limit },
       `Titles backfill for org ${orgId}`,
     );
+  }
+
+  /**
+   * Enqueue titles/images Catalog backfill for an org (first member with an active Amazon link).
+   * Used after FBA inventory sync when products still lack title/image.
+   */
+  async enqueueTitlesBackfillForOrg(orgId: string): Promise<void> {
+    const members = await this.prisma.organizationMembership.findMany({
+      where: { orgId },
+      select: { userId: true },
+    });
+    for (const { userId } of members) {
+      const linked = await this.prisma.sellerAccount.findFirst({
+        where: { userId, marketplace: 'amazon', isActive: true },
+        select: { id: true },
+      });
+      if (linked) {
+        await this.enqueueTitlesBackfill(orgId, userId);
+        return;
+      }
+    }
   }
 
   /** Enqueue category backfill (productType/displayGroup) to run in background. Runs after initial sync and after order sync so new ASINs get categories. */
