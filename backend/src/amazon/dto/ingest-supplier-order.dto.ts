@@ -33,6 +33,11 @@ export class IngestSupplierOrderLineDto {
   @IsOptional()
   productTitle?: string;
 
+  /** Optional catalog image when creating a missing product stub. */
+  @IsString()
+  @IsOptional()
+  imageUrl?: string;
+
   @IsInt()
   @Min(1)
   qty: number;

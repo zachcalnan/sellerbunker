@@ -28,6 +28,8 @@ type ExtractLine = {
   productTitle?: string;
   asin?: string;
   sku?: string;
+  /** Catalog / listing image — used when creating a missing product stub. */
+  imageUrl?: string | null;
   /** Number or digit draft/"" while editing — do not coerce on every keystroke. */
   qty: number | string;
   unitRrpIncVat?: number;
@@ -118,6 +120,15 @@ type ListingHit = {
   costOfGoods?: number | null;
 };
 
+type CatalogAsinHit = {
+  source: "portfolio" | "catalog";
+  asin: string;
+  sku: string | null;
+  title: string | null;
+  imageUrl?: string | null;
+  costOfGoods?: number | null;
+};
+
 type Props = {
   onExtract: (body: {
     imageBase64: string;
@@ -130,11 +141,17 @@ type Props = {
   onLoadQuota?: () => Promise<VisionQuota>;
   /** Optional: search org listings by ASIN/SKU/title (no OpenAI). */
   onSearchListings?: (query: string) => Promise<ListingHit[]>;
+  /** Optional: ASIN → portfolio or Amazon Catalog (for products not yet listed). */
+  onLookupAsin?: (asin: string) => Promise<CatalogAsinHit>;
   /** "page" = always-visible panel. Default "button" opens a modal. */
   variant?: "button" | "page";
   /** Label for the collapsed trigger (button variant only). */
   triggerLabel?: string;
 };
+
+function isValidAsinShape(raw: string): boolean {
+  return /^[A-Z0-9]{10}$/i.test(raw.trim());
+}
 
 const MAX_EDGE = 1024;
 const JPEG_QUALITY = 0.7;
@@ -193,27 +210,33 @@ function blankDraft(): ExtractDraft {
     // Blank qty so manual entry can type 4 without fighting sticky 1.
     lines: [emptyLine({ qty: "" })],
     warnings: [
-      "Search your listings for the ASIN, then fill qty, unit cost, supplier, and order number.",
+      "Search your listings, or paste an ASIN and Search Amazon if it is not listed yet — then fill qty, unit cost, supplier, and order number.",
     ],
   };
 }
 
 function ListingSearchField({
   onSearch,
+  onLookupAsin,
   onPick,
 }: {
   onSearch: (query: string) => Promise<ListingHit[]>;
-  onPick: (hit: ListingHit) => void;
+  onLookupAsin?: (asin: string) => Promise<CatalogAsinHit>;
+  onPick: (hit: ListingHit & { imageUrl?: string | null }) => void;
 }) {
   const [q, setQ] = useState("");
   const [hits, setHits] = useState<ListingHit[]>([]);
   const [busy, setBusy] = useState(false);
+  const [catalogBusy, setCatalogBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [catalogHit, setCatalogHit] = useState<CatalogAsinHit | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const asinReady = isValidAsinShape(q);
 
   useEffect(() => {
     if (timer.current) clearTimeout(timer.current);
     const trimmed = q.trim();
+    setCatalogHit(null);
     if (trimmed.length < 2) {
       setHits([]);
       setBusy(false);
@@ -240,20 +263,83 @@ function ListingSearchField({
     };
   }, [q, onSearch]);
 
+  const runCatalogLookup = async () => {
+    if (!onLookupAsin || !asinReady) return;
+    const asin = q.trim().toUpperCase();
+    setCatalogBusy(true);
+    setErr(null);
+    setCatalogHit(null);
+    try {
+      const hit = await onLookupAsin(asin);
+      if (hit.source === "portfolio") {
+        onPick({
+          asin: hit.asin,
+          sku: hit.sku ?? "",
+          title: (hit.title ?? "").trim() || hit.asin,
+          imageUrl: hit.imageUrl ?? null,
+          costOfGoods: hit.costOfGoods ?? null,
+        });
+        setQ("");
+        setHits([]);
+        setCatalogHit(null);
+        return;
+      }
+      setCatalogHit(hit);
+    } catch (e) {
+      setCatalogHit(null);
+      setErr(e instanceof Error ? e.message : "ASIN lookup failed");
+    } finally {
+      setCatalogBusy(false);
+    }
+  };
+
   return (
     <div className="sm:col-span-2">
       <label className="flex flex-col gap-0.5 text-xs text-[var(--muted-foreground)]">
         Search your listings (ASIN / SKU / title)
-        <input
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          placeholder="e.g. B0… or Otamatone"
-          className="rounded border border-[var(--surface-border)] bg-[var(--background)] px-2 py-1.5 text-sm text-[var(--foreground)]"
-        />
+        <div className="flex flex-wrap items-stretch gap-1.5">
+          <input
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            onKeyDown={(e) => {
+              if (
+                e.key === "Enter" &&
+                onLookupAsin &&
+                asinReady &&
+                hits.length === 0
+              ) {
+                e.preventDefault();
+                void runCatalogLookup();
+              }
+            }}
+            placeholder="e.g. B0… or Otamatone"
+            className="min-w-0 flex-1 rounded border border-[var(--surface-border)] bg-[var(--background)] px-2 py-1.5 text-sm text-[var(--foreground)]"
+          />
+          {onLookupAsin ? (
+            <button
+              type="button"
+              disabled={!asinReady || catalogBusy}
+              onClick={() => void runCatalogLookup()}
+              className="shrink-0 rounded border border-[var(--surface-border)] bg-[var(--surface)] px-2.5 py-1.5 text-xs font-semibold text-[var(--foreground)] hover:bg-[var(--foreground)]/5 disabled:cursor-not-allowed disabled:opacity-40"
+              title={
+                asinReady
+                  ? "Look up this ASIN on Amazon if it is not in your listings"
+                  : "Enter a 10-character ASIN to search Amazon catalog"
+              }
+            >
+              {catalogBusy ? "Searching…" : "Search ASIN"}
+            </button>
+          ) : null}
+        </div>
       </label>
+      {onLookupAsin ? (
+        <p className="mt-1 text-[11px] text-[var(--muted-foreground)]">
+          Not in your listings yet? Paste the ASIN and click Search ASIN.
+        </p>
+      ) : null}
       {busy ? (
         <p className="mt-1 text-[11px] text-[var(--muted-foreground)]">
-          Searching…
+          Searching listings…
         </p>
       ) : null}
       {err ? <p className="mt-1 text-[11px] text-red-500">{err}</p> : null}
@@ -267,6 +353,7 @@ function ListingSearchField({
                   onPick(h);
                   setQ("");
                   setHits([]);
+                  setCatalogHit(null);
                 }}
                 className="flex w-full cursor-pointer items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-xs text-[var(--foreground)] hover:bg-[var(--foreground)]/5"
               >
@@ -297,6 +384,52 @@ function ListingSearchField({
           ))}
         </ul>
       ) : null}
+      {catalogHit && catalogHit.source === "catalog" ? (
+        <div className="mt-1.5 rounded-lg border border-[var(--surface-border)] bg-[var(--background)] p-1.5">
+          <p className="mb-1 px-1 text-[11px] font-medium text-[var(--muted-foreground)]">
+            Amazon catalog — not in your listings yet
+          </p>
+          <button
+            type="button"
+            onClick={() => {
+              onPick({
+                asin: catalogHit.asin,
+                sku: "",
+                title: (catalogHit.title ?? "").trim() || catalogHit.asin,
+                imageUrl: catalogHit.imageUrl ?? null,
+                costOfGoods: null,
+              });
+              setQ("");
+              setHits([]);
+              setCatalogHit(null);
+            }}
+            className="flex w-full cursor-pointer items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-xs text-[var(--foreground)] hover:bg-[var(--foreground)]/5"
+          >
+            <div className="h-10 w-10 shrink-0 overflow-hidden rounded-md bg-[var(--surface)] ring-1 ring-[var(--surface-border)]">
+              {catalogHit.imageUrl ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={catalogHit.imageUrl}
+                  alt=""
+                  className="h-full w-full object-cover"
+                  loading="lazy"
+                  referrerPolicy="no-referrer"
+                />
+              ) : (
+                <div className="flex h-full w-full items-center justify-center text-[9px] text-[var(--muted-foreground)]">
+                  No img
+                </div>
+              )}
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="font-medium text-sb-accent">{catalogHit.asin}</div>
+              <div className="truncate text-[11px] text-[var(--muted-foreground)]">
+                {(catalogHit.title ?? "").trim() || "Untitled catalog item"}
+              </div>
+            </div>
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -307,6 +440,7 @@ export function CogsScreenshotIngest({
   onFinished,
   onLoadQuota,
   onSearchListings,
+  onLookupAsin,
   variant = "button",
   triggerLabel = "From screenshot",
 }: Props) {
@@ -507,6 +641,7 @@ export function CogsScreenshotIngest({
           asin: l.asin?.trim() || undefined,
           sku: l.sku?.trim() || undefined,
           productTitle: l.productTitle?.trim() || undefined,
+          imageUrl: l.imageUrl?.trim() || undefined,
           qty: coerceQty(l.qty, 1),
           unitCostIncVat:
             l.unitCostIncVat != null && Number(l.unitCostIncVat) > 0
@@ -1052,11 +1187,13 @@ export function CogsScreenshotIngest({
                       {onSearchListings ? (
                         <ListingSearchField
                           onSearch={onSearchListings}
+                          onLookupAsin={onLookupAsin}
                           onPick={(hit) =>
                             updateLine(idx, {
                               asin: hit.asin,
                               sku: hit.sku,
                               productTitle: hit.title,
+                              imageUrl: hit.imageUrl ?? null,
                               unitCostIncVat:
                                 hit.costOfGoods != null &&
                                 Number(hit.costOfGoods) > 0

@@ -47,6 +47,11 @@ import {
 } from './deal-check-fees.util';
 import { eligibilityFromListingsRestrictionsBody } from './asin-selling-eligibility.util';
 import {
+  normalizePurchaseAsin,
+  parseCatalogItemImageUrl,
+  parseCatalogItemTitle,
+} from './catalog-item-parse.util';
+import {
   avgDailyUnitsInStock,
   resolveInStockDaysForVelocity,
   utcDayDate,
@@ -7455,6 +7460,116 @@ export class AmazonService {
     }));
   }
 
+  /**
+   * ASIN lookup for Log a purchase: prefer org portfolio product, else Catalog API.
+   * Does not create a Product row — ingest with createProductIfMissing does that.
+   */
+  async lookupAsinForPurchase(
+    orgId: string,
+    preferredUserId: string | undefined,
+    rawAsin: string,
+  ): Promise<{
+    source: 'portfolio' | 'catalog';
+    asin: string;
+    sku: string | null;
+    title: string | null;
+    imageUrl: string | null;
+    costOfGoods: number | null;
+    productId: string | null;
+  }> {
+    const asin = normalizePurchaseAsin(rawAsin);
+    if (!asin) {
+      throw new BadRequestException(
+        'ASIN must be exactly 10 letters/digits (e.g. B0XXXXXXXX)',
+      );
+    }
+
+    const userIds = await this.getOrgAmazonAggregateUserIds(orgId);
+    if (userIds.length > 0) {
+      const product = await this.prisma.product.findFirst({
+        where: {
+          userId: { in: userIds },
+          asin: { equals: asin, mode: 'insensitive' },
+        },
+        orderBy: [{ updatedAt: 'desc' }],
+        select: {
+          id: true,
+          sku: true,
+          asin: true,
+          title: true,
+          imageUrl: true,
+          costOfGoods: true,
+        },
+      });
+      if (product) {
+        return {
+          source: 'portfolio',
+          asin: (product.asin ?? asin).toUpperCase(),
+          sku: product.sku,
+          title: product.title,
+          imageUrl: product.imageUrl,
+          costOfGoods:
+            product.costOfGoods == null ? null : Number(product.costOfGoods),
+          productId: product.id,
+        };
+      }
+    }
+
+    let credentials: SpApiCredentials;
+    try {
+      credentials = await this.getAmazonCredentialsForOrg(
+        orgId,
+        preferredUserId,
+      );
+    } catch {
+      throw new BadRequestException(
+        'Amazon is not connected — link Seller Central to look up ASINs outside your listings.',
+      );
+    }
+
+    const marketplaceId =
+      (credentials.region ?? 'eu') === 'eu'
+        ? 'A1F83G8C2ARO7P'
+        : (credentials.region ?? '') === 'na'
+          ? 'ATVPDKIKX0DER'
+          : 'A1VC38T7YXB528';
+
+    let res: unknown;
+    try {
+      res = await this.spApiClient.getCatalogItem(credentials, asin, [
+        marketplaceId,
+      ]);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (
+        msg.includes('(404)') ||
+        msg.toLowerCase().includes('not found')
+      ) {
+        throw new NotFoundException(
+          `No Amazon catalog item found for ASIN ${asin}`,
+        );
+      }
+      throw e;
+    }
+
+    const title = parseCatalogItemTitle(res, marketplaceId);
+    const imageUrl = parseCatalogItemImageUrl(res, marketplaceId);
+    if (!title && !imageUrl) {
+      throw new NotFoundException(
+        `No Amazon catalog item found for ASIN ${asin}`,
+      );
+    }
+
+    return {
+      source: 'catalog',
+      asin,
+      sku: null,
+      title,
+      imageUrl,
+      costOfGoods: null,
+      productId: null,
+    };
+  }
 
   /**
    * Sort product IDs by available stock (desc) then sales revenue (desc) for COGS tab.
@@ -17717,6 +17832,7 @@ try {
           skuNorm ||
           `SUP-${asin.slice(-8).toUpperCase()}`.replace(/[^A-Z0-9-]/g, '');
         const title = line.productTitle?.trim() || null;
+        const imageUrl = line.imageUrl?.trim() || null;
         try {
           const upserted = await this.prisma.product.upsert({
             where: {
@@ -17727,10 +17843,12 @@ try {
               sku: createdSku,
               asin,
               title,
+              ...(imageUrl ? { imageUrl } : {}),
             },
             update: {
               asin,
               ...(title ? { title } : {}),
+              ...(imageUrl ? { imageUrl } : {}),
             },
             select: productSelect,
           });

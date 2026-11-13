@@ -180,6 +180,34 @@ export function PurchaseOrderIngestPanel({
     [getToken, devImpersonate],
   );
 
+  const lookupAsin = useCallback(
+    async (asin: string) => {
+      const token = await getToken({ template: "backend" });
+      if (!token) throw new Error("Not authenticated.");
+      const url = new URL(`${baseUrl}/api/amazon/products/catalog-lookup`);
+      url.searchParams.set("asin", asin);
+      const res = await fetch(url.toString(), {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          ...getDevImpersonationHeaders(devImpersonate),
+        },
+      });
+      if (!res.ok) {
+        const msg = await res.text();
+        throw new Error(formatApiErrorMessage(msg, "ASIN lookup failed."));
+      }
+      return (await res.json()) as {
+        source: "portfolio" | "catalog";
+        asin: string;
+        sku: string | null;
+        title: string | null;
+        imageUrl?: string | null;
+        costOfGoods?: number | null;
+      };
+    },
+    [getToken, devImpersonate],
+  );
+
   const confirmScreenshotIngest = useCallback(
     async (payload: Record<string, unknown>) => {
       const token = await getToken({ template: "backend" });
@@ -226,6 +254,7 @@ export function PurchaseOrderIngestPanel({
         onExtract={extractPurchaseScreenshot}
         onLoadQuota={loadScreenshotQuota}
         onSearchListings={searchListings}
+        onLookupAsin={lookupAsin}
         onConfirm={confirmScreenshotIngest}
         onFinished={async () => {
           await onFinished?.();

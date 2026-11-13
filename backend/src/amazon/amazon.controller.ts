@@ -1122,6 +1122,25 @@ ping() {
   }
 
   /**
+   * Log-a-purchase ASIN lookup: org portfolio first, else Catalog API (title/image).
+   * Example: GET /api/amazon/products/catalog-lookup?asin=B0XXXXXXXX
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Get('products/catalog-lookup')
+  async catalogLookupAsin(
+    @Req() req: { user: { orgId: string; userId: string } },
+    @Query('asin') asin?: string,
+  ) {
+    const raw = String(asin ?? '').trim();
+    if (!raw) throw new BadRequestException('asin is required');
+    return this.amazonService.lookupAsinForPurchase(
+      req.user.orgId,
+      req.user.userId,
+      raw,
+    );
+  }
+
+  /**
    * Update Cost of Goods (per-unit) for a product.
    *
    * Example:
