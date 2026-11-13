@@ -13527,6 +13527,41 @@ try {
         data: { title: titleTrim },
       });
     }
+    // If this SKU is still missing title/image but another org SKU shares the ASIN
+    // (e.g. supplier stub vs FBA listing), copy catalog attrs across.
+    if (asin && uniqueTargets.length > 0) {
+      const sibling = await this.prisma.product.findFirst({
+        where: {
+          userId: { in: userIds },
+          asin,
+          AND: [
+            { title: { not: null } },
+            { NOT: { title: '' } },
+          ],
+        },
+        select: { title: true, imageUrl: true },
+        orderBy: { updatedAt: 'desc' },
+      });
+      const targetIds = uniqueTargets.map((t) => t.id);
+      if (sibling?.title?.trim()) {
+        await this.prisma.product.updateMany({
+          where: {
+            id: { in: targetIds },
+            OR: [{ title: null }, { title: '' }],
+          },
+          data: { title: sibling.title.trim() },
+        });
+      }
+      if (sibling?.imageUrl?.trim()) {
+        await this.prisma.product.updateMany({
+          where: {
+            id: { in: targetIds },
+            OR: [{ imageUrl: null }, { imageUrl: '' }],
+          },
+          data: { imageUrl: sibling.imageUrl.trim() },
+        });
+      }
+    }
     return uniqueTargets;
   };
 
@@ -16114,6 +16149,31 @@ try {
         }
 
         await this.prisma.product.update({ where: { id: p.id }, data });
+        // Same ASIN can have multiple SKUs (FBA stub + supplier stub); fill blank siblings too.
+        if (p.asin) {
+          if (data.title) {
+            await this.prisma.product.updateMany({
+              where: {
+                userId: { in: userIds },
+                asin: p.asin,
+                id: { not: p.id },
+                OR: [{ title: null }, { title: '' }],
+              },
+              data: { title: data.title },
+            });
+          }
+          if (data.imageUrl) {
+            await this.prisma.product.updateMany({
+              where: {
+                userId: { in: userIds },
+                asin: p.asin,
+                id: { not: p.id },
+                OR: [{ imageUrl: null }, { imageUrl: '' }],
+              },
+              data: { imageUrl: data.imageUrl },
+            });
+          }
+        }
         updated += 1;
         updatedProducts.push({
           id: p.id,
