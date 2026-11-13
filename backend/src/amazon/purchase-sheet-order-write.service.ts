@@ -123,12 +123,12 @@ export class PurchaseSheetOrderWriteService {
     const day = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso ?? '').trim());
     if (day) {
       // Avoid UTC/local Date parsing shifting the calendar day.
-      return `${Number(day[2])}/${Number(day[3])}/${day[1]}`;
+      // UK DD/MM/YYYY (same as prep inbound / Blue30).
+      return `${Number(day[3])}/${Number(day[2])}/${day[1]}`;
     }
     const d = new Date(iso);
     if (Number.isNaN(d.getTime())) return '';
-    // Match existing sheet style (M/D/YYYY).
-    return `${d.getUTCMonth() + 1}/${d.getUTCDate()}/${d.getUTCFullYear()}`;
+    return `${d.getUTCDate()}/${d.getUTCMonth() + 1}/${d.getUTCFullYear()}`;
   }
 
   /**

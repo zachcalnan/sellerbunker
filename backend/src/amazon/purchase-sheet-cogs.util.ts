@@ -60,12 +60,15 @@ export function parseSheetDate(raw: unknown): Date | null {
   }
   const s = String(raw).trim();
   if (!s) return null;
-  // US-style M/D/YYYY from the purchase sheet
-  const mdy = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (mdy) {
-    const month = Number(mdy[1]);
-    const day = Number(mdy[2]);
-    const year = Number(mdy[3]);
+  // Numeric slash dates: prefer UK D/M/YYYY. If the second part is >12,
+  // treat as legacy US M/D/YYYY from older sheet writes.
+  const slash = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (slash) {
+    const a = Number(slash[1]);
+    const b = Number(slash[2]);
+    const year = Number(slash[3]);
+    const day = b > 12 ? b : a;
+    const month = b > 12 ? a : b;
     const d = new Date(Date.UTC(year, month - 1, day));
     return Number.isNaN(d.getTime()) ? null : d;
   }

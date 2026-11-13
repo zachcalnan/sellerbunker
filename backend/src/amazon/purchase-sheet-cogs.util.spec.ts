@@ -4,6 +4,7 @@ import {
   decideOpsCells,
   fifoAllocateByAsin,
   findUnitCostColumnIndex,
+  parseSheetDate,
   parseSheetMoney,
   parseSheetPurchaseRows,
   shouldPreserveExistingCogs,
@@ -15,6 +16,19 @@ describe('purchase-sheet-cogs.util', () => {
     expect(parseSheetMoney('1,234.56')).toBe(1234.56);
     expect(parseSheetMoney('')).toBeNull();
     expect(parseSheetMoney(0)).toBeNull();
+  });
+
+  it('parses UK DD/MM/YYYY and legacy unambiguous US M/D/YYYY', () => {
+    expect(parseSheetDate('13/11/2026')?.toISOString().slice(0, 10)).toBe(
+      '2026-11-13',
+    );
+    expect(parseSheetDate('8/5/2026')?.toISOString().slice(0, 10)).toBe(
+      '2026-05-08',
+    );
+    // Second part >12 ⇒ legacy US rows from older writes
+    expect(parseSheetDate('11/13/2026')?.toISOString().slice(0, 10)).toBe(
+      '2026-11-13',
+    );
   });
 
   it('finds £/Unit and not Units', () => {
@@ -34,9 +48,9 @@ describe('purchase-sheet-cogs.util', () => {
   it('keeps latest dated unit cost per ASIN', () => {
     const values = [
       ['Date', 'ASIN', 'Product', 'Units', '£/Unit', 'Supplier'],
-      ['10/29/2025', 'B0AAA', 'Old', '2', '£10.00', 'A'],
-      ['11/01/2025', 'B0AAA', 'New', '1', '£12.50', 'B'],
-      ['10/30/2025', 'B0BBB', 'Other', '1', '£5.00', 'C'],
+      ['29/10/2025', 'B0AAA', 'Old', '2', '£10.00', 'A'],
+      ['1/11/2025', 'B0AAA', 'New', '1', '£12.50', 'B'],
+      ['30/10/2025', 'B0BBB', 'Other', '1', '£5.00', 'C'],
     ];
     const { costs, errors } = buildLatestAsinUnitCostsFromSheet(
       'CURRENT ORDERS',
@@ -72,9 +86,9 @@ describe('purchase-sheet-cogs.util', () => {
   it('FIFO allocates shipped/sold across same-ASIN rows by date', () => {
     const values = [
       ['Date', 'ASIN', 'Units', '£/Unit', 'Delivered ', ' to AMZ', 'Final'],
-      ['10/01/2025', 'B0AAA', '5', '£10', '', '', ''],
-      ['11/01/2025', 'B0AAA', '3', '£11', '', '', ''],
-      ['10/15/2025', 'B0BBB', '2', '£5', '', '', ''],
+      ['1/10/2025', 'B0AAA', '5', '£10', '', '', ''],
+      ['1/11/2025', 'B0AAA', '3', '£11', '', '', ''],
+      ['15/10/2025', 'B0BBB', '2', '£5', '', '', ''],
     ];
     const { rows } = parseSheetPurchaseRows(values);
     const pool = new Map([
