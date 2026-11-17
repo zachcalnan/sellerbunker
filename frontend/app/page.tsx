@@ -1584,7 +1584,7 @@ export default function LandingPage() {
               >
                 <h1 className="text-3xl font-bold leading-tight tracking-normal text-[var(--foreground)] sm:text-4xl lg:text-5xl">
                   See your{" "}
-                  <span className="whitespace-nowrap">REAL Amazon profit</span>
+                  <span className="whitespace-nowrap">REAL profit</span>
                   {" "}
                   <span className="whitespace-nowrap">— not just revenue</span>
                 </h1>
