@@ -1579,6 +1579,23 @@ ping() {
       req.user.userId,
       dto,
     );
+    if (ledger.needsCatalogEnrich) {
+      try {
+        await this.amazonSyncService.enqueueTitlesBackfill(
+          req.user.orgId,
+          req.user.userId,
+          { limit: 50 },
+        );
+        this.logger.log(
+          `Supplier order ingest: enqueued titles-backfill for incomplete catalog attrs (orgId=${req.user.orgId})`,
+        );
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        this.logger.warn(
+          `Supplier order ingest: titles-backfill enqueue failed (non-fatal): ${msg}`,
+        );
+      }
+    }
     const sheetLines = buildPurchaseSheetLinesFromIngest({
       ledgerLines: ledger.lines,
       dtoLines: dto.lines,
@@ -1639,6 +1656,21 @@ ping() {
       userId,
       dto,
     );
+    if (ledger.needsCatalogEnrich) {
+      try {
+        await this.amazonSyncService.enqueueTitlesBackfill(orgId, userId, {
+          limit: 50,
+        });
+        this.logger.log(
+          `Supplier order ingest-api-key: enqueued titles-backfill for incomplete catalog attrs (orgId=${orgId})`,
+        );
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        this.logger.warn(
+          `Supplier order ingest-api-key: titles-backfill enqueue failed (non-fatal): ${msg}`,
+        );
+      }
+    }
     const sheetLines = buildPurchaseSheetLinesFromIngest({
       ledgerLines: ledger.lines,
       dtoLines: dto.lines,

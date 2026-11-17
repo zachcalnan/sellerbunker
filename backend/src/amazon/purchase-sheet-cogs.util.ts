@@ -165,6 +165,29 @@ export function colIndexToA1(colIndex0: number): string {
   return s;
 }
 
+/**
+ * Derive Product.costOfGoods (ex-VAT unit / landed cost) from a purchase line's
+ * inc-VAT unit + delivery + prep totals. Matches createPurchase / ledger sync.
+ */
+export function deriveUnitCostOfGoodsExVat(opts: {
+  unitCostIncVat: number;
+  deliveryCostIncVat?: number;
+  prepCostIncVat?: number;
+  vatRatePct?: number;
+}): number | null {
+  const unit = Number(opts.unitCostIncVat ?? 0);
+  const delivery = Number(opts.deliveryCostIncVat ?? 0);
+  const prep = Number(opts.prepCostIncVat ?? 0);
+  const vatRatePct = Number(opts.vatRatePct ?? 0);
+  const totalCostIncVat = unit + delivery + prep;
+  if (!Number.isFinite(totalCostIncVat)) return null;
+  const vatFactor = 1 + (vatRatePct > 0 ? vatRatePct / 100 : 0);
+  const derived =
+    vatFactor > 0 ? totalCostIncVat / vatFactor : totalCostIncVat;
+  if (!Number.isFinite(derived)) return null;
+  return Number(derived.toFixed(2));
+}
+
 /** Whether an existing product cost should be left alone. */
 export function shouldPreserveExistingCogs(opts: {
   costOfGoods: number | null | undefined;

@@ -21,6 +21,7 @@ import {
   effectiveUnitCostIncVatForPromo,
   type SupplierPromoType,
 } from './supplier-order-promo.util';
+import { deriveUnitCostOfGoodsExVat } from './purchase-sheet-cogs.util';
 import type { IngestSupplierOrderDto } from './dto/ingest-supplier-order.dto';
 import { UsersService } from '../users/users.service';
 import {
@@ -8116,6 +8117,47 @@ export class AmazonService {
       throw new NotFoundException('Product not found in org');
     }
 
+    // Same ASIN can have supplier stub + later FBA SKU; fill siblings that still
+    // have no unit cost so inventory/orders pick up the purchase COGS.
+    const cogsNum =
+      costOfGoods == null ? null : Number(costOfGoods);
+    if (
+      updated.asin &&
+      cogsNum != null &&
+      Number.isFinite(cogsNum) &&
+      cogsNum > 0
+    ) {
+      try {
+        const siblings = await this.prisma.product.findMany({
+          where: {
+            userId: { in: userIds },
+            asin: { equals: updated.asin, mode: 'insensitive' },
+            id: { not: productId },
+          },
+          select: { id: true, costOfGoods: true },
+        });
+        const emptyIds = siblings
+          .filter((s) => {
+            const n =
+              s.costOfGoods == null ? null : Number(s.costOfGoods);
+            return n == null || !Number.isFinite(n) || n <= 0;
+          })
+          .map((s) => s.id);
+        if (emptyIds.length > 0) {
+          await this.prisma.product.updateMany({
+            where: { id: { in: emptyIds } },
+            data: { costOfGoods: cogsNum },
+          });
+        }
+      } catch (e) {
+        this.logger.warn(
+          `[updateProductCostOfGoods] sibling COGS propagate failed: ${
+            e instanceof Error ? e.message : String(e)
+          }`,
+        );
+      }
+    }
+
     // Profit freshness:
     // If COGS changes, recompute profit for existing OrderItem rows for this product.
     // This ensures dashboards and "top profitable products" update immediately without
@@ -13527,8 +13569,8 @@ try {
         data: { title: titleTrim },
       });
     }
-    // If this SKU is still missing title/image but another org SKU shares the ASIN
-    // (e.g. supplier stub vs FBA listing), copy catalog attrs across.
+    // If this SKU is still missing title/image/COGS but another org SKU shares the ASIN
+    // (e.g. supplier stub vs FBA listing), copy catalog attrs + unit cost across.
     if (asin && uniqueTargets.length > 0) {
       const sibling = await this.prisma.product.findFirst({
         where: {
@@ -13539,9 +13581,21 @@ try {
             { NOT: { title: '' } },
           ],
         },
-        select: { title: true, imageUrl: true },
+        select: { title: true, imageUrl: true, costOfGoods: true },
         orderBy: { updatedAt: 'desc' },
       });
+      const cogsSibling =
+        sibling?.costOfGoods != null && Number(sibling.costOfGoods) > 0
+          ? sibling
+          : await this.prisma.product.findFirst({
+              where: {
+                userId: { in: userIds },
+                asin,
+                costOfGoods: { not: null },
+              },
+              select: { title: true, imageUrl: true, costOfGoods: true },
+              orderBy: { updatedAt: 'desc' },
+            });
       const targetIds = uniqueTargets.map((t) => t.id);
       if (sibling?.title?.trim()) {
         await this.prisma.product.updateMany({
@@ -13560,6 +13614,29 @@ try {
           },
           data: { imageUrl: sibling.imageUrl.trim() },
         });
+      }
+      const siblingCogs =
+        cogsSibling?.costOfGoods == null
+          ? null
+          : Number(cogsSibling.costOfGoods);
+      if (siblingCogs != null && Number.isFinite(siblingCogs) && siblingCogs > 0) {
+        const targetsNeedingCogs = await this.prisma.product.findMany({
+          where: { id: { in: targetIds } },
+          select: { id: true, costOfGoods: true },
+        });
+        const emptyIds = targetsNeedingCogs
+          .filter((t) => {
+            const n =
+              t.costOfGoods == null ? null : Number(t.costOfGoods);
+            return n == null || !Number.isFinite(n) || n <= 0;
+          })
+          .map((t) => t.id);
+        if (emptyIds.length > 0) {
+          await this.prisma.product.updateMany({
+            where: { id: { in: emptyIds } },
+            data: { costOfGoods: siblingCogs },
+          });
+        }
       }
     }
     return uniqueTargets;
@@ -16852,12 +16929,12 @@ try {
     // This keeps dashboard profit working while COGS is managed via the ledger.
     if (!dto.skipSyncProductCostOfGoods) {
       try {
-        const vatFactor = 1 + (vatRatePct > 0 ? vatRatePct / 100 : 0);
-        const derivedCogs =
-          vatFactor > 0 ? totalCostIncVat / vatFactor : totalCostIncVat;
-        const rounded = Number.isFinite(derivedCogs)
-          ? Number(derivedCogs.toFixed(2))
-          : null;
+        const rounded = deriveUnitCostOfGoodsExVat({
+          unitCostIncVat,
+          deliveryCostIncVat,
+          prepCostIncVat,
+          vatRatePct,
+        });
         await this.updateProductCostOfGoods(orgId, dto.productId, rounded);
       } catch (e) {
         // Non-fatal; purchase entry is still saved.
@@ -17081,16 +17158,19 @@ try {
       const latest = await (this.prisma as any).purchase.findFirst({
         where: { productId: updated.product.id },
         orderBy: [{ purchaseDate: 'desc' }, { createdAt: 'desc' }],
-        select: { vatRatePct: true, totalCostIncVat: true },
+        select: {
+          vatRatePct: true,
+          unitCostIncVat: true,
+          deliveryCostIncVat: true,
+          prepCostIncVat: true,
+        },
       });
-      const vatRatePct = Number(latest?.vatRatePct ?? 0);
-      const totalCostIncVat = Number(latest?.totalCostIncVat ?? 0);
-      const vatFactor = 1 + (vatRatePct > 0 ? vatRatePct / 100 : 0);
-      const derivedCogs =
-        vatFactor > 0 ? totalCostIncVat / vatFactor : totalCostIncVat;
-      const rounded = Number.isFinite(derivedCogs)
-        ? Number(derivedCogs.toFixed(2))
-        : null;
+      const rounded = deriveUnitCostOfGoodsExVat({
+        unitCostIncVat: Number(latest?.unitCostIncVat ?? 0),
+        deliveryCostIncVat: Number(latest?.deliveryCostIncVat ?? 0),
+        prepCostIncVat: Number(latest?.prepCostIncVat ?? 0),
+        vatRatePct: Number(latest?.vatRatePct ?? 0),
+      });
       await this.updateProductCostOfGoods(orgId, updated.product.id, rounded);
     } catch (e) {
       console.warn('[AmazonService.updatePurchase] failed to derive COGS', {
@@ -17310,16 +17390,12 @@ try {
       const prepCostIncVat = Math.max(0, num(o.prepCostIncVat, 0) ?? 0);
       const vatRatePct = Math.max(0, num(o.vatRatePct, 0) ?? 0);
 
-      const totalLineIncVat =
-        unitCostIncVat + deliveryCostIncVat + prepCostIncVat;
-      const vatFactor = 1 + (vatRatePct > 0 ? vatRatePct / 100 : 0);
-      const derivedRounded = Number.isFinite(totalLineIncVat)
-        ? Number(
-            (vatFactor > 0 ? totalLineIncVat / vatFactor : totalLineIncVat).toFixed(
-              2,
-            ),
-          )
-        : null;
+      const derivedRounded = deriveUnitCostOfGoodsExVat({
+        unitCostIncVat,
+        deliveryCostIncVat,
+        prepCostIncVat,
+        vatRatePct,
+      });
 
       try {
         await this.createPurchase(orgId, product.userId, {
@@ -17848,6 +17924,8 @@ try {
     orderNumber: string;
     created: number;
     skipped: number;
+    /** True when at least one product used for this ingest still lacks title/image. */
+    needsCatalogEnrich: boolean;
     errors: Array<{ lineIndex: number; asin?: string; message: string }>;
     lines: Array<{
       lineIndex: number;
@@ -17894,6 +17972,7 @@ try {
     }> = [];
     let created = 0;
     let skipped = 0;
+    let needsCatalogEnrich = false;
 
     const normalizeAsin = (raw: string): string =>
       raw.replace(/\s/g, '').toUpperCase();
@@ -17917,12 +17996,14 @@ try {
         id: string;
         userId: string;
         title: string | null;
+        imageUrl: string | null;
         asin: string | null;
       } | null = null;
       const productSelect = {
         id: true,
         userId: true,
         title: true,
+        imageUrl: true,
         asin: true,
       } as const;
       if (skuNorm) {
@@ -18028,6 +18109,15 @@ try {
         undefined;
       const resolvedTitle =
         line.productTitle?.trim() || product.title || null;
+      const resolvedImage =
+        line.imageUrl?.trim() || product.imageUrl || null;
+      if (
+        resolvedAsin &&
+        (isBlankProductCatalogAttr(resolvedTitle) ||
+          isBlankProductCatalogAttr(resolvedImage))
+      ) {
+        needsCatalogEnrich = true;
+      }
 
       const qty = Math.max(1, Math.floor(Number(line.qty) || 1));
       const qtyDelivered = Math.max(
@@ -18110,6 +18200,7 @@ try {
       orderNumber,
       created,
       skipped,
+      needsCatalogEnrich,
       errors,
       lines,
     };

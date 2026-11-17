@@ -2,6 +2,7 @@ import {
   buildLatestAsinUnitCostsFromSheet,
   colIndexToA1,
   decideOpsCells,
+  deriveUnitCostOfGoodsExVat,
   fifoAllocateByAsin,
   findUnitCostColumnIndex,
   parseSheetDate,
@@ -60,6 +61,28 @@ describe('purchase-sheet-cogs.util', () => {
     expect(costs.get('B0AAA')?.unitCostIncVat).toBe(12.5);
     expect(costs.get('B0AAA')?.supplier).toBe('B');
     expect(costs.get('B0BBB')?.unitCostIncVat).toBe(5);
+  });
+
+  it('derives ex-VAT unit COGS from purchase buy price', () => {
+    expect(
+      deriveUnitCostOfGoodsExVat({
+        unitCostIncVat: 12,
+        vatRatePct: 20,
+      }),
+    ).toBe(10);
+    expect(
+      deriveUnitCostOfGoodsExVat({
+        unitCostIncVat: 10,
+        deliveryCostIncVat: 2,
+        prepCostIncVat: 0,
+        vatRatePct: 0,
+      }),
+    ).toBe(12);
+    expect(
+      deriveUnitCostOfGoodsExVat({
+        unitCostIncVat: Number.NaN,
+      }),
+    ).toBeNull();
   });
 
   it('preserves manual/legacy costs but not sheet-sourced', () => {
