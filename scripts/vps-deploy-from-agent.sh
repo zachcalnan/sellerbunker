@@ -63,7 +63,8 @@ set -euo pipefail
 cd /opt/seller-dashboard
 # Prefer the uploaded bundle when present (Cloud Agent / local deploy path).
 if [[ -f /root/seller-dashboard.bundle ]]; then
-  git fetch /root/seller-dashboard.bundle "${BRANCH}:refs/remotes/origin/${BRANCH}"
+  # Force-update the tracking ref: bundle is the intended deploy tip (may diverge from prior VPS-only HEADs).
+  git fetch -f /root/seller-dashboard.bundle "+${BRANCH}:refs/remotes/origin/${BRANCH}"
 else
   git fetch origin
 fi
