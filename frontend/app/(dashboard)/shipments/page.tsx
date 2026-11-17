@@ -416,8 +416,10 @@ export default function ShipmentsPage() {
 
   const { backgroundClass } = useDisplaySettings();
 
+  // Fixed tracks (no `auto`) so every row shares the same column edges — Items
+  // thumbnails previously used minmax(0,auto) and shifted Status/dates/qty per row.
   const gridCols =
-    "grid-cols-[20px_minmax(0,auto)_minmax(88px,0.75fr)_0.55fr_0.5fr_0.65fr_0.35fr_0.4fr_0.4fr_0.4fr]";
+    "min-w-[920px] grid-cols-[20px_9.5rem_minmax(7rem,1.15fr)_minmax(5.5rem,0.9fr)_5.75rem_5.75rem_3rem_3.25rem_3.25rem_3.75rem]";
 
   return (
     <div className={`flex min-h-screen flex-col gap-4 ${backgroundClass} p-4 md:p-6`}>
@@ -641,22 +643,22 @@ export default function ShipmentsPage() {
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                               </svg>
                             </div>
-                            <div className="py-0.5">
+                            <div className="w-full overflow-hidden py-0.5">
                               <ShipmentItemThumbnails items={r.items ?? []} />
                             </div>
                             <div className="min-w-0">
                               <div className="truncate font-mono text-[var(--foreground)]" title={r.shipmentId}>
                                 {r.shipmentId}
                               </div>
-                              <div className="text-[10px] text-[var(--muted-foreground)]">
+                              <div className="truncate text-[10px] text-[var(--muted-foreground)]">
                                 FC: {r.destinationFulfillmentCenterId ?? "—"}
                                 {itemCount > 0 ? ` · ${itemCount} SKU${itemCount !== 1 ? "s" : ""}` : ""}
                               </div>
                             </div>
-                            <div className="truncate pl-0.5 text-[var(--foreground)]">
+                            <div className="min-w-0 truncate pl-0.5 text-[var(--foreground)]" title={r.transportStatus ?? r.shipmentStatus ?? undefined}>
                               {r.transportStatus ?? r.shipmentStatus ?? "—"}
                             </div>
-                            <div className="text-[var(--foreground)]">
+                            <div className="tabular-nums text-[var(--foreground)]">
                               {r.createdDate != null ? (
                                 <span title={r.createdDateSource === "name" ? "Parsed from shipment name" : undefined}>
                                   {formatDate(r.createdDate)}
@@ -668,7 +670,7 @@ export default function ShipmentsPage() {
                                 <span className="text-[var(--muted-foreground)]">—</span>
                               )}
                             </div>
-                            <div className="min-w-[5.5rem] text-[var(--foreground)]">
+                            <div className="tabular-nums text-[var(--foreground)]">
                               {r.checkedInDate != null ? (
                                 <span title={checkedInSourceLabel(r.checkedInDateSource) ?? undefined}>
                                   {formatDate(r.checkedInDate)}
