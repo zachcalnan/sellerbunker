@@ -4156,11 +4156,25 @@ export class AmazonService {
       });
     }
 
-    const sheet = await this.stockCostSheetRead.getPurchasedAndArrivedByAsin();
+    const amazonHeldByAsin = new Map<string, number>();
+    for (const row of skuRows) {
+      const asin = (row.asin ?? '').trim().toUpperCase();
+      if (!asin) continue;
+      const held =
+        Math.max(0, Math.floor(row.availableQty || 0)) +
+        Math.max(0, Math.floor(row.inboundQty || 0));
+      if (!(held > 0)) continue;
+      amazonHeldByAsin.set(asin, (amazonHeldByAsin.get(asin) ?? 0) + held);
+    }
+
+    const sheet = await this.stockCostSheetRead.getPurchasedAndArrivedByAsin({
+      amazonHeldByAsin,
+    });
     const sheetTotals = sumSheetAwareStockCostPipeline({
       skuRows,
       purchasedByAsin: sheet.purchasedByAsin,
       arrivedByAsin: sheet.arrivedByAsin,
+      sheetSentByAsin: sheet.sheetSentByAsin,
     });
 
     // Optional DB fallback when sheets are unavailable (keeps widget usable).

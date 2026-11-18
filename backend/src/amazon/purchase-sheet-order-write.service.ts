@@ -57,12 +57,16 @@ export type AppendBlue30CopyResult = {
 /** Map free-text / enum into the live sheet Home/Prep labels. */
 export function normalizeShipDestinationLabel(
   raw: unknown,
-): 'HOME' | 'PREP CENTER' | '' {
+): 'HOME' | 'PREP CENTER' | 'sent' | '' {
   const s = String(raw ?? '')
     .trim()
     .toLowerCase()
     .replace(/[_-]+/g, ' ');
   if (!s) return '';
+  // Already shipped into Amazon (inbound / available) — middle status column.
+  if (s === 'sent' || s === 'sent to amazon' || s === 'sent to amz') {
+    return 'sent';
+  }
   if (
     s === 'home' ||
     s === 'house' ||

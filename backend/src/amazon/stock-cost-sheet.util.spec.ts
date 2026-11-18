@@ -1,11 +1,13 @@
 import {
   buildSheetPurchasedAndArrivedByAsin,
   isPurchaseSheetDeliveredYes,
+  isPurchaseSheetHomePrepSent,
   isPurchaseSheetInTransit,
   matchUnitCostFromPurchaseSheet,
   parseBlue30ArrivedRows,
   parsePurchaseSheetStageRows,
   planDeliveredYesUpdatesFromBlue30,
+  planHomePrepSentUpdatesFromAmazonHeld,
   sheetUnitCostToCogs,
   sumSheetAwareStockCostPipeline,
 } from './stock-cost-sheet.util';
@@ -25,6 +27,14 @@ describe('stock-cost-sheet.util', () => {
     expect(sheetUnitCostToCogs(12.5)).toBe(12.5);
   });
 
+  it('detects Home/Prep sent', () => {
+    expect(isPurchaseSheetHomePrepSent('sent')).toBe(true);
+    expect(isPurchaseSheetHomePrepSent('SENT')).toBe(true);
+    expect(isPurchaseSheetHomePrepSent('sent to amazon')).toBe(true);
+    expect(isPurchaseSheetHomePrepSent('HOME')).toBe(false);
+    expect(isPurchaseSheetHomePrepSent('PREP CENTER')).toBe(false);
+  });
+
   it('parses CURRENT ORDERS into in-transit vs delivered', () => {
     const values = [
       [
@@ -39,13 +49,15 @@ describe('stock-cost-sheet.util', () => {
       ['1/11/2026', 'B0AAA', 'ORD1', '4', '£10.00', 'PREP CENTER', 'No'],
       ['2/11/2026', 'B0BBB', 'ORD2', '2', '£5.00', 'HOME', 'Yes'],
       ['3/11/2026', 'B0CCC', 'ORD3', '1', '£8.00', 'HOME', ''],
+      ['4/11/2026', 'B0DDD', 'ORD4', '3', '£9.00', 'sent', 'Yes'],
     ];
     const { inTransit, delivered, errors } = parsePurchaseSheetStageRows(values);
     expect(errors).toEqual([]);
     expect(inTransit.map((r) => r.asin)).toEqual(['B0AAA', 'B0CCC']);
-    expect(delivered.map((r) => r.asin)).toEqual(['B0BBB']);
+    expect(delivered.map((r) => r.asin)).toEqual(['B0BBB', 'B0DDD']);
     expect(inTransit[0].unitCost).toBe(10);
     expect(delivered[0].homePrep).toBe('HOME');
+    expect(delivered[1].homePrep).toBe('sent');
   });
 
   it('parses Blue30 Quantity Received as arrived', () => {
@@ -189,6 +201,62 @@ describe('stock-cost-sheet.util', () => {
     expect(updates).toEqual([]);
   });
 
+  it('plans Home/Prep=sent from Amazon held FIFO; skips already-sent', () => {
+    const purchase = parsePurchaseSheetStageRows([
+      [
+        'Date',
+        'ASIN',
+        'Order Num',
+        'Units',
+        '£/Unit',
+        'Home/Prep',
+        'Delivered ',
+      ],
+      ['1/11/2026', 'B0A', 'O1', '4', '£5', 'PREP CENTER', 'Yes'],
+      ['2/11/2026', 'B0A', 'O2', '6', '£5', 'HOME', 'Yes'],
+      ['3/11/2026', 'B0A', 'O3', '2', '£5', 'sent', 'Yes'],
+      ['1/11/2026', 'B0B', 'O4', '3', '£2', 'HOME', 'Yes'],
+      ['1/11/2026', 'B0C', 'O5', '5', '£1', 'HOME', 'No'],
+    ]);
+
+    const updates = planHomePrepSentUpdatesFromAmazonHeld({
+      purchaseDelivered: purchase.delivered,
+      homePrepColIndex0: 5,
+      amazonHeldByAsin: new Map([
+        ['B0A', 5], // covers oldest open row (4) then starts next
+        ['B0B', 0],
+        ['B0C', 99], // not delivered — ignored
+      ]),
+    });
+
+    expect(updates.map((u) => u.sheetRow).sort((a, b) => a - b)).toEqual([
+      2, // O1 PREP CENTER
+      3, // O2 HOME (remaining held after O1)
+    ]);
+    expect(updates.every((u) => u.homePrepColIndex0 === 5)).toBe(true);
+    expect(updates.find((u) => u.sheetRow === 4)).toBeUndefined(); // already sent
+    expect(updates.find((u) => u.asin === 'B0B')).toBeUndefined();
+  });
+
+  it('Home/Prep=sent planning is idempotent when all covered rows are sent', () => {
+    const updates = planHomePrepSentUpdatesFromAmazonHeld({
+      purchaseDelivered: [
+        {
+          asin: 'B0A',
+          qty: 10,
+          unitCost: 1,
+          orderRef: 'O1',
+          homePrep: 'sent',
+          purchaseDate: new Date('2026-11-01'),
+          sheetRow: 2,
+        },
+      ],
+      homePrepColIndex0: 5,
+      amazonHeldByAsin: new Map([['B0A', 10]]),
+    });
+    expect(updates).toEqual([]);
+  });
+
   it('builds purchased / prep candidates from Delivered flag only (ignores raw B30)', () => {
     const purchase = parsePurchaseSheetStageRows([
       [
@@ -220,7 +288,7 @@ describe('stock-cost-sheet.util', () => {
       ['1/01/2025', 'OLD', 'S', 'Z', 'B0HIST', '100', '100'],
     ]);
 
-    const { purchasedByAsin, arrivedByAsin } =
+    const { purchasedByAsin, arrivedByAsin, sheetSentByAsin } =
       buildSheetPurchasedAndArrivedByAsin({
         purchaseInTransit: purchase.inTransit,
         purchaseDelivered: purchase.delivered,
@@ -239,6 +307,36 @@ describe('stock-cost-sheet.util', () => {
     expect(arrivedByAsin.get('B0BOTH')).toBeUndefined();
     expect(arrivedByAsin.get('B0PREP')).toBeUndefined();
     expect(arrivedByAsin.get('B0HIST')).toBeUndefined();
+    expect(sheetSentByAsin.size).toBe(0);
+  });
+
+  it('excludes Home/Prep=sent from prep candidates and tracks sheet-sent qty', () => {
+    const { arrivedByAsin, sheetSentByAsin } =
+      buildSheetPurchasedAndArrivedByAsin({
+        purchaseInTransit: [],
+        purchaseDelivered: [
+          {
+            asin: 'B0A',
+            qty: 4,
+            unitCost: 5,
+            orderRef: 'O1',
+            homePrep: 'sent',
+            purchaseDate: new Date('2026-11-01'),
+            sheetRow: 2,
+          },
+          {
+            asin: 'B0A',
+            qty: 6,
+            unitCost: 5,
+            orderRef: 'O2',
+            homePrep: 'PREP CENTER',
+            purchaseDate: new Date('2026-11-02'),
+            sheetRow: 3,
+          },
+        ],
+      });
+    expect(arrivedByAsin.get('B0A')?.qty).toBe(6);
+    expect(sheetSentByAsin.get('B0A')).toBe(4);
   });
 
   it('after sync-style Delivered flip, B30-received line moves from purchased to prep', () => {
@@ -270,6 +368,33 @@ describe('stock-cost-sheet.util', () => {
     expect(purchasedByAsin.get('B0PREP')).toBeUndefined();
     expect(arrivedByAsin.get('B0PREP')?.qty).toBe(10);
     expect(arrivedByAsin.get('B0PREP')?.cost).toBe(70);
+  });
+
+  it('does not double-clamp prep when sheet already marks sent rows', () => {
+    const purchasedByAsin = new Map();
+    const arrivedByAsin = new Map([
+      [
+        'B0A',
+        { qty: 5, cost: 35, unitCostWeight: 35, unitCostQty: 5 },
+      ],
+    ]);
+    const sheetSentByAsin = new Map([['B0A', 5]]);
+    const tot = sumSheetAwareStockCostPipeline({
+      skuRows: [
+        {
+          asin: 'B0A',
+          availableQty: 3,
+          inboundQty: 2,
+          unitCost: 7,
+        },
+      ],
+      purchasedByAsin,
+      arrivedByAsin,
+      sheetSentByAsin,
+    });
+    // Remaining prep row (5) must stay — held already explained by sheet-sent (5)
+    expect(tot.stockForPrepQty).toBe(5);
+    expect(tot.stockForPrepCost).toBe(35);
   });
 
   it('clamps prep by Amazon held — sent-in leaves prep (exclusivity)', () => {

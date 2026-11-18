@@ -11,20 +11,26 @@ import {
   parseBlue30ArrivedRows,
   parsePurchaseSheetStageRows,
   planDeliveredYesUpdatesFromBlue30,
+  planHomePrepSentUpdatesFromAmazonHeld,
   type AsinQtyCost,
   type DeliveredYesUpdate,
+  type HomePrepSentUpdate,
 } from './stock-cost-sheet.util';
 
 const CACHE_TTL_SEC = 90;
-/** Pipeline aggregates — bump when costing model changes. */
-const CACHE_KEY_PIPELINE = 'stock-cost:pipeline-maps:v2';
-/** Throttle Blue30→Delivered sheet writes. */
-const SYNC_THROTTLE_KEY = 'stock-cost:delivered-sync:v1';
+/** Pipeline aggregates — bump when costing / Home/Prep=sent model changes. */
+const CACHE_KEY_PIPELINE = 'stock-cost:pipeline-maps:v3';
+/** Throttle Blue30→Delivered + Home/Prep→sent sheet writes. */
+const SYNC_THROTTLE_KEY = 'stock-cost:delivered-sync:v2';
 const SYNC_THROTTLE_SEC = 120;
+
+/** Exact Home/Prep cell value when units have been sent into Amazon. */
+export const HOME_PREP_SENT_VALUE = 'sent';
 
 export type SheetStageSnapshots = {
   purchasedByAsin: Map<string, AsinQtyCost>;
   arrivedByAsin: Map<string, AsinQtyCost>;
+  sheetSentByAsin: Map<string, number>;
   purchaseSheetOk: boolean;
   blue30Ok: boolean;
   errors: string[];
@@ -36,12 +42,15 @@ export type DeliveredSyncResult = {
   skippedThrottle: boolean;
   updated: number;
   updates: DeliveredYesUpdate[];
+  sentUpdated: number;
+  sentUpdates: HomePrepSentUpdate[];
   errors: string[];
 };
 
 type CachedJsonMaps = {
   purchased: Record<string, AsinQtyCost>;
   arrived: Record<string, AsinQtyCost>;
+  sheetSent: Record<string, number>;
   purchaseSheetOk: boolean;
   blue30Ok: boolean;
   errors: string[];
@@ -83,6 +92,7 @@ export class StockCostSheetReadService {
     return {
       purchased: Object.fromEntries(s.purchasedByAsin),
       arrived: Object.fromEntries(s.arrivedByAsin),
+      sheetSent: Object.fromEntries(s.sheetSentByAsin),
       purchaseSheetOk: s.purchaseSheetOk,
       blue30Ok: s.blue30Ok,
       errors: s.errors,
@@ -94,6 +104,9 @@ export class StockCostSheetReadService {
     return {
       purchasedByAsin: new Map(Object.entries(j.purchased ?? {})),
       arrivedByAsin: new Map(Object.entries(j.arrived ?? {})),
+      sheetSentByAsin: new Map(
+        Object.entries(j.sheetSent ?? {}).map(([k, v]) => [k, Number(v) || 0]),
+      ),
       purchaseSheetOk: j.purchaseSheetOk,
       blue30Ok: j.blue30Ok,
       errors: j.errors ?? [],
@@ -110,26 +123,26 @@ export class StockCostSheetReadService {
   }
 
   /**
-   * When Blue30 shows Quantity Received > 0, flip matching CURRENT ORDERS
-   * Delivered cells to Yes. Idempotent; never rewrites £/Unit or Units.
+   * 1) Blue30 Quantity Received → CURRENT ORDERS Delivered=Yes
+   * 2) Amazon held (available+inbound) → Home/Prep = "sent" on covered Delivered rows
+   * Idempotent; never rewrites £/Unit or Units.
    */
   async syncBlue30ReceivedToPurchaseDelivered(opts?: {
     force?: boolean;
+    amazonHeldByAsin?: Map<string, number>;
   }): Promise<DeliveredSyncResult> {
     const empty: DeliveredSyncResult = {
       attempted: false,
       skippedThrottle: false,
       updated: 0,
       updates: [],
+      sentUpdated: 0,
+      sentUpdates: [],
       errors: [],
     };
 
     if (!this.sheets.isConfigured()) {
       return { ...empty, errors: ['Purchase Google Sheet not configured'] };
-    }
-    const b30Id = this.blue30SpreadsheetId();
-    if (!this.sheets.isAuthConfigured() || !b30Id) {
-      return { ...empty, errors: ['Blue30 Inbound sheet not configured'] };
     }
 
     if (!opts?.force) {
@@ -144,44 +157,87 @@ export class StockCostSheetReadService {
     }
 
     const errors: string[] = [];
+    let deliveredUpdates: DeliveredYesUpdate[] = [];
+    let sentUpdates: HomePrepSentUpdate[] = [];
+
     try {
       const tab = this.currentTabTitle();
-      const purchaseValues = await this.sheets.getValues(`'${tab}'!A1:AZ`);
-      const parsedPurchase = parsePurchaseSheetStageRows(purchaseValues);
+      let purchaseValues = await this.sheets.getValues(`'${tab}'!A1:AZ`);
+      let parsedPurchase = parsePurchaseSheetStageRows(purchaseValues);
       errors.push(...parsedPurchase.errors);
 
       const header = (purchaseValues[0] ?? []).map((h) => String(h ?? ''));
       const deliveredColIndex0 = findHeaderColumnIndex(header, ['Delivered']);
+      const homePrepColIndex0 = findHeaderColumnIndex(header, [
+        'Home/Prep',
+        'Prep',
+      ]);
+
       if (deliveredColIndex0 < 0) {
         errors.push('CURRENT ORDERS: Delivered column not found');
-        return { attempted: true, skippedThrottle: false, updated: 0, updates: [], errors };
       }
 
-      const b30Tab = this.blue30TabTitle();
-      const blue30Values = await this.sheets.getValues(
-        `'${b30Tab}'!A1:AZ`,
-        b30Id,
-      );
-      const parsedB30 = parseBlue30ArrivedRows(blue30Values);
-      errors.push(...parsedB30.errors);
-
-      const updates = planDeliveredYesUpdatesFromBlue30({
-        purchaseInTransit: parsedPurchase.inTransit,
-        deliveredColIndex0,
-        blue30Arrived: parsedB30.arrived,
-      });
-
-      if (updates.length > 0) {
-        const colLetter = colIndexToA1(deliveredColIndex0);
-        await this.sheets.batchUpdateValues(
-          updates.map((u) => ({
-            range: `'${tab}'!${colLetter}${u.sheetRow}`,
-            values: [['Yes']],
-          })),
+      const b30Id = this.blue30SpreadsheetId();
+      if (this.sheets.isAuthConfigured() && b30Id && deliveredColIndex0 >= 0) {
+        const b30Tab = this.blue30TabTitle();
+        const blue30Values = await this.sheets.getValues(
+          `'${b30Tab}'!A1:AZ`,
+          b30Id,
         );
-        this.logger.log(
-          `Blue30→Delivered sync: set Delivered=Yes on ${updates.length} CURRENT ORDERS row(s)`,
-        );
+        const parsedB30 = parseBlue30ArrivedRows(blue30Values);
+        errors.push(...parsedB30.errors);
+
+        deliveredUpdates = planDeliveredYesUpdatesFromBlue30({
+          purchaseInTransit: parsedPurchase.inTransit,
+          deliveredColIndex0,
+          blue30Arrived: parsedB30.arrived,
+        });
+
+        if (deliveredUpdates.length > 0) {
+          const colLetter = colIndexToA1(deliveredColIndex0);
+          await this.sheets.batchUpdateValues(
+            deliveredUpdates.map((u) => ({
+              range: `'${tab}'!${colLetter}${u.sheetRow}`,
+              values: [['Yes']],
+            })),
+          );
+          this.logger.log(
+            `Blue30→Delivered sync: set Delivered=Yes on ${deliveredUpdates.length} CURRENT ORDERS row(s)`,
+          );
+          // Re-read so Home/Prep=sent planning sees flipped Delivered rows.
+          purchaseValues = await this.sheets.getValues(`'${tab}'!A1:AZ`);
+          parsedPurchase = parsePurchaseSheetStageRows(purchaseValues);
+          errors.push(...parsedPurchase.errors);
+        }
+      } else if (!b30Id || !this.sheets.isAuthConfigured()) {
+        errors.push('Blue30 Inbound sheet not configured');
+      }
+
+      const held = opts?.amazonHeldByAsin;
+      if (held && homePrepColIndex0 >= 0) {
+        sentUpdates = planHomePrepSentUpdatesFromAmazonHeld({
+          purchaseDelivered: parsedPurchase.delivered,
+          homePrepColIndex0,
+          amazonHeldByAsin: held,
+        });
+
+        if (sentUpdates.length > 0) {
+          const colLetter = colIndexToA1(homePrepColIndex0);
+          await this.sheets.batchUpdateValues(
+            sentUpdates.map((u) => ({
+              range: `'${tab}'!${colLetter}${u.sheetRow}`,
+              values: [[HOME_PREP_SENT_VALUE]],
+            })),
+          );
+          this.logger.log(
+            `Amazon→Home/Prep sync: set Home/Prep=${HOME_PREP_SENT_VALUE} on ${sentUpdates.length} CURRENT ORDERS row(s)`,
+          );
+        }
+      } else if (held && homePrepColIndex0 < 0) {
+        errors.push('CURRENT ORDERS: Home/Prep column not found');
+      }
+
+      if (deliveredUpdates.length > 0 || sentUpdates.length > 0) {
         await this.invalidatePipelineCache();
       }
 
@@ -194,30 +250,36 @@ export class StockCostSheetReadService {
       return {
         attempted: true,
         skippedThrottle: false,
-        updated: updates.length,
-        updates,
+        updated: deliveredUpdates.length,
+        updates: deliveredUpdates,
+        sentUpdated: sentUpdates.length,
+        sentUpdates,
         errors,
       };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      errors.push(`Blue30→Delivered sync failed: ${msg}`);
-      this.logger.warn(`Blue30→Delivered sync failed: ${msg}`);
+      errors.push(`Blue30→Delivered / Home/Prep→sent sync failed: ${msg}`);
+      this.logger.warn(`Sheet stage sync failed: ${msg}`);
       return {
         attempted: true,
         skippedThrottle: false,
         updated: 0,
         updates: [],
+        sentUpdated: 0,
+        sentUpdates: [],
         errors,
       };
     }
   }
 
   /**
-   * Read CURRENT ORDERS after optional Blue30→Delivered sync.
-   * Prep candidates = Delivered=Yes only (not raw Blue30 received history).
+   * Read CURRENT ORDERS after optional Blue30→Delivered + Home/Prep→sent sync.
+   * Prep candidates = Delivered=Yes and Home/Prep ≠ sent.
    * Cached ~90s in Redis.
    */
-  async getPurchasedAndArrivedByAsin(): Promise<SheetStageSnapshots> {
+  async getPurchasedAndArrivedByAsin(opts?: {
+    amazonHeldByAsin?: Map<string, number>;
+  }): Promise<SheetStageSnapshots> {
     try {
       const raw = await this.redis.get(CACHE_KEY_PIPELINE);
       if (raw) {
@@ -228,7 +290,9 @@ export class StockCostSheetReadService {
       // ignore cache read errors
     }
 
-    const sync = await this.syncBlue30ReceivedToPurchaseDelivered();
+    const sync = await this.syncBlue30ReceivedToPurchaseDelivered({
+      amazonHeldByAsin: opts?.amazonHeldByAsin,
+    });
     const errors: string[] = [...sync.errors];
     let purchaseInTransit = [] as ReturnType<
       typeof parsePurchaseSheetStageRows
@@ -263,26 +327,33 @@ export class StockCostSheetReadService {
       blue30Ok = false;
     }
 
-    const { purchasedByAsin, arrivedByAsin } =
+    const { purchasedByAsin, arrivedByAsin, sheetSentByAsin } =
       buildSheetPurchasedAndArrivedByAsin({
         purchaseInTransit,
         purchaseDelivered,
       });
 
-    const syncNote =
-      sync.updated > 0
-        ? `synced Delivered=Yes on ${sync.updated} row(s)`
-        : sync.skippedThrottle
-          ? 'Delivered sync throttled'
-          : '';
+    const syncParts: string[] = [];
+    if (sync.updated > 0) {
+      syncParts.push(`synced Delivered=Yes on ${sync.updated} row(s)`);
+    }
+    if (sync.sentUpdated > 0) {
+      syncParts.push(
+        `synced Home/Prep=${HOME_PREP_SENT_VALUE} on ${sync.sentUpdated} row(s)`,
+      );
+    }
+    if (syncParts.length === 0 && sync.skippedThrottle) {
+      syncParts.push('sheet stage sync throttled');
+    }
 
     const snapshot: SheetStageSnapshots = {
       purchasedByAsin,
       arrivedByAsin,
+      sheetSentByAsin,
       purchaseSheetOk,
       blue30Ok,
       errors,
-      sourceNote: syncNote,
+      sourceNote: syncParts.join('; '),
     };
 
     try {

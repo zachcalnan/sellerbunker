@@ -2,15 +2,15 @@
  * Sheet-driven stock-cost stages (early pipeline):
  *
  * Stock purchased  = CURRENT ORDERS rows with Delivered ≠ Yes, valued at £/Unit.
- * Stock for prep   = CURRENT ORDERS rows with Delivered = Yes, valued at £/Unit,
- *                    then clamped by Amazon available+inbound (sent-in leaves prep).
+ * Stock for prep   = CURRENT ORDERS rows with Delivered = Yes and Home/Prep ≠ sent,
+ *                    valued at £/Unit, then clamped by Amazon available+inbound.
  *
  * Blue30 Quantity Received is NOT a second cost pile — it only drives a sync that
- * flips matching purchase-sheet Delivered → Yes. Historical B30 received must not
- * inflate prep after units leave for / sell through Amazon.
+ * flips matching purchase-sheet Delivered → Yes. When Amazon held (available+inbound)
+ * covers Delivered=Yes rows, Home/Prep is set to "sent" (middle column).
  *
  * Exclusivity waterfall (caller): Available → Sent → Prep → Purchased.
- * prep = max(0, deliveredOnSheet − amazonHeld); purchased = not delivered.
+ * prep = max(0, deliveredNotSent − amazonHeld); purchased = not delivered.
  */
 
 import {
@@ -32,10 +32,15 @@ export type SheetCostLine = {
   /** Per-unit cost on the same basis as Product.costOfGoods (ex-VAT / landed). */
   unitCost: number;
   orderRef: string;
-  homePrep: 'HOME' | 'PREP CENTER' | '';
+  homePrep: 'HOME' | 'PREP CENTER' | 'sent' | '';
   purchaseDate: Date | null;
   sheetRow: number;
 };
+
+/** True when CURRENT ORDERS Home/Prep means already sent into Amazon. */
+export function isPurchaseSheetHomePrepSent(raw: unknown): boolean {
+  return normalizeShipDestinationLabel(raw) === 'sent';
+}
 
 export type AsinQtyCost = {
   qty: number;
@@ -311,6 +316,69 @@ export type DeliveredYesUpdate = {
   match: 'order_asin' | 'asin';
 };
 
+export type HomePrepSentUpdate = {
+  /** 1-based sheet row */
+  sheetRow: number;
+  homePrepColIndex0: number;
+  asin: string;
+  orderRef: string;
+  qty: number;
+};
+
+/**
+ * Plan idempotent Home/Prep → "sent" writes for Delivered=Yes rows covered by
+ * Amazon held (available + inbound) per ASIN, oldest first.
+ * Does not touch £/Unit, Units, or Delivered.
+ */
+export function planHomePrepSentUpdatesFromAmazonHeld(opts: {
+  purchaseDelivered: SheetCostLine[];
+  homePrepColIndex0: number;
+  amazonHeldByAsin: Map<string, number>;
+}): HomePrepSentUpdate[] {
+  if (opts.homePrepColIndex0 < 0) return [];
+
+  const updates: HomePrepSentUpdate[] = [];
+  const seenRows = new Set<number>();
+
+  const byAsin = new Map<string, SheetCostLine[]>();
+  for (const line of opts.purchaseDelivered) {
+    if (line.homePrep === 'sent') continue; // already marked
+    const asin = line.asin.trim().toUpperCase();
+    if (!asin) continue;
+    const list = byAsin.get(asin) ?? [];
+    list.push(line);
+    byAsin.set(asin, list);
+  }
+
+  for (const [asin, lines] of byAsin) {
+    let remaining = Math.max(0, Math.floor(opts.amazonHeldByAsin.get(asin) ?? 0));
+    if (!(remaining > 0)) continue;
+
+    const ordered = [...lines].sort((a, b) => {
+      const at = a.purchaseDate?.getTime() ?? 0;
+      const bt = b.purchaseDate?.getTime() ?? 0;
+      if (at !== bt) return at - bt;
+      return a.sheetRow - b.sheetRow;
+    });
+
+    for (const line of ordered) {
+      if (remaining <= 0) break;
+      if (seenRows.has(line.sheetRow)) continue;
+      seenRows.add(line.sheetRow);
+      updates.push({
+        sheetRow: line.sheetRow,
+        homePrepColIndex0: opts.homePrepColIndex0,
+        asin: line.asin,
+        orderRef: line.orderRef,
+        qty: line.qty,
+      });
+      remaining -= line.qty;
+    }
+  }
+
+  return updates;
+}
+
 /**
  * Plan idempotent Delivered=Yes writes from Blue30 Quantity Received.
  * Match Order Ref+ASIN first, else FIFO ASIN-only against undelivered rows.
@@ -390,9 +458,10 @@ export function planDeliveredYesUpdatesFromBlue30(opts: {
 /**
  * Build purchased + arrived-for-prep ASIN aggregates from the purchase sheet.
  *
- * Source of truth after Blue30→Delivered sync:
+ * Source of truth after Blue30→Delivered / Home/Prep→sent sync:
  * - Purchased = Delivered ≠ Yes rows (in-transit)
- * - Arrived (prep candidates) = Delivered = Yes rows only
+ * - Arrived (prep candidates) = Delivered = Yes and Home/Prep ≠ sent
+ * - Sheet-sent qty = Delivered = Yes and Home/Prep = sent (for clamp accounting)
  *
  * `blue30Arrived` is ignored for costing (kept optional for call-site compat).
  */
@@ -403,19 +472,29 @@ export function buildSheetPurchasedAndArrivedByAsin(opts: {
 }): {
   purchasedByAsin: Map<string, AsinQtyCost>;
   arrivedByAsin: Map<string, AsinQtyCost>;
+  sheetSentByAsin: Map<string, number>;
 } {
   void opts.blue30Arrived;
   const purchasedByAsin = new Map<string, AsinQtyCost>();
   const arrivedByAsin = new Map<string, AsinQtyCost>();
+  const sheetSentByAsin = new Map<string, number>();
 
   for (const line of opts.purchaseInTransit) {
     addAsinQtyCost(purchasedByAsin, line.asin, line.qty, line.unitCost);
   }
   for (const line of opts.purchaseDelivered) {
+    const asin = line.asin.trim().toUpperCase();
+    // Home/Prep=sent → already into Amazon; leave prep (Available/Sent tiles own them).
+    if (line.homePrep === 'sent') {
+      if (asin && line.qty > 0) {
+        sheetSentByAsin.set(asin, (sheetSentByAsin.get(asin) ?? 0) + line.qty);
+      }
+      continue;
+    }
     addAsinQtyCost(arrivedByAsin, line.asin, line.qty, line.unitCost);
   }
 
-  return { purchasedByAsin, arrivedByAsin };
+  return { purchasedByAsin, arrivedByAsin, sheetSentByAsin };
 }
 
 export type SheetAwareSkuInput = {
@@ -442,13 +521,16 @@ export type SheetAwarePipelineResult = {
 /**
  * Exclusive sheet-aware totals:
  * 1) Available / Sent from Amazon inventory (SKU rows)
- * 2) Prep = max(0, Delivered=Yes − amazonHeldByAsin), sheet £/Unit
+ * 2) Prep = Delivered=Yes & Home/Prep≠sent, clamped by held not already
+ *    explained by sheet-sent rows: max(0, arrived − max(0, held − sheetSent))
  * 3) Purchased = Delivered ≠ Yes purchase-sheet rows
  */
 export function sumSheetAwareStockCostPipeline(opts: {
   skuRows: SheetAwareSkuInput[];
   purchasedByAsin: Map<string, AsinQtyCost>;
   arrivedByAsin: Map<string, AsinQtyCost>;
+  /** Delivered=Yes rows already marked Home/Prep=sent (qty by ASIN). */
+  sheetSentByAsin?: Map<string, number>;
 }): SheetAwarePipelineResult {
   const amazonHeldByAsin = new Map<string, number>();
   let stockSentQty = 0;
@@ -496,7 +578,10 @@ export function sumSheetAwareStockCostPipeline(opts: {
     const arrived = opts.arrivedByAsin.get(asin);
     if (!arrived || !(arrived.qty > 0)) continue;
     const held = amazonHeldByAsin.get(asin) ?? 0;
-    const prepQty = Math.max(0, arrived.qty - held);
+    const sheetSent = nonNegInt(opts.sheetSentByAsin?.get(asin) ?? 0);
+    // Don't double-subtract inventory already attributed to Home/Prep=sent rows.
+    const heldForPrepClamp = Math.max(0, held - sheetSent);
+    const prepQty = Math.max(0, arrived.qty - heldForPrepClamp);
     if (!(prepQty > 0)) continue;
     stockForPrepQty += prepQty;
     const avgUnit =
