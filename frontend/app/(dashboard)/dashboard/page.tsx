@@ -2397,37 +2397,37 @@ function StockCostPipeline({
       key: "purchased",
       label: "Stock purchased",
       stage: data?.stockPurchased,
-      tileClass: "border-amber-500/35 bg-amber-500/10",
-      labelClass: "text-amber-950 dark:text-amber-100",
-      valueClass: "text-amber-950 dark:text-amber-50",
-      qtyClass: "text-amber-900/80 dark:text-amber-200/85",
+      tileClass: "border-amber-400/40 bg-amber-500/15",
+      labelClass: "text-amber-800 dark:text-amber-300",
+      valueClass: "text-amber-900 dark:text-amber-100",
+      qtyClass: "text-amber-700 dark:text-amber-200/80",
     },
     {
       key: "prep",
       label: "Stock for prep",
       stage: data?.stockForPrep,
-      tileClass: "border-sky-500/35 bg-sky-500/10",
-      labelClass: "text-sky-950 dark:text-sky-100",
-      valueClass: "text-sky-950 dark:text-sky-50",
-      qtyClass: "text-sky-900/80 dark:text-sky-200/85",
+      tileClass: "border-sky-400/40 bg-sky-500/15",
+      labelClass: "text-sky-800 dark:text-sky-300",
+      valueClass: "text-sky-900 dark:text-sky-100",
+      qtyClass: "text-sky-700 dark:text-sky-200/80",
     },
     {
       key: "sent",
       label: "Stock sent",
       stage: data?.stockSent,
-      tileClass: "border-indigo-500/35 bg-indigo-500/10",
-      labelClass: "text-indigo-950 dark:text-indigo-100",
-      valueClass: "text-indigo-950 dark:text-indigo-50",
-      qtyClass: "text-indigo-900/80 dark:text-indigo-200/85",
+      tileClass: "border-indigo-400/40 bg-indigo-500/15",
+      labelClass: "text-indigo-800 dark:text-indigo-300",
+      valueClass: "text-indigo-900 dark:text-indigo-100",
+      qtyClass: "text-indigo-700 dark:text-indigo-200/80",
     },
     {
       key: "available",
       label: "Available stock",
       stage: data?.availableStock,
-      tileClass: "border-emerald-500/35 bg-emerald-500/10",
-      labelClass: "text-emerald-950 dark:text-emerald-100",
-      valueClass: "text-emerald-950 dark:text-emerald-50",
-      qtyClass: "text-emerald-900/80 dark:text-emerald-200/85",
+      tileClass: "border-emerald-400/40 bg-emerald-500/15",
+      labelClass: "text-emerald-800 dark:text-emerald-300",
+      valueClass: "text-emerald-900 dark:text-emerald-100",
+      qtyClass: "text-emerald-700 dark:text-emerald-200/80",
     },
   ];
 
@@ -2467,7 +2467,7 @@ function StockCostPipeline({
             ) : (
               <div className="mt-auto">
                 <p
-                  className={`text-base font-bold tabular-nums leading-tight sm:text-lg ${valueClass}`}
+                  className={`text-lg font-bold tabular-nums leading-tight tracking-tight sm:text-xl ${valueClass}`}
                 >
                   {stage ? formatCurrency(stage.cost, cur, 2) : formatCurrency(0, cur, 2)}
                 </p>

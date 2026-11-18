@@ -1,6 +1,9 @@
 @import "tailwindcss";
 @import "@clerk/themes/shadcn.css";
 
+/* App theme uses data-theme on <html>, not the .dark class / prefers-color-scheme. */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
 :root {
   --background: #f8fafc;
   --foreground: #0f172a;
