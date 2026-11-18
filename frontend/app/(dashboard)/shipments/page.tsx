@@ -1,7 +1,7 @@
 "use client";
 
 import { useAuth, SignedIn, SignedOut } from "@clerk/nextjs";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { useDisplaySettings } from "@/contexts/display-settings-context";
 import { useMarketplace } from "@/contexts/marketplace-context";
@@ -80,20 +80,30 @@ const LIFECYCLE_LABELS: Record<string, string> = {
   AVAILABLE: "Available",
 };
 
-/** Solid chips so each stage is obvious: cyan in transit, violet delivered, teal checked in. */
-const LIFECYCLE_PILL: Record<string, string> = {
-  WORKING: "bg-slate-300 text-slate-950",
-  READY_TO_SHIP: "bg-indigo-300 text-indigo-950",
-  SHIPPED: "bg-blue-300 text-blue-950",
-  IN_TRANSIT: "bg-cyan-300 text-cyan-950",
-  DELIVERED: "bg-violet-300 text-violet-950",
-  CHECKED_IN: "bg-teal-300 text-teal-950",
-  RECEIVING: "bg-sky-300 text-sky-950",
-  AVAILABLE: "bg-emerald-300 text-emerald-950",
-  CLOSED: "bg-zinc-300 text-zinc-950",
-  CANCELLED: "bg-rose-300 text-rose-950",
-  DELETED: "bg-zinc-500 text-white",
-  ERROR: "bg-red-400 text-red-950",
+/** Text color only. Finished rows stay quiet; the live stage is the color. */
+const LIFECYCLE_TEXT: Record<string, string> = {
+  WORKING: "text-slate-500 dark:text-slate-300",
+  READY_TO_SHIP: "text-indigo-600 dark:text-indigo-300",
+  SHIPPED: "text-blue-600 dark:text-blue-300",
+  IN_TRANSIT: "text-cyan-600 dark:text-cyan-300",
+  DELIVERED: "text-violet-600 dark:text-violet-300",
+  CHECKED_IN: "text-teal-600 dark:text-teal-300",
+  RECEIVING: "text-sky-600 dark:text-sky-300",
+  AVAILABLE: "text-[var(--muted-foreground)]",
+  CLOSED: "text-[var(--muted-foreground)]",
+  CANCELLED: "text-rose-600 dark:text-rose-300",
+  DELETED: "text-[var(--muted-foreground)]",
+  ERROR: "text-red-600 dark:text-red-400",
+};
+
+const LIFECYCLE_DOT: Record<string, string> = {
+  READY_TO_SHIP: "bg-indigo-500",
+  SHIPPED: "bg-blue-500",
+  IN_TRANSIT: "bg-cyan-400",
+  DELIVERED: "bg-violet-400",
+  CHECKED_IN: "bg-teal-400",
+  RECEIVING: "bg-sky-400",
+  ERROR: "bg-red-500",
 };
 
 function normalizeStatusCode(raw: string | null | undefined): string {
@@ -141,18 +151,23 @@ function rowIsDelayed(row: ShipmentRow, code: string): boolean {
   return false;
 }
 
-function ShipmentStatusPills({ row }: { row: ShipmentRow }) {
+function ShipmentStatus({ row }: { row: ShipmentRow }) {
   const { code, label } = resolveRowLifecycle(row);
   const delayed = rowIsDelayed(row, code);
   const awaitingCheckIn =
     typeof row.awaitingCheckIn === "boolean"
       ? row.awaitingCheckIn
       : code === "DELIVERED" && (row.unitsReceived || 0) === 0;
-  const tone =
-    code === "CLOSED" && row.unitsMissing > 0
-      ? "bg-rose-300 text-rose-950"
-      : (LIFECYCLE_PILL[code] ?? "bg-zinc-300 text-zinc-950");
-  const amazonTitle = [
+  const missingClose = code === "CLOSED" && row.unitsMissing > 0;
+  const tone = delayed
+    ? "text-amber-600 dark:text-amber-300"
+    : missingClose
+      ? "text-rose-600 dark:text-rose-300"
+      : (LIFECYCLE_TEXT[code] ?? "text-[var(--foreground)]");
+  const dot = delayed ? "bg-amber-400" : LIFECYCLE_DOT[code];
+  const title = [
+    awaitingCheckIn ? "Delivered, awaiting check-in" : null,
+    delayed ? "Past the expected delivery date" : null,
     row.shipmentStatus ? `Amazon: ${row.shipmentStatus}` : null,
     row.transportStatus ? `Carrier: ${row.transportStatus}` : null,
   ]
@@ -160,23 +175,13 @@ function ShipmentStatusPills({ row }: { row: ShipmentRow }) {
     .join(" · ");
 
   return (
-    <div className="flex flex-wrap items-center gap-1" title={amazonTitle || undefined}>
-      <span
-        className={`inline-flex items-center whitespace-nowrap rounded-full px-2.5 py-0.5 text-[11px] font-semibold leading-4 shadow-sm ${tone}`}
-      >
-        {label}
-      </span>
-      {delayed ? (
-        <span className="inline-flex items-center whitespace-nowrap rounded-full bg-amber-300 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-950">
-          Delayed
-        </span>
-      ) : null}
-      {awaitingCheckIn ? (
-        <span className="inline-flex items-center whitespace-nowrap rounded-full bg-fuchsia-300 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-fuchsia-950">
-          Awaiting check-in
-        </span>
-      ) : null}
-    </div>
+    <span
+      className={`inline-flex max-w-full items-center gap-1.5 whitespace-nowrap text-[13px] font-medium leading-none ${tone}`}
+      title={title || undefined}
+    >
+      {dot ? <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${dot}`} aria-hidden /> : null}
+      <span className="truncate">{label}</span>
+    </span>
   );
 }
 
@@ -221,7 +226,7 @@ function ShipmentItemThumbnails({
   if (unique.length === 0) {
     return (
       <div
-        className="flex h-8 w-8 items-center justify-center rounded-md bg-[var(--surface-hover)] text-[10px] text-[var(--muted-foreground)]"
+        className="flex h-7 w-7 items-center justify-center rounded-md border border-[var(--surface-border)] bg-[var(--surface-hover)] text-[10px] text-[var(--muted-foreground)]"
         title="Item images load when SKU lines are synced"
       >
         —
@@ -234,13 +239,13 @@ function ShipmentItemThumbnails({
 
   return (
     <div className="flex items-center">
-      <div className="flex -space-x-2">
+      <div className="flex gap-1">
         {shown.map((item) => {
           const label = item.title ?? item.sellerSku ?? item.asin ?? "Product";
           return (
             <div
               key={item.id}
-              className="relative h-8 w-8 shrink-0 overflow-hidden rounded-md ring-2 ring-[var(--surface)]"
+              className="relative h-7 w-7 shrink-0 overflow-hidden rounded-md border border-[var(--surface-border)]"
               title={`${item.quantityShipped}× ${label}`}
             >
               {item.imageUrl ? (
@@ -262,7 +267,7 @@ function ShipmentItemThumbnails({
         })}
         {extra > 0 && (
           <div
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-[var(--surface-hover)] text-[10px] font-medium tabular-nums text-[var(--muted-foreground)] ring-2 ring-[var(--surface)]"
+            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-[var(--surface-border)] bg-[var(--surface-hover)] text-[10px] font-medium tabular-nums text-[var(--muted-foreground)]"
             title={`${extra} more SKU${extra !== 1 ? "s" : ""}`}
           >
             +{extra}
@@ -539,10 +544,6 @@ export default function ShipmentsPage() {
 
   const { backgroundClass } = useDisplaySettings();
 
-  // Fixed tracks (no `auto`) so every row shares the same column edges — Items
-  // thumbnails previously used minmax(0,auto) and shifted Status/dates/qty per row.
-  const gridCols =
-    "min-w-[1040px] grid-cols-[20px_8.5rem_minmax(7rem,1.1fr)_minmax(9.5rem,1.15fr)_5.75rem_5.75rem_3rem_3.25rem_3.25rem_3.75rem]";
 
   return (
     <div className={`flex min-h-screen flex-col gap-4 ${backgroundClass} p-4 md:p-6`}>
@@ -638,7 +639,7 @@ export default function ShipmentsPage() {
                                   {r.shipmentId}
                                 </div>
                                 <div className="mt-1.5">
-                                  <ShipmentStatusPills row={r} />
+                                  <ShipmentStatus row={r} />
                                 </div>
                                 <div className="mt-1 text-xs text-[var(--muted-foreground)]">
                                   {r.destinationFulfillmentCenterId
@@ -719,129 +720,141 @@ export default function ShipmentsPage() {
                   })}
                 </div>
 
-                {/* Desktop table */}
+                {/* Desktop table — real columns so every row shares the same edges */}
                 <div className="hidden overflow-x-auto md:block">
-                  <div
-                    className={`grid ${gridCols} items-center gap-2 px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-[var(--muted-foreground)]`}
-                  >
-                    <div aria-hidden />
-                    <div>Items</div>
-                    <div>Shipment ID</div>
-                    <div className="pl-0.5">Status</div>
-                    <div>Created</div>
-                    <div>Checked in</div>
-                    <div className="text-center">Days</div>
-                    <div className="text-center">Sent</div>
-                    <div className="text-center">Recv</div>
-                    <div className="text-center">Missing</div>
-                  </div>
-
-                  <div className="divide-y divide-[var(--surface-border)]">
-                    {paginated.map((r) => {
-                      const expanded = expandedId === r.id;
-                      const itemCount = r.items?.length ?? r.itemLineCount ?? 0;
-                      return (
-                        <div key={r.id}>
-                          <div
-                            role="button"
-                            tabIndex={0}
-                            onClick={() => toggleExpand(r)}
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter" || e.key === " ") {
-                                e.preventDefault();
-                                toggleExpand(r);
-                              }
-                            }}
-                            aria-expanded={expanded}
-                            className={`grid ${gridCols} w-full cursor-pointer items-center gap-2 px-4 py-3 text-left text-sm min-w-0 transition-colors hover:bg-[var(--surface-hover)] focus:outline-none focus:ring-2 focus:ring-inset focus:ring-sb-accent ${
-                              expanded ? "bg-[var(--surface-hover)]/50" : ""
-                            } ${r.unitsMissing > 0 ? "bg-red-500/5" : ""}`}
-                          >
-                            <div className="flex items-center justify-center text-[var(--muted-foreground)]">
-                              <svg
-                                className={`h-4 w-4 transition-transform ${expanded ? "rotate-90" : ""}`}
-                                fill="none"
-                                stroke="currentColor"
-                                viewBox="0 0 24 24"
-                                aria-hidden
-                              >
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                              </svg>
-                            </div>
-                            <div className="w-full overflow-hidden py-0.5">
-                              <ShipmentItemThumbnails items={r.items ?? []} />
-                            </div>
-                            <div className="min-w-0">
-                              <div className="truncate font-mono text-[var(--foreground)]" title={r.shipmentId}>
-                                {r.shipmentId}
-                              </div>
-                              <div className="truncate text-[10px] text-[var(--muted-foreground)]">
-                                FC: {r.destinationFulfillmentCenterId ?? "—"}
-                                {itemCount > 0 ? ` · ${itemCount} SKU${itemCount !== 1 ? "s" : ""}` : ""}
-                              </div>
-                            </div>
-                            <div className="min-w-0 py-0.5">
-                              <ShipmentStatusPills row={r} />
-                            </div>
-                            <div className="tabular-nums text-[var(--foreground)]">
-                              {r.createdDate != null ? (
-                                <span title={r.createdDateSource === "name" ? "Parsed from shipment name" : undefined}>
-                                  {formatDate(r.createdDate)}
-                                  {r.createdDateSource === "name" && (
-                                    <span className="ml-0.5 text-[10px] text-[var(--muted-foreground)]">*</span>
-                                  )}
-                                </span>
-                              ) : (
-                                <span className="text-[var(--muted-foreground)]">—</span>
-                              )}
-                            </div>
-                            <div className="tabular-nums text-[var(--foreground)]">
-                              {r.checkedInDate != null ? (
-                                <span title={checkedInSourceLabel(r.checkedInDateSource) ?? undefined}>
-                                  {formatDate(r.checkedInDate)}
-                                </span>
-                              ) : r.receivedDate ? (
-                                <span
-                                  className="text-[var(--muted-foreground)]"
-                                  title="Delivery to FC from Amazon transport data"
-                                >
-                                  {formatDate(r.receivedDate)}
-                                </span>
-                              ) : (
-                                <span className="text-[var(--muted-foreground)]">—</span>
-                              )}
-                            </div>
-                            <div className="text-center text-[var(--foreground)] tabular-nums">
-                              {r.checkInDurationDays != null ? String(r.checkInDurationDays) : "—"}
-                            </div>
-                            <div className="text-center text-[var(--foreground)] tabular-nums">{r.unitsSent}</div>
-                            <div className="text-center text-[var(--foreground)] tabular-nums">{r.unitsReceived}</div>
-                            <div
-                              className={`text-center tabular-nums ${
-                                r.unitsMissing > 0 ? "text-red-600 dark:text-red-400" : "text-green-600 dark:text-green-400"
+                  <table className="w-full min-w-[920px] table-fixed border-collapse text-sm">
+                    <colgroup>
+                      <col className="w-8" />
+                      <col className="w-[7.5rem]" />
+                      <col />
+                      <col className="w-[8.25rem]" />
+                      <col className="w-[6.25rem]" />
+                      <col className="w-[6.25rem]" />
+                      <col className="w-14" />
+                      <col className="w-14" />
+                      <col className="w-16" />
+                      <col className="w-16" />
+                    </colgroup>
+                    <thead>
+                      <tr className="border-b border-[var(--surface-border)] text-left text-[11px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
+                        <th className="px-2 py-2.5" aria-hidden />
+                        <th className="px-2 py-2.5 font-medium">Items</th>
+                        <th className="px-2 py-2.5 font-medium">Shipment</th>
+                        <th className="px-2 py-2.5 font-medium">Status</th>
+                        <th className="px-2 py-2.5 font-medium">Created</th>
+                        <th className="px-2 py-2.5 font-medium">Checked in</th>
+                        <th className="px-2 py-2.5 text-right font-medium">Days</th>
+                        <th className="px-2 py-2.5 text-right font-medium">Sent</th>
+                        <th className="px-2 py-2.5 text-right font-medium">Received</th>
+                        <th className="px-2 py-2.5 text-right font-medium">Missing</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {paginated.map((r) => {
+                        const expanded = expandedId === r.id;
+                        return (
+                          <Fragment key={r.id}>
+                            <tr
+                              role="button"
+                              tabIndex={0}
+                              onClick={() => toggleExpand(r)}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter" || e.key === " ") {
+                                  e.preventDefault();
+                                  toggleExpand(r);
+                                }
+                              }}
+                              aria-expanded={expanded}
+                              className={`cursor-pointer border-b border-[var(--surface-border)] transition-colors hover:bg-[var(--surface-hover)] focus:outline-none focus:ring-2 focus:ring-inset focus:ring-sb-accent ${
+                                expanded ? "bg-[var(--surface-hover)]/50" : ""
                               }`}
                             >
-                              {r.unitsMissing}
-                            </div>
-                          </div>
-
-                          {expanded && (
-                            <div className="border-t border-[var(--surface-border)] bg-[var(--surface-hover)]/20 px-4 py-3">
-                              <p className="mb-2 text-xs font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
-                                Unit breakdown
-                              </p>
-                              {detailLoadingId === r.shipmentId && (
-                                <p className="mb-2 text-sm text-[var(--muted-foreground)]">
-                                  Loading per-SKU breakdown from Amazon…
-                                </p>
-                              )}
-                              <ShipmentItemsBreakdown row={r} />
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
+                              <td className="px-2 py-2.5 text-[var(--muted-foreground)]">
+                                <svg
+                                  className={`h-4 w-4 transition-transform ${expanded ? "rotate-90" : ""}`}
+                                  fill="none"
+                                  stroke="currentColor"
+                                  viewBox="0 0 24 24"
+                                  aria-hidden
+                                >
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                                </svg>
+                              </td>
+                              <td className="px-2 py-2.5">
+                                <ShipmentItemThumbnails items={r.items ?? []} />
+                              </td>
+                              <td className="px-2 py-2.5">
+                                <div className="truncate font-mono text-[13px] text-[var(--foreground)]" title={r.shipmentId}>
+                                  {r.shipmentId}
+                                </div>
+                                <div className="truncate text-[11px] text-[var(--muted-foreground)]">
+                                  {r.destinationFulfillmentCenterId ?? "—"}
+                                </div>
+                              </td>
+                              <td className="px-2 py-2.5">
+                                <ShipmentStatus row={r} />
+                              </td>
+                              <td
+                                className="whitespace-nowrap px-2 py-2.5 tabular-nums text-[var(--foreground)]"
+                                title={r.createdDateSource === "name" ? "Parsed from shipment name" : undefined}
+                              >
+                                {r.createdDate != null ? formatDate(r.createdDate) : "—"}
+                              </td>
+                              <td
+                                className="whitespace-nowrap px-2 py-2.5 tabular-nums text-[var(--foreground)]"
+                                title={
+                                  r.checkedInDate != null
+                                    ? (checkedInSourceLabel(r.checkedInDateSource) ?? undefined)
+                                    : r.receivedDate
+                                      ? "Delivery to FC from Amazon transport data"
+                                      : undefined
+                                }
+                              >
+                                {r.checkedInDate != null
+                                  ? formatDate(r.checkedInDate)
+                                  : r.receivedDate
+                                    ? formatDate(r.receivedDate)
+                                    : "—"}
+                              </td>
+                              <td className="px-2 py-2.5 text-right tabular-nums text-[var(--foreground)]">
+                                {r.checkInDurationDays != null ? r.checkInDurationDays : "—"}
+                              </td>
+                              <td className="px-2 py-2.5 text-right tabular-nums text-[var(--foreground)]">
+                                {r.unitsSent}
+                              </td>
+                              <td className="px-2 py-2.5 text-right tabular-nums text-[var(--foreground)]">
+                                {r.unitsReceived}
+                              </td>
+                              <td
+                                className={`px-2 py-2.5 text-right tabular-nums ${
+                                  r.unitsMissing > 0
+                                    ? "font-medium text-rose-600 dark:text-rose-400"
+                                    : "text-[var(--muted-foreground)]"
+                                }`}
+                              >
+                                {r.unitsMissing}
+                              </td>
+                            </tr>
+                            {expanded && (
+                              <tr className="border-b border-[var(--surface-border)]">
+                                <td colSpan={10} className="bg-[var(--surface-hover)]/20 px-4 py-3">
+                                  <p className="mb-2 text-xs font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
+                                    Unit breakdown
+                                  </p>
+                                  {detailLoadingId === r.shipmentId && (
+                                    <p className="mb-2 text-sm text-[var(--muted-foreground)]">
+                                      Loading per-SKU breakdown from Amazon…
+                                    </p>
+                                  )}
+                                  <ShipmentItemsBreakdown row={r} />
+                                </td>
+                              </tr>
+                            )}
+                          </Fragment>
+                        );
+                      })}
+                    </tbody>
+                  </table>
                 </div>
 
                 {totalPages > 1 && (
