@@ -27,6 +27,12 @@ type ShipmentRow = {
   shipmentId: string;
   shipmentName: string | null;
   shipmentStatus: string | null;
+  /** Friendly lifecycle label from Amazon inbound status (not carrier transport). */
+  statusLabel?: string | null;
+  lifecycleStatus?: string | null;
+  isDelayed?: boolean;
+  /** Delivered at FC but check-in / receiving has not started. */
+  awaitingCheckIn?: boolean;
   destinationFulfillmentCenterId: string | null;
   createdDate: string | null;
   createdDateSource?: "api" | "name" | null;
@@ -57,6 +63,127 @@ function formatDate(iso: string | null): string {
   if (!iso) return "—";
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? "—" : d.toLocaleDateString("en-GB", { day: "2-digit", month: "2-digit", year: "numeric" });
+}
+
+const LIFECYCLE_LABELS: Record<string, string> = {
+  WORKING: "Working",
+  READY_TO_SHIP: "Ready to ship",
+  SHIPPED: "Shipped",
+  IN_TRANSIT: "In transit",
+  DELIVERED: "Delivered",
+  CHECKED_IN: "Checked in",
+  RECEIVING: "Receiving",
+  CLOSED: "Closed",
+  CANCELLED: "Cancelled",
+  DELETED: "Deleted",
+  ERROR: "Error",
+  AVAILABLE: "Available",
+};
+
+/** Cool, distinct tones so each stage reads at a glance in light and dark. */
+const LIFECYCLE_PILL: Record<string, string> = {
+  WORKING:
+    "bg-slate-500/15 text-slate-700 ring-slate-500/30 dark:text-slate-200",
+  READY_TO_SHIP:
+    "bg-indigo-500/15 text-indigo-800 ring-indigo-500/35 dark:text-indigo-200",
+  SHIPPED: "bg-blue-500/15 text-blue-800 ring-blue-500/35 dark:text-blue-200",
+  IN_TRANSIT:
+    "bg-cyan-500/20 text-cyan-900 ring-cyan-500/40 dark:text-cyan-100",
+  DELIVERED:
+    "bg-violet-500/20 text-violet-900 ring-violet-500/40 dark:text-violet-100",
+  CHECKED_IN:
+    "bg-teal-500/20 text-teal-900 ring-teal-500/40 dark:text-teal-100",
+  RECEIVING: "bg-sky-500/20 text-sky-900 ring-sky-500/40 dark:text-sky-100",
+  AVAILABLE:
+    "bg-emerald-500/20 text-emerald-900 ring-emerald-500/40 dark:text-emerald-100",
+  CLOSED: "bg-zinc-500/15 text-zinc-700 ring-zinc-500/30 dark:text-zinc-200",
+  CANCELLED:
+    "bg-rose-500/15 text-rose-800 ring-rose-500/30 dark:text-rose-200",
+  DELETED: "bg-zinc-500/10 text-zinc-500 ring-zinc-500/25 dark:text-zinc-400",
+  ERROR: "bg-red-500/20 text-red-800 ring-red-500/40 dark:text-red-200",
+};
+
+function normalizeStatusCode(raw: string | null | undefined): string {
+  return String(raw ?? "")
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, "_");
+}
+
+function resolveRowLifecycle(row: ShipmentRow): { code: string; label: string } {
+  const sent = Math.max(0, row.unitsSent || 0);
+  const received = Math.max(0, row.unitsReceived || 0);
+  const missing = Math.max(0, row.unitsMissing || 0);
+  const code = normalizeStatusCode(row.lifecycleStatus ?? row.shipmentStatus);
+  const derivedAvailable =
+    code === "CLOSED" && received > 0 && (missing === 0 || received >= sent);
+  const resolved = derivedAvailable ? "AVAILABLE" : code || "UNKNOWN";
+  const label =
+    (derivedAvailable ? LIFECYCLE_LABELS.AVAILABLE : null) ??
+    row.statusLabel ??
+    LIFECYCLE_LABELS[resolved] ??
+    (resolved && resolved !== "UNKNOWN"
+      ? resolved
+          .toLowerCase()
+          .split("_")
+          .filter(Boolean)
+          .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+          .join(" ")
+      : "—");
+  return { code: resolved, label };
+}
+
+function rowIsDelayed(row: ShipmentRow, code: string): boolean {
+  if (typeof row.isDelayed === "boolean") return row.isDelayed;
+  if (code !== "SHIPPED" && code !== "IN_TRANSIT") return false;
+  const now = Date.now();
+  if (row.deliveryDate) {
+    const delivery = new Date(row.deliveryDate).getTime();
+    if (!Number.isNaN(delivery) && delivery < now - 12 * 60 * 60 * 1000) return true;
+  }
+  if (!row.deliveryDate && row.pickupDate) {
+    const pickup = new Date(row.pickupDate).getTime();
+    if (!Number.isNaN(pickup) && (now - pickup) / (24 * 60 * 60 * 1000) >= 10) return true;
+  }
+  return false;
+}
+
+function ShipmentStatusPills({ row }: { row: ShipmentRow }) {
+  const { code, label } = resolveRowLifecycle(row);
+  const delayed = rowIsDelayed(row, code);
+  const awaitingCheckIn =
+    typeof row.awaitingCheckIn === "boolean"
+      ? row.awaitingCheckIn
+      : code === "DELIVERED" && (row.unitsReceived || 0) === 0;
+  const tone =
+    LIFECYCLE_PILL[code] ??
+    "bg-[var(--surface-hover)] text-[var(--foreground)] ring-[var(--surface-border)]";
+  const amazonTitle = [
+    row.shipmentStatus ? `Amazon: ${row.shipmentStatus}` : null,
+    row.transportStatus ? `Carrier: ${row.transportStatus}` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  return (
+    <div className="flex flex-wrap items-center gap-1" title={amazonTitle || undefined}>
+      <span
+        className={`inline-flex items-center whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-semibold leading-4 ring-1 ${tone}`}
+      >
+        {label}
+      </span>
+      {delayed ? (
+        <span className="inline-flex items-center whitespace-nowrap rounded-full bg-amber-500/20 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-800 ring-1 ring-amber-500/40 dark:text-amber-200">
+          Delayed
+        </span>
+      ) : null}
+      {awaitingCheckIn ? (
+        <span className="inline-flex items-center whitespace-nowrap rounded-full bg-violet-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-violet-800 ring-1 ring-violet-500/35 dark:text-violet-200">
+          Awaiting check-in
+        </span>
+      ) : null}
+    </div>
+  );
 }
 
 function checkedInSourceLabel(
@@ -398,6 +525,8 @@ export default function ShipmentsPage() {
         (r.shipmentId ?? "").toLowerCase().includes(q) ||
         (r.shipmentName ?? "").toLowerCase().includes(q) ||
         (r.shipmentStatus ?? "").toLowerCase().includes(q) ||
+        (r.statusLabel ?? "").toLowerCase().includes(q) ||
+        (r.lifecycleStatus ?? "").toLowerCase().includes(q) ||
         (r.destinationFulfillmentCenterId ?? "").toLowerCase().includes(q)
     );
   }, [rows, query]);
@@ -419,7 +548,7 @@ export default function ShipmentsPage() {
   // Fixed tracks (no `auto`) so every row shares the same column edges — Items
   // thumbnails previously used minmax(0,auto) and shifted Status/dates/qty per row.
   const gridCols =
-    "min-w-[920px] grid-cols-[20px_9.5rem_minmax(7rem,1.15fr)_minmax(5.5rem,0.9fr)_5.75rem_5.75rem_3rem_3.25rem_3.25rem_3.75rem]";
+    "min-w-[1040px] grid-cols-[20px_8.5rem_minmax(7rem,1.1fr)_minmax(9.5rem,1.15fr)_5.75rem_5.75rem_3rem_3.25rem_3.25rem_3.75rem]";
 
   return (
     <div className={`flex min-h-screen flex-col gap-4 ${backgroundClass} p-4 md:p-6`}>
@@ -514,11 +643,13 @@ export default function ShipmentsPage() {
                                 <div className="truncate font-mono text-sm font-medium text-[var(--foreground)]">
                                   {r.shipmentId}
                                 </div>
-                                <div className="mt-0.5 text-xs text-[var(--muted-foreground)]">
-                                  {r.transportStatus ?? r.shipmentStatus ?? "—"}
+                                <div className="mt-1.5">
+                                  <ShipmentStatusPills row={r} />
+                                </div>
+                                <div className="mt-1 text-xs text-[var(--muted-foreground)]">
                                   {r.destinationFulfillmentCenterId
-                                    ? ` · FC ${r.destinationFulfillmentCenterId}`
-                                    : ""}
+                                    ? `FC ${r.destinationFulfillmentCenterId}`
+                                    : "FC —"}
                                 </div>
                               </div>
                               <ShipmentItemThumbnails items={r.items ?? []} max={3} />
@@ -655,8 +786,8 @@ export default function ShipmentsPage() {
                                 {itemCount > 0 ? ` · ${itemCount} SKU${itemCount !== 1 ? "s" : ""}` : ""}
                               </div>
                             </div>
-                            <div className="min-w-0 truncate pl-0.5 text-[var(--foreground)]" title={r.transportStatus ?? r.shipmentStatus ?? undefined}>
-                              {r.transportStatus ?? r.shipmentStatus ?? "—"}
+                            <div className="min-w-0 py-0.5">
+                              <ShipmentStatusPills row={r} />
                             </div>
                             <div className="tabular-nums text-[var(--foreground)]">
                               {r.createdDate != null ? (

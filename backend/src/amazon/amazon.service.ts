@@ -83,7 +83,11 @@ import {
   resolveShipmentCheckedIn,
   sameCalendarDay,
 } from './shipment-date.util';
-import { isFbaShipmentDelayed } from './shipment-status.util';
+import {
+  isFbaShipmentAwaitingCheckIn,
+  isFbaShipmentDelayed,
+  resolveFbaShipmentLifecycle,
+} from './shipment-status.util';
 import { RepricerService } from '../repricer/repricer.service';
 import { PushService } from '../push/push.service';
 import { toPushIconUrl, toSaleCardUrl } from '../push/push-image.util';
@@ -11946,11 +11950,32 @@ export class AmazonService {
             : null)
         : null;
 
+    const lifecycle = resolveFbaShipmentLifecycle({
+      shipmentStatus: s.shipmentStatus,
+      unitsSent: s.unitsSent,
+      unitsReceived: s.unitsReceived,
+      unitsMissing: s.unitsMissing,
+    });
+    const delayed = isFbaShipmentDelayed({
+      shipmentStatus: s.shipmentStatus,
+      deliveryDate: s.deliveryDate,
+      pickupDate: s.pickupDate,
+    });
+    const awaitingCheckIn = isFbaShipmentAwaitingCheckIn({
+      shipmentStatus: s.shipmentStatus,
+      unitsReceived: s.unitsReceived,
+    });
+
     return {
       id: s.id,
       shipmentId: s.shipmentId,
       shipmentName: s.shipmentName ?? null,
       shipmentStatus: s.shipmentStatus ?? null,
+      /** Seller-facing lifecycle (Working → In transit → Delivered → Checked in → Available). */
+      statusLabel: lifecycle.label,
+      lifecycleStatus: lifecycle.code,
+      isDelayed: delayed,
+      awaitingCheckIn,
       destinationFulfillmentCenterId: s.destinationFulfillmentCenterId ?? null,
       createdDate: createdDate?.toISOString() ?? null,
       createdDateSource: createdDateStored
