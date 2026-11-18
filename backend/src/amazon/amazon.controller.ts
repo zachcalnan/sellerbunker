@@ -272,6 +272,21 @@ ping() {
   }
 
   /**
+   * Stock cost (COGS) by exclusive pipeline stage for the dashboard widget.
+   * GET /api/amazon/dashboard/stock-cost-pipeline
+   */
+  @UseGuards(ClerkAuthGuard)
+  @Get('dashboard/stock-cost-pipeline')
+  getStockCostPipeline(
+    @Req() req: { user: { orgId: string; marketplaceId?: string } },
+  ) {
+    return this.amazonService.getStockCostPipeline(
+      req.user.orgId,
+      req.user.marketplaceId,
+    );
+  }
+
+  /**
    * Manually trigger a background Amazon full-sync for the authenticated user.
    * Example: POST /api/amazon/sync
    *

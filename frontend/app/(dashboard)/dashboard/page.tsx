@@ -1205,7 +1205,7 @@ function HomeInner() {
                 </div>
               </div>
 
-              {/* Right column: Sales v Profit + Inventory Summary + Category Pie Charts + Profit & Loss */}
+              {/* Right column: Sales v Profit + Stock cost by stage + Inventory Summary + Profit & Loss */}
               <div className={`flex min-w-0 flex-col gap-3 ${isLocked ? "blur-sm pointer-events-none select-none" : ""}`}>
               <div className="flex min-w-0 w-full flex-col overflow-hidden rounded-xl bg-[var(--surface)] p-4 ring-1 ring-[var(--surface-border)]">
                 <div className="mb-2 flex w-full items-center justify-between gap-2">
@@ -1284,6 +1284,13 @@ function HomeInner() {
                   noWrapper
                 />
               </div>
+
+              <StockCostPipeline
+                baseUrl={baseUrl}
+                isSignedIn={isSignedIn}
+                getToken={getToken}
+                currency={effectiveCurrency}
+              />
 
               {/* Inventory breakdown */}
               <InventorySummary
@@ -2307,6 +2314,128 @@ function ProfitAndLoss({
       {!loading && !data && (
         <p className="text-[11px] text-[var(--muted-foreground)]">No P&amp;L data for this period.</p>
       )}
+    </div>
+  );
+}
+
+type StockCostStage = { qty: number; cost: number };
+
+type StockCostPipelineData = {
+  currency: string;
+  stockPurchased: StockCostStage;
+  stockForPrep: StockCostStage;
+  stockSent: StockCostStage;
+  availableStock: StockCostStage;
+  totalCost: number;
+  note: string | null;
+};
+
+type StockCostPipelineProps = {
+  baseUrl: string;
+  isSignedIn: boolean | undefined;
+  getToken: (args: { template?: string }) => Promise<string | null>;
+  currency: string;
+};
+
+function StockCostPipeline({
+  baseUrl,
+  isSignedIn,
+  getToken,
+  currency,
+}: StockCostPipelineProps) {
+  const { selectedMarketplaceId } = useMarketplace();
+  const searchParams = useSearchParams();
+  const devImpersonate = searchParams.get("impersonate");
+  const [data, setData] = useState<StockCostPipelineData | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isSignedIn) {
+      setData(null);
+      return;
+    }
+    const fetchData = async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const token = await getToken({ template: "backend" });
+        const url = new URL(`${baseUrl}/api/amazon/dashboard/stock-cost-pipeline`);
+        if (devImpersonate) url.searchParams.set("impersonate", devImpersonate);
+        const res = await fetch(url.toString(), {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            ...getDevImpersonationHeaders(devImpersonate),
+            ...(selectedMarketplaceId
+              ? { "x-marketplace-id": selectedMarketplaceId }
+              : {}),
+          },
+        });
+        if (!res.ok) throw new Error("Failed to load stock cost pipeline");
+        const json = (await res.json()) as StockCostPipelineData;
+        setData(json);
+      } catch {
+        setData(null);
+        setError("Could not load stock cost");
+      } finally {
+        setLoading(false);
+      }
+    };
+    void fetchData();
+  }, [isSignedIn, getToken, baseUrl, selectedMarketplaceId, devImpersonate]);
+
+  const cur = data?.currency ?? currency;
+  const tiles: { key: string; label: string; stage: StockCostStage | undefined }[] = [
+    { key: "purchased", label: "Stock purchased", stage: data?.stockPurchased },
+    { key: "prep", label: "Stock for prep", stage: data?.stockForPrep },
+    { key: "sent", label: "Stock sent", stage: data?.stockSent },
+    { key: "available", label: "Available stock", stage: data?.availableStock },
+  ];
+
+  return (
+    <div className="flex w-full flex-col rounded-xl bg-[var(--surface)] p-3 ring-1 ring-[var(--surface-border)] sm:p-4">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <h2 className="text-[10px] font-medium uppercase tracking-[0.1em] text-[var(--foreground)] sm:text-sm sm:tracking-[0.2em]">
+          Stock cost by stage
+        </h2>
+        {!loading && data ? (
+          <span className="text-[10px] tabular-nums text-[var(--muted-foreground)]">
+            Total {formatCurrency(data.totalCost, cur, 2)}
+          </span>
+        ) : null}
+      </div>
+
+      {error ? (
+        <p className="text-[10px] text-red-600">{error}</p>
+      ) : null}
+
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        {tiles.map(({ key, label, stage }) => (
+          <div
+            key={key}
+            className="flex aspect-square min-h-[5.5rem] flex-col justify-between rounded-lg border border-[var(--surface-border)] bg-[var(--background)]/60 p-2.5 sm:aspect-auto sm:min-h-[5.75rem]"
+          >
+            <p className="text-[9px] font-medium uppercase leading-tight tracking-wider text-[var(--muted-foreground)] sm:text-[10px]">
+              {label}
+            </p>
+            {loading ? (
+              <div className="mt-auto space-y-2">
+                <div className="h-5 w-3/4 animate-pulse rounded bg-[var(--surface-border)]" />
+                <div className="h-3 w-1/2 animate-pulse rounded bg-[var(--surface-border)]/70" />
+              </div>
+            ) : (
+              <div className="mt-auto">
+                <p className="text-base font-semibold tabular-nums leading-tight text-[var(--foreground)] sm:text-lg">
+                  {stage ? formatCurrency(stage.cost, cur, 2) : formatCurrency(0, cur, 2)}
+                </p>
+                <p className="mt-0.5 text-[9px] tabular-nums text-[var(--muted-foreground)]">
+                  {stage ? `${stage.qty.toLocaleString()} units` : "0 units"}
+                </p>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

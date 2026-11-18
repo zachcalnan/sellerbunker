@@ -22,6 +22,10 @@ import {
   type SupplierPromoType,
 } from './supplier-order-promo.util';
 import { deriveUnitCostOfGoodsExVat } from './purchase-sheet-cogs.util';
+import {
+  allocateStockCostPipelineSku,
+  sumStockCostPipeline,
+} from './stock-cost-pipeline.util';
 import type { IngestSupplierOrderDto } from './dto/ingest-supplier-order.dto';
 import { UsersService } from '../users/users.service';
 import {
@@ -3911,6 +3915,366 @@ export class AmazonService {
       currency: cost.currency,
       start: cost.start,
       end: cost.end,
+    };
+  }
+
+  /**
+   * Dashboard: cumulative stock COGS by exclusive pipeline stage.
+   * See `stock-cost-pipeline.util.ts` for the waterfall rules.
+   */
+  async getStockCostPipeline(
+    orgId: string,
+    marketplaceId?: string,
+  ): Promise<{
+    currency: string;
+    stockPurchased: { qty: number; cost: number };
+    stockForPrep: { qty: number; cost: number };
+    stockSent: { qty: number; cost: number };
+    availableStock: { qty: number; cost: number };
+    totalCost: number;
+    note: string | null;
+  }> {
+    const currency = this.resolveCurrencyFromMarketplace('GBP', marketplaceId);
+    const empty = {
+      currency,
+      stockPurchased: { qty: 0, cost: 0 },
+      stockForPrep: { qty: 0, cost: 0 },
+      stockSent: { qty: 0, cost: 0 },
+      availableStock: { qty: 0, cost: 0 },
+      totalCost: 0,
+      note: null as string | null,
+    };
+
+    const aggUserIds = await this.getOrgAmazonAggregateUserIds(orgId);
+    const memberUserIds = await this.getOrgMemberUserIds(orgId);
+    if (aggUserIds.length === 0 && memberUserIds.length === 0) {
+      return empty;
+    }
+
+    const toNum = (v: unknown): number => {
+      if (v == null) return 0;
+      if (typeof v === 'number' && Number.isFinite(v)) return v;
+      if (typeof v === 'string') return parseFloat(v) || 0;
+      if (
+        typeof v === 'object' &&
+        v !== null &&
+        'toNumber' in v &&
+        typeof (v as { toNumber: () => number }).toNumber === 'function'
+      ) {
+        const n = (v as { toNumber: () => number }).toNumber();
+        return Number.isFinite(n) ? n : 0;
+      }
+      return Number((v as { toString?: () => string }).toString?.() ?? 0) || 0;
+    };
+
+    type InvMp = {
+      marketplaceId: string;
+      fulfillableQty: number;
+      inboundQty: number;
+      inboundWorkingQty: number;
+      inboundShippedQty: number;
+      inboundReceivingQty: number;
+      updatedAt: Date;
+    };
+    type ProductRow = {
+      id: string;
+      sku: string;
+      costOfGoods: unknown;
+      updatedAt: Date;
+      inventory: {
+        availableQty: number;
+        inboundQty: number;
+        updatedAt: Date;
+      } | null;
+      inventoryByMarketplace: InvMp[];
+    };
+
+    const productUserIds =
+      aggUserIds.length > 0 ? aggUserIds : memberUserIds;
+    const products = (await this.prisma.product.findMany({
+      where: { userId: { in: productUserIds } },
+      select: {
+        id: true,
+        sku: true,
+        costOfGoods: true,
+        updatedAt: true,
+        inventory: {
+          select: {
+            availableQty: true,
+            inboundQty: true,
+            updatedAt: true,
+          },
+        },
+        inventoryByMarketplace: {
+          select: {
+            marketplaceId: true,
+            fulfillableQty: true,
+            inboundQty: true,
+            inboundWorkingQty: true,
+            inboundShippedQty: true,
+            inboundReceivingQty: true,
+            updatedAt: true,
+          },
+        },
+      },
+    })) as unknown as ProductRow[];
+
+    // Canonical row per SKU (prefer inventory snapshot, then newest product).
+    const bySku = new Map<string, ProductRow>();
+    const productIdToSku = new Map<string, string>();
+    for (const p of products) {
+      productIdToSku.set(p.id, p.sku);
+      const prev = bySku.get(p.sku);
+      if (!prev) {
+        bySku.set(p.sku, p);
+        continue;
+      }
+      const aInv = prev.inventory?.updatedAt?.getTime() ?? 0;
+      const bInv = p.inventory?.updatedAt?.getTime() ?? 0;
+      if (bInv !== aInv) {
+        if (bInv > aInv) bySku.set(p.sku, p);
+        continue;
+      }
+      if (p.updatedAt.getTime() > prev.updatedAt.getTime()) {
+        bySku.set(p.sku, p);
+      }
+    }
+
+    // Merge sibling COGS + freshest marketplace inventory onto canonical.
+    const siblingsBySku = new Map<string, ProductRow[]>();
+    for (const p of products) {
+      const arr = siblingsBySku.get(p.sku) ?? [];
+      arr.push(p);
+      siblingsBySku.set(p.sku, arr);
+    }
+    for (const [sku, group] of siblingsBySku) {
+      const canonical = bySku.get(sku);
+      if (!canonical) continue;
+      let cogs = toNum(canonical.costOfGoods);
+      if (!(cogs > 0)) {
+        for (const row of [...group].sort(
+          (a, b) => b.updatedAt.getTime() - a.updatedAt.getTime(),
+        )) {
+          const n = toNum(row.costOfGoods);
+          if (n > 0) {
+            cogs = n;
+            (canonical as { costOfGoods: unknown }).costOfGoods = row.costOfGoods;
+            break;
+          }
+        }
+      }
+      let bestInv = canonical.inventory;
+      let bestInvAt = bestInv?.updatedAt?.getTime() ?? 0;
+      for (const row of group) {
+        const at = row.inventory?.updatedAt?.getTime() ?? 0;
+        if (row.inventory && at >= bestInvAt) {
+          bestInv = row.inventory;
+          bestInvAt = at;
+        }
+      }
+      canonical.inventory = bestInv;
+      const mpById = new Map<string, InvMp>();
+      for (const row of group) {
+        for (const m of row.inventoryByMarketplace ?? []) {
+          const prev = mpById.get(m.marketplaceId);
+          const mAt = m.updatedAt?.getTime() ?? 0;
+          const pAt = prev?.updatedAt?.getTime() ?? 0;
+          if (!prev || mAt >= pAt) mpById.set(m.marketplaceId, m);
+        }
+      }
+      canonical.inventoryByMarketplace = Array.from(mpById.values());
+      bySku.set(sku, canonical);
+    }
+
+    const purchaseUserIds =
+      memberUserIds.length > 0 ? memberUserIds : aggUserIds;
+    const purchases =
+      purchaseUserIds.length > 0
+        ? await this.prisma.purchase.findMany({
+            where: { userId: { in: purchaseUserIds } },
+            select: {
+              productId: true,
+              qtyPurchased: true,
+              qtyDelivered: true,
+              unitCostExVat: true,
+              unitCostIncVat: true,
+              deliveryCostIncVat: true,
+              prepCostIncVat: true,
+              vatRatePct: true,
+              product: { select: { sku: true, costOfGoods: true } },
+            },
+          })
+        : [];
+
+    type PurchaseAgg = {
+      qtyPurchased: number;
+      qtyDelivered: number;
+      costWeight: number;
+      costQty: number;
+    };
+    const purchaseBySku = new Map<string, PurchaseAgg>();
+    for (const pur of purchases) {
+      const sku =
+        pur.product?.sku ??
+        productIdToSku.get(pur.productId) ??
+        null;
+      if (!sku) continue;
+      const qtyPurchased = Math.max(0, Math.floor(Number(pur.qtyPurchased) || 0));
+      let qtyDelivered = Math.max(0, Math.floor(Number(pur.qtyDelivered) || 0));
+      if (qtyDelivered > qtyPurchased) qtyDelivered = qtyPurchased;
+
+      // Prefer stored ex-VAT unit; else landed ex-VAT (unit + delivery + prep).
+      let unit =
+        pur.unitCostExVat != null ? toNum(pur.unitCostExVat) : 0;
+      if (!(unit > 0)) {
+        const derived = deriveUnitCostOfGoodsExVat({
+          unitCostIncVat: toNum(pur.unitCostIncVat),
+          deliveryCostIncVat: toNum(pur.deliveryCostIncVat),
+          prepCostIncVat: toNum(pur.prepCostIncVat),
+          vatRatePct: toNum(pur.vatRatePct),
+        });
+        unit = derived != null && derived > 0 ? derived : 0;
+      }
+
+      const prev = purchaseBySku.get(sku) ?? {
+        qtyPurchased: 0,
+        qtyDelivered: 0,
+        costWeight: 0,
+        costQty: 0,
+      };
+      prev.qtyPurchased += qtyPurchased;
+      prev.qtyDelivered += qtyDelivered;
+      if (unit > 0 && qtyPurchased > 0) {
+        prev.costWeight += unit * qtyPurchased;
+        prev.costQty += qtyPurchased;
+      }
+      // Sibling product COGS fallback seed onto bySku if missing.
+      if (!bySku.has(sku) && pur.product) {
+        bySku.set(sku, {
+          id: pur.productId,
+          sku,
+          costOfGoods: pur.product.costOfGoods,
+          updatedAt: new Date(0),
+          inventory: null,
+          inventoryByMarketplace: [],
+        });
+      }
+      purchaseBySku.set(sku, prev);
+    }
+
+    const inboundFromMp = (m: InvMp | null | undefined): number => {
+      if (!m) return 0;
+      const granular =
+        Math.max(0, Number(m.inboundWorkingQty) || 0) +
+        Math.max(0, Number(m.inboundShippedQty) || 0) +
+        Math.max(0, Number(m.inboundReceivingQty) || 0);
+      if (granular > 0) return granular;
+      return Math.max(0, Number(m.inboundQty) || 0);
+    };
+
+    const allocated: ReturnType<typeof allocateStockCostPipelineSku>[] = [];
+    let missingCogsQty = 0;
+    for (const [sku, product] of bySku) {
+      let availableQty = 0;
+      let inboundQty = 0;
+      if (marketplaceId) {
+        const m = (product.inventoryByMarketplace ?? []).find(
+          (row) => row.marketplaceId === marketplaceId,
+        );
+        availableQty = Math.max(0, Number(m?.fulfillableQty) || 0);
+        inboundQty = inboundFromMp(m);
+      } else {
+        availableQty = Math.max(
+          0,
+          Number(product.inventory?.availableQty) || 0,
+        );
+        inboundQty = Math.max(0, Number(product.inventory?.inboundQty) || 0);
+        // If summary inbound is empty but marketplace rows have granular, sum them.
+        if (inboundQty <= 0 && (product.inventoryByMarketplace?.length ?? 0) > 0) {
+          inboundQty = (product.inventoryByMarketplace ?? []).reduce(
+            (sum, m) => sum + inboundFromMp(m),
+            0,
+          );
+        }
+      }
+
+      const pur = purchaseBySku.get(sku);
+      const qtyPurchased = pur?.qtyPurchased ?? 0;
+      const qtyDelivered = pur?.qtyDelivered ?? 0;
+
+      let unitCost = toNum(product.costOfGoods);
+      if (!(unitCost > 0) && pur && pur.costQty > 0) {
+        unitCost = pur.costWeight / pur.costQty;
+      }
+
+      if (
+        !(unitCost > 0) &&
+        availableQty + inboundQty + qtyPurchased > 0
+      ) {
+        missingCogsQty += availableQty + inboundQty + Math.max(0, qtyPurchased - qtyDelivered) + Math.max(0, qtyDelivered - (availableQty + inboundQty));
+      }
+
+      allocated.push(
+        allocateStockCostPipelineSku({
+          availableQty,
+          inboundQty,
+          qtyPurchased,
+          qtyDelivered,
+          unitCost,
+        }),
+      );
+    }
+
+    // Purchases whose SKU never appeared in product scan (edge: deleted product).
+    for (const [sku, pur] of purchaseBySku) {
+      if (bySku.has(sku)) continue;
+      const unitCost =
+        pur.costQty > 0 ? pur.costWeight / pur.costQty : 0;
+      allocated.push(
+        allocateStockCostPipelineSku({
+          availableQty: 0,
+          inboundQty: 0,
+          qtyPurchased: pur.qtyPurchased,
+          qtyDelivered: pur.qtyDelivered,
+          unitCost,
+        }),
+      );
+    }
+
+    const totals = sumStockCostPipeline(allocated);
+    const notes: string[] = [];
+    notes.push(
+      'Stages are mutually exclusive: available → inbound/sent → for prep (delivered − Amazon) → purchased (ordered − delivered). Valued at Product.costOfGoods (purchase landed ex-VAT average when COGS missing).',
+    );
+    notes.push(
+      'Reserved / FC-processing / unfulfillable Amazon qty is excluded. Prep vs home is not split (no DB destination). Relies on Purchase.qtyDelivered being maintained.',
+    );
+    if (missingCogsQty > 0) {
+      notes.push(
+        `${missingCogsQty} unit(s) across stages lack COGS and contribute £0 until cost is set.`,
+      );
+    }
+
+    return {
+      currency,
+      stockPurchased: {
+        qty: totals.stockPurchasedQty,
+        cost: totals.stockPurchasedCost,
+      },
+      stockForPrep: {
+        qty: totals.stockForPrepQty,
+        cost: totals.stockForPrepCost,
+      },
+      stockSent: {
+        qty: totals.stockSentQty,
+        cost: totals.stockSentCost,
+      },
+      availableStock: {
+        qty: totals.availableStockQty,
+        cost: totals.availableStockCost,
+      },
+      totalCost: totals.totalCost,
+      note: notes.join(' '),
     };
   }
 
