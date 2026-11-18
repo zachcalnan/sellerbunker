@@ -2391,38 +2391,43 @@ function StockCostPipeline({
     tileClass: string;
     labelClass: string;
     valueClass: string;
+    qtyClass: string;
   }[] = [
     {
       key: "purchased",
       label: "Stock purchased",
       stage: data?.stockPurchased,
-      tileClass: "border-amber-500/30 bg-amber-500/10",
-      labelClass: "text-amber-800 dark:text-amber-300",
-      valueClass: "text-amber-950 dark:text-amber-100",
+      tileClass: "border-amber-500/35 bg-amber-500/10",
+      labelClass: "text-amber-950 dark:text-amber-100",
+      valueClass: "text-amber-950 dark:text-amber-50",
+      qtyClass: "text-amber-900/80 dark:text-amber-200/85",
     },
     {
       key: "prep",
       label: "Stock for prep",
       stage: data?.stockForPrep,
-      tileClass: "border-sky-500/30 bg-sky-500/10",
-      labelClass: "text-sky-800 dark:text-sky-300",
-      valueClass: "text-sky-950 dark:text-sky-100",
+      tileClass: "border-sky-500/35 bg-sky-500/10",
+      labelClass: "text-sky-950 dark:text-sky-100",
+      valueClass: "text-sky-950 dark:text-sky-50",
+      qtyClass: "text-sky-900/80 dark:text-sky-200/85",
     },
     {
       key: "sent",
       label: "Stock sent",
       stage: data?.stockSent,
-      tileClass: "border-indigo-500/30 bg-indigo-500/10",
-      labelClass: "text-indigo-800 dark:text-indigo-300",
-      valueClass: "text-indigo-950 dark:text-indigo-100",
+      tileClass: "border-indigo-500/35 bg-indigo-500/10",
+      labelClass: "text-indigo-950 dark:text-indigo-100",
+      valueClass: "text-indigo-950 dark:text-indigo-50",
+      qtyClass: "text-indigo-900/80 dark:text-indigo-200/85",
     },
     {
       key: "available",
       label: "Available stock",
       stage: data?.availableStock,
-      tileClass: "border-emerald-500/30 bg-emerald-500/10",
-      labelClass: "text-emerald-800 dark:text-emerald-300",
-      valueClass: "text-emerald-950 dark:text-emerald-100",
+      tileClass: "border-emerald-500/35 bg-emerald-500/10",
+      labelClass: "text-emerald-950 dark:text-emerald-100",
+      valueClass: "text-emerald-950 dark:text-emerald-50",
+      qtyClass: "text-emerald-900/80 dark:text-emerald-200/85",
     },
   ];
 
@@ -2444,13 +2449,13 @@ function StockCostPipeline({
       ) : null}
 
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-        {tiles.map(({ key, label, stage, tileClass, labelClass, valueClass }) => (
+        {tiles.map(({ key, label, stage, tileClass, labelClass, valueClass, qtyClass }) => (
           <div
             key={key}
             className={`flex aspect-square min-h-[5.5rem] flex-col justify-between rounded-lg border p-2.5 sm:aspect-auto sm:min-h-[5.75rem] ${tileClass}`}
           >
             <p
-              className={`text-[9px] font-medium uppercase leading-tight tracking-wider sm:text-[10px] ${labelClass}`}
+              className={`text-[9px] font-semibold uppercase leading-tight tracking-wider sm:text-[10px] ${labelClass}`}
             >
               {label}
             </p>
@@ -2462,11 +2467,11 @@ function StockCostPipeline({
             ) : (
               <div className="mt-auto">
                 <p
-                  className={`text-base font-semibold tabular-nums leading-tight sm:text-lg ${valueClass}`}
+                  className={`text-base font-bold tabular-nums leading-tight sm:text-lg ${valueClass}`}
                 >
                   {stage ? formatCurrency(stage.cost, cur, 2) : formatCurrency(0, cur, 2)}
                 </p>
-                <p className="mt-0.5 text-[9px] tabular-nums text-[var(--muted-foreground)]">
+                <p className={`mt-0.5 text-[9px] font-medium tabular-nums ${qtyClass}`}>
                   {stage ? `${stage.qty.toLocaleString()} units` : "0 units"}
                 </p>
               </div>
