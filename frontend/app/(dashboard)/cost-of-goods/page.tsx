@@ -160,6 +160,14 @@ function CostOfGoodsInner() {
   const [query, setQuery] = useState("");
   const [showForm, setShowForm] = useState(false);
   const [editingEntry, setEditingEntry] = useState<CostEntryRow | null>(null);
+  const [repricerOpen, setRepricerOpen] = useState(false);
+  const [repricerRules, setRepricerRules] = useState<
+    Array<{ id: string; name: string }>
+  >([]);
+  const [repricerRuleId, setRepricerRuleId] = useState("");
+  const [repricerMinPrice, setRepricerMinPrice] = useState("");
+  const [repricerBusy, setRepricerBusy] = useState(false);
+  const [repricerNote, setRepricerNote] = useState<string | null>(null);
   const [productPickerQuery, setProductPickerQuery] = useState("");
 
   type VatMode = "inc" | "ex";
@@ -956,6 +964,134 @@ function CostOfGoodsInner() {
     setNotice(null);
     setEditingEntry(entry);
     setShowForm(true);
+  };
+
+  const popupProduct = selectedProduct ?? editingEntry?.product ?? null;
+
+  useEffect(() => {
+    if (!showForm) {
+      setRepricerOpen(false);
+      setRepricerNote(null);
+    }
+  }, [showForm]);
+
+  const openRepricerPanel = async () => {
+    const asin = popupProduct?.asin?.trim();
+    if (!asin) {
+      setRepricerNote("This product has no ASIN.");
+      setRepricerOpen(true);
+      return;
+    }
+    setRepricerOpen(true);
+    setRepricerNote(null);
+    setRepricerBusy(true);
+    try {
+      const token = await getToken({ template: "backend" });
+      if (!token) throw new Error("Not authenticated.");
+      const headers = {
+        Authorization: `Bearer ${token}`,
+        ...getDevImpersonationHeaders(devImpersonate),
+      };
+      const [rulesRes, currentRes] = await Promise.all([
+        fetch(`${baseUrl}/api/repricer/rules`, { headers }),
+        fetch(
+          `${baseUrl}/api/repricer/asin?asin=${encodeURIComponent(asin)}`,
+          { headers },
+        ),
+      ]);
+      if (!rulesRes.ok) throw new Error("Could not load repricing rules.");
+      const rulesJson = (await rulesRes.json()) as {
+        presets?: Array<{ id: string; name?: string }>;
+      };
+      const presets = (rulesJson.presets ?? []).map((p) => ({
+        id: p.id,
+        name: (p.name ?? "").trim() || "Untitled rule",
+      }));
+      setRepricerRules(presets);
+      let currentRule = "";
+      let currentMin = "";
+      if (currentRes.ok) {
+        const current = (await currentRes.json()) as {
+          ruleSetId?: string | null;
+          minListPrice?: number | null;
+        };
+        currentRule = current.ruleSetId ?? "";
+        currentMin =
+          current.minListPrice != null && Number.isFinite(current.minListPrice)
+            ? String(current.minListPrice)
+            : "";
+      }
+      setRepricerRuleId(currentRule || presets[0]?.id || "");
+      setRepricerMinPrice(currentMin);
+    } catch (e) {
+      setRepricerNote(
+        e instanceof Error ? e.message : "Could not load repricer.",
+      );
+    } finally {
+      setRepricerBusy(false);
+    }
+  };
+
+  const applyRepricerToAsin = async () => {
+    const asin = popupProduct?.asin?.trim();
+    if (!asin) {
+      setRepricerNote("This product has no ASIN.");
+      return;
+    }
+    const min = Number(repricerMinPrice);
+    if (!repricerRuleId) {
+      setRepricerNote("Pick a repricing rule.");
+      return;
+    }
+    if (!Number.isFinite(min) || min <= 0) {
+      setRepricerNote("Enter a minimum hard price above 0.");
+      return;
+    }
+    setRepricerBusy(true);
+    setRepricerNote(null);
+    try {
+      const token = await getToken({ template: "backend" });
+      if (!token) throw new Error("Not authenticated.");
+      const res = await fetch(`${baseUrl}/api/repricer/asin`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+          ...getDevImpersonationHeaders(devImpersonate),
+        },
+        body: JSON.stringify({
+          asin,
+          ruleSetId: repricerRuleId,
+          minListPrice: Math.round(min * 100) / 100,
+        }),
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        message?: string;
+        ruleSetName?: string | null;
+        minListPrice?: number;
+        skuCount?: number;
+      };
+      if (!res.ok) {
+        throw new Error(
+          typeof data.message === "string"
+            ? data.message
+            : "Could not apply repricer.",
+        );
+      }
+      const ruleName =
+        data.ruleSetName ??
+        repricerRules.find((r) => r.id === repricerRuleId)?.name ??
+        "rule";
+      setRepricerNote(
+        `Applied “${ruleName}” to ${asin}. Hard minimum £${Number(data.minListPrice ?? min).toFixed(2)}.`,
+      );
+    } catch (e) {
+      setRepricerNote(
+        e instanceof Error ? e.message : "Could not apply repricer.",
+      );
+    } finally {
+      setRepricerBusy(false);
+    }
   };
 
   const seedFromExisting = async () => {
@@ -1939,19 +2075,101 @@ function CostOfGoodsInner() {
                   </div>
                 </div>
 
-                <div className="mt-4 flex justify-end">
-                  <button
-                    type="button"
-                    onClick={editingEntry ? updateEntry : createEntry}
-                    disabled={creating}
-                    className="cursor-pointer rounded-lg bg-sb-accent px-4 py-2 text-sm font-medium text-black disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    {creating
-                      ? "Saving…"
-                      : editingEntry
-                        ? "Save changes"
-                        : "Save"}
-                  </button>
+                <div className="mt-4 border-t border-[var(--surface-border)] pt-4">
+                  {repricerOpen ? (
+                    <div className="mb-3 rounded-lg border border-[var(--surface-border)] bg-[var(--surface)] p-3">
+                      <div className="text-xs font-medium text-[var(--foreground)]">
+                        Repricer for{" "}
+                        <span className="font-mono">
+                          {popupProduct?.asin ?? "this ASIN"}
+                        </span>
+                      </div>
+                      <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                        <label className="flex flex-col gap-1 text-[11px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
+                          Rule
+                          <select
+                            value={repricerRuleId}
+                            onChange={(e) => setRepricerRuleId(e.target.value)}
+                            disabled={repricerBusy || repricerRules.length === 0}
+                            className="rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-3 py-2 text-sm font-normal normal-case tracking-normal text-[var(--foreground)] outline-none"
+                          >
+                            {repricerRules.length === 0 ? (
+                              <option value="">No rules yet</option>
+                            ) : (
+                              repricerRules.map((rule) => (
+                                <option key={rule.id} value={rule.id}>
+                                  {rule.name}
+                                </option>
+                              ))
+                            )}
+                          </select>
+                        </label>
+                        <label className="flex flex-col gap-1 text-[11px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
+                          Minimum hard price
+                          <input
+                            inputMode="decimal"
+                            value={repricerMinPrice}
+                            onChange={(e) => setRepricerMinPrice(e.target.value)}
+                            placeholder="e.g. 12.99"
+                            disabled={repricerBusy}
+                            className="rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-3 py-2 text-sm font-normal normal-case tracking-normal text-[var(--foreground)] outline-none"
+                          />
+                        </label>
+                      </div>
+                      <div className="mt-2 flex flex-wrap items-center justify-end gap-2">
+                        <button
+                          type="button"
+                          onClick={() => void applyRepricerToAsin()}
+                          disabled={
+                            repricerBusy ||
+                            !popupProduct?.asin ||
+                            repricerRules.length === 0
+                          }
+                          className="cursor-pointer rounded-lg bg-sb-accent px-3 py-2 text-sm font-medium text-black disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          {repricerBusy ? "Applying…" : "Apply to this ASIN"}
+                        </button>
+                      </div>
+                      {repricerNote ? (
+                        <p className="mt-2 text-xs text-[var(--muted-foreground)]">
+                          {repricerNote}
+                        </p>
+                      ) : null}
+                    </div>
+                  ) : null}
+                  <div className="flex flex-wrap items-center justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (repricerOpen) {
+                          setRepricerOpen(false);
+                          return;
+                        }
+                        void openRepricerPanel();
+                      }}
+                      disabled={!popupProduct?.asin}
+                      title={
+                        popupProduct?.asin
+                          ? `Apply a rule and hard minimum to ${popupProduct.asin}`
+                          : "Pick a product with an ASIN first"
+                      }
+                      className="cursor-pointer rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-4 py-2 text-sm font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/5 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      Apply repricer
+                    </button>
+                    <button
+                      type="button"
+                      onClick={editingEntry ? updateEntry : createEntry}
+                      disabled={creating}
+                      className="cursor-pointer rounded-lg bg-sb-accent px-4 py-2 text-sm font-medium text-black disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {creating
+                        ? "Saving…"
+                        : editingEntry
+                          ? "Save changes"
+                          : "Save"}
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>

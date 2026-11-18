@@ -336,6 +336,105 @@ export class RepricerService {
     return { ok: true as const, selected: await this.getSelectedSkus(orgId) };
   }
 
+  private async productsForOrgAsin(orgId: string, asinRaw: string) {
+    const asin = asinRaw.trim().toUpperCase();
+    if (!/^[A-Z0-9]{10}$/.test(asin)) {
+      throw new BadRequestException('A valid ASIN is required');
+    }
+    const userIds = await this.getOrgMemberUserIds(orgId);
+    const products = await this.prisma.product.findMany({
+      where: {
+        userId: { in: userIds },
+        asin: { equals: asin, mode: 'insensitive' },
+      },
+      select: { id: true, sku: true, asin: true },
+    });
+    return { asin, products };
+  }
+
+  /** Rule + hard floor currently stored for an ASIN (any enrolled SKU). */
+  async getAsinRepricer(orgId: string, asinRaw: string) {
+    const { asin, products } = await this.productsForOrgAsin(orgId, asinRaw);
+    if (products.length === 0) {
+      return {
+        asin,
+        ruleSetId: null as string | null,
+        ruleSetName: null as string | null,
+        minListPrice: null as number | null,
+        skuCount: 0,
+      };
+    }
+    const row = await (this.prisma as any).repricerSelectedSku.findFirst({
+      where: {
+        orgId,
+        productId: { in: products.map((p) => p.id) },
+        ruleSetId: { not: null },
+      },
+      orderBy: { updatedAt: 'desc' },
+      include: { ruleSet: { select: { id: true, name: true } } },
+    });
+    const minRaw = row?.minListPrice != null ? Number(row.minListPrice) : null;
+    return {
+      asin,
+      ruleSetId: row?.ruleSetId ?? null,
+      ruleSetName: row?.ruleSet?.name ?? null,
+      minListPrice: minRaw != null && Number.isFinite(minRaw) ? minRaw : null,
+      skuCount: products.length,
+    };
+  }
+
+  /**
+   * Enrol every SKU of this ASIN on a saved rule, with a hard list-price floor
+   * that only this ASIN uses (the rule's own floor still applies if it is higher).
+   */
+  async applyAsinRepricer(
+    orgId: string,
+    asinRaw: string,
+    ruleSetId: string,
+    minListPriceRaw: unknown,
+  ) {
+    const rid = ruleSetId.trim();
+    if (!rid) throw new BadRequestException('ruleSetId is required');
+    const minListPrice = Number(minListPriceRaw);
+    if (!Number.isFinite(minListPrice) || minListPrice <= 0) {
+      throw new BadRequestException('Minimum hard price must be greater than 0');
+    }
+    const floor = Math.round(minListPrice * 100) / 100;
+
+    const { asin, products } = await this.productsForOrgAsin(orgId, asinRaw);
+    if (products.length === 0) {
+      throw new BadRequestException(`No listing found for ASIN ${asin}`);
+    }
+    const preset = await (this.prisma as any).repricerRuleSet.findFirst({
+      where: { id: rid, orgId },
+      select: { id: true, name: true },
+    });
+    if (!preset) throw new BadRequestException('Pricing rule not found');
+
+    for (const product of products) {
+      await (this.prisma as any).repricerSelectedSku.upsert({
+        where: { orgId_productId: { orgId, productId: product.id } },
+        create: {
+          orgId,
+          productId: product.id,
+          ruleSetId: rid,
+          minListPrice: floor,
+          enabled: true,
+        },
+        update: { ruleSetId: rid, minListPrice: floor, enabled: true },
+      });
+    }
+
+    return {
+      ok: true as const,
+      asin,
+      ruleSetId: String(preset.id),
+      ruleSetName: preset.name ?? null,
+      minListPrice: floor,
+      skuCount: products.length,
+    };
+  }
+
   /** Remove SKU from the repricer cohort. */
   async unassignSkuFromPreset(orgId: string, productId: string) {
     const pid = productId.trim();
@@ -2083,8 +2182,14 @@ export class RepricerService {
       // For now, use rule1 only (step chaining not executed yet).
       const minProfit = preset.rule1MinProfit != null ? Number(preset.rule1MinProfit) : null;
       const maxProfit = preset.rule1MaxProfit != null ? Number(preset.rule1MaxProfit) : null;
-      const minListPriceRule =
+      const ruleFloor =
         preset.rule1MinListPrice != null ? Number(preset.rule1MinListPrice) : null;
+      const skuHardMin =
+        (row as any).minListPrice != null ? Number((row as any).minListPrice) : null;
+      const floors = [ruleFloor, skuHardMin].filter(
+        (n): n is number => n != null && Number.isFinite(n) && n > 0,
+      );
+      const minListPriceRule = floors.length ? Math.max(...floors) : null;
       const maxListPriceRule =
         preset.rule1MaxListPrice != null ? Number(preset.rule1MaxListPrice) : null;
       const minRoiPct = preset.rule1MinRoiPct != null ? Number(preset.rule1MinRoiPct) : null;

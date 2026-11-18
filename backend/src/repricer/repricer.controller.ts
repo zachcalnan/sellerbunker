@@ -100,6 +100,30 @@ export class RepricerController {
     }
   }
 
+  /** Current repricer rule + hard floor for one ASIN, if any SKU is enrolled. */
+  @Get('asin')
+  async asinAssignment(
+    @Req() req: { user: { orgId: string } },
+    @Query('asin') asin?: string,
+  ) {
+    return this.repricer.getAsinRepricer(req.user.orgId, asin ?? '');
+  }
+
+  /** Assign a saved rule and a hard minimum price to every SKU of one ASIN. */
+  @Post('asin')
+  async applyAsin(
+    @Req() req: { user: { orgId: string } },
+    @Body()
+    body: { asin?: string; ruleSetId?: string; minListPrice?: number },
+  ) {
+    return this.repricer.applyAsinRepricer(
+      req.user.orgId,
+      typeof body?.asin === 'string' ? body.asin : '',
+      typeof body?.ruleSetId === 'string' ? body.ruleSetId : '',
+      body?.minListPrice,
+    );
+  }
+
   /** Assign one SKU to a saved pricing preset. */
   @Post('assign-sku')
   async assignSku(

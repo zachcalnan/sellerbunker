@@ -603,6 +603,8 @@ model RepricerSelectedSku {
   productId String   @map("product_id")
   /// Which saved pricing preset applies to this SKU (repricer engine uses this rule set).
   ruleSetId String?  @map("rule_set_id")
+  /// Hard list-price floor for this SKU only. The engine uses the higher of this and the rule floor.
+  minListPrice Decimal? @map("min_list_price") @db.Decimal(14, 2)
   enabled   Boolean  @default(true)
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
