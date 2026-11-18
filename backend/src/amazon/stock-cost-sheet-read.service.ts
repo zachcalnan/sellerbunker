@@ -3,15 +3,24 @@ import { ConfigService } from '@nestjs/config';
 import { GoogleSheetsClient } from './google-sheets.client';
 import { RedisService } from '../redis/redis.service';
 import {
+  colIndexToA1,
+  findHeaderColumnIndex,
+} from './purchase-sheet-cogs.util';
+import {
   buildSheetPurchasedAndArrivedByAsin,
   parseBlue30ArrivedRows,
   parsePurchaseSheetStageRows,
+  planDeliveredYesUpdatesFromBlue30,
   type AsinQtyCost,
+  type DeliveredYesUpdate,
 } from './stock-cost-sheet.util';
 
 const CACHE_TTL_SEC = 90;
-const CACHE_KEY_PURCHASE = 'stock-cost:purchase-sheet:v1';
-const CACHE_KEY_BLUE30 = 'stock-cost:blue30-inbound:v1';
+/** Pipeline aggregates — bump when costing model changes. */
+const CACHE_KEY_PIPELINE = 'stock-cost:pipeline-maps:v2';
+/** Throttle Blue30→Delivered sheet writes. */
+const SYNC_THROTTLE_KEY = 'stock-cost:delivered-sync:v1';
+const SYNC_THROTTLE_SEC = 120;
 
 export type SheetStageSnapshots = {
   purchasedByAsin: Map<string, AsinQtyCost>;
@@ -20,6 +29,14 @@ export type SheetStageSnapshots = {
   blue30Ok: boolean;
   errors: string[];
   sourceNote: string;
+};
+
+export type DeliveredSyncResult = {
+  attempted: boolean;
+  skippedThrottle: boolean;
+  updated: number;
+  updates: DeliveredYesUpdate[];
+  errors: string[];
 };
 
 type CachedJsonMaps = {
@@ -84,14 +101,125 @@ export class StockCostSheetReadService {
     };
   }
 
+  async invalidatePipelineCache(): Promise<void> {
+    try {
+      await this.redis.del(CACHE_KEY_PIPELINE);
+    } catch {
+      // ignore
+    }
+  }
+
   /**
-   * Read purchase CURRENT ORDERS + Blue30 Inbound (Quantity Received),
-   * build purchased / arrived ASIN aggregates. Cached ~90s in Redis.
+   * When Blue30 shows Quantity Received > 0, flip matching CURRENT ORDERS
+   * Delivered cells to Yes. Idempotent; never rewrites £/Unit or Units.
+   */
+  async syncBlue30ReceivedToPurchaseDelivered(opts?: {
+    force?: boolean;
+  }): Promise<DeliveredSyncResult> {
+    const empty: DeliveredSyncResult = {
+      attempted: false,
+      skippedThrottle: false,
+      updated: 0,
+      updates: [],
+      errors: [],
+    };
+
+    if (!this.sheets.isConfigured()) {
+      return { ...empty, errors: ['Purchase Google Sheet not configured'] };
+    }
+    const b30Id = this.blue30SpreadsheetId();
+    if (!this.sheets.isAuthConfigured() || !b30Id) {
+      return { ...empty, errors: ['Blue30 Inbound sheet not configured'] };
+    }
+
+    if (!opts?.force) {
+      try {
+        const throttled = await this.redis.get(SYNC_THROTTLE_KEY);
+        if (throttled) {
+          return { ...empty, skippedThrottle: true };
+        }
+      } catch {
+        // proceed without throttle if Redis unavailable
+      }
+    }
+
+    const errors: string[] = [];
+    try {
+      const tab = this.currentTabTitle();
+      const purchaseValues = await this.sheets.getValues(`'${tab}'!A1:AZ`);
+      const parsedPurchase = parsePurchaseSheetStageRows(purchaseValues);
+      errors.push(...parsedPurchase.errors);
+
+      const header = (purchaseValues[0] ?? []).map((h) => String(h ?? ''));
+      const deliveredColIndex0 = findHeaderColumnIndex(header, ['Delivered']);
+      if (deliveredColIndex0 < 0) {
+        errors.push('CURRENT ORDERS: Delivered column not found');
+        return { attempted: true, skippedThrottle: false, updated: 0, updates: [], errors };
+      }
+
+      const b30Tab = this.blue30TabTitle();
+      const blue30Values = await this.sheets.getValues(
+        `'${b30Tab}'!A1:AZ`,
+        b30Id,
+      );
+      const parsedB30 = parseBlue30ArrivedRows(blue30Values);
+      errors.push(...parsedB30.errors);
+
+      const updates = planDeliveredYesUpdatesFromBlue30({
+        purchaseInTransit: parsedPurchase.inTransit,
+        deliveredColIndex0,
+        blue30Arrived: parsedB30.arrived,
+      });
+
+      if (updates.length > 0) {
+        const colLetter = colIndexToA1(deliveredColIndex0);
+        await this.sheets.batchUpdateValues(
+          updates.map((u) => ({
+            range: `'${tab}'!${colLetter}${u.sheetRow}`,
+            values: [['Yes']],
+          })),
+        );
+        this.logger.log(
+          `Blue30→Delivered sync: set Delivered=Yes on ${updates.length} CURRENT ORDERS row(s)`,
+        );
+        await this.invalidatePipelineCache();
+      }
+
+      try {
+        await this.redis.set(SYNC_THROTTLE_KEY, '1', SYNC_THROTTLE_SEC);
+      } catch {
+        // ignore
+      }
+
+      return {
+        attempted: true,
+        skippedThrottle: false,
+        updated: updates.length,
+        updates,
+        errors,
+      };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      errors.push(`Blue30→Delivered sync failed: ${msg}`);
+      this.logger.warn(`Blue30→Delivered sync failed: ${msg}`);
+      return {
+        attempted: true,
+        skippedThrottle: false,
+        updated: 0,
+        updates: [],
+        errors,
+      };
+    }
+  }
+
+  /**
+   * Read CURRENT ORDERS after optional Blue30→Delivered sync.
+   * Prep candidates = Delivered=Yes only (not raw Blue30 received history).
+   * Cached ~90s in Redis.
    */
   async getPurchasedAndArrivedByAsin(): Promise<SheetStageSnapshots> {
-    const cacheKey = `${CACHE_KEY_PURCHASE}+${CACHE_KEY_BLUE30}`;
     try {
-      const raw = await this.redis.get(cacheKey);
+      const raw = await this.redis.get(CACHE_KEY_PIPELINE);
       if (raw) {
         const parsed = JSON.parse(raw) as CachedJsonMaps;
         return this.jsonToMaps(parsed);
@@ -100,18 +228,16 @@ export class StockCostSheetReadService {
       // ignore cache read errors
     }
 
-    const errors: string[] = [];
+    const sync = await this.syncBlue30ReceivedToPurchaseDelivered();
+    const errors: string[] = [...sync.errors];
     let purchaseInTransit = [] as ReturnType<
       typeof parsePurchaseSheetStageRows
     >['inTransit'];
     let purchaseDelivered = [] as ReturnType<
       typeof parsePurchaseSheetStageRows
     >['delivered'];
-    let blue30Arrived = [] as ReturnType<
-      typeof parseBlue30ArrivedRows
-    >['arrived'];
     let purchaseSheetOk = false;
-    let blue30Ok = false;
+    let blue30Ok = sync.attempted && sync.errors.length === 0;
 
     if (this.sheets.isConfigured()) {
       try {
@@ -121,7 +247,9 @@ export class StockCostSheetReadService {
         purchaseInTransit = parsed.inTransit;
         purchaseDelivered = parsed.delivered;
         errors.push(...parsed.errors);
-        purchaseSheetOk = parsed.errors.length === 0 || parsed.inTransit.length + parsed.delivered.length > 0;
+        purchaseSheetOk =
+          parsed.errors.length === 0 ||
+          parsed.inTransit.length + parsed.delivered.length > 0;
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         errors.push(`Purchase sheet read failed: ${msg}`);
@@ -131,31 +259,22 @@ export class StockCostSheetReadService {
       errors.push('Purchase Google Sheet not configured');
     }
 
-    const b30Id = this.blue30SpreadsheetId();
-    if (this.sheets.isAuthConfigured() && b30Id) {
-      try {
-        const tab = this.blue30TabTitle();
-        const values = await this.sheets.getValues(`'${tab}'!A1:AZ`, b30Id);
-        const parsed = parseBlue30ArrivedRows(values);
-        blue30Arrived = parsed.arrived;
-        errors.push(...parsed.errors);
-        blue30Ok =
-          parsed.errors.length === 0 || parsed.arrived.length > 0;
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        errors.push(`Blue30 Inbound read failed: ${msg}`);
-        this.logger.warn(`Blue30 Inbound read failed: ${msg}`);
-      }
-    } else {
-      errors.push('Blue30 Inbound sheet not configured');
+    if (!this.blue30SpreadsheetId() || !this.sheets.isAuthConfigured()) {
+      blue30Ok = false;
     }
 
     const { purchasedByAsin, arrivedByAsin } =
       buildSheetPurchasedAndArrivedByAsin({
         purchaseInTransit,
         purchaseDelivered,
-        blue30Arrived,
       });
+
+    const syncNote =
+      sync.updated > 0
+        ? `synced Delivered=Yes on ${sync.updated} row(s)`
+        : sync.skippedThrottle
+          ? 'Delivered sync throttled'
+          : '';
 
     const snapshot: SheetStageSnapshots = {
       purchasedByAsin,
@@ -163,12 +282,12 @@ export class StockCostSheetReadService {
       purchaseSheetOk,
       blue30Ok,
       errors,
-      sourceNote: '',
+      sourceNote: syncNote,
     };
 
     try {
       await this.redis.set(
-        cacheKey,
+        CACHE_KEY_PIPELINE,
         JSON.stringify(this.mapsToJson(snapshot)),
         CACHE_TTL_SEC,
       );

@@ -2,7 +2,7 @@
  * Stock cost by pipeline stage — exclusive qty waterfall (COGS × qty).
  *
  * Production dashboard prefers sheet-aware stages in `stock-cost-sheet.util.ts`:
- *   purchased = CURRENT ORDERS in-transit; prep = Blue30 received (+ HOME delivered).
+ *   purchased = Delivered ≠ Yes; prep = Delivered=Yes − amazonHeld.
  * This util remains the Amazon + DB-ledger waterfall (fallback / unit tests):
  * 1. Available stock  = fulfillable / available qty
  * 2. Stock sent       = inbound working + shipped + receiving (or inboundQty)

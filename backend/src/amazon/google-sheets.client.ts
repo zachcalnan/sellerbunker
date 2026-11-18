@@ -86,6 +86,25 @@ export class GoogleSheetsClient {
     });
   }
 
+  /** Multi-range cell writes (e.g. flip several Delivered cells). */
+  async batchUpdateValues(
+    data: Array<{ range: string; values: (string | number | null)[][] }>,
+    spreadsheetId?: string,
+  ): Promise<void> {
+    if (data.length === 0) return;
+    const id = this.resolveSpreadsheetId(spreadsheetId);
+    await this.sheets().spreadsheets.values.batchUpdate({
+      spreadsheetId: id,
+      requestBody: {
+        valueInputOption: 'USER_ENTERED',
+        data: data.map((d) => ({
+          range: d.range,
+          values: d.values,
+        })),
+      },
+    });
+  }
+
   async appendValues(
     rangeA1: string,
     values: (string | number | null)[][],

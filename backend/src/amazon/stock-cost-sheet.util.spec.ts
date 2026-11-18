@@ -5,6 +5,7 @@ import {
   matchUnitCostFromPurchaseSheet,
   parseBlue30ArrivedRows,
   parsePurchaseSheetStageRows,
+  planDeliveredYesUpdatesFromBlue30,
   sheetUnitCostToCogs,
   sumSheetAwareStockCostPipeline,
 } from './stock-cost-sheet.util';
@@ -111,7 +112,84 @@ describe('stock-cost-sheet.util', () => {
     expect(matchUnitCostFromPurchaseSheet('B0AAA', '', lines)).toBe(12);
   });
 
-  it('builds purchased in-transit and arrived-for-prep with exclusivity', () => {
+  it('plans Delivered=Yes from Blue30 by Order Ref+ASIN then ASIN FIFO', () => {
+    const purchase = parsePurchaseSheetStageRows([
+      [
+        'Date',
+        'ASIN',
+        'Order Num',
+        'Units',
+        '£/Unit',
+        'Delivered ',
+      ],
+      ['1/11/2026', 'B0BOTH', 'O3', '4', '£8', 'No'],
+      ['1/11/2026', 'B0OPEN', 'O1', '5', '£4', 'No'],
+      ['2/11/2026', 'B0ASIN', 'O9', '3', '£2', 'No'],
+      ['3/11/2026', 'B0ASIN', 'O10', '7', '£2', 'No'],
+      ['1/11/2026', 'B0DONE', 'O2', '2', '£6', 'Yes'],
+    ]);
+
+    const updates = planDeliveredYesUpdatesFromBlue30({
+      purchaseInTransit: purchase.inTransit,
+      deliveredColIndex0: 5,
+      blue30Arrived: [
+        {
+          asin: 'B0BOTH',
+          sku: null,
+          qtyReceived: 2,
+          qtyOrdered: 4,
+          orderRef: 'O3',
+          sheetRow: 2,
+        },
+        {
+          asin: 'B0ASIN',
+          sku: null,
+          qtyReceived: 3,
+          qtyOrdered: 10,
+          orderRef: 'UNKNOWN',
+          sheetRow: 3,
+        },
+        {
+          asin: 'B0DONE',
+          sku: null,
+          qtyReceived: 2,
+          qtyOrdered: 2,
+          orderRef: 'O2',
+          sheetRow: 4,
+        },
+      ],
+    });
+
+    // Order+ASIN match flips O3; ASIN-only covers oldest B0ASIN (3 units) first;
+    // already-delivered B0DONE is not in inTransit so never planned.
+    expect(updates.map((u) => u.sheetRow).sort((a, b) => a - b)).toEqual([
+      2, // B0BOTH O3
+      4, // B0ASIN O9 (sheet row 4 in 1-based: header=1, rows 2..6 → O9 is row 4)
+    ]);
+    expect(updates.find((u) => u.asin === 'B0BOTH')?.match).toBe('order_asin');
+    expect(updates.find((u) => u.asin === 'B0ASIN')?.match).toBe('asin');
+    expect(updates.every((u) => u.deliveredColIndex0 === 5)).toBe(true);
+  });
+
+  it('is idempotent: already Delivered rows are not re-planned', () => {
+    const updates = planDeliveredYesUpdatesFromBlue30({
+      purchaseInTransit: [],
+      deliveredColIndex0: 5,
+      blue30Arrived: [
+        {
+          asin: 'B0X',
+          sku: null,
+          qtyReceived: 10,
+          qtyOrdered: 10,
+          orderRef: 'O1',
+          sheetRow: 2,
+        },
+      ],
+    });
+    expect(updates).toEqual([]);
+  });
+
+  it('builds purchased / prep candidates from Delivered flag only (ignores raw B30)', () => {
     const purchase = parsePurchaseSheetStageRows([
       [
         'Date',
@@ -122,11 +200,8 @@ describe('stock-cost-sheet.util', () => {
         'Home/Prep',
         'Delivered ',
       ],
-      // Still on the way
       ['1/11/2026', 'B0OPEN', 'O1', '5', '£4', 'PREP CENTER', 'No'],
-      // Delivered at home
       ['1/11/2026', 'B0HOME', 'O2', '3', '£6', 'HOME', 'Yes'],
-      // Still marked No but B30 has received 2 → leave purchased
       ['1/11/2026', 'B0BOTH', 'O3', '4', '£8', 'PREP CENTER', 'No'],
     ]);
     const blue30 = parseBlue30ArrivedRows([
@@ -140,23 +215,10 @@ describe('stock-cost-sheet.util', () => {
         'Quantity Received',
       ],
       ['1/11/2026', 'O3', 'S', 'X', 'B0BOTH', '4', '2'],
+      // Historical received that used to inflate prep forever:
       ['1/11/2026', 'O4', 'S', 'Y', 'B0PREP', '10', '10'],
+      ['1/01/2025', 'OLD', 'S', 'Z', 'B0HIST', '100', '100'],
     ]);
-
-    // Give B0PREP a purchase cost via a delivered? or in-transit line for match
-    const costLines = [
-      ...purchase.inTransit,
-      ...purchase.delivered,
-      {
-        asin: 'B0PREP',
-        qty: 10,
-        unitCost: 7,
-        orderRef: 'O4',
-        homePrep: 'PREP CENTER' as const,
-        purchaseDate: null,
-        sheetRow: 99,
-      },
-    ];
 
     const { purchasedByAsin, arrivedByAsin } =
       buildSheetPurchasedAndArrivedByAsin({
@@ -165,25 +227,25 @@ describe('stock-cost-sheet.util', () => {
         blue30Arrived: blue30.arrived,
       });
 
-    // Re-match B0PREP cost: blue30 match uses allPurchase which includes only
-    // purchase sheet lines — add cost via inTransit for B0PREP in a second build.
-    void costLines;
-
     expect(purchasedByAsin.get('B0OPEN')?.qty).toBe(5);
     expect(purchasedByAsin.get('B0OPEN')?.cost).toBe(20);
-    // 4 open minus 2 B30 received → 2 still purchased
-    expect(purchasedByAsin.get('B0BOTH')?.qty).toBe(2);
+    // Still Delivered=No on sheet → stays purchased (sync would flip before this)
+    expect(purchasedByAsin.get('B0BOTH')?.qty).toBe(4);
     expect(purchasedByAsin.get('B0HOME')).toBeUndefined();
 
+    // Only Delivered=Yes sheet rows — not historical Blue30 received
     expect(arrivedByAsin.get('B0HOME')?.qty).toBe(3);
     expect(arrivedByAsin.get('B0HOME')?.cost).toBe(18);
-    expect(arrivedByAsin.get('B0BOTH')?.qty).toBe(2);
+    expect(arrivedByAsin.get('B0BOTH')).toBeUndefined();
+    expect(arrivedByAsin.get('B0PREP')).toBeUndefined();
+    expect(arrivedByAsin.get('B0HIST')).toBeUndefined();
   });
 
-  it('values B30 arrived via purchase-sheet order match', () => {
+  it('after sync-style Delivered flip, B30-received line moves from purchased to prep', () => {
     const { purchasedByAsin, arrivedByAsin } =
       buildSheetPurchasedAndArrivedByAsin({
-        purchaseInTransit: [
+        purchaseInTransit: [],
+        purchaseDelivered: [
           {
             asin: 'B0PREP',
             qty: 10,
@@ -194,7 +256,6 @@ describe('stock-cost-sheet.util', () => {
             sheetRow: 2,
           },
         ],
-        purchaseDelivered: [],
         blue30Arrived: [
           {
             asin: 'B0PREP',
@@ -206,13 +267,12 @@ describe('stock-cost-sheet.util', () => {
           },
         ],
       });
-    // All 10 arrived on B30 while still "No" on purchase → purchased deducted to 0
     expect(purchasedByAsin.get('B0PREP')).toBeUndefined();
     expect(arrivedByAsin.get('B0PREP')?.qty).toBe(10);
     expect(arrivedByAsin.get('B0PREP')?.cost).toBe(70);
   });
 
-  it('clamps prep by Amazon held and keeps available/sent from inventory', () => {
+  it('clamps prep by Amazon held — sent-in leaves prep (exclusivity)', () => {
     const purchasedByAsin = new Map([
       [
         'B0OPEN',
@@ -243,7 +303,7 @@ describe('stock-cost-sheet.util', () => {
       purchasedByAsin,
       arrivedByAsin,
     });
-    // prep = 10 arrived − 5 amazon held = 5 × £7
+    // prep = 10 delivered − 5 amazon held = 5 × £7
     expect(tot.stockForPrepQty).toBe(5);
     expect(tot.stockForPrepCost).toBe(35);
     expect(tot.availableStockQty).toBe(3);
@@ -253,5 +313,29 @@ describe('stock-cost-sheet.util', () => {
     expect(tot.stockPurchasedQty).toBe(5);
     expect(tot.stockPurchasedCost).toBe(20);
     expect(tot.totalCost).toBe(90);
+  });
+
+  it('does not keep historical delivered-as-prep after units are fully at Amazon', () => {
+    const arrivedByAsin = new Map([
+      [
+        'B0OLD',
+        { qty: 100, cost: 15000, unitCostWeight: 15000, unitCostQty: 100 },
+      ],
+    ]);
+    const tot = sumSheetAwareStockCostPipeline({
+      skuRows: [
+        {
+          asin: 'B0OLD',
+          availableQty: 40,
+          inboundQty: 60,
+          unitCost: 150,
+        },
+      ],
+      purchasedByAsin: new Map(),
+      arrivedByAsin,
+    });
+    expect(tot.stockForPrepQty).toBe(0);
+    expect(tot.stockForPrepCost).toBe(0);
+    expect(tot.availableStockCost + tot.stockSentCost).toBe(15000);
   });
 });

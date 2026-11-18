@@ -3923,8 +3923,8 @@ export class AmazonService {
 
   /**
    * Dashboard: cumulative stock COGS by exclusive pipeline stage.
-   * Purchased / for-prep are sheet-driven (CURRENT ORDERS + Blue30);
-   * available / sent stay on Amazon inventory snapshots.
+   * Purchased / for-prep are CURRENT ORDERS Delivered flag (Blue30 sync
+   * flips Delivered=Yes on receive); available / sent from Amazon inventory.
    * See `stock-cost-sheet.util.ts` + `stock-cost-pipeline.util.ts`.
    */
   async getStockCostPipeline(

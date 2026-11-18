@@ -1,13 +1,16 @@
 /**
  * Sheet-driven stock-cost stages (early pipeline):
  *
- * Stock purchased  = CURRENT ORDERS rows still in transit (Delivered ≠ Yes),
- *                    valued at sheet £/Unit (same COGS basis as deriveUnitCostOfGoodsExVat @ VAT 0).
- * Stock for prep   = Blue30 Inbound Quantity Received (+ purchase-sheet Delivered=Yes HOME
- *                    lines not already counted on B30), valued by matching purchase-sheet cost.
- * Then Amazon waterfall (caller): Stock sent / Available from inventory snapshots.
+ * Stock purchased  = CURRENT ORDERS rows with Delivered ≠ Yes, valued at £/Unit.
+ * Stock for prep   = CURRENT ORDERS rows with Delivered = Yes, valued at £/Unit,
+ *                    then clamped by Amazon available+inbound (sent-in leaves prep).
  *
- * Exclusivity: purchased ∩ arrived = ∅; prep = max(0, arrived − amazonHeld).
+ * Blue30 Quantity Received is NOT a second cost pile — it only drives a sync that
+ * flips matching purchase-sheet Delivered → Yes. Historical B30 received must not
+ * inflate prep after units leave for / sell through Amazon.
+ *
+ * Exclusivity waterfall (caller): Available → Sent → Prep → Purchased.
+ * prep = max(0, deliveredOnSheet − amazonHeld); purchased = not delivered.
  */
 
 import {
@@ -253,7 +256,7 @@ export function parseBlue30ArrivedRows(values: string[][]): {
   return { header, headerRowIndex, arrived, errors };
 }
 
-function normOrderRef(s: string): string {
+export function normOrderRef(s: string): string {
   return String(s ?? '')
     .trim()
     .toUpperCase()
@@ -299,86 +302,117 @@ export function matchUnitCostFromPurchaseSheet(
   return ordered[0]?.unitCost ?? 0;
 }
 
+export type DeliveredYesUpdate = {
+  /** 1-based sheet row */
+  sheetRow: number;
+  deliveredColIndex0: number;
+  asin: string;
+  orderRef: string;
+  match: 'order_asin' | 'asin';
+};
+
 /**
- * Build purchased + arrived-for-prep ASIN aggregates from sheet snapshots.
+ * Plan idempotent Delivered=Yes writes from Blue30 Quantity Received.
+ * Match Order Ref+ASIN first, else FIFO ASIN-only against undelivered rows.
+ * Does not touch £/Unit, Units, or other cells.
+ */
+export function planDeliveredYesUpdatesFromBlue30(opts: {
+  purchaseInTransit: SheetCostLine[];
+  deliveredColIndex0: number;
+  blue30Arrived: Blue30ArrivedLine[];
+}): DeliveredYesUpdate[] {
+  if (opts.deliveredColIndex0 < 0) return [];
+
+  type OpenLine = SheetCostLine & { claimed: boolean };
+  const open: OpenLine[] = opts.purchaseInTransit.map((l) => ({
+    ...l,
+    claimed: false,
+  }));
+  const updates: DeliveredYesUpdate[] = [];
+  const seenRows = new Set<number>();
+
+  const pushUpdate = (line: OpenLine, match: 'order_asin' | 'asin') => {
+    if (line.claimed || seenRows.has(line.sheetRow)) return;
+    line.claimed = true;
+    seenRows.add(line.sheetRow);
+    updates.push({
+      sheetRow: line.sheetRow,
+      deliveredColIndex0: opts.deliveredColIndex0,
+      asin: line.asin,
+      orderRef: line.orderRef,
+      match,
+    });
+  };
+
+  const sortOldest = (a: OpenLine, b: OpenLine) => {
+    const at = a.purchaseDate?.getTime() ?? 0;
+    const bt = b.purchaseDate?.getTime() ?? 0;
+    if (at !== bt) return at - bt;
+    return a.sheetRow - b.sheetRow;
+  };
+
+  for (const b30 of opts.blue30Arrived) {
+    if (!(b30.qtyReceived > 0)) continue;
+    const asin = b30.asin.trim().toUpperCase();
+    if (!asin) continue;
+    const wantOrder = normOrderRef(b30.orderRef);
+
+    if (wantOrder) {
+      const byOrder = open
+        .filter(
+          (l) =>
+            !l.claimed &&
+            l.asin === asin &&
+            normOrderRef(l.orderRef) === wantOrder,
+        )
+        .sort(sortOldest);
+      if (byOrder.length > 0) {
+        for (const line of byOrder) pushUpdate(line, 'order_asin');
+        continue;
+      }
+    }
+
+    // ASIN-only: cover received qty FIFO across undelivered rows.
+    let remaining = b30.qtyReceived;
+    const byAsin = open
+      .filter((l) => !l.claimed && l.asin === asin)
+      .sort(sortOldest);
+    for (const line of byAsin) {
+      if (remaining <= 0) break;
+      pushUpdate(line, 'asin');
+      remaining -= line.qty;
+    }
+  }
+
+  return updates;
+}
+
+/**
+ * Build purchased + arrived-for-prep ASIN aggregates from the purchase sheet.
  *
- * - Purchased: in-transit purchase rows, minus any B30-received qty still
- *   marked undelivered (B30 arrival wins for exclusivity).
- * - Arrived: B30 Quantity Received + HOME Delivered=Yes purchase rows not
- *   already covered by B30 received for that ASIN (FIFO).
+ * Source of truth after Blue30→Delivered sync:
+ * - Purchased = Delivered ≠ Yes rows (in-transit)
+ * - Arrived (prep candidates) = Delivered = Yes rows only
+ *
+ * `blue30Arrived` is ignored for costing (kept optional for call-site compat).
  */
 export function buildSheetPurchasedAndArrivedByAsin(opts: {
   purchaseInTransit: SheetCostLine[];
   purchaseDelivered: SheetCostLine[];
-  blue30Arrived: Blue30ArrivedLine[];
+  blue30Arrived?: Blue30ArrivedLine[];
 }): {
   purchasedByAsin: Map<string, AsinQtyCost>;
   arrivedByAsin: Map<string, AsinQtyCost>;
 } {
-  const allPurchase = [
-    ...opts.purchaseInTransit,
-    ...opts.purchaseDelivered,
-  ];
+  void opts.blue30Arrived;
   const purchasedByAsin = new Map<string, AsinQtyCost>();
   const arrivedByAsin = new Map<string, AsinQtyCost>();
 
-  // B30 arrived first — valued via purchase sheet match.
-  const b30QtyByAsin = new Map<string, number>();
-  for (const row of opts.blue30Arrived) {
-    const unitCost = matchUnitCostFromPurchaseSheet(
-      row.asin,
-      row.orderRef,
-      allPurchase,
-    );
-    addAsinQtyCost(arrivedByAsin, row.asin, row.qtyReceived, unitCost);
-    b30QtyByAsin.set(
-      row.asin,
-      (b30QtyByAsin.get(row.asin) ?? 0) + row.qtyReceived,
-    );
-  }
-
-  // HOME (or any) Delivered=Yes on purchase sheet that B30 did not already count.
-  const b30Remaining = new Map(b30QtyByAsin);
-  for (const line of opts.purchaseDelivered) {
-    const covered = b30Remaining.get(line.asin) ?? 0;
-    if (covered > 0) {
-      const take = Math.min(covered, line.qty);
-      b30Remaining.set(line.asin, covered - take);
-      const leftover = line.qty - take;
-      if (leftover > 0) {
-        addAsinQtyCost(arrivedByAsin, line.asin, leftover, line.unitCost);
-      }
-      continue;
-    }
-    addAsinQtyCost(arrivedByAsin, line.asin, line.qty, line.unitCost);
-  }
-
-  // In-transit purchased; subtract B30 arrivals still flagged undelivered.
-  const openByAsin = new Map<string, SheetCostLine[]>();
   for (const line of opts.purchaseInTransit) {
-    const list = openByAsin.get(line.asin) ?? [];
-    list.push(line);
-    openByAsin.set(line.asin, list);
+    addAsinQtyCost(purchasedByAsin, line.asin, line.qty, line.unitCost);
   }
-  for (const [asin, lines] of openByAsin) {
-    let deduct = b30QtyByAsin.get(asin) ?? 0;
-    const ordered = [...lines].sort((a, b) => {
-      const at = a.purchaseDate?.getTime() ?? 0;
-      const bt = b.purchaseDate?.getTime() ?? 0;
-      if (at !== bt) return at - bt;
-      return a.sheetRow - b.sheetRow;
-    });
-    for (const line of ordered) {
-      let qty = line.qty;
-      if (deduct > 0) {
-        const take = Math.min(deduct, qty);
-        deduct -= take;
-        qty -= take;
-      }
-      if (qty > 0) {
-        addAsinQtyCost(purchasedByAsin, asin, qty, line.unitCost);
-      }
-    }
+  for (const line of opts.purchaseDelivered) {
+    addAsinQtyCost(arrivedByAsin, line.asin, line.qty, line.unitCost);
   }
 
   return { purchasedByAsin, arrivedByAsin };
@@ -408,8 +442,8 @@ export type SheetAwarePipelineResult = {
 /**
  * Exclusive sheet-aware totals:
  * 1) Available / Sent from Amazon inventory (SKU rows)
- * 2) Prep = max(0, arrived − amazonHeldByAsin), sheet-valued
- * 3) Purchased = in-transit purchase sheet (after B30 exclusivity)
+ * 2) Prep = max(0, Delivered=Yes − amazonHeldByAsin), sheet £/Unit
+ * 3) Purchased = Delivered ≠ Yes purchase-sheet rows
  */
 export function sumSheetAwareStockCostPipeline(opts: {
   skuRows: SheetAwareSkuInput[];
