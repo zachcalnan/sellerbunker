@@ -4164,11 +4164,8 @@ export class AmazonService {
     let stockPurchasedCost = sheetTotals.stockPurchasedCost;
     let stockForPrepQty = sheetTotals.stockForPrepQty;
     let stockForPrepCost = sheetTotals.stockForPrepCost;
-    let missingCogsQty = sheetTotals.missingCogsQty;
-    let usedDbFallback = false;
 
     if (!sheet.purchaseSheetOk && !sheet.blue30Ok) {
-      usedDbFallback = true;
       const purchaseUserIds =
         memberUserIds.length > 0 ? memberUserIds : aggUserIds;
       const purchases =
@@ -4265,25 +4262,6 @@ export class AmazonService {
           100,
       ) / 100;
 
-    const notes: string[] = [];
-    if (sheet.sourceNote) notes.push(sheet.sourceNote);
-    notes.push(
-      'Available / Stock sent from Amazon inventory (fulfillable + inbound). Stages are mutually exclusive; reserved/FC-processing excluded.',
-    );
-    if (usedDbFallback) {
-      notes.push(
-        'Sheets unavailable — purchased/prep fell back to Purchase.qtyDelivered ledger.',
-      );
-    }
-    if (sheet.errors.length > 0 && !usedDbFallback) {
-      notes.push(`Sheet notes: ${sheet.errors.slice(0, 3).join('; ')}`);
-    }
-    if (missingCogsQty > 0) {
-      notes.push(
-        `${missingCogsQty} unit(s) across stages lack COGS and contribute £0 until cost is set.`,
-      );
-    }
-
     return {
       currency,
       stockPurchased: {
@@ -4303,7 +4281,7 @@ export class AmazonService {
         cost: sheetTotals.availableStockCost,
       },
       totalCost,
-      note: notes.join(' '),
+      note: null,
     };
   }
 

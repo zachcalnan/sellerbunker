@@ -2327,7 +2327,6 @@ type StockCostPipelineData = {
   stockSent: StockCostStage;
   availableStock: StockCostStage;
   totalCost: number;
-  note: string | null;
 };
 
 type StockCostPipelineProps = {
@@ -2404,11 +2403,6 @@ function StockCostPipeline({
           </span>
         ) : null}
       </div>
-      {!loading && data?.note ? (
-        <p className="mb-2 text-[9px] leading-snug text-[var(--muted-foreground)] line-clamp-2">
-          {data.note}
-        </p>
-      ) : null}
 
       {error ? (
         <p className="text-[10px] text-red-600">{error}</p>

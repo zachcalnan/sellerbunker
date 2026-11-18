@@ -157,26 +157,13 @@ export class StockCostSheetReadService {
         blue30Arrived,
       });
 
-    const bits: string[] = [];
-    if (purchaseSheetOk) {
-      bits.push(
-        'Stock purchased = CURRENT ORDERS rows with Delivered ≠ Yes (in transit to home/prep), qty × £/Unit',
-      );
-    }
-    if (blue30Ok) {
-      bits.push(
-        'Stock for prep = Blue30 Quantity Received (+ purchase-sheet Delivered=Yes HOME not already on B30), valued via purchase-sheet £/Unit match, minus Amazon held',
-      );
-    }
-    const sourceNote = bits.join(' ');
-
     const snapshot: SheetStageSnapshots = {
       purchasedByAsin,
       arrivedByAsin,
       purchaseSheetOk,
       blue30Ok,
       errors,
-      sourceNote,
+      sourceNote: '',
     };
 
     try {

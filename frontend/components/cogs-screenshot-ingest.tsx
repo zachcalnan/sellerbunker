@@ -319,11 +319,7 @@ function ListingSearchField({
               disabled={!asinReady || catalogBusy}
               onClick={() => void runCatalogLookup()}
               className="shrink-0 rounded border border-[var(--surface-border)] bg-[var(--surface)] px-2.5 py-1.5 text-xs font-semibold text-[var(--foreground)] hover:bg-[var(--foreground)]/5 disabled:cursor-not-allowed disabled:opacity-40"
-              title={
-                asinReady
-                  ? "Look up this ASIN on Amazon if it is not in your listings"
-                  : "Enter a 10-character ASIN to search Amazon catalog"
-              }
+              title={asinReady ? "Search Amazon catalog" : undefined}
             >
               {catalogBusy ? "Searching…" : "Search ASIN"}
             </button>
@@ -835,11 +831,10 @@ export function CogsScreenshotIngest({
 
             {useAiSearch && !isPage ? (
             <label className="mb-3 block text-xs text-[var(--muted-foreground)]">
-              Optional hint
+              Hint
               <input
                 value={hint}
                 onChange={(e) => setHint(e.target.value)}
-                placeholder="e.g. Thomann 10x Otamatone / Healf confirmation"
                 className="mt-1 w-full rounded border border-[var(--surface-border)] bg-[var(--background)] px-2 py-1.5 text-sm text-[var(--foreground)]"
               />
             </label>
@@ -898,11 +893,10 @@ export function CogsScreenshotIngest({
 
             {useAiSearch && isPage ? (
               <label className="mb-3 block text-xs text-[var(--muted-foreground)]">
-                Optional hint
+                Hint
                 <input
                   value={hint}
                   onChange={(e) => setHint(e.target.value)}
-                  placeholder="e.g. iHerb PURA D'OR / Thomann 10x Otamatone"
                   className="mt-1 w-full rounded-lg border border-[var(--surface-border)] bg-[var(--surface)] px-2 py-1.5 text-sm text-[var(--foreground)]"
                 />
               </label>
@@ -1068,7 +1062,6 @@ export function CogsScreenshotIngest({
                       )
                     }
                     rows={2}
-                    placeholder="Optional — goes on the purchase sheet Notes column"
                     className="rounded border border-[var(--surface-border)] bg-[var(--background)] px-2 py-1.5 text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)]"
                   />
                 </label>
@@ -1087,9 +1080,7 @@ export function CogsScreenshotIngest({
                       }
                       className="mt-0.5 h-3.5 w-3.5 rounded border-[var(--surface-border)]"
                     />
-                    <span>
-                      Also copy notes to Blue30 prep (Inbound Notes column)
-                    </span>
+                    <span>Copy to prep</span>
                   </label>
                 ) : null}
 
