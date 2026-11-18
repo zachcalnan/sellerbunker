@@ -48,6 +48,42 @@ export type SheetCostLine = {
 /** Exact Final cell value when purchase units have sold through on Amazon. */
 export const PURCHASE_SHEET_COMPLETE_VALUE = 'Complete';
 
+/** Exact Final cell value when a sold-through purchase lot was returned. */
+export const PURCHASE_SHEET_RETURNED_VALUE = 'Returned';
+
+/** Google Sheets RGB (0–1) for Final status cells — Excel-like conditional format. */
+export type PurchaseSheetRgb = { red: number; green: number; blue: number };
+
+export type PurchaseSheetFinalStatusFormat = {
+  status: 'Complete' | 'Returned';
+  backgroundColor: PurchaseSheetRgb;
+  foregroundColor: PurchaseSheetRgb;
+};
+
+/** Complete: light green fill (#C6EFCE) + dark green text (#006100). */
+export const PURCHASE_SHEET_COMPLETE_BG: PurchaseSheetRgb = {
+  red: 198 / 255,
+  green: 239 / 255,
+  blue: 206 / 255,
+};
+export const PURCHASE_SHEET_COMPLETE_FG: PurchaseSheetRgb = {
+  red: 0,
+  green: 97 / 255,
+  blue: 0,
+};
+
+/** Returned: light red fill (#FFC7CE) + dark red text (#9C0006). */
+export const PURCHASE_SHEET_RETURNED_BG: PurchaseSheetRgb = {
+  red: 255 / 255,
+  green: 199 / 255,
+  blue: 206 / 255,
+};
+export const PURCHASE_SHEET_RETURNED_FG: PurchaseSheetRgb = {
+  red: 156 / 255,
+  green: 0,
+  blue: 6 / 255,
+};
+
 /** True when CURRENT ORDERS Home/Prep means already sent into Amazon. */
 export function isPurchaseSheetHomePrepSent(raw: unknown): boolean {
   return normalizeShipDestinationLabel(raw) === 'sent';
@@ -73,6 +109,15 @@ export function isPurchaseSheetFinalComplete(raw: unknown): boolean {
   return s === 'complete' || s === 'completed' || s === 'done' || s === 'sold';
 }
 
+/** True when Final means a return (Returned / return / refund wording). */
+export function isPurchaseSheetFinalReturned(raw: unknown): boolean {
+  const s = String(raw ?? '')
+    .trim()
+    .toLowerCase();
+  if (!s) return false;
+  return s.includes('return') || s.includes('refund');
+}
+
 /** Final cell values that must not be overwritten by Complete sync. */
 export function isPurchaseSheetFinalProtected(raw: unknown): boolean {
   const s = String(raw ?? '')
@@ -85,6 +130,29 @@ export function isPurchaseSheetFinalProtected(raw: unknown): boolean {
     s === 'cancelled' ||
     s === 'canceled'
   );
+}
+
+/**
+ * Map Final cell text → green (Complete) / red (Returned) fill+text, or null.
+ */
+export function resolvePurchaseSheetFinalStatusFormat(
+  raw: unknown,
+): PurchaseSheetFinalStatusFormat | null {
+  if (isPurchaseSheetFinalComplete(raw)) {
+    return {
+      status: 'Complete',
+      backgroundColor: PURCHASE_SHEET_COMPLETE_BG,
+      foregroundColor: PURCHASE_SHEET_COMPLETE_FG,
+    };
+  }
+  if (isPurchaseSheetFinalReturned(raw)) {
+    return {
+      status: 'Returned',
+      backgroundColor: PURCHASE_SHEET_RETURNED_BG,
+      foregroundColor: PURCHASE_SHEET_RETURNED_FG,
+    };
+  }
+  return null;
 }
 
 /**
@@ -447,11 +515,30 @@ export type FinalCompleteUpdate = {
   match: 'order_asin' | 'asin';
 };
 
+export type FinalReturnedUpdate = {
+  /** 1-based sheet row */
+  sheetRow: number;
+  finalColIndex0: number;
+  asin: string;
+  orderRef: string;
+  qty: number;
+  match: 'order_asin' | 'asin';
+};
+
+export type FinalStatusFormatUpdate = {
+  /** 1-based sheet row */
+  sheetRow: number;
+  finalColIndex0: number;
+  status: 'Complete' | 'Returned';
+  backgroundColor: PurchaseSheetRgb;
+  foregroundColor: PurchaseSheetRgb;
+};
+
 /**
  * Plan idempotent Home/Prep → "sent" writes for Delivered=Yes rows covered by
  * Amazon units that reached FBA: held (available+inbound) plus sold-through.
  * Sold is included so already-sold rows still get sent before Complete backfill.
- * Skips Final=Complete rows. Does not touch £/Unit, Units, or Delivered.
+ * Skips Final=Complete / Returned / protected rows. Does not touch £/Unit, Units, or Delivered.
  */
 export function planHomePrepSentUpdatesFromAmazonHeld(opts: {
   purchaseDelivered: SheetCostLine[];
@@ -468,6 +555,7 @@ export function planHomePrepSentUpdatesFromAmazonHeld(opts: {
   const byAsin = new Map<string, SheetCostLine[]>();
   for (const line of opts.purchaseDelivered) {
     if (line.finalComplete) continue; // sold-through — leave alone
+    if (isPurchaseSheetFinalProtected(line.finalRaw)) continue;
     if (line.homePrep === 'sent') continue; // already marked
     const asin = line.asin.trim().toUpperCase();
     if (!asin) continue;
@@ -597,6 +685,120 @@ export function planFinalCompleteUpdatesFromSold(opts: {
 }
 
 /**
+ * Plan idempotent Final Complete → Returned writes from Amazon returned/refunded units.
+ * Eligible = Delivered=Yes, Home/Prep=sent, Final=Complete. ASIN FIFO oldest first.
+ * Does not touch £/Unit, Units, Delivered, Home/Prep, or non-Complete Final values.
+ */
+export function planFinalReturnedUpdatesFromReturns(opts: {
+  purchaseDelivered: SheetCostLine[];
+  finalColIndex0: number;
+  returnedByAsin: Map<string, number>;
+  /** Optional Order Ref hints per ASIN. */
+  returnedOrderRefsByAsin?: Map<string, string[]>;
+}): FinalReturnedUpdate[] {
+  if (opts.finalColIndex0 < 0) return [];
+
+  const updates: FinalReturnedUpdate[] = [];
+  const seenRows = new Set<number>();
+
+  type OpenLine = SheetCostLine & { claimed: boolean };
+  const byAsin = new Map<string, OpenLine[]>();
+  for (const line of opts.purchaseDelivered) {
+    // Only undo sold-through Complete rows — never overwrite Ebay / blank / etc.
+    if (!line.finalComplete) continue;
+    if (isPurchaseSheetFinalReturned(line.finalRaw)) continue;
+    if (line.homePrep !== 'sent') continue;
+    const asin = line.asin.trim().toUpperCase();
+    if (!asin) continue;
+    const list = byAsin.get(asin) ?? [];
+    list.push({ ...line, claimed: false });
+    byAsin.set(asin, list);
+  }
+
+  const sortOldest = (a: OpenLine, b: OpenLine) => {
+    const at = a.purchaseDate?.getTime() ?? 0;
+    const bt = b.purchaseDate?.getTime() ?? 0;
+    if (at !== bt) return at - bt;
+    return a.sheetRow - b.sheetRow;
+  };
+
+  const pushUpdate = (line: OpenLine, match: 'order_asin' | 'asin') => {
+    if (line.claimed || seenRows.has(line.sheetRow)) return;
+    line.claimed = true;
+    seenRows.add(line.sheetRow);
+    updates.push({
+      sheetRow: line.sheetRow,
+      finalColIndex0: opts.finalColIndex0,
+      asin: line.asin,
+      orderRef: line.orderRef,
+      qty: line.qty,
+      match,
+    });
+  };
+
+  for (const [asin, lines] of byAsin) {
+    let remaining = Math.max(
+      0,
+      Math.floor(opts.returnedByAsin.get(asin) ?? 0),
+    );
+    if (!(remaining > 0)) continue;
+
+    const open = [...lines].sort(sortOldest);
+    const orderHints = (opts.returnedOrderRefsByAsin?.get(asin) ?? [])
+      .map((r) => normOrderRef(r))
+      .filter(Boolean);
+
+    for (const wantOrder of orderHints) {
+      if (!(remaining > 0)) break;
+      const byOrder = open.filter(
+        (l) => !l.claimed && normOrderRef(l.orderRef) === wantOrder,
+      );
+      for (const line of byOrder) {
+        if (!(remaining > 0)) break;
+        pushUpdate(line, 'order_asin');
+        remaining -= line.qty;
+      }
+    }
+
+    for (const line of open) {
+      if (!(remaining > 0)) break;
+      if (line.claimed) continue;
+      pushUpdate(line, 'asin');
+      remaining -= line.qty;
+    }
+  }
+
+  return updates;
+}
+
+/**
+ * Plan Final cell format backfill for Complete (green) / Returned (red) values.
+ * Idempotent — callers may re-apply the same colors every sync.
+ */
+export function planFinalStatusFormatUpdates(opts: {
+  lines: SheetCostLine[];
+  finalColIndex0: number;
+}): FinalStatusFormatUpdate[] {
+  if (opts.finalColIndex0 < 0) return [];
+  const out: FinalStatusFormatUpdate[] = [];
+  const seen = new Set<number>();
+  for (const line of opts.lines) {
+    if (seen.has(line.sheetRow)) continue;
+    const fmt = resolvePurchaseSheetFinalStatusFormat(line.finalRaw);
+    if (!fmt) continue;
+    seen.add(line.sheetRow);
+    out.push({
+      sheetRow: line.sheetRow,
+      finalColIndex0: opts.finalColIndex0,
+      status: fmt.status,
+      backgroundColor: fmt.backgroundColor,
+      foregroundColor: fmt.foregroundColor,
+    });
+  }
+  return out;
+}
+
+/**
  * Plan idempotent Delivered=Yes writes from Blue30 Quantity Received.
  * Match Order Ref+ASIN first, else FIFO ASIN-only against undelivered rows.
  * Does not touch £/Unit, Units, or other cells.
@@ -677,9 +879,9 @@ export function planDeliveredYesUpdatesFromBlue30(opts: {
  *
  * Source of truth after Blue30→Delivered / Home/Prep→sent / Final→Complete sync:
  * - Purchased = Delivered ≠ Yes rows (in-transit)
- * - Arrived (prep candidates) = Delivered = Yes, Home/Prep ≠ sent, Final ≠ Complete
- * - Sheet-sent qty = Delivered = Yes, Home/Prep = sent, Final ≠ Complete
- * - Final=Complete rows leave every sheet stage (sold-through).
+ * - Arrived (prep candidates) = Delivered = Yes, Home/Prep ≠ sent, Final ≠ Complete/Returned
+ * - Sheet-sent qty = Delivered = Yes, Home/Prep = sent, Final ≠ Complete/Returned
+ * - Final=Complete / Returned / protected rows leave every sheet stage.
  *
  * `blue30Arrived` is ignored for costing (kept optional for call-site compat).
  */
@@ -699,12 +901,14 @@ export function buildSheetPurchasedAndArrivedByAsin(opts: {
 
   for (const line of opts.purchaseInTransit) {
     if (line.finalComplete) continue;
+    if (isPurchaseSheetFinalProtected(line.finalRaw)) continue;
     addAsinQtyCost(purchasedByAsin, line.asin, line.qty, line.unitCost);
   }
   for (const line of opts.purchaseDelivered) {
     const asin = line.asin.trim().toUpperCase();
-    // Sold-through → gone from prep / sheet-sent / Available attribution.
+    // Sold-through / returned / protected → gone from prep / sheet-sent.
     if (line.finalComplete) continue;
+    if (isPurchaseSheetFinalProtected(line.finalRaw)) continue;
     // Home/Prep=sent → already into Amazon; leave prep (Available/Sent tiles own them).
     if (line.homePrep === 'sent') {
       if (asin && line.qty > 0) {

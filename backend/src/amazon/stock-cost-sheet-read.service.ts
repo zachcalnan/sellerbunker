@@ -13,19 +13,25 @@ import {
   parsePurchaseSheetStageRows,
   planDeliveredYesUpdatesFromBlue30,
   planFinalCompleteUpdatesFromSold,
+  planFinalReturnedUpdatesFromReturns,
+  planFinalStatusFormatUpdates,
   planHomePrepSentUpdatesFromAmazonHeld,
   PURCHASE_SHEET_COMPLETE_VALUE,
+  PURCHASE_SHEET_RETURNED_VALUE,
+  resolvePurchaseSheetFinalStatusFormat,
   type AsinQtyCost,
   type DeliveredYesUpdate,
   type FinalCompleteUpdate,
+  type FinalReturnedUpdate,
+  type FinalStatusFormatUpdate,
   type HomePrepSentUpdate,
 } from './stock-cost-sheet.util';
 
 const CACHE_TTL_SEC = 90;
-/** Pipeline aggregates — bump when Complete / sold-through model changes. */
-const CACHE_KEY_PIPELINE = 'stock-cost:pipeline-maps:v4';
-/** Throttle Blue30→Delivered + Home/Prep→sent + Final→Complete sheet writes. */
-const SYNC_THROTTLE_KEY = 'stock-cost:delivered-sync:v3';
+/** Pipeline aggregates — bump when Complete / Returned / sold-through model changes. */
+const CACHE_KEY_PIPELINE = 'stock-cost:pipeline-maps:v5';
+/** Throttle Blue30→Delivered + Home/Prep→sent + Final→Complete/Returned + formats. */
+const SYNC_THROTTLE_KEY = 'stock-cost:delivered-sync:v4';
 const SYNC_THROTTLE_SEC = 120;
 
 /** Exact Home/Prep cell value when units have been sent into Amazon. */
@@ -50,6 +56,10 @@ export type DeliveredSyncResult = {
   sentUpdates: HomePrepSentUpdate[];
   completeUpdated: number;
   completeUpdates: FinalCompleteUpdate[];
+  returnedUpdated: number;
+  returnedUpdates: FinalReturnedUpdate[];
+  formatsUpdated: number;
+  formatUpdates: FinalStatusFormatUpdate[];
   errors: string[];
 };
 
@@ -131,13 +141,16 @@ export class StockCostSheetReadService {
   /**
    * 1) Blue30 Quantity Received → CURRENT ORDERS Delivered=Yes
    * 2) Amazon reached (held + sold) → Home/Prep = "sent" on covered Delivered rows
-   * 3) Amazon fulfilled sales → Final = Complete on covered sent rows
-   * Idempotent; never rewrites £/Unit or Units.
+   * 3) Amazon fulfilled sales → Final = Complete on covered sent rows (green)
+   * 4) Amazon returned/refunded → Final = Returned on covered Complete rows (red)
+   * 5) Idempotent Final cell color backfill for Complete / Returned
+   * Never rewrites £/Unit or Units.
    */
   async syncBlue30ReceivedToPurchaseDelivered(opts?: {
     force?: boolean;
     amazonHeldByAsin?: Map<string, number>;
     soldByAsin?: Map<string, number>;
+    returnedByAsin?: Map<string, number>;
   }): Promise<DeliveredSyncResult> {
     const empty: DeliveredSyncResult = {
       attempted: false,
@@ -148,6 +161,10 @@ export class StockCostSheetReadService {
       sentUpdates: [],
       completeUpdated: 0,
       completeUpdates: [],
+      returnedUpdated: 0,
+      returnedUpdates: [],
+      formatsUpdated: 0,
+      formatUpdates: [],
       errors: [],
     };
 
@@ -170,6 +187,8 @@ export class StockCostSheetReadService {
     let deliveredUpdates: DeliveredYesUpdate[] = [];
     let sentUpdates: HomePrepSentUpdate[] = [];
     let completeUpdates: FinalCompleteUpdate[] = [];
+    let returnedUpdates: FinalReturnedUpdate[] = [];
+    let formatUpdates: FinalStatusFormatUpdate[] = [];
 
     try {
       const tab = this.currentTabTitle();
@@ -227,6 +246,7 @@ export class StockCostSheetReadService {
 
       const held = opts?.amazonHeldByAsin;
       const sold = opts?.soldByAsin;
+      const returned = opts?.returnedByAsin;
       if (held && homePrepColIndex0 >= 0) {
         sentUpdates = planHomePrepSentUpdatesFromAmazonHeld({
           purchaseDelivered: parsedPurchase.delivered,
@@ -273,6 +293,10 @@ export class StockCostSheetReadService {
           this.logger.log(
             `Amazon sales→Final sync: set Final=${PURCHASE_SHEET_COMPLETE_VALUE} on ${completeUpdates.length} CURRENT ORDERS row(s)`,
           );
+          // Re-read so Returned planning + format backfill see Complete values.
+          purchaseValues = await this.sheets.getValues(`'${tab}'!A1:AZ`);
+          parsedPurchase = parsePurchaseSheetStageRows(purchaseValues);
+          errors.push(...parsedPurchase.errors);
         }
       } else if (sold && finalColIndex0 < 0) {
         errors.push(
@@ -280,10 +304,96 @@ export class StockCostSheetReadService {
         );
       }
 
+      if (returned && finalColIndex0 >= 0) {
+        returnedUpdates = planFinalReturnedUpdatesFromReturns({
+          purchaseDelivered: parsedPurchase.delivered,
+          finalColIndex0,
+          returnedByAsin: returned,
+        });
+
+        if (returnedUpdates.length > 0) {
+          const colLetter = colIndexToA1(finalColIndex0);
+          await this.sheets.batchUpdateValues(
+            returnedUpdates.map((u) => ({
+              range: `'${tab}'!${colLetter}${u.sheetRow}`,
+              values: [[PURCHASE_SHEET_RETURNED_VALUE]],
+            })),
+          );
+          this.logger.log(
+            `Amazon returns→Final sync: set Final=${PURCHASE_SHEET_RETURNED_VALUE} on ${returnedUpdates.length} CURRENT ORDERS row(s)`,
+          );
+          purchaseValues = await this.sheets.getValues(`'${tab}'!A1:AZ`);
+          parsedPurchase = parsePurchaseSheetStageRows(purchaseValues);
+          errors.push(...parsedPurchase.errors);
+        }
+      }
+
+      if (finalColIndex0 >= 0) {
+        formatUpdates = planFinalStatusFormatUpdates({
+          lines: [
+            ...parsedPurchase.inTransit,
+            ...parsedPurchase.delivered,
+          ],
+          finalColIndex0,
+        });
+        // Also include rows we just wrote if parse somehow missed (shouldn't).
+        for (const u of completeUpdates) {
+          if (formatUpdates.some((f) => f.sheetRow === u.sheetRow)) continue;
+          const fmt = resolvePurchaseSheetFinalStatusFormat(
+            PURCHASE_SHEET_COMPLETE_VALUE,
+          );
+          if (!fmt) continue;
+          formatUpdates.push({
+            sheetRow: u.sheetRow,
+            finalColIndex0,
+            status: fmt.status,
+            backgroundColor: fmt.backgroundColor,
+            foregroundColor: fmt.foregroundColor,
+          });
+        }
+        for (const u of returnedUpdates) {
+          if (formatUpdates.some((f) => f.sheetRow === u.sheetRow)) continue;
+          const fmt = resolvePurchaseSheetFinalStatusFormat(
+            PURCHASE_SHEET_RETURNED_VALUE,
+          );
+          if (!fmt) continue;
+          formatUpdates.push({
+            sheetRow: u.sheetRow,
+            finalColIndex0,
+            status: fmt.status,
+            backgroundColor: fmt.backgroundColor,
+            foregroundColor: fmt.foregroundColor,
+          });
+        }
+
+        if (formatUpdates.length > 0) {
+          const sheetId = await this.sheets.getSheetIdByTitle(tab);
+          if (sheetId == null) {
+            errors.push(
+              `CURRENT ORDERS: could not resolve sheetId for tab "${tab}" (format skipped)`,
+            );
+          } else {
+            await this.sheets.batchUpdateCellFormats(
+              formatUpdates.map((f) => ({
+                sheetId,
+                sheetRow: f.sheetRow,
+                colIndex0: f.finalColIndex0,
+                backgroundColor: f.backgroundColor,
+                foregroundColor: f.foregroundColor,
+              })),
+            );
+            this.logger.log(
+              `Final status colors: formatted ${formatUpdates.length} Complete/Returned cell(s)`,
+            );
+          }
+        }
+      }
+
       if (
         deliveredUpdates.length > 0 ||
         sentUpdates.length > 0 ||
-        completeUpdates.length > 0
+        completeUpdates.length > 0 ||
+        returnedUpdates.length > 0
       ) {
         await this.invalidatePipelineCache();
       }
@@ -303,12 +413,16 @@ export class StockCostSheetReadService {
         sentUpdates,
         completeUpdated: completeUpdates.length,
         completeUpdates,
+        returnedUpdated: returnedUpdates.length,
+        returnedUpdates,
+        formatsUpdated: formatUpdates.length,
+        formatUpdates,
         errors,
       };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       errors.push(
-        `Blue30→Delivered / Home/Prep→sent / Final→Complete sync failed: ${msg}`,
+        `Blue30→Delivered / Home/Prep→sent / Final→Complete/Returned sync failed: ${msg}`,
       );
       this.logger.warn(`Sheet stage sync failed: ${msg}`);
       return {
@@ -320,6 +434,10 @@ export class StockCostSheetReadService {
         sentUpdates: [],
         completeUpdated: 0,
         completeUpdates: [],
+        returnedUpdated: 0,
+        returnedUpdates: [],
+        formatsUpdated: 0,
+        formatUpdates: [],
         errors,
       };
     }
@@ -333,6 +451,7 @@ export class StockCostSheetReadService {
   async getPurchasedAndArrivedByAsin(opts?: {
     amazonHeldByAsin?: Map<string, number>;
     soldByAsin?: Map<string, number>;
+    returnedByAsin?: Map<string, number>;
   }): Promise<SheetStageSnapshots> {
     try {
       const raw = await this.redis.get(CACHE_KEY_PIPELINE);
@@ -347,6 +466,7 @@ export class StockCostSheetReadService {
     const sync = await this.syncBlue30ReceivedToPurchaseDelivered({
       amazonHeldByAsin: opts?.amazonHeldByAsin,
       soldByAsin: opts?.soldByAsin,
+      returnedByAsin: opts?.returnedByAsin,
     });
     const errors: string[] = [...sync.errors];
     let purchaseInTransit = [] as ReturnType<
@@ -401,6 +521,14 @@ export class StockCostSheetReadService {
       syncParts.push(
         `synced Final=${PURCHASE_SHEET_COMPLETE_VALUE} on ${sync.completeUpdated} row(s)`,
       );
+    }
+    if (sync.returnedUpdated > 0) {
+      syncParts.push(
+        `synced Final=${PURCHASE_SHEET_RETURNED_VALUE} on ${sync.returnedUpdated} row(s)`,
+      );
+    }
+    if (sync.formatsUpdated > 0) {
+      syncParts.push(`formatted ${sync.formatsUpdated} Final status cell(s)`);
     }
     if (syncParts.length === 0 && sync.skippedThrottle) {
       syncParts.push('sheet stage sync throttled');

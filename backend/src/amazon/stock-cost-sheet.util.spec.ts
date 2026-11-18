@@ -3,6 +3,7 @@ import {
   findPurchaseSheetFinalColumnIndex,
   isPurchaseSheetDeliveredYes,
   isPurchaseSheetFinalComplete,
+  isPurchaseSheetFinalReturned,
   isPurchaseSheetHomePrepSent,
   isPurchaseSheetInTransit,
   matchUnitCostFromPurchaseSheet,
@@ -10,8 +11,16 @@ import {
   parsePurchaseSheetStageRows,
   planDeliveredYesUpdatesFromBlue30,
   planFinalCompleteUpdatesFromSold,
+  planFinalReturnedUpdatesFromReturns,
+  planFinalStatusFormatUpdates,
   planHomePrepSentUpdatesFromAmazonHeld,
+  PURCHASE_SHEET_COMPLETE_BG,
+  PURCHASE_SHEET_COMPLETE_FG,
   PURCHASE_SHEET_COMPLETE_VALUE,
+  PURCHASE_SHEET_RETURNED_BG,
+  PURCHASE_SHEET_RETURNED_FG,
+  PURCHASE_SHEET_RETURNED_VALUE,
+  resolvePurchaseSheetFinalStatusFormat,
   sheetUnitCostToCogs,
   sumSheetAwareStockCostPipeline,
 } from './stock-cost-sheet.util';
@@ -46,6 +55,42 @@ describe('stock-cost-sheet.util', () => {
     expect(isPurchaseSheetFinalComplete('Returned')).toBe(false);
     expect(isPurchaseSheetFinalComplete('')).toBe(false);
     expect(PURCHASE_SHEET_COMPLETE_VALUE).toBe('Complete');
+    expect(PURCHASE_SHEET_RETURNED_VALUE).toBe('Returned');
+  });
+
+  it('detects Final Returned wording', () => {
+    expect(isPurchaseSheetFinalReturned('Returned')).toBe(true);
+    expect(isPurchaseSheetFinalReturned('returned')).toBe(true);
+    expect(isPurchaseSheetFinalReturned('Pending Return')).toBe(true);
+    expect(isPurchaseSheetFinalReturned('Refunded')).toBe(true);
+    expect(isPurchaseSheetFinalReturned('Complete')).toBe(false);
+    expect(isPurchaseSheetFinalReturned('Ebay')).toBe(false);
+  });
+
+  it('maps Final status to green Complete / red Returned colors', () => {
+    expect(resolvePurchaseSheetFinalStatusFormat('Complete')).toEqual({
+      status: 'Complete',
+      backgroundColor: PURCHASE_SHEET_COMPLETE_BG,
+      foregroundColor: PURCHASE_SHEET_COMPLETE_FG,
+    });
+    expect(resolvePurchaseSheetFinalStatusFormat('Returned')).toEqual({
+      status: 'Returned',
+      backgroundColor: PURCHASE_SHEET_RETURNED_BG,
+      foregroundColor: PURCHASE_SHEET_RETURNED_FG,
+    });
+    expect(resolvePurchaseSheetFinalStatusFormat('')).toBeNull();
+    expect(resolvePurchaseSheetFinalStatusFormat('Ebay')).toBeNull();
+    // Excel-like greens / reds
+    expect(PURCHASE_SHEET_COMPLETE_BG).toEqual({
+      red: 198 / 255,
+      green: 239 / 255,
+      blue: 206 / 255,
+    });
+    expect(PURCHASE_SHEET_RETURNED_BG).toEqual({
+      red: 1,
+      green: 199 / 255,
+      blue: 206 / 255,
+    });
   });
 
   it('finds Final column by name or after Home/Prep', () => {
@@ -389,6 +434,109 @@ describe('stock-cost-sheet.util', () => {
     expect(updates).toEqual([]);
   });
 
+  it('plans Final=Returned from returned FIFO on Complete sent rows', () => {
+    const purchase = parsePurchaseSheetStageRows([
+      [
+        'Date',
+        'ASIN',
+        'Order Num',
+        'Units',
+        '£/Unit',
+        'Home/Prep',
+        'Delivered ',
+        'Final',
+      ],
+      ['1/11/2026', 'B0A', 'O1', '4', '£5', 'sent', 'Yes', 'Complete'],
+      ['2/11/2026', 'B0A', 'O2', '6', '£5', 'sent', 'Yes', 'Complete'],
+      ['3/11/2026', 'B0A', 'O3', '2', '£5', 'sent', 'Yes', ''],
+      ['1/11/2026', 'B0B', 'O4', '3', '£2', 'sent', 'Yes', 'Returned'],
+    ]);
+
+    const updates = planFinalReturnedUpdatesFromReturns({
+      purchaseDelivered: purchase.delivered,
+      finalColIndex0: 7,
+      returnedByAsin: new Map([
+        ['B0A', 5], // covers O1 (4) then starts O2
+        ['B0B', 99],
+      ]),
+    });
+
+    expect(updates.map((u) => u.sheetRow).sort((a, b) => a - b)).toEqual([
+      2, // O1 Complete → Returned
+      3, // O2 Complete → Returned
+    ]);
+    expect(updates.find((u) => u.sheetRow === 4)).toBeUndefined(); // blank Final
+    expect(updates.find((u) => u.asin === 'B0B')).toBeUndefined(); // already Returned
+  });
+
+  it('Final=Returned planning is idempotent when already Returned', () => {
+    const updates = planFinalReturnedUpdatesFromReturns({
+      purchaseDelivered: [
+        {
+          asin: 'B0A',
+          qty: 10,
+          unitCost: 1,
+          orderRef: 'O1',
+          homePrep: 'sent',
+          finalComplete: false,
+          finalRaw: 'Returned',
+          purchaseDate: new Date('2026-11-01'),
+          sheetRow: 2,
+        },
+      ],
+      finalColIndex0: 7,
+      returnedByAsin: new Map([['B0A', 10]]),
+    });
+    expect(updates).toEqual([]);
+  });
+
+  it('plans Final status format backfill for Complete and Returned cells', () => {
+    const formats = planFinalStatusFormatUpdates({
+      finalColIndex0: 7,
+      lines: [
+        {
+          asin: 'B0A',
+          qty: 1,
+          unitCost: 1,
+          orderRef: 'O1',
+          homePrep: 'sent',
+          finalComplete: true,
+          finalRaw: 'Complete',
+          purchaseDate: null,
+          sheetRow: 2,
+        },
+        {
+          asin: 'B0B',
+          qty: 1,
+          unitCost: 1,
+          orderRef: 'O2',
+          homePrep: 'sent',
+          finalComplete: false,
+          finalRaw: 'Returned',
+          purchaseDate: null,
+          sheetRow: 3,
+        },
+        {
+          asin: 'B0C',
+          qty: 1,
+          unitCost: 1,
+          orderRef: 'O3',
+          homePrep: 'sent',
+          finalComplete: false,
+          finalRaw: '',
+          purchaseDate: null,
+          sheetRow: 4,
+        },
+      ],
+    });
+    expect(formats.map((f) => [f.sheetRow, f.status])).toEqual([
+      [2, 'Complete'],
+      [3, 'Returned'],
+    ]);
+    expect(formats[0].backgroundColor).toEqual(PURCHASE_SHEET_COMPLETE_BG);
+    expect(formats[1].backgroundColor).toEqual(PURCHASE_SHEET_RETURNED_BG);
+  });
+
   it('builds purchased / prep candidates from Delivered flag only (ignores raw B30)', () => {
     const purchase = parsePurchaseSheetStageRows([
       [
@@ -518,6 +666,39 @@ describe('stock-cost-sheet.util', () => {
     expect(sheetSentByAsin.get('B0A')).toBe(6); // only non-complete sent
     expect(arrivedByAsin.get('B0A')).toBeUndefined(); // complete prep excluded
     expect(purchasedByAsin.get('B0A')).toBeUndefined();
+  });
+
+  it('excludes Final=Returned from prep and sheet-sent', () => {
+    const { arrivedByAsin, sheetSentByAsin } =
+      buildSheetPurchasedAndArrivedByAsin({
+        purchaseInTransit: [],
+        purchaseDelivered: [
+          {
+            asin: 'B0A',
+            qty: 4,
+            unitCost: 5,
+            orderRef: 'O1',
+            homePrep: 'sent',
+            finalComplete: false,
+            finalRaw: 'Returned',
+            purchaseDate: new Date('2026-11-01'),
+            sheetRow: 2,
+          },
+          {
+            asin: 'B0A',
+            qty: 3,
+            unitCost: 5,
+            orderRef: 'O2',
+            homePrep: 'sent',
+            finalComplete: false,
+            finalRaw: '',
+            purchaseDate: new Date('2026-11-02'),
+            sheetRow: 3,
+          },
+        ],
+      });
+    expect(sheetSentByAsin.get('B0A')).toBe(3);
+    expect(arrivedByAsin.get('B0A')).toBeUndefined();
   });
 
   it('after sync-style Delivered flip, B30-received line moves from purchased to prep', () => {

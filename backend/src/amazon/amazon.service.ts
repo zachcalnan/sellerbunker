@@ -115,6 +115,13 @@ const PRISMA_EXCLUDED_AMAZON_ORDER_STATUSES: string[] = [
   'PendingReturn',
 ];
 
+/** Parent statuses that mean units came back after a sale (Final→Returned sheet sync). */
+const PRISMA_RETURNED_AMAZON_ORDER_STATUSES: string[] = [
+  'Returned',
+  'Refunded',
+  'PendingReturn',
+];
+
 type OrderSalesExclusionKind = 'cancelled' | 'returned' | 'unfulfillable';
 
 @Injectable()
@@ -4171,6 +4178,8 @@ export class AmazonService {
 
     // Fulfilled Amazon sales by ASIN — drives Final=Complete sheet sync.
     const soldByAsin = new Map<string, number>();
+    // Returned / refunded units by ASIN — flips Complete → Returned (red).
+    const returnedByAsin = new Map<string, number>();
     const soldUserIds =
       aggUserIds.length > 0
         ? aggUserIds
@@ -4207,10 +4216,38 @@ export class AmazonService {
           if (!(qty > 0)) continue;
           soldByAsin.set(asin, (soldByAsin.get(asin) ?? 0) + qty);
         }
+
+        const returnedRows = await (this.prisma as any).orderItem.groupBy({
+          by: ['asin'],
+          where: {
+            userId: { in: soldUserIds },
+            asin: { not: null },
+            quantity: { gt: 0 },
+            marketplace: marketplaceFilter,
+            order: {
+              amazonOrderStatus: {
+                in: PRISMA_RETURNED_AMAZON_ORDER_STATUSES,
+              },
+            },
+          },
+          _sum: { quantity: true },
+        });
+        for (const r of returnedRows as {
+          asin: string | null;
+          _sum: { quantity: number | null };
+        }[]) {
+          const asin = String(r.asin ?? '')
+            .trim()
+            .toUpperCase();
+          if (!asin) continue;
+          const qty = Math.max(0, Math.floor(Number(r._sum?.quantity) || 0));
+          if (!(qty > 0)) continue;
+          returnedByAsin.set(asin, (returnedByAsin.get(asin) ?? 0) + qty);
+        }
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         this.logger.warn(
-          `Stock-cost sold-by-ASIN aggregate failed (orgId=${orgId}): ${msg}`,
+          `Stock-cost sold/returned-by-ASIN aggregate failed (orgId=${orgId}): ${msg}`,
         );
       }
     }
@@ -4218,6 +4255,7 @@ export class AmazonService {
     const sheet = await this.stockCostSheetRead.getPurchasedAndArrivedByAsin({
       amazonHeldByAsin,
       soldByAsin,
+      returnedByAsin,
     });
     const sheetTotals = sumSheetAwareStockCostPipeline({
       skuRows,

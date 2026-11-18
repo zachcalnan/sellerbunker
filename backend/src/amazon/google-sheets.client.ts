@@ -105,6 +105,82 @@ export class GoogleSheetsClient {
     });
   }
 
+  /**
+   * Resolve numeric sheetId for a tab title (needed by spreadsheets.batchUpdate
+   * repeatCell / grid ranges).
+   */
+  async getSheetIdByTitle(
+    tabTitle: string,
+    spreadsheetId?: string,
+  ): Promise<number | null> {
+    const id = this.resolveSpreadsheetId(spreadsheetId);
+    const want = String(tabTitle ?? '').trim();
+    if (!want) return null;
+    const res = await this.sheets().spreadsheets.get({
+      spreadsheetId: id,
+      fields: 'sheets.properties(sheetId,title)',
+    });
+    const sheets = res.data.sheets ?? [];
+    for (const s of sheets) {
+      const title = String(s.properties?.title ?? '').trim();
+      if (title === want && typeof s.properties?.sheetId === 'number') {
+        return s.properties.sheetId;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Apply background + text color via repeatCell (userEnteredFormat).
+   * `sheetRow` is 1-based (A1); `colIndex0` is 0-based.
+   */
+  async batchUpdateCellFormats(
+    cells: Array<{
+      sheetId: number;
+      sheetRow: number;
+      colIndex0: number;
+      backgroundColor: { red: number; green: number; blue: number };
+      foregroundColor: { red: number; green: number; blue: number };
+    }>,
+    spreadsheetId?: string,
+  ): Promise<void> {
+    if (cells.length === 0) return;
+    const id = this.resolveSpreadsheetId(spreadsheetId);
+    const chunkSize = 100;
+    for (let i = 0; i < cells.length; i += chunkSize) {
+      const chunk = cells.slice(i, i + chunkSize);
+      const requests: sheets_v4.Schema$Request[] = chunk.map((c) => {
+        const row0 = Math.max(0, Math.floor(c.sheetRow) - 1);
+        const col0 = Math.max(0, Math.floor(c.colIndex0));
+        return {
+          repeatCell: {
+            range: {
+              sheetId: c.sheetId,
+              startRowIndex: row0,
+              endRowIndex: row0 + 1,
+              startColumnIndex: col0,
+              endColumnIndex: col0 + 1,
+            },
+            cell: {
+              userEnteredFormat: {
+                backgroundColor: c.backgroundColor,
+                textFormat: {
+                  foregroundColor: c.foregroundColor,
+                },
+              },
+            },
+            fields:
+              'userEnteredFormat.backgroundColor,userEnteredFormat.textFormat.foregroundColor',
+          },
+        };
+      });
+      await this.sheets().spreadsheets.batchUpdate({
+        spreadsheetId: id,
+        requestBody: { requests },
+      });
+    }
+  }
+
   async appendValues(
     rangeA1: string,
     values: (string | number | null)[][],
