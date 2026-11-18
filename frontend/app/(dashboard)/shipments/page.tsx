@@ -80,30 +80,43 @@ const LIFECYCLE_LABELS: Record<string, string> = {
   AVAILABLE: "Available",
 };
 
-/** Text color only. Finished rows stay quiet; the live stage is the color. */
+/** Bright stage colours. Finished rows stay quiet; a live stage glows. */
 const LIFECYCLE_TEXT: Record<string, string> = {
   WORKING: "text-slate-500 dark:text-slate-300",
-  READY_TO_SHIP: "text-indigo-600 dark:text-indigo-300",
-  SHIPPED: "text-blue-600 dark:text-blue-300",
-  IN_TRANSIT: "text-cyan-600 dark:text-cyan-300",
-  DELIVERED: "text-violet-600 dark:text-violet-300",
-  CHECKED_IN: "text-teal-600 dark:text-teal-300",
-  RECEIVING: "text-sky-600 dark:text-sky-300",
-  AVAILABLE: "text-[var(--muted-foreground)]",
+  READY_TO_SHIP: "text-indigo-500 dark:text-indigo-300",
+  SHIPPED: "text-blue-500 dark:text-blue-300",
+  IN_TRANSIT: "text-cyan-500 dark:text-cyan-300",
+  DELIVERED: "text-fuchsia-500 dark:text-fuchsia-300",
+  CHECKED_IN: "text-teal-500 dark:text-teal-300",
+  RECEIVING: "text-sky-500 dark:text-sky-300",
+  AVAILABLE: "text-emerald-600 dark:text-emerald-300",
   CLOSED: "text-[var(--muted-foreground)]",
-  CANCELLED: "text-rose-600 dark:text-rose-300",
+  CANCELLED: "text-rose-500 dark:text-rose-300",
   DELETED: "text-[var(--muted-foreground)]",
-  ERROR: "text-red-600 dark:text-red-400",
+  ERROR: "text-red-500 dark:text-red-300",
 };
 
 const LIFECYCLE_DOT: Record<string, string> = {
-  READY_TO_SHIP: "bg-indigo-500",
-  SHIPPED: "bg-blue-500",
-  IN_TRANSIT: "bg-cyan-400",
-  DELIVERED: "bg-violet-400",
-  CHECKED_IN: "bg-teal-400",
-  RECEIVING: "bg-sky-400",
-  ERROR: "bg-red-500",
+  READY_TO_SHIP: "bg-indigo-400 shadow-[0_0_8px_rgba(129,140,248,0.95)]",
+  SHIPPED: "bg-blue-400 shadow-[0_0_8px_rgba(96,165,250,0.95)]",
+  IN_TRANSIT: "bg-cyan-300 shadow-[0_0_8px_rgba(34,211,238,0.95)]",
+  DELIVERED: "bg-fuchsia-400 shadow-[0_0_8px_rgba(232,121,249,0.95)]",
+  CHECKED_IN: "bg-teal-300 shadow-[0_0_8px_rgba(45,212,191,0.95)]",
+  RECEIVING: "bg-sky-300 shadow-[0_0_8px_rgba(56,189,248,0.95)]",
+  AVAILABLE: "bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.85)]",
+  ERROR: "bg-red-400 shadow-[0_0_8px_rgba(248,113,113,0.95)]",
+};
+
+const STAGE_RANK: Record<string, number> = {
+  WORKING: 0,
+  READY_TO_SHIP: 1,
+  SHIPPED: 2,
+  IN_TRANSIT: 3,
+  DELIVERED: 4,
+  CHECKED_IN: 5,
+  RECEIVING: 6,
+  CLOSED: 7,
+  AVAILABLE: 8,
 };
 
 function normalizeStatusCode(raw: string | null | undefined): string {
@@ -182,6 +195,129 @@ function ShipmentStatus({ row }: { row: ShipmentRow }) {
       {dot ? <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${dot}`} aria-hidden /> : null}
       <span className="truncate">{label}</span>
     </span>
+  );
+}
+
+function ShipmentJourney({ row }: { row: ShipmentRow }) {
+  const { code } = resolveRowLifecycle(row);
+  const rank = STAGE_RANK[code] ?? -1;
+  const closed = code === "CLOSED" || code === "AVAILABLE";
+  const steps: Array<{
+    id: string;
+    label: string;
+    date: string | null;
+    note?: string | null;
+    min: number;
+    text: string;
+    dot: string;
+  }> = [
+    {
+      id: "created",
+      label: "Created",
+      date: row.createdDate,
+      min: 0,
+      text: "text-slate-500 dark:text-slate-200",
+      dot: "bg-slate-300 shadow-[0_0_8px_rgba(203,213,225,0.8)]",
+    },
+    {
+      id: "pickup",
+      label: "Picked up",
+      date: row.pickupDate,
+      min: 2,
+      text: "text-blue-500 dark:text-blue-300",
+      dot: "bg-blue-400 shadow-[0_0_8px_rgba(96,165,250,0.95)]",
+    },
+    {
+      id: "transit",
+      label: "In transit",
+      date: null,
+      note: row.transportStatus,
+      min: 3,
+      text: "text-cyan-500 dark:text-cyan-300",
+      dot: "bg-cyan-300 shadow-[0_0_8px_rgba(34,211,238,0.95)]",
+    },
+    {
+      id: "delivered",
+      label: "Delivered",
+      date: row.deliveryDate,
+      min: 4,
+      text: "text-fuchsia-500 dark:text-fuchsia-300",
+      dot: "bg-fuchsia-400 shadow-[0_0_8px_rgba(232,121,249,0.95)]",
+    },
+    {
+      id: "checked",
+      label: "Checked in",
+      date: row.checkedInDate,
+      min: 5,
+      text: "text-teal-500 dark:text-teal-300",
+      dot: "bg-teal-300 shadow-[0_0_8px_rgba(45,212,191,0.95)]",
+    },
+    {
+      id: "receiving",
+      label: "Receiving",
+      date: row.receivedDate ?? null,
+      min: 6,
+      text: "text-sky-500 dark:text-sky-300",
+      dot: "bg-sky-300 shadow-[0_0_8px_rgba(56,189,248,0.95)]",
+    },
+    {
+      id: "closed",
+      label: code === "AVAILABLE" ? "Available" : "Closed",
+      date: closed ? row.damageClosedDate ?? row.lastUpdatedDate : row.damageClosedDate,
+      min: 7,
+      text: "text-emerald-600 dark:text-emerald-300",
+      dot: "bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.9)]",
+    },
+  ];
+  let currentId = "";
+  for (const step of steps) {
+    if (rank >= step.min) currentId = step.id;
+  }
+
+  return (
+    <div className="mb-4">
+      <p className="mb-2 text-xs font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
+        Send-in
+      </p>
+      <ol className="flex gap-2 overflow-x-auto pb-1">
+        {steps.map((step) => {
+          const reached = rank >= step.min || Boolean(step.date);
+          const current = step.id === currentId;
+          const when = step.date ? formatDate(step.date) : step.note?.replaceAll("_", " ") || "—";
+          return (
+            <li
+              key={step.id}
+              className={`min-w-[7.25rem] flex-1 rounded-lg border px-2.5 py-2 ${
+                current
+                  ? "border-transparent bg-[var(--background)]"
+                  : "border-[var(--surface-border)] bg-[var(--background)]/60"
+              }`}
+            >
+              <div className="flex items-center gap-1.5">
+                <span
+                  className={`h-2 w-2 shrink-0 rounded-full ${reached ? step.dot : "bg-[var(--surface-border)]"}`}
+                  aria-hidden
+                />
+                <span
+                  className={`truncate text-[11px] font-semibold uppercase tracking-wide ${
+                    reached ? step.text : "text-[var(--muted-foreground)]"
+                  }`}
+                >
+                  {step.label}
+                </span>
+              </div>
+              <div
+                className={`mt-1 pl-3.5 text-xs tabular-nums ${
+                  reached && step.date ? "text-[var(--foreground)]" : "text-[var(--muted-foreground)]"
+                }`}
+              >
+                {when}
+              </div>
+            </li>
+          );
+        })}
+      </ol>
+    </div>
   );
 }
 
@@ -704,6 +840,7 @@ export default function ShipmentsPage() {
                         </button>
                         {expanded && (
                           <div className="border-t border-[var(--surface-border)] bg-[var(--surface-hover)]/20 px-3 py-3">
+                            <ShipmentJourney row={r} />
                             <p className="mb-2 text-xs font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
                               Unit breakdown
                             </p>
@@ -722,18 +859,18 @@ export default function ShipmentsPage() {
 
                 {/* Desktop table — real columns so every row shares the same edges */}
                 <div className="hidden overflow-x-auto md:block">
-                  <table className="w-full min-w-[920px] table-fixed border-collapse text-sm">
+                  <table className="w-full table-fixed border-collapse text-sm">
                     <colgroup>
-                      <col className="w-8" />
-                      <col className="w-[7.5rem]" />
-                      <col />
-                      <col className="w-[8.25rem]" />
-                      <col className="w-[6.25rem]" />
-                      <col className="w-[6.25rem]" />
-                      <col className="w-14" />
-                      <col className="w-14" />
-                      <col className="w-16" />
-                      <col className="w-16" />
+                      <col className="w-[4%]" />
+                      <col className="w-[12%]" />
+                      <col className="w-[18%]" />
+                      <col className="w-[14%]" />
+                      <col className="w-[12%]" />
+                      <col className="w-[12%]" />
+                      <col className="w-[7%]" />
+                      <col className="w-[7%]" />
+                      <col className="w-[7%]" />
+                      <col className="w-[7%]" />
                     </colgroup>
                     <thead>
                       <tr className="border-b border-[var(--surface-border)] text-left text-[11px] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
@@ -838,6 +975,7 @@ export default function ShipmentsPage() {
                             {expanded && (
                               <tr className="border-b border-[var(--surface-border)]">
                                 <td colSpan={10} className="bg-[var(--surface-hover)]/20 px-4 py-3">
+                                  <ShipmentJourney row={r} />
                                   <p className="mb-2 text-xs font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
                                     Unit breakdown
                                   </p>
