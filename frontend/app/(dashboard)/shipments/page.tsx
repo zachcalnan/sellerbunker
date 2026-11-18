@@ -80,27 +80,20 @@ const LIFECYCLE_LABELS: Record<string, string> = {
   AVAILABLE: "Available",
 };
 
-/** Cool, distinct tones so each stage reads at a glance in light and dark. */
+/** Solid chips so each stage is obvious: cyan in transit, violet delivered, teal checked in. */
 const LIFECYCLE_PILL: Record<string, string> = {
-  WORKING:
-    "bg-slate-500/15 text-slate-700 ring-slate-500/30 dark:text-slate-200",
-  READY_TO_SHIP:
-    "bg-indigo-500/15 text-indigo-800 ring-indigo-500/35 dark:text-indigo-200",
-  SHIPPED: "bg-blue-500/15 text-blue-800 ring-blue-500/35 dark:text-blue-200",
-  IN_TRANSIT:
-    "bg-cyan-500/20 text-cyan-900 ring-cyan-500/40 dark:text-cyan-100",
-  DELIVERED:
-    "bg-violet-500/20 text-violet-900 ring-violet-500/40 dark:text-violet-100",
-  CHECKED_IN:
-    "bg-teal-500/20 text-teal-900 ring-teal-500/40 dark:text-teal-100",
-  RECEIVING: "bg-sky-500/20 text-sky-900 ring-sky-500/40 dark:text-sky-100",
-  AVAILABLE:
-    "bg-emerald-500/20 text-emerald-900 ring-emerald-500/40 dark:text-emerald-100",
-  CLOSED: "bg-zinc-500/15 text-zinc-700 ring-zinc-500/30 dark:text-zinc-200",
-  CANCELLED:
-    "bg-rose-500/15 text-rose-800 ring-rose-500/30 dark:text-rose-200",
-  DELETED: "bg-zinc-500/10 text-zinc-500 ring-zinc-500/25 dark:text-zinc-400",
-  ERROR: "bg-red-500/20 text-red-800 ring-red-500/40 dark:text-red-200",
+  WORKING: "bg-slate-300 text-slate-950",
+  READY_TO_SHIP: "bg-indigo-300 text-indigo-950",
+  SHIPPED: "bg-blue-300 text-blue-950",
+  IN_TRANSIT: "bg-cyan-300 text-cyan-950",
+  DELIVERED: "bg-violet-300 text-violet-950",
+  CHECKED_IN: "bg-teal-300 text-teal-950",
+  RECEIVING: "bg-sky-300 text-sky-950",
+  AVAILABLE: "bg-emerald-300 text-emerald-950",
+  CLOSED: "bg-zinc-300 text-zinc-950",
+  CANCELLED: "bg-rose-300 text-rose-950",
+  DELETED: "bg-zinc-500 text-white",
+  ERROR: "bg-red-400 text-red-950",
 };
 
 function normalizeStatusCode(raw: string | null | undefined): string {
@@ -156,8 +149,9 @@ function ShipmentStatusPills({ row }: { row: ShipmentRow }) {
       ? row.awaitingCheckIn
       : code === "DELIVERED" && (row.unitsReceived || 0) === 0;
   const tone =
-    LIFECYCLE_PILL[code] ??
-    "bg-[var(--surface-hover)] text-[var(--foreground)] ring-[var(--surface-border)]";
+    code === "CLOSED" && row.unitsMissing > 0
+      ? "bg-rose-300 text-rose-950"
+      : (LIFECYCLE_PILL[code] ?? "bg-zinc-300 text-zinc-950");
   const amazonTitle = [
     row.shipmentStatus ? `Amazon: ${row.shipmentStatus}` : null,
     row.transportStatus ? `Carrier: ${row.transportStatus}` : null,
@@ -168,17 +162,17 @@ function ShipmentStatusPills({ row }: { row: ShipmentRow }) {
   return (
     <div className="flex flex-wrap items-center gap-1" title={amazonTitle || undefined}>
       <span
-        className={`inline-flex items-center whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-semibold leading-4 ring-1 ${tone}`}
+        className={`inline-flex items-center whitespace-nowrap rounded-full px-2.5 py-0.5 text-[11px] font-semibold leading-4 shadow-sm ${tone}`}
       >
         {label}
       </span>
       {delayed ? (
-        <span className="inline-flex items-center whitespace-nowrap rounded-full bg-amber-500/20 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-800 ring-1 ring-amber-500/40 dark:text-amber-200">
+        <span className="inline-flex items-center whitespace-nowrap rounded-full bg-amber-300 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-950">
           Delayed
         </span>
       ) : null}
       {awaitingCheckIn ? (
-        <span className="inline-flex items-center whitespace-nowrap rounded-full bg-violet-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-violet-800 ring-1 ring-violet-500/35 dark:text-violet-200">
+        <span className="inline-flex items-center whitespace-nowrap rounded-full bg-fuchsia-300 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-fuchsia-950">
           Awaiting check-in
         </span>
       ) : null}
