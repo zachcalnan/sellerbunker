@@ -26,6 +26,8 @@ import {
   allocateStockCostPipelineSku,
   sumStockCostPipeline,
 } from './stock-cost-pipeline.util';
+import { sumSheetAwareStockCostPipeline } from './stock-cost-sheet.util';
+import { StockCostSheetReadService } from './stock-cost-sheet-read.service';
 import type { IngestSupplierOrderDto } from './dto/ingest-supplier-order.dto';
 import { UsersService } from '../users/users.service';
 import {
@@ -122,6 +124,7 @@ export class AmazonService {
     @Inject(forwardRef(() => RepricerService))
     private readonly repricerService: RepricerService,
     private readonly pushService: PushService,
+    private readonly stockCostSheetRead: StockCostSheetReadService,
   ) {}
 
   private async resolveOrgIdForUser(userId: string): Promise<string | null> {
@@ -3920,7 +3923,9 @@ export class AmazonService {
 
   /**
    * Dashboard: cumulative stock COGS by exclusive pipeline stage.
-   * See `stock-cost-pipeline.util.ts` for the waterfall rules.
+   * Purchased / for-prep are sheet-driven (CURRENT ORDERS + Blue30);
+   * available / sent stay on Amazon inventory snapshots.
+   * See `stock-cost-sheet.util.ts` + `stock-cost-pipeline.util.ts`.
    */
   async getStockCostPipeline(
     orgId: string,
@@ -3979,6 +3984,7 @@ export class AmazonService {
     type ProductRow = {
       id: string;
       sku: string;
+      asin: string | null;
       costOfGoods: unknown;
       updatedAt: Date;
       inventory: {
@@ -3996,6 +4002,7 @@ export class AmazonService {
       select: {
         id: true,
         sku: true,
+        asin: true,
         costOfGoods: true,
         updatedAt: true,
         inventory: {
@@ -4021,9 +4028,7 @@ export class AmazonService {
 
     // Canonical row per SKU (prefer inventory snapshot, then newest product).
     const bySku = new Map<string, ProductRow>();
-    const productIdToSku = new Map<string, string>();
     for (const p of products) {
-      productIdToSku.set(p.id, p.sku);
       const prev = bySku.get(p.sku);
       if (!prev) {
         bySku.set(p.sku, p);
@@ -4058,7 +4063,17 @@ export class AmazonService {
           const n = toNum(row.costOfGoods);
           if (n > 0) {
             cogs = n;
-            (canonical as { costOfGoods: unknown }).costOfGoods = row.costOfGoods;
+            (canonical as { costOfGoods: unknown }).costOfGoods =
+              row.costOfGoods;
+            break;
+          }
+        }
+      }
+      if (!(canonical.asin ?? '').trim()) {
+        for (const row of group) {
+          const a = (row.asin ?? '').trim();
+          if (a) {
+            canonical.asin = a;
             break;
           }
         }
@@ -4086,82 +4101,6 @@ export class AmazonService {
       bySku.set(sku, canonical);
     }
 
-    const purchaseUserIds =
-      memberUserIds.length > 0 ? memberUserIds : aggUserIds;
-    const purchases =
-      purchaseUserIds.length > 0
-        ? await this.prisma.purchase.findMany({
-            where: { userId: { in: purchaseUserIds } },
-            select: {
-              productId: true,
-              qtyPurchased: true,
-              qtyDelivered: true,
-              unitCostExVat: true,
-              unitCostIncVat: true,
-              deliveryCostIncVat: true,
-              prepCostIncVat: true,
-              vatRatePct: true,
-              product: { select: { sku: true, costOfGoods: true } },
-            },
-          })
-        : [];
-
-    type PurchaseAgg = {
-      qtyPurchased: number;
-      qtyDelivered: number;
-      costWeight: number;
-      costQty: number;
-    };
-    const purchaseBySku = new Map<string, PurchaseAgg>();
-    for (const pur of purchases) {
-      const sku =
-        pur.product?.sku ??
-        productIdToSku.get(pur.productId) ??
-        null;
-      if (!sku) continue;
-      const qtyPurchased = Math.max(0, Math.floor(Number(pur.qtyPurchased) || 0));
-      let qtyDelivered = Math.max(0, Math.floor(Number(pur.qtyDelivered) || 0));
-      if (qtyDelivered > qtyPurchased) qtyDelivered = qtyPurchased;
-
-      // Prefer stored ex-VAT unit; else landed ex-VAT (unit + delivery + prep).
-      let unit =
-        pur.unitCostExVat != null ? toNum(pur.unitCostExVat) : 0;
-      if (!(unit > 0)) {
-        const derived = deriveUnitCostOfGoodsExVat({
-          unitCostIncVat: toNum(pur.unitCostIncVat),
-          deliveryCostIncVat: toNum(pur.deliveryCostIncVat),
-          prepCostIncVat: toNum(pur.prepCostIncVat),
-          vatRatePct: toNum(pur.vatRatePct),
-        });
-        unit = derived != null && derived > 0 ? derived : 0;
-      }
-
-      const prev = purchaseBySku.get(sku) ?? {
-        qtyPurchased: 0,
-        qtyDelivered: 0,
-        costWeight: 0,
-        costQty: 0,
-      };
-      prev.qtyPurchased += qtyPurchased;
-      prev.qtyDelivered += qtyDelivered;
-      if (unit > 0 && qtyPurchased > 0) {
-        prev.costWeight += unit * qtyPurchased;
-        prev.costQty += qtyPurchased;
-      }
-      // Sibling product COGS fallback seed onto bySku if missing.
-      if (!bySku.has(sku) && pur.product) {
-        bySku.set(sku, {
-          id: pur.productId,
-          sku,
-          costOfGoods: pur.product.costOfGoods,
-          updatedAt: new Date(0),
-          inventory: null,
-          inventoryByMarketplace: [],
-        });
-      }
-      purchaseBySku.set(sku, prev);
-    }
-
     const inboundFromMp = (m: InvMp | null | undefined): number => {
       if (!m) return 0;
       const granular =
@@ -4172,8 +4111,13 @@ export class AmazonService {
       return Math.max(0, Number(m.inboundQty) || 0);
     };
 
-    const allocated: ReturnType<typeof allocateStockCostPipelineSku>[] = [];
-    let missingCogsQty = 0;
+    const skuRows: {
+      sku: string;
+      asin: string | null;
+      availableQty: number;
+      inboundQty: number;
+      unitCost: number;
+    }[] = [];
     for (const [sku, product] of bySku) {
       let availableQty = 0;
       let inboundQty = 0;
@@ -4189,66 +4133,151 @@ export class AmazonService {
           Number(product.inventory?.availableQty) || 0,
         );
         inboundQty = Math.max(0, Number(product.inventory?.inboundQty) || 0);
-        // If summary inbound is empty but marketplace rows have granular, sum them.
-        if (inboundQty <= 0 && (product.inventoryByMarketplace?.length ?? 0) > 0) {
+        if (
+          inboundQty <= 0 &&
+          (product.inventoryByMarketplace?.length ?? 0) > 0
+        ) {
           inboundQty = (product.inventoryByMarketplace ?? []).reduce(
             (sum, m) => sum + inboundFromMp(m),
             0,
           );
         }
       }
-
-      const pur = purchaseBySku.get(sku);
-      const qtyPurchased = pur?.qtyPurchased ?? 0;
-      const qtyDelivered = pur?.qtyDelivered ?? 0;
-
-      let unitCost = toNum(product.costOfGoods);
-      if (!(unitCost > 0) && pur && pur.costQty > 0) {
-        unitCost = pur.costWeight / pur.costQty;
-      }
-
-      if (
-        !(unitCost > 0) &&
-        availableQty + inboundQty + qtyPurchased > 0
-      ) {
-        missingCogsQty += availableQty + inboundQty + Math.max(0, qtyPurchased - qtyDelivered) + Math.max(0, qtyDelivered - (availableQty + inboundQty));
-      }
-
-      allocated.push(
-        allocateStockCostPipelineSku({
-          availableQty,
-          inboundQty,
-          qtyPurchased,
-          qtyDelivered,
-          unitCost,
-        }),
-      );
+      skuRows.push({
+        sku,
+        asin: product.asin,
+        availableQty,
+        inboundQty,
+        unitCost: toNum(product.costOfGoods),
+      });
     }
 
-    // Purchases whose SKU never appeared in product scan (edge: deleted product).
-    for (const [sku, pur] of purchaseBySku) {
-      if (bySku.has(sku)) continue;
-      const unitCost =
-        pur.costQty > 0 ? pur.costWeight / pur.costQty : 0;
-      allocated.push(
-        allocateStockCostPipelineSku({
-          availableQty: 0,
-          inboundQty: 0,
-          qtyPurchased: pur.qtyPurchased,
-          qtyDelivered: pur.qtyDelivered,
-          unitCost,
-        }),
-      );
+    const sheet = await this.stockCostSheetRead.getPurchasedAndArrivedByAsin();
+    const sheetTotals = sumSheetAwareStockCostPipeline({
+      skuRows,
+      purchasedByAsin: sheet.purchasedByAsin,
+      arrivedByAsin: sheet.arrivedByAsin,
+    });
+
+    // Optional DB fallback when sheets are unavailable (keeps widget usable).
+    let stockPurchasedQty = sheetTotals.stockPurchasedQty;
+    let stockPurchasedCost = sheetTotals.stockPurchasedCost;
+    let stockForPrepQty = sheetTotals.stockForPrepQty;
+    let stockForPrepCost = sheetTotals.stockForPrepCost;
+    let missingCogsQty = sheetTotals.missingCogsQty;
+    let usedDbFallback = false;
+
+    if (!sheet.purchaseSheetOk && !sheet.blue30Ok) {
+      usedDbFallback = true;
+      const purchaseUserIds =
+        memberUserIds.length > 0 ? memberUserIds : aggUserIds;
+      const purchases =
+        purchaseUserIds.length > 0
+          ? await this.prisma.purchase.findMany({
+              where: { userId: { in: purchaseUserIds } },
+              select: {
+                qtyPurchased: true,
+                qtyDelivered: true,
+                unitCostExVat: true,
+                unitCostIncVat: true,
+                deliveryCostIncVat: true,
+                prepCostIncVat: true,
+                vatRatePct: true,
+                product: { select: { sku: true } },
+              },
+            })
+          : [];
+      type PurchaseAgg = {
+        qtyPurchased: number;
+        qtyDelivered: number;
+        costWeight: number;
+        costQty: number;
+      };
+      const purchaseBySku = new Map<string, PurchaseAgg>();
+      for (const pur of purchases) {
+        const sku = pur.product?.sku;
+        if (!sku) continue;
+        const qtyPurchased = Math.max(
+          0,
+          Math.floor(Number(pur.qtyPurchased) || 0),
+        );
+        let qtyDelivered = Math.max(
+          0,
+          Math.floor(Number(pur.qtyDelivered) || 0),
+        );
+        if (qtyDelivered > qtyPurchased) qtyDelivered = qtyPurchased;
+        let unit =
+          pur.unitCostExVat != null ? toNum(pur.unitCostExVat) : 0;
+        if (!(unit > 0)) {
+          const derived = deriveUnitCostOfGoodsExVat({
+            unitCostIncVat: toNum(pur.unitCostIncVat),
+            deliveryCostIncVat: toNum(pur.deliveryCostIncVat),
+            prepCostIncVat: toNum(pur.prepCostIncVat),
+            vatRatePct: toNum(pur.vatRatePct),
+          });
+          unit = derived != null && derived > 0 ? derived : 0;
+        }
+        const prev = purchaseBySku.get(sku) ?? {
+          qtyPurchased: 0,
+          qtyDelivered: 0,
+          costWeight: 0,
+          costQty: 0,
+        };
+        prev.qtyPurchased += qtyPurchased;
+        prev.qtyDelivered += qtyDelivered;
+        if (unit > 0 && qtyPurchased > 0) {
+          prev.costWeight += unit * qtyPurchased;
+          prev.costQty += qtyPurchased;
+        }
+        purchaseBySku.set(sku, prev);
+      }
+      const allocated: ReturnType<typeof allocateStockCostPipelineSku>[] =
+        [];
+      for (const row of skuRows) {
+        const pur = purchaseBySku.get(row.sku);
+        let unitCost = row.unitCost;
+        if (!(unitCost > 0) && pur && pur.costQty > 0) {
+          unitCost = pur.costWeight / pur.costQty;
+        }
+        allocated.push(
+          allocateStockCostPipelineSku({
+            availableQty: row.availableQty,
+            inboundQty: row.inboundQty,
+            qtyPurchased: pur?.qtyPurchased ?? 0,
+            qtyDelivered: pur?.qtyDelivered ?? 0,
+            unitCost,
+          }),
+        );
+      }
+      const dbTotals = sumStockCostPipeline(allocated);
+      stockPurchasedQty = dbTotals.stockPurchasedQty;
+      stockPurchasedCost = dbTotals.stockPurchasedCost;
+      stockForPrepQty = dbTotals.stockForPrepQty;
+      stockForPrepCost = dbTotals.stockForPrepCost;
     }
 
-    const totals = sumStockCostPipeline(allocated);
+    const totalCost =
+      Math.round(
+        (stockPurchasedCost +
+          stockForPrepCost +
+          sheetTotals.stockSentCost +
+          sheetTotals.availableStockCost) *
+          100,
+      ) / 100;
+
     const notes: string[] = [];
+    if (sheet.sourceNote) notes.push(sheet.sourceNote);
     notes.push(
-      'Stages are mutually exclusive: available → inbound/sent → for prep (delivered − Amazon) → purchased (ordered − delivered). Valued at Product.costOfGoods (purchase landed ex-VAT average when COGS missing).',
+      'Available / Stock sent from Amazon inventory (fulfillable + inbound). Stages are mutually exclusive; reserved/FC-processing excluded.',
     );
-    notes.push(
-      'Reserved / FC-processing / unfulfillable Amazon qty is excluded. Prep vs home is not split (no DB destination). Relies on Purchase.qtyDelivered being maintained.',
-    );
+    if (usedDbFallback) {
+      notes.push(
+        'Sheets unavailable — purchased/prep fell back to Purchase.qtyDelivered ledger.',
+      );
+    }
+    if (sheet.errors.length > 0 && !usedDbFallback) {
+      notes.push(`Sheet notes: ${sheet.errors.slice(0, 3).join('; ')}`);
+    }
     if (missingCogsQty > 0) {
       notes.push(
         `${missingCogsQty} unit(s) across stages lack COGS and contribute £0 until cost is set.`,
@@ -4258,22 +4287,22 @@ export class AmazonService {
     return {
       currency,
       stockPurchased: {
-        qty: totals.stockPurchasedQty,
-        cost: totals.stockPurchasedCost,
+        qty: stockPurchasedQty,
+        cost: stockPurchasedCost,
       },
       stockForPrep: {
-        qty: totals.stockForPrepQty,
-        cost: totals.stockForPrepCost,
+        qty: stockForPrepQty,
+        cost: stockForPrepCost,
       },
       stockSent: {
-        qty: totals.stockSentQty,
-        cost: totals.stockSentCost,
+        qty: sheetTotals.stockSentQty,
+        cost: sheetTotals.stockSentCost,
       },
       availableStock: {
-        qty: totals.availableStockQty,
-        cost: totals.availableStockCost,
+        qty: sheetTotals.availableStockQty,
+        cost: sheetTotals.availableStockCost,
       },
-      totalCost: totals.totalCost,
+      totalCost,
       note: notes.join(' '),
     };
   }

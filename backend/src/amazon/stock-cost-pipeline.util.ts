@@ -1,17 +1,16 @@
 /**
  * Stock cost by pipeline stage — exclusive qty waterfall (COGS × qty).
  *
- * Amazon snapshot wins first (authoritative for units Amazon holds):
+ * Production dashboard prefers sheet-aware stages in `stock-cost-sheet.util.ts`:
+ *   purchased = CURRENT ORDERS in-transit; prep = Blue30 received (+ HOME delivered).
+ * This util remains the Amazon + DB-ledger waterfall (fallback / unit tests):
  * 1. Available stock  = fulfillable / available qty
  * 2. Stock sent       = inbound working + shipped + receiving (or inboundQty)
- * Then purchase ledger for units not yet in that Amazon snapshot:
- * 3. Stock purchased  = max(0, qtyPurchased − qtyDelivered)  // ordered, not received
+ * 3. Stock purchased  = max(0, qtyPurchased − qtyDelivered)
  * 4. Stock for prep   = max(0, qtyDelivered − (available + inbound))
- *    // received at home/prep, not yet in Amazon inbound/available
  *
- * Each unit sits in exactly one bucket. Sold / leaked units drop out when
- * delivered < amazonHeld (prep clamped to 0). Reserved / FC-processing qty
- * is intentionally excluded from these four stages.
+ * Each unit sits in exactly one bucket. Reserved / FC-processing qty is
+ * intentionally excluded from these four stages.
  */
 
 export type StockCostPipelineSkuInput = {

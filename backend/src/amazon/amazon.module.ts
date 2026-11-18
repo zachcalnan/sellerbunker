@@ -19,6 +19,7 @@ import { PurchaseSheetCheckoutAddressService } from './purchase-sheet-checkout-a
 import { PurchaseScreenshotExtractService } from './purchase-screenshot-extract.service';
 import { ProductFinderService } from './product-finder.service';
 import { PrepCenterInboundSheetService } from './prep-center-inbound-sheet.service';
+import { StockCostSheetReadService } from './stock-cost-sheet-read.service';
 import { PushModule } from '../push/push.module';
 import { KeepaClient } from './keepa.client';
 import { DealCheckService } from './deal-check.service';
@@ -52,6 +53,7 @@ import { DealCheckService } from './deal-check.service';
     PurchaseScreenshotExtractService,
     ProductFinderService,
     PrepCenterInboundSheetService,
+    StockCostSheetReadService,
     KeepaClient,
     DealCheckService,
   ],
@@ -62,6 +64,7 @@ import { DealCheckService } from './deal-check.service';
     PurchaseSheetOrderWriteService,
     PurchaseSheetCheckoutAddressService,
     PrepCenterInboundSheetService,
+    StockCostSheetReadService,
     DealCheckService,
   ],
 })
