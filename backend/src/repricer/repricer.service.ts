@@ -401,9 +401,22 @@ export class RepricerService {
     }
     const floor = Math.round(minListPrice * 100) / 100;
 
-    const { asin, products } = await this.productsForOrgAsin(orgId, asinRaw);
+    let { asin, products } = await this.productsForOrgAsin(orgId, asinRaw);
     if (products.length === 0) {
-      throw new BadRequestException(`No listing found for ASIN ${asin}`);
+      try {
+        await this.amazonService.lookupAsinForPurchase(orgId, undefined, asin);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        this.logger.warn(
+          `[applyAsinRepricer] live listing pull failed for ${asin}: ${msg}`,
+        );
+      }
+      products = (await this.productsForOrgAsin(orgId, asin)).products;
+    }
+    if (products.length === 0) {
+      throw new BadRequestException(
+        `ASIN ${asin} is not on your Seller Central account yet. If you just created the listing, try again in a few seconds.`,
+      );
     }
     const preset = await (this.prisma as any).repricerRuleSet.findFirst({
       where: { id: rid, orgId },

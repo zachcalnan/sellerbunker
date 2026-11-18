@@ -364,6 +364,43 @@ export class AmazonSpApiClient {
   }
 
   /**
+   * Listings Items API v2021-08-01: searchListingsItems
+   * GET /listings/2021-08-01/items/{sellerId}
+   * Seller's own listings. A listing created in Seller Central is visible here
+   * before the public Catalog index and before our local product sync.
+   * `marketplaceIds` and `identifiers` are comma-delimited (OpenAPI explode: false).
+   */
+  async searchListingsItems(
+    credentials: SpApiCredentials,
+    sellerId: string,
+    params: {
+      marketplaceIds: string[];
+      identifiers: string[];
+      identifiersType: 'ASIN' | 'SKU' | 'EAN' | 'UPC' | 'GTIN' | 'ISBN';
+      includedData?: string[];
+      pageSize?: number;
+    },
+  ) {
+    const marketplaceIds = (params.marketplaceIds ?? [])
+      .map((id) => String(id).trim())
+      .filter(Boolean);
+    const identifiers = (params.identifiers ?? [])
+      .map((id) => String(id).trim())
+      .filter(Boolean);
+    return this.signedSpApiRequest(credentials, {
+      method: 'GET',
+      path: `/listings/2021-08-01/items/${encodeURIComponent(sellerId)}`,
+      query: {
+        marketplaceIds: marketplaceIds.join(','),
+        identifiers: identifiers.join(','),
+        identifiersType: params.identifiersType,
+        includedData: (params.includedData ?? ['summaries']).join(','),
+        pageSize: String(Math.min(20, Math.max(1, params.pageSize ?? 20))),
+      },
+    });
+  }
+
+  /**
    * Listings Items API v2021-08-01: getListingsItem
    * GET /listings/2021-08-01/items/{sellerId}/{sku}
    * Returns this seller's own listing (their SKU, their listed price). Not other sellers' or buy box price.

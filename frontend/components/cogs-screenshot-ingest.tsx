@@ -442,24 +442,55 @@ function ListingSearchField({
       return;
     }
     setBusy(true);
+    let cancelled = false;
     timer.current = setTimeout(() => {
       void (async () => {
         try {
           const rows = await onSearch(trimmed);
+          if (cancelled) return;
           setHits(rows);
           setErr(null);
+          if (rows.length === 0 && onLookupAsin && isValidAsinShape(trimmed)) {
+            setCatalogBusy(true);
+            try {
+              const hit = await onLookupAsin(trimmed.toUpperCase());
+              if (cancelled) return;
+              if (hit.source === "portfolio") {
+                onPick({
+                  asin: hit.asin,
+                  sku: hit.sku ?? "",
+                  title: (hit.title ?? "").trim() || hit.asin,
+                  imageUrl: hit.imageUrl ?? null,
+                  costOfGoods: hit.costOfGoods ?? null,
+                });
+                setQ("");
+                setHits([]);
+                setCatalogHit(null);
+                return;
+              }
+              setCatalogHit(hit);
+            } catch (e) {
+              if (cancelled) return;
+              setCatalogHit(null);
+              setErr(e instanceof Error ? e.message : "ASIN lookup failed");
+            } finally {
+              if (!cancelled) setCatalogBusy(false);
+            }
+          }
         } catch (e) {
+          if (cancelled) return;
           setHits([]);
           setErr(e instanceof Error ? e.message : "Search failed");
         } finally {
-          setBusy(false);
+          if (!cancelled) setBusy(false);
         }
       })();
     }, 250);
     return () => {
+      cancelled = true;
       if (timer.current) clearTimeout(timer.current);
     };
-  }, [q, onSearch]);
+  }, [q, onSearch, onLookupAsin, onPick]);
 
   const runCatalogLookup = async () => {
     if (!onLookupAsin || !asinReady) return;
@@ -528,12 +559,12 @@ function ListingSearchField({
       </label>
       {onLookupAsin ? (
         <p className="mt-1 text-[11px] text-[var(--muted-foreground)]">
-          Not in your listings yet? Paste the ASIN and click Search ASIN.
+          Paste a new ASIN and it is pulled from Seller Central straight away.
         </p>
       ) : null}
-      {busy ? (
+      {busy || catalogBusy ? (
         <p className="mt-1 text-[11px] text-[var(--muted-foreground)]">
-          Searching listings…
+          {catalogBusy ? "Checking Seller Central…" : "Searching listings…"}
         </p>
       ) : null}
       {err ? <p className="mt-1 text-[11px] text-red-500">{err}</p> : null}

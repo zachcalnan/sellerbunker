@@ -7904,8 +7904,167 @@ export class AmazonService {
   }
 
   /**
-   * ASIN lookup for Log a purchase: prefer org portfolio product, else Catalog API.
-   * Does not create a Product row — ingest with createProductIfMissing does that.
+   * A listing just created in Seller Central is not in our product table until the
+   * next sync, and Catalog often 404s until Amazon indexes the ASIN. Search the
+   * seller's own listings and save any match so purchase + repricer can use it now.
+   */
+  private async importSellerListingByAsin(
+    orgId: string,
+    preferredUserId: string | undefined,
+    asin: string,
+  ): Promise<{
+    id: string;
+    sku: string;
+    asin: string | null;
+    title: string | null;
+    imageUrl: string | null;
+    costOfGoods: unknown;
+  } | null> {
+    const account = await this.findAmazonSellerAccountForOrg(
+      orgId,
+      preferredUserId,
+    );
+    const sellerId =
+      account?.sellerId != null ? String(account.sellerId).trim() : '';
+    const ownerUserId = account?.userId ? String(account.userId) : '';
+    if (!sellerId || !ownerUserId) return null;
+
+    let credentials: SpApiCredentials;
+    try {
+      credentials = await this.getAmazonCredentialsForOrg(
+        orgId,
+        preferredUserId,
+      );
+    } catch {
+      return null;
+    }
+
+    const region = credentials.region ?? 'eu';
+    const regionMarketplaces =
+      this.spApiClient.marketplaceIdsForListingPriceRefresh(region);
+    const primary =
+      region === 'eu'
+        ? 'A1F83G8C2ARO7P'
+        : region === 'na'
+          ? 'ATVPDKIKX0DER'
+          : (regionMarketplaces[0] ?? 'A1VC38T7YXB528');
+    const marketplaceAttempts = [
+      regionMarketplaces.length ? regionMarketplaces : [primary],
+      [primary],
+    ];
+
+    let res: unknown = null;
+    let lastError: unknown = null;
+    for (let i = 0; i < marketplaceAttempts.length; i++) {
+      try {
+        res = await this.spApiClient.searchListingsItems(
+          credentials,
+          sellerId,
+          {
+            marketplaceIds: marketplaceAttempts[i],
+            identifiers: [asin],
+            identifiersType: 'ASIN',
+            includedData: ['summaries'],
+          },
+        );
+        lastError = null;
+        break;
+      } catch (e) {
+        lastError = e;
+        res = null;
+        if (i === marketplaceAttempts.length - 1) {
+          const msg = e instanceof Error ? e.message : String(e);
+          this.logger.warn(
+            `[lookupAsin] live listings search failed for ${asin}: ${msg}`,
+          );
+        }
+      }
+    }
+    if (lastError || !res) return null;
+
+    const rawItems = (res as { items?: unknown }).items;
+    const items = Array.isArray(rawItems) ? rawItems : [];
+    const hits: Array<{
+      sku: string;
+      asin: string;
+      title: string | null;
+      imageUrl: string | null;
+    }> = [];
+    for (const item of items) {
+      if (!item || typeof item !== 'object') continue;
+      const sku = String((item as { sku?: unknown }).sku ?? '').trim();
+      if (!sku) continue;
+      const summaries = (item as { summaries?: unknown }).summaries;
+      const list = Array.isArray(summaries) ? summaries : [];
+      const summary =
+        list.find((s) => {
+          if (!s || typeof s !== 'object') return false;
+          return (
+            String((s as { asin?: unknown }).asin ?? '')
+              .trim()
+              .toUpperCase() === asin
+          );
+        }) ?? list[0];
+      const rec =
+        summary && typeof summary === 'object'
+          ? (summary as Record<string, unknown>)
+          : {};
+      const titleRaw = rec.itemName != null ? String(rec.itemName).trim() : '';
+      const imageLink =
+        rec.mainImage && typeof rec.mainImage === 'object'
+          ? String((rec.mainImage as { link?: unknown }).link ?? '').trim()
+          : '';
+      const summaryAsin =
+        rec.asin != null ? String(rec.asin).trim().toUpperCase() : asin;
+      hits.push({
+        sku,
+        asin: summaryAsin || asin,
+        title: titleRaw || null,
+        imageUrl: imageLink || null,
+      });
+    }
+    if (hits.length === 0) return null;
+
+    let first: {
+      id: string;
+      sku: string;
+      asin: string | null;
+      title: string | null;
+      imageUrl: string | null;
+      costOfGoods: unknown;
+    } | null = null;
+    for (const hit of hits) {
+      const row = await this.prisma.product.upsert({
+        where: { userId_sku: { userId: ownerUserId, sku: hit.sku } },
+        create: {
+          userId: ownerUserId,
+          sku: hit.sku,
+          asin: hit.asin,
+          title: hit.title,
+          ...(hit.imageUrl ? { imageUrl: hit.imageUrl } : {}),
+        },
+        update: {
+          asin: hit.asin,
+          ...(hit.title ? { title: hit.title } : {}),
+          ...(hit.imageUrl ? { imageUrl: hit.imageUrl } : {}),
+        },
+        select: {
+          id: true,
+          sku: true,
+          asin: true,
+          title: true,
+          imageUrl: true,
+          costOfGoods: true,
+        },
+      });
+      if (!first) first = row;
+    }
+    return first;
+  }
+
+  /**
+   * ASIN lookup for Log a purchase: local catalog, then the seller's live
+   * listings (saved immediately), then the public Catalog API.
    */
   async lookupAsinForPurchase(
     orgId: string,
@@ -7958,6 +8117,24 @@ export class AmazonService {
       }
     }
 
+    const imported = await this.importSellerListingByAsin(
+      orgId,
+      preferredUserId,
+      asin,
+    );
+    if (imported) {
+      return {
+        source: 'portfolio' as const,
+        asin: (imported.asin ?? asin).toUpperCase(),
+        sku: imported.sku,
+        title: imported.title,
+        imageUrl: imported.imageUrl,
+        costOfGoods:
+          imported.costOfGoods == null ? null : Number(imported.costOfGoods),
+        productId: imported.id,
+      };
+    }
+
     let credentials: SpApiCredentials;
     try {
       credentials = await this.getAmazonCredentialsForOrg(
@@ -7989,7 +8166,7 @@ export class AmazonService {
         msg.toLowerCase().includes('not found')
       ) {
         throw new NotFoundException(
-          `No Amazon catalog item found for ASIN ${asin}`,
+          `ASIN ${asin} is not on your Seller Central account yet. If you just created the listing, try again in a few seconds.`,
         );
       }
       throw e;
@@ -7999,7 +8176,7 @@ export class AmazonService {
     const imageUrl = parseCatalogItemImageUrl(res, marketplaceId);
     if (!title && !imageUrl) {
       throw new NotFoundException(
-        `No Amazon catalog item found for ASIN ${asin}`,
+        `ASIN ${asin} is not on your Seller Central account yet. If you just created the listing, try again in a few seconds.`,
       );
     }
 
