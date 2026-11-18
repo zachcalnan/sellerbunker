@@ -8,20 +8,24 @@ import {
 } from './purchase-sheet-cogs.util';
 import {
   buildSheetPurchasedAndArrivedByAsin,
+  findPurchaseSheetFinalColumnIndex,
   parseBlue30ArrivedRows,
   parsePurchaseSheetStageRows,
   planDeliveredYesUpdatesFromBlue30,
+  planFinalCompleteUpdatesFromSold,
   planHomePrepSentUpdatesFromAmazonHeld,
+  PURCHASE_SHEET_COMPLETE_VALUE,
   type AsinQtyCost,
   type DeliveredYesUpdate,
+  type FinalCompleteUpdate,
   type HomePrepSentUpdate,
 } from './stock-cost-sheet.util';
 
 const CACHE_TTL_SEC = 90;
-/** Pipeline aggregates — bump when costing / Home/Prep=sent model changes. */
-const CACHE_KEY_PIPELINE = 'stock-cost:pipeline-maps:v3';
-/** Throttle Blue30→Delivered + Home/Prep→sent sheet writes. */
-const SYNC_THROTTLE_KEY = 'stock-cost:delivered-sync:v2';
+/** Pipeline aggregates — bump when Complete / sold-through model changes. */
+const CACHE_KEY_PIPELINE = 'stock-cost:pipeline-maps:v4';
+/** Throttle Blue30→Delivered + Home/Prep→sent + Final→Complete sheet writes. */
+const SYNC_THROTTLE_KEY = 'stock-cost:delivered-sync:v3';
 const SYNC_THROTTLE_SEC = 120;
 
 /** Exact Home/Prep cell value when units have been sent into Amazon. */
@@ -44,6 +48,8 @@ export type DeliveredSyncResult = {
   updates: DeliveredYesUpdate[];
   sentUpdated: number;
   sentUpdates: HomePrepSentUpdate[];
+  completeUpdated: number;
+  completeUpdates: FinalCompleteUpdate[];
   errors: string[];
 };
 
@@ -124,12 +130,14 @@ export class StockCostSheetReadService {
 
   /**
    * 1) Blue30 Quantity Received → CURRENT ORDERS Delivered=Yes
-   * 2) Amazon held (available+inbound) → Home/Prep = "sent" on covered Delivered rows
+   * 2) Amazon reached (held + sold) → Home/Prep = "sent" on covered Delivered rows
+   * 3) Amazon fulfilled sales → Final = Complete on covered sent rows
    * Idempotent; never rewrites £/Unit or Units.
    */
   async syncBlue30ReceivedToPurchaseDelivered(opts?: {
     force?: boolean;
     amazonHeldByAsin?: Map<string, number>;
+    soldByAsin?: Map<string, number>;
   }): Promise<DeliveredSyncResult> {
     const empty: DeliveredSyncResult = {
       attempted: false,
@@ -138,6 +146,8 @@ export class StockCostSheetReadService {
       updates: [],
       sentUpdated: 0,
       sentUpdates: [],
+      completeUpdated: 0,
+      completeUpdates: [],
       errors: [],
     };
 
@@ -159,6 +169,7 @@ export class StockCostSheetReadService {
     const errors: string[] = [];
     let deliveredUpdates: DeliveredYesUpdate[] = [];
     let sentUpdates: HomePrepSentUpdate[] = [];
+    let completeUpdates: FinalCompleteUpdate[] = [];
 
     try {
       const tab = this.currentTabTitle();
@@ -172,6 +183,7 @@ export class StockCostSheetReadService {
         'Home/Prep',
         'Prep',
       ]);
+      const finalColIndex0 = findPurchaseSheetFinalColumnIndex(header);
 
       if (deliveredColIndex0 < 0) {
         errors.push('CURRENT ORDERS: Delivered column not found');
@@ -214,11 +226,13 @@ export class StockCostSheetReadService {
       }
 
       const held = opts?.amazonHeldByAsin;
+      const sold = opts?.soldByAsin;
       if (held && homePrepColIndex0 >= 0) {
         sentUpdates = planHomePrepSentUpdatesFromAmazonHeld({
           purchaseDelivered: parsedPurchase.delivered,
           homePrepColIndex0,
           amazonHeldByAsin: held,
+          soldByAsin: sold,
         });
 
         if (sentUpdates.length > 0) {
@@ -232,12 +246,45 @@ export class StockCostSheetReadService {
           this.logger.log(
             `Amazon→Home/Prep sync: set Home/Prep=${HOME_PREP_SENT_VALUE} on ${sentUpdates.length} CURRENT ORDERS row(s)`,
           );
+          // Re-read so Final=Complete planning sees flipped sent rows.
+          purchaseValues = await this.sheets.getValues(`'${tab}'!A1:AZ`);
+          parsedPurchase = parsePurchaseSheetStageRows(purchaseValues);
+          errors.push(...parsedPurchase.errors);
         }
       } else if (held && homePrepColIndex0 < 0) {
         errors.push('CURRENT ORDERS: Home/Prep column not found');
       }
 
-      if (deliveredUpdates.length > 0 || sentUpdates.length > 0) {
+      if (sold && finalColIndex0 >= 0) {
+        completeUpdates = planFinalCompleteUpdatesFromSold({
+          purchaseDelivered: parsedPurchase.delivered,
+          finalColIndex0,
+          soldByAsin: sold,
+        });
+
+        if (completeUpdates.length > 0) {
+          const colLetter = colIndexToA1(finalColIndex0);
+          await this.sheets.batchUpdateValues(
+            completeUpdates.map((u) => ({
+              range: `'${tab}'!${colLetter}${u.sheetRow}`,
+              values: [[PURCHASE_SHEET_COMPLETE_VALUE]],
+            })),
+          );
+          this.logger.log(
+            `Amazon sales→Final sync: set Final=${PURCHASE_SHEET_COMPLETE_VALUE} on ${completeUpdates.length} CURRENT ORDERS row(s)`,
+          );
+        }
+      } else if (sold && finalColIndex0 < 0) {
+        errors.push(
+          'CURRENT ORDERS: Final/Complete column not found (expected Final or status column after Home/Prep)',
+        );
+      }
+
+      if (
+        deliveredUpdates.length > 0 ||
+        sentUpdates.length > 0 ||
+        completeUpdates.length > 0
+      ) {
         await this.invalidatePipelineCache();
       }
 
@@ -254,11 +301,15 @@ export class StockCostSheetReadService {
         updates: deliveredUpdates,
         sentUpdated: sentUpdates.length,
         sentUpdates,
+        completeUpdated: completeUpdates.length,
+        completeUpdates,
         errors,
       };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      errors.push(`Blue30→Delivered / Home/Prep→sent sync failed: ${msg}`);
+      errors.push(
+        `Blue30→Delivered / Home/Prep→sent / Final→Complete sync failed: ${msg}`,
+      );
       this.logger.warn(`Sheet stage sync failed: ${msg}`);
       return {
         attempted: true,
@@ -267,18 +318,21 @@ export class StockCostSheetReadService {
         updates: [],
         sentUpdated: 0,
         sentUpdates: [],
+        completeUpdated: 0,
+        completeUpdates: [],
         errors,
       };
     }
   }
 
   /**
-   * Read CURRENT ORDERS after optional Blue30→Delivered + Home/Prep→sent sync.
-   * Prep candidates = Delivered=Yes and Home/Prep ≠ sent.
-   * Cached ~90s in Redis.
+   * Read CURRENT ORDERS after optional Blue30→Delivered + Home/Prep→sent +
+   * Final→Complete sync. Prep candidates = Delivered=Yes, Home/Prep ≠ sent,
+   * Final ≠ Complete. Cached ~90s in Redis.
    */
   async getPurchasedAndArrivedByAsin(opts?: {
     amazonHeldByAsin?: Map<string, number>;
+    soldByAsin?: Map<string, number>;
   }): Promise<SheetStageSnapshots> {
     try {
       const raw = await this.redis.get(CACHE_KEY_PIPELINE);
@@ -292,6 +346,7 @@ export class StockCostSheetReadService {
 
     const sync = await this.syncBlue30ReceivedToPurchaseDelivered({
       amazonHeldByAsin: opts?.amazonHeldByAsin,
+      soldByAsin: opts?.soldByAsin,
     });
     const errors: string[] = [...sync.errors];
     let purchaseInTransit = [] as ReturnType<
@@ -340,6 +395,11 @@ export class StockCostSheetReadService {
     if (sync.sentUpdated > 0) {
       syncParts.push(
         `synced Home/Prep=${HOME_PREP_SENT_VALUE} on ${sync.sentUpdated} row(s)`,
+      );
+    }
+    if (sync.completeUpdated > 0) {
+      syncParts.push(
+        `synced Final=${PURCHASE_SHEET_COMPLETE_VALUE} on ${sync.completeUpdated} row(s)`,
       );
     }
     if (syncParts.length === 0 && sync.skippedThrottle) {

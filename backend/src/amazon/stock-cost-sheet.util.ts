@@ -2,14 +2,18 @@
  * Sheet-driven stock-cost stages (early pipeline):
  *
  * Stock purchased  = CURRENT ORDERS rows with Delivered ≠ Yes, valued at £/Unit.
- * Stock for prep   = CURRENT ORDERS rows with Delivered = Yes and Home/Prep ≠ sent,
- *                    valued at £/Unit, then clamped by Amazon available+inbound.
+ * Stock for prep   = CURRENT ORDERS rows with Delivered = Yes and Home/Prep ≠ sent
+ *                    and Final ≠ Complete, valued at £/Unit, then clamped by Amazon
+ *                    available+inbound.
  *
  * Blue30 Quantity Received is NOT a second cost pile — it only drives a sync that
  * flips matching purchase-sheet Delivered → Yes. When Amazon held (available+inbound)
- * covers Delivered=Yes rows, Home/Prep is set to "sent" (middle column).
+ * covers Delivered=Yes rows, Home/Prep is set to "sent" (middle column). When Amazon
+ * sales consume units, Final (next status column after Home/Prep) is set to Complete.
  *
  * Exclusivity waterfall (caller): Available → Sent → Prep → Purchased.
+ * Completed (sold-through) rows leave every stage — Available is Amazon inventory
+ * after sales; sheet Complete rows are excluded from prep / sheet-sent clamps.
  * prep = max(0, deliveredNotSent − amazonHeld); purchased = not delivered.
  */
 
@@ -33,13 +37,117 @@ export type SheetCostLine = {
   unitCost: number;
   orderRef: string;
   homePrep: 'HOME' | 'PREP CENTER' | 'sent' | '';
+  /** Final / Sold / Complete column — sold-through purchase rows. */
+  finalComplete: boolean;
+  /** Raw Final cell (for protect / idempotent writes). */
+  finalRaw: string;
   purchaseDate: Date | null;
   sheetRow: number;
 };
 
+/** Exact Final cell value when purchase units have sold through on Amazon. */
+export const PURCHASE_SHEET_COMPLETE_VALUE = 'Complete';
+
 /** True when CURRENT ORDERS Home/Prep means already sent into Amazon. */
 export function isPurchaseSheetHomePrepSent(raw: unknown): boolean {
   return normalizeShipDestinationLabel(raw) === 'sent';
+}
+
+/**
+ * True when CURRENT ORDERS Final (or Sold / Complete / Done) means sold-through.
+ * Does not treat Returned / Ebay / Cancelled as complete.
+ */
+export function isPurchaseSheetFinalComplete(raw: unknown): boolean {
+  const s = String(raw ?? '')
+    .trim()
+    .toLowerCase();
+  if (!s) return false;
+  if (
+    s.includes('return') ||
+    s.includes('ebay') ||
+    s === 'cancelled' ||
+    s === 'canceled'
+  ) {
+    return false;
+  }
+  return s === 'complete' || s === 'completed' || s === 'done' || s === 'sold';
+}
+
+/** Final cell values that must not be overwritten by Complete sync. */
+export function isPurchaseSheetFinalProtected(raw: unknown): boolean {
+  const s = String(raw ?? '')
+    .trim()
+    .toLowerCase();
+  if (!s) return false;
+  return (
+    s.includes('return') ||
+    s.includes('ebay') ||
+    s === 'cancelled' ||
+    s === 'canceled'
+  );
+}
+
+/**
+ * Resolve the Final / Complete status column on CURRENT ORDERS.
+ * Prefer named Final / Sold / Complete / Done / Ebay/Return; else the column
+ * immediately after Home/Prep when that header is a status-like / blank name
+ * (not Delivered / Units / money).
+ */
+export function findPurchaseSheetFinalColumnIndex(header: string[]): number {
+  const named = findHeaderColumnIndex(header, [
+    'Final',
+    'Sold',
+    'Complete',
+    'Done',
+    'Ebay/Return',
+    'Status',
+  ]);
+  if (named >= 0) return named;
+
+  const homePrepIdx = findHeaderColumnIndex(header, ['Home/Prep', 'Prep']);
+  if (homePrepIdx < 0) return -1;
+  const next = homePrepIdx + 1;
+  if (next >= header.length) return -1;
+  const nextNorm = String(header[next] ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, '');
+  // Occupied by a known non-final column → do not invent.
+  if (
+    nextNorm === 'delivered' ||
+    nextNorm === 'units' ||
+    nextNorm === 'qty' ||
+    nextNorm === 'quantity' ||
+    nextNorm.includes('£/unit') ||
+    nextNorm.includes('/unit') ||
+    nextNorm === 'asin' ||
+    nextNorm === 'date' ||
+    nextNorm === 'supplier' ||
+    nextNorm === 'notes' ||
+    nextNorm === 'note' ||
+    nextNorm === 'product' ||
+    nextNorm === 'ordernum' ||
+    nextNorm === 'ordernumber' ||
+    nextNorm === 'ordercost' ||
+    nextNorm === 'toamz' ||
+    nextNorm === 'toamazon'
+  ) {
+    return -1;
+  }
+  // Blank header or status-ish label after Home/Prep.
+  if (
+    !nextNorm ||
+    nextNorm.includes('final') ||
+    nextNorm.includes('sold') ||
+    nextNorm.includes('complete') ||
+    nextNorm.includes('done') ||
+    nextNorm.includes('status') ||
+    nextNorm.includes('ebay') ||
+    nextNorm.includes('return')
+  ) {
+    return next;
+  }
+  return -1;
 }
 
 export type AsinQtyCost = {
@@ -131,6 +239,7 @@ export function parsePurchaseSheetStageRows(values: unknown[][]): {
     'Order Ref',
   ]);
   const homePrepIdx = findHeaderColumnIndex(header, ['Home/Prep', 'Prep']);
+  const finalIdx = findPurchaseSheetFinalColumnIndex(header);
 
   const inTransit: SheetCostLine[] = [];
   const delivered: SheetCostLine[] = [];
@@ -159,6 +268,7 @@ export function parsePurchaseSheetStageRows(values: unknown[][]): {
     const homeRaw =
       homePrepIdx >= 0 ? String(row[homePrepIdx] ?? '') : '';
     const homePrep = normalizeShipDestinationLabel(homeRaw);
+    const finalRaw = finalIdx >= 0 ? String(row[finalIdx] ?? '') : '';
     const line: SheetCostLine = {
       asin,
       qty,
@@ -166,6 +276,8 @@ export function parsePurchaseSheetStageRows(values: unknown[][]): {
       orderRef:
         orderIdx >= 0 ? String(row[orderIdx] ?? '').trim() : '',
       homePrep,
+      finalComplete: isPurchaseSheetFinalComplete(finalRaw),
+      finalRaw,
       purchaseDate: dateIdx >= 0 ? parseSheetDate(row[dateIdx]) : null,
       sheetRow: r + 1,
     };
@@ -325,15 +437,28 @@ export type HomePrepSentUpdate = {
   qty: number;
 };
 
+export type FinalCompleteUpdate = {
+  /** 1-based sheet row */
+  sheetRow: number;
+  finalColIndex0: number;
+  asin: string;
+  orderRef: string;
+  qty: number;
+  match: 'order_asin' | 'asin';
+};
+
 /**
  * Plan idempotent Home/Prep → "sent" writes for Delivered=Yes rows covered by
- * Amazon held (available + inbound) per ASIN, oldest first.
- * Does not touch £/Unit, Units, or Delivered.
+ * Amazon units that reached FBA: held (available+inbound) plus sold-through.
+ * Sold is included so already-sold rows still get sent before Complete backfill.
+ * Skips Final=Complete rows. Does not touch £/Unit, Units, or Delivered.
  */
 export function planHomePrepSentUpdatesFromAmazonHeld(opts: {
   purchaseDelivered: SheetCostLine[];
   homePrepColIndex0: number;
   amazonHeldByAsin: Map<string, number>;
+  /** Cumulative fulfilled sales by ASIN — expands coverage for sold-through backfill. */
+  soldByAsin?: Map<string, number>;
 }): HomePrepSentUpdate[] {
   if (opts.homePrepColIndex0 < 0) return [];
 
@@ -342,6 +467,7 @@ export function planHomePrepSentUpdatesFromAmazonHeld(opts: {
 
   const byAsin = new Map<string, SheetCostLine[]>();
   for (const line of opts.purchaseDelivered) {
+    if (line.finalComplete) continue; // sold-through — leave alone
     if (line.homePrep === 'sent') continue; // already marked
     const asin = line.asin.trim().toUpperCase();
     if (!asin) continue;
@@ -351,7 +477,10 @@ export function planHomePrepSentUpdatesFromAmazonHeld(opts: {
   }
 
   for (const [asin, lines] of byAsin) {
-    let remaining = Math.max(0, Math.floor(opts.amazonHeldByAsin.get(asin) ?? 0));
+    const held = Math.max(0, Math.floor(opts.amazonHeldByAsin.get(asin) ?? 0));
+    const sold = Math.max(0, Math.floor(opts.soldByAsin?.get(asin) ?? 0));
+    // Units that reached Amazon = still held + already sold.
+    let remaining = held + sold;
     if (!(remaining > 0)) continue;
 
     const ordered = [...lines].sort((a, b) => {
@@ -372,6 +501,94 @@ export function planHomePrepSentUpdatesFromAmazonHeld(opts: {
         orderRef: line.orderRef,
         qty: line.qty,
       });
+      remaining -= line.qty;
+    }
+  }
+
+  return updates;
+}
+
+/**
+ * Plan idempotent Final → Complete writes from Amazon fulfilled sales.
+ * Eligible = Delivered=Yes rows with Home/Prep=sent (or just-marked sent), not
+ * already Complete / protected. Match Order Ref+ASIN when sale refs align,
+ * else ASIN FIFO oldest first. Does not touch £/Unit, Units, Delivered, Home/Prep.
+ */
+export function planFinalCompleteUpdatesFromSold(opts: {
+  purchaseDelivered: SheetCostLine[];
+  finalColIndex0: number;
+  soldByAsin: Map<string, number>;
+  /** Optional Order Ref hints per ASIN (usually empty for Amazon sales). */
+  soldOrderRefsByAsin?: Map<string, string[]>;
+}): FinalCompleteUpdate[] {
+  if (opts.finalColIndex0 < 0) return [];
+
+  const updates: FinalCompleteUpdate[] = [];
+  const seenRows = new Set<number>();
+
+  type OpenLine = SheetCostLine & { claimed: boolean };
+  const byAsin = new Map<string, OpenLine[]>();
+  for (const line of opts.purchaseDelivered) {
+    if (line.finalComplete) continue;
+    if (isPurchaseSheetFinalProtected(line.finalRaw)) continue;
+    // Only units that made it into Amazon (sent) can be sold-through.
+    if (line.homePrep !== 'sent') continue;
+    const asin = line.asin.trim().toUpperCase();
+    if (!asin) continue;
+    const list = byAsin.get(asin) ?? [];
+    list.push({ ...line, claimed: false });
+    byAsin.set(asin, list);
+  }
+
+  const sortOldest = (a: OpenLine, b: OpenLine) => {
+    const at = a.purchaseDate?.getTime() ?? 0;
+    const bt = b.purchaseDate?.getTime() ?? 0;
+    if (at !== bt) return at - bt;
+    return a.sheetRow - b.sheetRow;
+  };
+
+  const pushUpdate = (line: OpenLine, match: 'order_asin' | 'asin') => {
+    if (line.claimed || seenRows.has(line.sheetRow)) return;
+    line.claimed = true;
+    seenRows.add(line.sheetRow);
+    updates.push({
+      sheetRow: line.sheetRow,
+      finalColIndex0: opts.finalColIndex0,
+      asin: line.asin,
+      orderRef: line.orderRef,
+      qty: line.qty,
+      match,
+    });
+  };
+
+  for (const [asin, lines] of byAsin) {
+    let remaining = Math.max(0, Math.floor(opts.soldByAsin.get(asin) ?? 0));
+    if (!(remaining > 0)) continue;
+
+    const open = [...lines].sort(sortOldest);
+    const orderHints = (opts.soldOrderRefsByAsin?.get(asin) ?? [])
+      .map((r) => normOrderRef(r))
+      .filter(Boolean);
+
+    // Prefer Order Ref+ASIN when a sale/ref hint matches a purchase Order Num.
+    for (const wantOrder of orderHints) {
+      if (!(remaining > 0)) break;
+      const byOrder = open.filter(
+        (l) =>
+          !l.claimed &&
+          normOrderRef(l.orderRef) === wantOrder,
+      );
+      for (const line of byOrder) {
+        if (!(remaining > 0)) break;
+        pushUpdate(line, 'order_asin');
+        remaining -= line.qty;
+      }
+    }
+
+    for (const line of open) {
+      if (!(remaining > 0)) break;
+      if (line.claimed) continue;
+      pushUpdate(line, 'asin');
       remaining -= line.qty;
     }
   }
@@ -458,10 +675,11 @@ export function planDeliveredYesUpdatesFromBlue30(opts: {
 /**
  * Build purchased + arrived-for-prep ASIN aggregates from the purchase sheet.
  *
- * Source of truth after Blue30→Delivered / Home/Prep→sent sync:
+ * Source of truth after Blue30→Delivered / Home/Prep→sent / Final→Complete sync:
  * - Purchased = Delivered ≠ Yes rows (in-transit)
- * - Arrived (prep candidates) = Delivered = Yes and Home/Prep ≠ sent
- * - Sheet-sent qty = Delivered = Yes and Home/Prep = sent (for clamp accounting)
+ * - Arrived (prep candidates) = Delivered = Yes, Home/Prep ≠ sent, Final ≠ Complete
+ * - Sheet-sent qty = Delivered = Yes, Home/Prep = sent, Final ≠ Complete
+ * - Final=Complete rows leave every sheet stage (sold-through).
  *
  * `blue30Arrived` is ignored for costing (kept optional for call-site compat).
  */
@@ -480,10 +698,13 @@ export function buildSheetPurchasedAndArrivedByAsin(opts: {
   const sheetSentByAsin = new Map<string, number>();
 
   for (const line of opts.purchaseInTransit) {
+    if (line.finalComplete) continue;
     addAsinQtyCost(purchasedByAsin, line.asin, line.qty, line.unitCost);
   }
   for (const line of opts.purchaseDelivered) {
     const asin = line.asin.trim().toUpperCase();
+    // Sold-through → gone from prep / sheet-sent / Available attribution.
+    if (line.finalComplete) continue;
     // Home/Prep=sent → already into Amazon; leave prep (Available/Sent tiles own them).
     if (line.homePrep === 'sent') {
       if (asin && line.qty > 0) {

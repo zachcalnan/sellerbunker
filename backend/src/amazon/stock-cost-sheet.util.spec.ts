@@ -1,13 +1,17 @@
 import {
   buildSheetPurchasedAndArrivedByAsin,
+  findPurchaseSheetFinalColumnIndex,
   isPurchaseSheetDeliveredYes,
+  isPurchaseSheetFinalComplete,
   isPurchaseSheetHomePrepSent,
   isPurchaseSheetInTransit,
   matchUnitCostFromPurchaseSheet,
   parseBlue30ArrivedRows,
   parsePurchaseSheetStageRows,
   planDeliveredYesUpdatesFromBlue30,
+  planFinalCompleteUpdatesFromSold,
   planHomePrepSentUpdatesFromAmazonHeld,
+  PURCHASE_SHEET_COMPLETE_VALUE,
   sheetUnitCostToCogs,
   sumSheetAwareStockCostPipeline,
 } from './stock-cost-sheet.util';
@@ -35,6 +39,45 @@ describe('stock-cost-sheet.util', () => {
     expect(isPurchaseSheetHomePrepSent('PREP CENTER')).toBe(false);
   });
 
+  it('detects Final Complete vs protected', () => {
+    expect(isPurchaseSheetFinalComplete('Complete')).toBe(true);
+    expect(isPurchaseSheetFinalComplete('complete')).toBe(true);
+    expect(isPurchaseSheetFinalComplete('COMPLETE')).toBe(true);
+    expect(isPurchaseSheetFinalComplete('Returned')).toBe(false);
+    expect(isPurchaseSheetFinalComplete('')).toBe(false);
+    expect(PURCHASE_SHEET_COMPLETE_VALUE).toBe('Complete');
+  });
+
+  it('finds Final column by name or after Home/Prep', () => {
+    expect(
+      findPurchaseSheetFinalColumnIndex([
+        'Date',
+        'ASIN',
+        'Home/Prep',
+        'Delivered ',
+        'Final',
+      ]),
+    ).toBe(4);
+    expect(
+      findPurchaseSheetFinalColumnIndex([
+        'Date',
+        'ASIN',
+        '£/Unit',
+        'Home/Prep',
+        'Delivered ',
+      ]),
+    ).toBe(-1); // next after Home/Prep is Delivered — do not invent
+    expect(
+      findPurchaseSheetFinalColumnIndex([
+        'Date',
+        'ASIN',
+        'Home/Prep',
+        '',
+        'Notes',
+      ]),
+    ).toBe(3); // blank header immediately after Home/Prep
+  });
+
   it('parses CURRENT ORDERS into in-transit vs delivered', () => {
     const values = [
       [
@@ -45,11 +88,12 @@ describe('stock-cost-sheet.util', () => {
         '£/Unit',
         'Home/Prep',
         'Delivered ',
+        'Final',
       ],
-      ['1/11/2026', 'B0AAA', 'ORD1', '4', '£10.00', 'PREP CENTER', 'No'],
-      ['2/11/2026', 'B0BBB', 'ORD2', '2', '£5.00', 'HOME', 'Yes'],
-      ['3/11/2026', 'B0CCC', 'ORD3', '1', '£8.00', 'HOME', ''],
-      ['4/11/2026', 'B0DDD', 'ORD4', '3', '£9.00', 'sent', 'Yes'],
+      ['1/11/2026', 'B0AAA', 'ORD1', '4', '£10.00', 'PREP CENTER', 'No', ''],
+      ['2/11/2026', 'B0BBB', 'ORD2', '2', '£5.00', 'HOME', 'Yes', ''],
+      ['3/11/2026', 'B0CCC', 'ORD3', '1', '£8.00', 'HOME', '', ''],
+      ['4/11/2026', 'B0DDD', 'ORD4', '3', '£9.00', 'sent', 'Yes', 'Complete'],
     ];
     const { inTransit, delivered, errors } = parsePurchaseSheetStageRows(values);
     expect(errors).toEqual([]);
@@ -58,6 +102,8 @@ describe('stock-cost-sheet.util', () => {
     expect(inTransit[0].unitCost).toBe(10);
     expect(delivered[0].homePrep).toBe('HOME');
     expect(delivered[1].homePrep).toBe('sent');
+    expect(delivered[1].finalComplete).toBe(true);
+    expect(delivered[0].finalComplete).toBe(false);
   });
 
   it('parses Blue30 Quantity Received as arrived', () => {
@@ -247,12 +293,98 @@ describe('stock-cost-sheet.util', () => {
           unitCost: 1,
           orderRef: 'O1',
           homePrep: 'sent',
+          finalComplete: false,
+          finalRaw: '',
           purchaseDate: new Date('2026-11-01'),
           sheetRow: 2,
         },
       ],
       homePrepColIndex0: 5,
       amazonHeldByAsin: new Map([['B0A', 10]]),
+    });
+    expect(updates).toEqual([]);
+  });
+
+  it('Home/Prep=sent uses held+sold so already-sold rows still get sent', () => {
+    const purchase = parsePurchaseSheetStageRows([
+      [
+        'Date',
+        'ASIN',
+        'Order Num',
+        'Units',
+        '£/Unit',
+        'Home/Prep',
+        'Delivered ',
+        'Final',
+      ],
+      ['1/11/2026', 'B0A', 'O1', '4', '£5', 'HOME', 'Yes', ''],
+      ['2/11/2026', 'B0A', 'O2', '6', '£5', 'HOME', 'Yes', ''],
+    ]);
+    const updates = planHomePrepSentUpdatesFromAmazonHeld({
+      purchaseDelivered: purchase.delivered,
+      homePrepColIndex0: 5,
+      amazonHeldByAsin: new Map([['B0A', 0]]),
+      soldByAsin: new Map([['B0A', 4]]),
+    });
+    expect(updates.map((u) => u.sheetRow)).toEqual([2]); // oldest 4 units
+  });
+
+  it('plans Final=Complete from sold FIFO on sent rows; skips already complete', () => {
+    const purchase = parsePurchaseSheetStageRows([
+      [
+        'Date',
+        'ASIN',
+        'Order Num',
+        'Units',
+        '£/Unit',
+        'Home/Prep',
+        'Delivered ',
+        'Final',
+      ],
+      ['1/11/2026', 'B0A', 'O1', '4', '£5', 'sent', 'Yes', ''],
+      ['2/11/2026', 'B0A', 'O2', '6', '£5', 'sent', 'Yes', ''],
+      ['3/11/2026', 'B0A', 'O3', '2', '£5', 'sent', 'Yes', 'Complete'],
+      ['1/11/2026', 'B0B', 'O4', '3', '£2', 'HOME', 'Yes', ''], // not sent
+      ['1/11/2026', 'B0C', 'O5', '5', '£1', 'sent', 'Yes', 'Returned'],
+    ]);
+
+    const updates = planFinalCompleteUpdatesFromSold({
+      purchaseDelivered: purchase.delivered,
+      finalColIndex0: 7,
+      soldByAsin: new Map([
+        ['B0A', 5], // covers O1 (4) then starts O2
+        ['B0B', 99],
+        ['B0C', 99],
+      ]),
+    });
+
+    expect(updates.map((u) => u.sheetRow).sort((a, b) => a - b)).toEqual([
+      2, // O1
+      3, // O2
+    ]);
+    expect(updates.every((u) => u.finalColIndex0 === 7)).toBe(true);
+    expect(updates.find((u) => u.sheetRow === 4)).toBeUndefined(); // already Complete
+    expect(updates.find((u) => u.asin === 'B0B')).toBeUndefined(); // not sent
+    expect(updates.find((u) => u.asin === 'B0C')).toBeUndefined(); // protected
+  });
+
+  it('Final=Complete planning is idempotent when sold rows already Complete', () => {
+    const updates = planFinalCompleteUpdatesFromSold({
+      purchaseDelivered: [
+        {
+          asin: 'B0A',
+          qty: 10,
+          unitCost: 1,
+          orderRef: 'O1',
+          homePrep: 'sent',
+          finalComplete: true,
+          finalRaw: 'Complete',
+          purchaseDate: new Date('2026-11-01'),
+          sheetRow: 2,
+        },
+      ],
+      finalColIndex0: 7,
+      soldByAsin: new Map([['B0A', 10]]),
     });
     expect(updates).toEqual([]);
   });
@@ -321,6 +453,8 @@ describe('stock-cost-sheet.util', () => {
             unitCost: 5,
             orderRef: 'O1',
             homePrep: 'sent',
+            finalComplete: false,
+            finalRaw: '',
             purchaseDate: new Date('2026-11-01'),
             sheetRow: 2,
           },
@@ -330,6 +464,8 @@ describe('stock-cost-sheet.util', () => {
             unitCost: 5,
             orderRef: 'O2',
             homePrep: 'PREP CENTER',
+            finalComplete: false,
+            finalRaw: '',
             purchaseDate: new Date('2026-11-02'),
             sheetRow: 3,
           },
@@ -337,6 +473,51 @@ describe('stock-cost-sheet.util', () => {
       });
     expect(arrivedByAsin.get('B0A')?.qty).toBe(6);
     expect(sheetSentByAsin.get('B0A')).toBe(4);
+  });
+
+  it('excludes Final=Complete from prep and sheet-sent (sold leaves Available stages)', () => {
+    const { arrivedByAsin, sheetSentByAsin, purchasedByAsin } =
+      buildSheetPurchasedAndArrivedByAsin({
+        purchaseInTransit: [],
+        purchaseDelivered: [
+          {
+            asin: 'B0A',
+            qty: 4,
+            unitCost: 5,
+            orderRef: 'O1',
+            homePrep: 'sent',
+            finalComplete: true,
+            finalRaw: 'Complete',
+            purchaseDate: new Date('2026-11-01'),
+            sheetRow: 2,
+          },
+          {
+            asin: 'B0A',
+            qty: 6,
+            unitCost: 5,
+            orderRef: 'O2',
+            homePrep: 'sent',
+            finalComplete: false,
+            finalRaw: '',
+            purchaseDate: new Date('2026-11-02'),
+            sheetRow: 3,
+          },
+          {
+            asin: 'B0A',
+            qty: 2,
+            unitCost: 5,
+            orderRef: 'O3',
+            homePrep: 'HOME',
+            finalComplete: true,
+            finalRaw: 'Complete',
+            purchaseDate: new Date('2026-11-03'),
+            sheetRow: 4,
+          },
+        ],
+      });
+    expect(sheetSentByAsin.get('B0A')).toBe(6); // only non-complete sent
+    expect(arrivedByAsin.get('B0A')).toBeUndefined(); // complete prep excluded
+    expect(purchasedByAsin.get('B0A')).toBeUndefined();
   });
 
   it('after sync-style Delivered flip, B30-received line moves from purchased to prep', () => {
@@ -350,6 +531,8 @@ describe('stock-cost-sheet.util', () => {
             unitCost: 7,
             orderRef: 'O4',
             homePrep: 'PREP CENTER',
+            finalComplete: false,
+            finalRaw: '',
             purchaseDate: new Date('2026-11-01'),
             sheetRow: 2,
           },
@@ -368,6 +551,33 @@ describe('stock-cost-sheet.util', () => {
     expect(purchasedByAsin.get('B0PREP')).toBeUndefined();
     expect(arrivedByAsin.get('B0PREP')?.qty).toBe(10);
     expect(arrivedByAsin.get('B0PREP')?.cost).toBe(70);
+  });
+
+  it('Complete rows do not inflate prep clamp via sheet-sent', () => {
+    const purchasedByAsin = new Map();
+    const arrivedByAsin = new Map([
+      [
+        'B0A',
+        { qty: 5, cost: 35, unitCostWeight: 35, unitCostQty: 5 },
+      ],
+    ]);
+    // Only non-complete sent qty should be passed (complete already excluded upstream)
+    const sheetSentByAsin = new Map([['B0A', 0]]);
+    const tot = sumSheetAwareStockCostPipeline({
+      skuRows: [
+        {
+          asin: 'B0A',
+          availableQty: 0,
+          inboundQty: 0,
+          unitCost: 7,
+        },
+      ],
+      purchasedByAsin,
+      arrivedByAsin,
+      sheetSentByAsin,
+    });
+    expect(tot.availableStockQty).toBe(0);
+    expect(tot.stockForPrepQty).toBe(5);
   });
 
   it('does not double-clamp prep when sheet already marks sent rows', () => {

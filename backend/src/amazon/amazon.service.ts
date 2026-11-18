@@ -3928,8 +3928,10 @@ export class AmazonService {
   /**
    * Dashboard: cumulative stock COGS by exclusive pipeline stage.
    * Purchased / for-prep are CURRENT ORDERS Delivered flag (Blue30 sync
-   * flips Delivered=Yes on receive); available / sent from Amazon inventory.
-   * See `stock-cost-sheet.util.ts` + `stock-cost-pipeline.util.ts`.
+   * flips Delivered=Yes on receive; Home/Prep→sent from Amazon held; Final→
+   * Complete from fulfilled sales). Available / sent from Amazon inventory
+   * (sold-through Complete rows leave sheet stages). See
+   * `stock-cost-sheet.util.ts` + `stock-cost-pipeline.util.ts`.
    */
   async getStockCostPipeline(
     orgId: string,
@@ -4167,8 +4169,55 @@ export class AmazonService {
       amazonHeldByAsin.set(asin, (amazonHeldByAsin.get(asin) ?? 0) + held);
     }
 
+    // Fulfilled Amazon sales by ASIN — drives Final=Complete sheet sync.
+    const soldByAsin = new Map<string, number>();
+    const soldUserIds =
+      aggUserIds.length > 0
+        ? aggUserIds
+        : memberUserIds.length > 0
+          ? memberUserIds
+          : [];
+    if (soldUserIds.length > 0) {
+      try {
+        const marketplaceFilter = this.resolveMarketplaceFilter(marketplaceId);
+        const soldRows = await (this.prisma as any).orderItem.groupBy({
+          by: ['asin'],
+          where: {
+            userId: { in: soldUserIds },
+            asin: { not: null },
+            quantity: { gt: 0 },
+            marketplace: marketplaceFilter,
+            order: {
+              amazonOrderStatus: {
+                notIn: PRISMA_EXCLUDED_AMAZON_ORDER_STATUSES,
+              },
+            },
+          },
+          _sum: { quantity: true },
+        });
+        for (const r of soldRows as {
+          asin: string | null;
+          _sum: { quantity: number | null };
+        }[]) {
+          const asin = String(r.asin ?? '')
+            .trim()
+            .toUpperCase();
+          if (!asin) continue;
+          const qty = Math.max(0, Math.floor(Number(r._sum?.quantity) || 0));
+          if (!(qty > 0)) continue;
+          soldByAsin.set(asin, (soldByAsin.get(asin) ?? 0) + qty);
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        this.logger.warn(
+          `Stock-cost sold-by-ASIN aggregate failed (orgId=${orgId}): ${msg}`,
+        );
+      }
+    }
+
     const sheet = await this.stockCostSheetRead.getPurchasedAndArrivedByAsin({
       amazonHeldByAsin,
+      soldByAsin,
     });
     const sheetTotals = sumSheetAwareStockCostPipeline({
       skuRows,
