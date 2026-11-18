@@ -1,6 +1,8 @@
 import {
   buildSheetPurchasedAndArrivedByAsin,
   findPurchaseSheetFinalColumnIndex,
+  findPurchaseSheetHomePrepColumnIndex,
+  findPurchaseSheetToAmazonColumnIndex,
   isPurchaseSheetDeliveredYes,
   isPurchaseSheetFinalComplete,
   isPurchaseSheetFinalReturned,
@@ -15,6 +17,7 @@ import {
   planFinalStatusFormatUpdates,
   planFinalStatusFormatUpdatesFromValues,
   planHomePrepSentUpdatesFromAmazonHeld,
+  planHomePrepSentUpdatesFromFinalSoldValues,
   PURCHASE_SHEET_COMPLETE_BG,
   PURCHASE_SHEET_COMPLETE_FG,
   PURCHASE_SHEET_COMPLETE_VALUE,
@@ -92,6 +95,71 @@ describe('stock-cost-sheet.util', () => {
       green: 199 / 255,
       blue: 206 / 255,
     });
+  });
+
+  it('finds Home/Prep and separate To Amazon columns', () => {
+    expect(
+      findPurchaseSheetHomePrepColumnIndex([
+        'Date',
+        'ASIN',
+        'Home/Prep',
+        'Final',
+      ]),
+    ).toBe(2);
+    expect(
+      findPurchaseSheetHomePrepColumnIndex(['Date', 'ASIN', 'To Amazon', 'Final']),
+    ).toBe(2);
+    expect(
+      findPurchaseSheetToAmazonColumnIndex(
+        ['Date', 'ASIN', 'Home/Prep', 'To Amazon', 'Final'],
+        2,
+      ),
+    ).toBe(3);
+    expect(
+      findPurchaseSheetToAmazonColumnIndex(
+        ['Date', 'ASIN', 'Home/Prep', 'Final'],
+        2,
+      ),
+    ).toBe(-1);
+    expect(
+      findPurchaseSheetToAmazonColumnIndex(
+        ['Date', 'ASIN', 'To Amazon', 'Final'],
+        2,
+      ),
+    ).toBe(-1); // same column as Home/Prep alias
+  });
+
+  it('plans Home/Prep=sent from Final Complete/Returned (sold ⇒ sent)', () => {
+    const updates = planHomePrepSentUpdatesFromFinalSoldValues({
+      homePrepColIndex0: 1,
+      finalColIndex0: 2,
+      values: [
+        ['ASIN', 'Home/Prep', 'Final'],
+        ['B0A', 'HOME', 'Complete'],
+        ['B0B', 'PREP CENTER', 'complete'],
+        ['B0C', 'sent', 'Complete'], // already sent
+        ['B0D', '', 'Returned'],
+        ['B0E', 'HOME', ''], // not sold
+        ['B0F', 'HOME', 'Ebay'], // protected / not Complete-Returned for sent backfill via complete check — Ebay is not Complete; Returned check is return/refund only
+        ['', 'HOME', 'COMPLETE'], // still flip — raw scan
+      ],
+    });
+    expect(updates.map((u) => u.sheetRow)).toEqual([2, 3, 5, 8]);
+    expect(updates.every((u) => u.homePrepColIndex0 === 1)).toBe(true);
+  });
+
+  it('Final→sent planning is idempotent when sold rows are already sent', () => {
+    const updates = planHomePrepSentUpdatesFromFinalSoldValues({
+      homePrepColIndex0: 0,
+      finalColIndex0: 1,
+      values: [
+        ['Home/Prep', 'Final'],
+        ['sent', 'Complete'],
+        ['SENT', 'Returned'],
+        ['sent to amazon', 'complete'],
+      ],
+    });
+    expect(updates).toEqual([]);
   });
 
   it('finds Final column by name or after Home/Prep', () => {

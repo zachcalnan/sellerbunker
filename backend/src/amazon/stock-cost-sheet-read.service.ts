@@ -9,13 +9,17 @@ import {
 import {
   buildSheetPurchasedAndArrivedByAsin,
   findPurchaseSheetFinalColumnIndex,
+  findPurchaseSheetHomePrepColumnIndex,
+  findPurchaseSheetToAmazonColumnIndex,
   parseBlue30ArrivedRows,
   parsePurchaseSheetStageRows,
   planDeliveredYesUpdatesFromBlue30,
   planFinalCompleteUpdatesFromSold,
   planFinalReturnedUpdatesFromReturns,
   planFinalStatusFormatUpdatesFromValues,
+  isPurchaseSheetHomePrepSent,
   planHomePrepSentUpdatesFromAmazonHeld,
+  planHomePrepSentUpdatesFromFinalSoldValues,
   PURCHASE_SHEET_COMPLETE_VALUE,
   PURCHASE_SHEET_RETURNED_VALUE,
   resolvePurchaseSheetFinalStatusFormat,
@@ -29,9 +33,9 @@ import {
 
 const CACHE_TTL_SEC = 90;
 /** Pipeline aggregates — bump when Complete / Returned / sold-through model changes. */
-const CACHE_KEY_PIPELINE = 'stock-cost:pipeline-maps:v6';
+const CACHE_KEY_PIPELINE = 'stock-cost:pipeline-maps:v7';
 /** Throttle Blue30→Delivered + Home/Prep→sent + Final→Complete/Returned value writes. */
-const SYNC_THROTTLE_KEY = 'stock-cost:delivered-sync:v5';
+const SYNC_THROTTLE_KEY = 'stock-cost:delivered-sync:v6';
 const SYNC_THROTTLE_SEC = 120;
 /**
  * One-shot (then periodic) Final color backfill. Absent → force format even when
@@ -40,6 +44,13 @@ const SYNC_THROTTLE_SEC = 120;
  */
 const FORMAT_FORCE_KEY = 'stock-cost:final-format-force:v1';
 const FORMAT_FORCE_DONE_TTL_SEC = 6 * 60 * 60;
+/**
+ * One-shot (then periodic) Final Complete/Returned → Home/Prep=sent backfill.
+ * Sold ⇒ must have been sent; absent key forces the pass even when value-sync
+ * is throttled.
+ */
+const SENT_FORCE_KEY = 'stock-cost:home-prep-sent-force:v1';
+const SENT_FORCE_DONE_TTL_SEC = 6 * 60 * 60;
 
 /** Exact Home/Prep cell value when units have been sent into Amazon. */
 export const HOME_PREP_SENT_VALUE = 'sent';
@@ -163,6 +174,100 @@ export class StockCostSheetReadService {
     }
   }
 
+  /** True when Final Complete/Returned → Home/Prep=sent must run (bypass value-sync throttle). */
+  private async isHomePrepSentForceNeeded(): Promise<boolean> {
+    try {
+      const done = await this.redis.get(SENT_FORCE_KEY);
+      return done !== 'done';
+    } catch {
+      return true;
+    }
+  }
+
+  private async markHomePrepSentForceDone(): Promise<void> {
+    try {
+      await this.redis.set(SENT_FORCE_KEY, 'done', SENT_FORCE_DONE_TTL_SEC);
+    } catch {
+      // ignore
+    }
+  }
+
+  /**
+   * Sold ⇒ must have been sent. Force Home/Prep (and literal To Amazon when
+   * separate) to "sent" on every Final Complete/Returned row that still says
+   * HOME / PREP CENTER / blank. Does not touch £/Unit or Final colors.
+   */
+  private async applyHomePrepSentFromFinalSold(opts: {
+    tab: string;
+    purchaseValues: unknown[][];
+    homePrepColIndex0: number;
+    toAmazonColIndex0: number;
+    finalColIndex0: number;
+    /** Rows we just marked Complete/Returned — also ensure sent. */
+    ensureSentSheetRows?: number[];
+  }): Promise<{ sentUpdates: HomePrepSentUpdate[]; errors: string[] }> {
+    const errors: string[] = [];
+    if (opts.homePrepColIndex0 < 0 || opts.finalColIndex0 < 0) {
+      return { sentUpdates: [], errors };
+    }
+
+    const sentUpdates = planHomePrepSentUpdatesFromFinalSoldValues({
+      values: opts.purchaseValues,
+      homePrepColIndex0: opts.homePrepColIndex0,
+      finalColIndex0: opts.finalColIndex0,
+    });
+
+    const seen = new Set(sentUpdates.map((u) => u.sheetRow));
+    for (const sheetRow of opts.ensureSentSheetRows ?? []) {
+      if (seen.has(sheetRow)) continue;
+      const row = opts.purchaseValues[sheetRow - 1] ?? [];
+      if (isPurchaseSheetHomePrepSent(row[opts.homePrepColIndex0])) continue;
+      seen.add(sheetRow);
+      sentUpdates.push({
+        sheetRow,
+        homePrepColIndex0: opts.homePrepColIndex0,
+        asin: '',
+        orderRef: '',
+        qty: 0,
+      });
+    }
+
+    if (sentUpdates.length === 0) {
+      this.logger.log(
+        `Final→Home/Prep sent: no Complete/Returned rows need Home/Prep=${HOME_PREP_SENT_VALUE} on "${opts.tab}"`,
+      );
+      await this.markHomePrepSentForceDone();
+      return { sentUpdates, errors };
+    }
+
+    const homeColLetter = colIndexToA1(opts.homePrepColIndex0);
+    const valueWrites: Array<{ range: string; values: string[][] }> =
+      sentUpdates.map((u) => ({
+        range: `'${opts.tab}'!${homeColLetter}${u.sheetRow}`,
+        values: [[HOME_PREP_SENT_VALUE]],
+      }));
+
+    // Separate literal To Amazon column (if present and distinct).
+    if (opts.toAmazonColIndex0 >= 0) {
+      const toAmzLetter = colIndexToA1(opts.toAmazonColIndex0);
+      for (const u of sentUpdates) {
+        const row = opts.purchaseValues[u.sheetRow - 1] ?? [];
+        if (isPurchaseSheetHomePrepSent(row[opts.toAmazonColIndex0])) continue;
+        valueWrites.push({
+          range: `'${opts.tab}'!${toAmzLetter}${u.sheetRow}`,
+          values: [[HOME_PREP_SENT_VALUE]],
+        });
+      }
+    }
+
+    await this.sheets.batchUpdateValues(valueWrites);
+    this.logger.log(
+      `Final→Home/Prep sent: set Home/Prep=${HOME_PREP_SENT_VALUE} on ${sentUpdates.length} CURRENT ORDERS row(s) (sold ⇒ sent)`,
+    );
+    await this.markHomePrepSentForceDone();
+    return { sentUpdates, errors };
+  }
+
   /**
    * Force-apply green/red on every Final cell whose text is Complete/Returned
    * (case-insensitive). Scans raw column values — not just rows we just wrote.
@@ -257,11 +362,12 @@ export class StockCostSheetReadService {
    * 2) Amazon reached (held + sold) → Home/Prep = "sent" on covered Delivered rows
    * 3) Amazon fulfilled sales → Final = Complete on covered sent rows (green)
    * 4) Amazon returned/refunded → Final = Returned on covered Complete rows (red)
-   * 5) Force Final cell color backfill for ALL Complete / Returned (raw column scan)
+   * 5) Final Complete/Returned → Home/Prep=sent (sold ⇒ must have been sent)
+   * 6) Force Final cell color backfill for ALL Complete / Returned (raw column scan)
    * Never rewrites £/Unit or Units.
    *
-   * Value writes are throttled; format backfill bypasses that throttle until the
-   * one-shot FORMAT_FORCE_KEY is marked done (then re-checks every 6h).
+   * Value writes are throttled; Final→sent and format backfills bypass that
+   * throttle until their one-shot force keys are marked done (then every 6h).
    */
   async syncBlue30ReceivedToPurchaseDelivered(opts?: {
     force?: boolean;
@@ -291,6 +397,8 @@ export class StockCostSheetReadService {
 
     const formatForceNeeded =
       opts?.force === true || (await this.isFinalFormatForceNeeded());
+    const sentForceNeeded =
+      opts?.force === true || (await this.isHomePrepSentForceNeeded());
 
     let valueSyncThrottled = false;
     if (!opts?.force) {
@@ -302,8 +410,8 @@ export class StockCostSheetReadService {
       }
     }
 
-    // Both value sync and format backfill idle → skip entirely.
-    if (valueSyncThrottled && !formatForceNeeded) {
+    // Value sync + format + sold→sent backfills all idle → skip entirely.
+    if (valueSyncThrottled && !formatForceNeeded && !sentForceNeeded) {
       return { ...empty, skippedThrottle: true };
     }
 
@@ -323,10 +431,11 @@ export class StockCostSheetReadService {
 
       const header = (purchaseValues[0] ?? []).map((h) => String(h ?? ''));
       const deliveredColIndex0 = findHeaderColumnIndex(header, ['Delivered']);
-      const homePrepColIndex0 = findHeaderColumnIndex(header, [
-        'Home/Prep',
-        'Prep',
-      ]);
+      const homePrepColIndex0 = findPurchaseSheetHomePrepColumnIndex(header);
+      const toAmazonColIndex0 = findPurchaseSheetToAmazonColumnIndex(
+        header,
+        homePrepColIndex0,
+      );
       const finalColIndex0 = findPurchaseSheetFinalColumnIndex(header);
 
       if (deliveredColIndex0 < 0) {
@@ -452,7 +561,49 @@ export class StockCostSheetReadService {
         }
       } else {
         this.logger.log(
-          'Sheet value sync throttled; running Final Complete/Returned format-only backfill',
+          'Sheet value sync throttled; running Final→sent / format-only backfill',
+        );
+      }
+
+      // Sold ⇒ sent: backfill Home/Prep on every Complete/Returned (force or
+      // after value writes that may have just set Final).
+      const runSoldToSent =
+        homePrepColIndex0 >= 0 &&
+        finalColIndex0 >= 0 &&
+        (sentForceNeeded ||
+          runValueSync ||
+          completeUpdates.length > 0 ||
+          returnedUpdates.length > 0);
+      if (runSoldToSent) {
+        const soldSent = await this.applyHomePrepSentFromFinalSold({
+          tab,
+          purchaseValues,
+          homePrepColIndex0,
+          toAmazonColIndex0,
+          finalColIndex0,
+          ensureSentSheetRows: [
+            ...completeUpdates.map((u) => u.sheetRow),
+            ...returnedUpdates.map((u) => u.sheetRow),
+          ],
+        });
+        errors.push(...soldSent.errors);
+        if (soldSent.sentUpdates.length > 0) {
+          const seen = new Set(sentUpdates.map((u) => u.sheetRow));
+          for (const u of soldSent.sentUpdates) {
+            if (seen.has(u.sheetRow)) continue;
+            seen.add(u.sheetRow);
+            sentUpdates.push(u);
+          }
+          purchaseValues = await this.sheets.getValues(`'${tab}'!A1:AZ`);
+          parsedPurchase = parsePurchaseSheetStageRows(purchaseValues);
+          errors.push(...parsedPurchase.errors);
+        }
+      } else if (
+        sentForceNeeded &&
+        (homePrepColIndex0 < 0 || finalColIndex0 < 0)
+      ) {
+        errors.push(
+          'CURRENT ORDERS: Home/Prep or Final column not found (sold→sent backfill skipped)',
         );
       }
 
@@ -533,7 +684,7 @@ export class StockCostSheetReadService {
    * Read CURRENT ORDERS after optional Blue30→Delivered + Home/Prep→sent +
    * Final→Complete sync. Prep candidates = Delivered=Yes, Home/Prep ≠ sent,
    * Final ≠ Complete. Cached ~90s in Redis (bypassed while Final format force
-   * is pending so greys get fixed on the next dashboard load).
+   * or sold→sent force is pending so the sheet is fixed on the next dashboard load).
    */
   async getPurchasedAndArrivedByAsin(opts?: {
     amazonHeldByAsin?: Map<string, number>;
@@ -541,7 +692,8 @@ export class StockCostSheetReadService {
     returnedByAsin?: Map<string, number>;
   }): Promise<SheetStageSnapshots> {
     const formatForceNeeded = await this.isFinalFormatForceNeeded();
-    if (!formatForceNeeded) {
+    const sentForceNeeded = await this.isHomePrepSentForceNeeded();
+    if (!formatForceNeeded && !sentForceNeeded) {
       try {
         const raw = await this.redis.get(CACHE_KEY_PIPELINE);
         if (raw) {

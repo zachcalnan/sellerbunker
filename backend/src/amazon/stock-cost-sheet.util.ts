@@ -8,8 +8,10 @@
  *
  * Blue30 Quantity Received is NOT a second cost pile — it only drives a sync that
  * flips matching purchase-sheet Delivered → Yes. When Amazon held (available+inbound)
- * covers Delivered=Yes rows, Home/Prep is set to "sent" (middle column). When Amazon
- * sales consume units, Final (next status column after Home/Prep) is set to Complete.
+ * covers Delivered=Yes rows, Home/Prep is set to "sent" (middle / "to amazon" column).
+ * When Amazon sales consume units, Final (next status column after Home/Prep) is set
+ * to Complete. Sold-through Final=Complete/Returned rows must also be Home/Prep=sent
+ * (sold ⇒ must have been sent) — backfilled independently of held FIFO.
  *
  * Exclusivity waterfall (caller): Available → Sent → Prep → Purchased.
  * Completed (sold-through) rows leave every stage — Available is Amazon inventory
@@ -156,6 +158,38 @@ export function resolvePurchaseSheetFinalStatusFormat(
 }
 
 /**
+ * Middle status column ("to amazon"): Home/Prep, or To Amazon / to AMZ aliases
+ * when the sheet uses that header instead.
+ */
+export function findPurchaseSheetHomePrepColumnIndex(header: string[]): number {
+  return findHeaderColumnIndex(header, [
+    'Home/Prep',
+    'Prep',
+    'to AMZ',
+    'toAMZ',
+    'To Amazon',
+  ]);
+}
+
+/**
+ * Literal To Amazon / to AMZ column when it is separate from Home/Prep.
+ * Returns -1 when absent or when it is the same column as Home/Prep.
+ */
+export function findPurchaseSheetToAmazonColumnIndex(
+  header: string[],
+  homePrepColIndex0: number,
+): number {
+  const idx = findHeaderColumnIndex(header, [
+    'To Amazon',
+    'to AMZ',
+    'toAMZ',
+  ]);
+  if (idx < 0) return -1;
+  if (homePrepColIndex0 >= 0 && idx === homePrepColIndex0) return -1;
+  return idx;
+}
+
+/**
  * Resolve the Final / Complete status column on CURRENT ORDERS.
  * Prefer named Final / Sold / Complete / Done / Ebay/Return; else the column
  * immediately after Home/Prep when that header is a status-like / blank name
@@ -172,7 +206,7 @@ export function findPurchaseSheetFinalColumnIndex(header: string[]): number {
   ]);
   if (named >= 0) return named;
 
-  const homePrepIdx = findHeaderColumnIndex(header, ['Home/Prep', 'Prep']);
+  const homePrepIdx = findPurchaseSheetHomePrepColumnIndex(header);
   if (homePrepIdx < 0) return -1;
   const next = homePrepIdx + 1;
   if (next >= header.length) return -1;
@@ -306,7 +340,7 @@ export function parsePurchaseSheetStageRows(values: unknown[][]): {
     'Order Reference',
     'Order Ref',
   ]);
-  const homePrepIdx = findHeaderColumnIndex(header, ['Home/Prep', 'Prep']);
+  const homePrepIdx = findPurchaseSheetHomePrepColumnIndex(header);
   const finalIdx = findPurchaseSheetFinalColumnIndex(header);
 
   const inTransit: SheetCostLine[] = [];
@@ -538,7 +572,9 @@ export type FinalStatusFormatUpdate = {
  * Plan idempotent Home/Prep → "sent" writes for Delivered=Yes rows covered by
  * Amazon units that reached FBA: held (available+inbound) plus sold-through.
  * Sold is included so already-sold rows still get sent before Complete backfill.
- * Skips Final=Complete / Returned / protected rows. Does not touch £/Unit, Units, or Delivered.
+ * Skips Final=Complete / Returned / protected rows (those are covered by
+ * planHomePrepSentUpdatesFromFinalSoldValues — sold ⇒ must already be sent).
+ * Does not touch £/Unit, Units, or Delivered.
  */
 export function planHomePrepSentUpdatesFromAmazonHeld(opts: {
   purchaseDelivered: SheetCostLine[];
@@ -554,7 +590,7 @@ export function planHomePrepSentUpdatesFromAmazonHeld(opts: {
 
   const byAsin = new Map<string, SheetCostLine[]>();
   for (const line of opts.purchaseDelivered) {
-    if (line.finalComplete) continue; // sold-through — leave alone
+    if (line.finalComplete) continue; // sold-through — Final→sent backfill owns these
     if (isPurchaseSheetFinalProtected(line.finalRaw)) continue;
     if (line.homePrep === 'sent') continue; // already marked
     const asin = line.asin.trim().toUpperCase();
@@ -594,6 +630,40 @@ export function planHomePrepSentUpdatesFromAmazonHeld(opts: {
   }
 
   return updates;
+}
+
+/**
+ * Sold ⇒ must have been sent. Scan the Final column on raw sheet values and plan
+ * Home/Prep → "sent" for every Complete / Returned cell (case-insensitive) whose
+ * Home/Prep is not already sent (HOME / PREP CENTER / blank / other).
+ * Does not depend on ASIN/qty parse or Amazon held/sold maps. Does not touch
+ * £/Unit, Units, Delivered, or Final.
+ */
+export function planHomePrepSentUpdatesFromFinalSoldValues(opts: {
+  values: unknown[][];
+  homePrepColIndex0: number;
+  finalColIndex0: number;
+}): HomePrepSentUpdate[] {
+  if (opts.homePrepColIndex0 < 0 || opts.finalColIndex0 < 0) return [];
+  const out: HomePrepSentUpdate[] = [];
+  for (let r = 1; r < opts.values.length; r++) {
+    const row = opts.values[r] ?? [];
+    const finalRaw = row[opts.finalColIndex0];
+    const soldThrough =
+      isPurchaseSheetFinalComplete(finalRaw) ||
+      isPurchaseSheetFinalReturned(finalRaw);
+    if (!soldThrough) continue;
+    const homeRaw = row[opts.homePrepColIndex0];
+    if (isPurchaseSheetHomePrepSent(homeRaw)) continue;
+    out.push({
+      sheetRow: r + 1,
+      homePrepColIndex0: opts.homePrepColIndex0,
+      asin: '',
+      orderRef: '',
+      qty: 0,
+    });
+  }
+  return out;
 }
 
 /**
