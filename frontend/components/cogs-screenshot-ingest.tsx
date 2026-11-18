@@ -209,9 +209,7 @@ function blankDraft(): ExtractDraft {
     promo: { type: "none" },
     // Blank qty so manual entry can type 4 without fighting sticky 1.
     lines: [emptyLine({ qty: "" })],
-    warnings: [
-      "Search your listings, or paste an ASIN and Search Amazon if it is not listed yet — then fill qty, unit cost, supplier, and order number.",
-    ],
+    warnings: [],
   };
 }
 
@@ -449,7 +447,6 @@ export function CogsScreenshotIngest({
   const [open, setOpen] = useState(isPage);
   const [busy, setBusy] = useState(false);
   const [extractBusy, setExtractBusy] = useState(false);
-  // Manual entry first; tick “Search with AI” only when needed.
   const [useAiSearch, setUseAiSearch] = useState(false);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [draft, setDraft] = useState<ExtractDraft | null>(
@@ -512,9 +509,7 @@ export function CogsScreenshotIngest({
     async (file: File | null) => {
       if (!file) return;
       if (!useAiSearch) {
-        setLocalError(
-          "Turn on “Search with AI” to analyse a screenshot, or fill the form and search your listings.",
-        );
+        setLocalError("Enable AI to analyse a screenshot.");
         return;
       }
       if (!file.type.startsWith("image/")) {
@@ -523,7 +518,7 @@ export function CogsScreenshotIngest({
       }
       if (quota && quota.remaining <= 0) {
         setLocalError(
-          `Daily screenshot AI limit reached (${quota.limit}/day). Search your listings instead, or try again tomorrow.`,
+          `Daily screenshot AI limit reached (${quota.limit}/day). Try again tomorrow.`,
         );
         setDraft(blankDraft());
         return;
@@ -786,18 +781,12 @@ export function CogsScreenshotIngest({
           >
             {!isPage ? (
             <div className="mb-4 flex items-start justify-between gap-2">
-              <div>
-                <h2
-                  id="cogs-screenshot-title"
-                  className="text-lg font-semibold text-[var(--foreground)]"
-                >
-                  Log a purchase
-                </h2>
-                <p className="mt-1 text-xs text-[var(--muted-foreground)]">
-                  Fill supplier, order, qty and cost — or tick Search with AI
-                  to read a screenshot. Updates COGS and your purchase sheets.
-                </p>
-              </div>
+              <h2
+                id="cogs-screenshot-title"
+                className="text-lg font-semibold text-[var(--foreground)]"
+              >
+                Log a purchase
+              </h2>
               <button
                 type="button"
                 onClick={close}
@@ -812,7 +801,7 @@ export function CogsScreenshotIngest({
               </h2>
             )}
 
-            <label className="mb-3 flex cursor-pointer items-start gap-2 text-sm text-[var(--foreground)]">
+            <label className="mb-3 flex cursor-pointer items-center gap-2 text-sm text-[var(--foreground)]">
               <input
                 type="checkbox"
                 checked={useAiSearch}
@@ -826,25 +815,17 @@ export function CogsScreenshotIngest({
                     if (!draft) setDraft(blankDraft());
                   }
                 }}
-                className="mt-0.5"
               />
-              <span>
-                <span className="font-medium">Search with AI</span>
-                <span className="mt-0.5 block text-xs text-[var(--muted-foreground)]">
-                  Uses OpenAI to read a screenshot. Leave unticked to search your
-                  listings for free.
-                </span>
-              </span>
+              <span className="font-medium">AI</span>
             </label>
 
             {useAiSearch && quota ? (
               <p className="mb-3 text-xs text-[var(--muted-foreground)]">
-                AI extracts today:{" "}
                 <span className="font-medium text-[var(--foreground)]">
                   {quota.used}/{quota.limit}
                 </span>
                 {quota.remaining === 0
-                  ? " — limit reached; search listings instead."
+                  ? " — limit reached"
                   : ` · ${quota.remaining} left`}
                 {lastCostUsd != null
                   ? ` · last call ~$${lastCostUsd.toFixed(3)}`
@@ -913,12 +894,7 @@ export function CogsScreenshotIngest({
                 </>
               )}
             </div>
-            ) : (
-              <p className="mb-3 text-xs text-[var(--muted-foreground)]">
-                Search a listing below, fill supplier / order / qty / cost, then
-                confirm. No OpenAI call.
-              </p>
-            )}
+            ) : null}
 
             {useAiSearch && isPage ? (
               <label className="mb-3 block text-xs text-[var(--muted-foreground)]">
@@ -950,18 +926,14 @@ export function CogsScreenshotIngest({
                   className="text-xs text-sb-accent underline"
                   disabled={extractBusy || busy}
                 >
-                  Enter manually (no AI)
+                  Enter manually
                 </button>
               ) : null}
             </div>
 
             {modelUsed ? (
               <p className="mb-2 text-[11px] text-[var(--muted-foreground)]">
-                Extracted with {modelUsed} (OpenAI API — not Cursor)
-              </p>
-            ) : draft && !modelUsed ? (
-              <p className="mb-2 text-[11px] text-[var(--muted-foreground)]">
-                Manual entry — AI extract skipped or unavailable
+                Extracted with {modelUsed}
               </p>
             ) : null}
 
