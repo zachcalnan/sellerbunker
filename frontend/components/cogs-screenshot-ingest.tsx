@@ -213,6 +213,206 @@ function blankDraft(): ExtractDraft {
   };
 }
 
+function PurchaseLineRepricer({
+  asin,
+  label,
+}: {
+  asin: string;
+  label: string;
+}) {
+  const { getToken } = useAuth();
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [rules, setRules] = useState<Array<{ id: string; name: string }>>([]);
+  const [ruleId, setRuleId] = useState("");
+  const [minPrice, setMinPrice] = useState("");
+  const [note, setNote] = useState<string | null>(null);
+  const validAsin = isValidAsinShape(asin);
+
+  const authHeaders = useCallback(async () => {
+    const token = await getToken({ template: "backend" });
+    if (!token) throw new Error("Not signed in.");
+    return {
+      Authorization: `Bearer ${token}`,
+      ...getDevImpersonationHeaders(),
+    };
+  }, [getToken]);
+
+  const toggle = async () => {
+    if (open) {
+      setOpen(false);
+      return;
+    }
+    setOpen(true);
+    setNote(null);
+    if (!validAsin) {
+      setNote("Enter this line’s ASIN first.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const headers = await authHeaders();
+      const [rulesRes, currentRes] = await Promise.all([
+        fetch(`${API_BASE}/api/repricer/rules`, { headers }),
+        fetch(
+          `${API_BASE}/api/repricer/asin?asin=${encodeURIComponent(asin)}`,
+          { headers },
+        ),
+      ]);
+      if (!rulesRes.ok) throw new Error("Could not load pricing rules.");
+      const rulesJson = (await rulesRes.json()) as {
+        presets?: Array<{ id: string; name?: string }>;
+      };
+      const presets = (rulesJson.presets ?? []).map((p) => ({
+        id: p.id,
+        name: (p.name ?? "").trim() || "Untitled rule",
+      }));
+      setRules(presets);
+      let currentRule = "";
+      let currentMin = "";
+      if (currentRes.ok) {
+        const current = (await currentRes.json()) as {
+          ruleSetId?: string | null;
+          minListPrice?: number | null;
+        };
+        currentRule = current.ruleSetId ?? "";
+        currentMin =
+          current.minListPrice != null && Number.isFinite(current.minListPrice)
+            ? String(current.minListPrice)
+            : "";
+      }
+      setRuleId(currentRule || presets[0]?.id || "");
+      setMinPrice(currentMin);
+      if (presets.length === 0) {
+        setNote("Create a pricing rule on the Repricer page first.");
+      }
+    } catch (e) {
+      setNote(e instanceof Error ? e.message : "Could not load repricer.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const apply = async () => {
+    if (!validAsin) {
+      setNote("Enter this line’s ASIN first.");
+      return;
+    }
+    const min = Number(minPrice);
+    if (!ruleId) {
+      setNote("Pick a pricing rule.");
+      return;
+    }
+    if (!Number.isFinite(min) || min <= 0) {
+      setNote("Enter a minimum hard price above 0.");
+      return;
+    }
+    setBusy(true);
+    setNote(null);
+    try {
+      const headers = await authHeaders();
+      const res = await fetch(`${API_BASE}/api/repricer/asin`, {
+        method: "POST",
+        headers: { ...headers, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          asin,
+          ruleSetId: ruleId,
+          minListPrice: Math.round(min * 100) / 100,
+        }),
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        message?: string | string[];
+        ruleSetName?: string | null;
+        minListPrice?: number;
+      };
+      if (!res.ok) {
+        const msg = Array.isArray(data.message)
+          ? data.message.join(" ")
+          : data.message;
+        throw new Error(msg || "Could not apply the rule.");
+      }
+      const ruleName =
+        data.ruleSetName ?? rules.find((r) => r.id === ruleId)?.name ?? "rule";
+      setNote(
+        `Applied “${ruleName}” to ${asin}. Hard minimum £${Number(data.minListPrice ?? min).toFixed(2)}.`,
+      );
+    } catch (e) {
+      setNote(e instanceof Error ? e.message : "Could not apply the rule.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="rounded-lg border border-[var(--surface-border)] bg-[var(--background)] px-3 py-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="min-w-0 text-xs text-[var(--muted-foreground)]">
+          <span className="font-medium text-[var(--foreground)]">{label}</span>
+          {validAsin ? (
+            <span className="ml-2 font-mono text-[var(--foreground)]">{asin}</span>
+          ) : (
+            <span className="ml-2">No ASIN yet</span>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={() => void toggle()}
+          className="cursor-pointer rounded-lg border border-[var(--surface-border)] bg-[var(--surface)] px-3 py-1.5 text-xs font-medium text-[var(--foreground)] hover:bg-[var(--foreground)]/5"
+        >
+          Apply repricer
+        </button>
+      </div>
+      {open ? (
+        <div className="mt-2 grid gap-2 sm:grid-cols-2">
+          <label className="flex flex-col gap-0.5 text-xs text-[var(--muted-foreground)]">
+            Pricing rule
+            <select
+              value={ruleId}
+              onChange={(e) => setRuleId(e.target.value)}
+              disabled={busy || !validAsin || rules.length === 0}
+              className="rounded border border-[var(--surface-border)] bg-[var(--surface)] px-2 py-1.5 text-sm text-[var(--foreground)]"
+            >
+              {rules.length === 0 ? (
+                <option value="">No rules yet</option>
+              ) : (
+                rules.map((rule) => (
+                  <option key={rule.id} value={rule.id}>
+                    {rule.name}
+                  </option>
+                ))
+              )}
+            </select>
+          </label>
+          <label className="flex flex-col gap-0.5 text-xs text-[var(--muted-foreground)]">
+            Minimum hard price
+            <input
+              inputMode="decimal"
+              value={minPrice}
+              onChange={(e) => setMinPrice(e.target.value)}
+              placeholder="e.g. 12.99"
+              disabled={busy || !validAsin}
+              className="rounded border border-[var(--surface-border)] bg-[var(--surface)] px-2 py-1.5 text-sm text-[var(--foreground)]"
+            />
+          </label>
+          <div className="sm:col-span-2 flex justify-end">
+            <button
+              type="button"
+              onClick={() => void apply()}
+              disabled={busy || !validAsin || rules.length === 0}
+              className="cursor-pointer rounded-lg bg-sb-accent px-3 py-1.5 text-xs font-medium text-black disabled:opacity-60"
+            >
+              {busy ? "Applying…" : "Apply to this ASIN"}
+            </button>
+          </div>
+        </div>
+      ) : null}
+      {note ? (
+        <p className="mt-2 text-[11px] text-[var(--muted-foreground)]">{note}</p>
+      ) : null}
+    </div>
+  );
+}
+
 function ListingSearchField({
   onSearch,
   onLookupAsin,
@@ -1348,6 +1548,16 @@ export function CogsScreenshotIngest({
                     </div>
                   </div>
                 ))}
+
+                <div className="space-y-2">
+                  {draft.lines.map((line, idx) => (
+                    <PurchaseLineRepricer
+                      key={`repricer-${idx}-${(line.asin ?? "").toUpperCase()}`}
+                      label={`Line ${idx + 1}`}
+                      asin={(line.asin ?? "").trim().toUpperCase()}
+                    />
+                  ))}
+                </div>
 
                 <div className="flex flex-wrap gap-2 pt-1">
                   <button
