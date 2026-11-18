@@ -799,6 +799,33 @@ export function planFinalStatusFormatUpdates(opts: {
 }
 
 /**
+ * Scan the Final column on raw sheet values (all data rows) and plan green/red
+ * formats for Complete / Returned (case-insensitive). Does not depend on ASIN/qty
+ * parse — so every visible Complete/Returned cell is colored.
+ */
+export function planFinalStatusFormatUpdatesFromValues(opts: {
+  values: unknown[][];
+  finalColIndex0: number;
+}): FinalStatusFormatUpdate[] {
+  if (opts.finalColIndex0 < 0) return [];
+  const out: FinalStatusFormatUpdate[] = [];
+  for (let r = 1; r < opts.values.length; r++) {
+    const row = opts.values[r] ?? [];
+    const raw = row[opts.finalColIndex0];
+    const fmt = resolvePurchaseSheetFinalStatusFormat(raw);
+    if (!fmt) continue;
+    out.push({
+      sheetRow: r + 1,
+      finalColIndex0: opts.finalColIndex0,
+      status: fmt.status,
+      backgroundColor: fmt.backgroundColor,
+      foregroundColor: fmt.foregroundColor,
+    });
+  }
+  return out;
+}
+
+/**
  * Plan idempotent Delivered=Yes writes from Blue30 Quantity Received.
  * Match Order Ref+ASIN first, else FIFO ASIN-only against undelivered rows.
  * Does not touch £/Unit, Units, or other cells.

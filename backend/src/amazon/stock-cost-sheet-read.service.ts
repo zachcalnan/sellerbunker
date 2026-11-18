@@ -14,7 +14,7 @@ import {
   planDeliveredYesUpdatesFromBlue30,
   planFinalCompleteUpdatesFromSold,
   planFinalReturnedUpdatesFromReturns,
-  planFinalStatusFormatUpdates,
+  planFinalStatusFormatUpdatesFromValues,
   planHomePrepSentUpdatesFromAmazonHeld,
   PURCHASE_SHEET_COMPLETE_VALUE,
   PURCHASE_SHEET_RETURNED_VALUE,
@@ -29,10 +29,17 @@ import {
 
 const CACHE_TTL_SEC = 90;
 /** Pipeline aggregates — bump when Complete / Returned / sold-through model changes. */
-const CACHE_KEY_PIPELINE = 'stock-cost:pipeline-maps:v5';
-/** Throttle Blue30→Delivered + Home/Prep→sent + Final→Complete/Returned + formats. */
-const SYNC_THROTTLE_KEY = 'stock-cost:delivered-sync:v4';
+const CACHE_KEY_PIPELINE = 'stock-cost:pipeline-maps:v6';
+/** Throttle Blue30→Delivered + Home/Prep→sent + Final→Complete/Returned value writes. */
+const SYNC_THROTTLE_KEY = 'stock-cost:delivered-sync:v5';
 const SYNC_THROTTLE_SEC = 120;
+/**
+ * One-shot (then periodic) Final color backfill. Absent → force format even when
+ * value-sync is throttled. Set to "done" after a successful format pass; TTL lets
+ * greys get re-fixed if someone clears colors later.
+ */
+const FORMAT_FORCE_KEY = 'stock-cost:final-format-force:v1';
+const FORMAT_FORCE_DONE_TTL_SEC = 6 * 60 * 60;
 
 /** Exact Home/Prep cell value when units have been sent into Amazon. */
 export const HOME_PREP_SENT_VALUE = 'sent';
@@ -138,13 +145,123 @@ export class StockCostSheetReadService {
     }
   }
 
+  /** True when Final Complete/Returned colors must be force-applied (bypass value-sync throttle). */
+  private async isFinalFormatForceNeeded(): Promise<boolean> {
+    try {
+      const done = await this.redis.get(FORMAT_FORCE_KEY);
+      return done !== 'done';
+    } catch {
+      return true;
+    }
+  }
+
+  private async markFinalFormatForceDone(): Promise<void> {
+    try {
+      await this.redis.set(FORMAT_FORCE_KEY, 'done', FORMAT_FORCE_DONE_TTL_SEC);
+    } catch {
+      // ignore
+    }
+  }
+
+  /**
+   * Force-apply green/red on every Final cell whose text is Complete/Returned
+   * (case-insensitive). Scans raw column values — not just rows we just wrote.
+   */
+  private async applyFinalStatusFormats(opts: {
+    tab: string;
+    purchaseValues: unknown[][];
+    finalColIndex0: number;
+    completeUpdates: FinalCompleteUpdate[];
+    returnedUpdates: FinalReturnedUpdate[];
+  }): Promise<{ formatUpdates: FinalStatusFormatUpdate[]; errors: string[] }> {
+    const errors: string[] = [];
+    if (opts.finalColIndex0 < 0) {
+      return { formatUpdates: [], errors };
+    }
+
+    const formatUpdates = planFinalStatusFormatUpdatesFromValues({
+      values: opts.purchaseValues,
+      finalColIndex0: opts.finalColIndex0,
+    });
+
+    // Ensure rows we just wrote are included even if the sheet re-read lagged.
+    for (const u of opts.completeUpdates) {
+      if (formatUpdates.some((f) => f.sheetRow === u.sheetRow)) continue;
+      const fmt = resolvePurchaseSheetFinalStatusFormat(
+        PURCHASE_SHEET_COMPLETE_VALUE,
+      );
+      if (!fmt) continue;
+      formatUpdates.push({
+        sheetRow: u.sheetRow,
+        finalColIndex0: opts.finalColIndex0,
+        status: fmt.status,
+        backgroundColor: fmt.backgroundColor,
+        foregroundColor: fmt.foregroundColor,
+      });
+    }
+    for (const u of opts.returnedUpdates) {
+      if (formatUpdates.some((f) => f.sheetRow === u.sheetRow)) continue;
+      const fmt = resolvePurchaseSheetFinalStatusFormat(
+        PURCHASE_SHEET_RETURNED_VALUE,
+      );
+      if (!fmt) continue;
+      formatUpdates.push({
+        sheetRow: u.sheetRow,
+        finalColIndex0: opts.finalColIndex0,
+        status: fmt.status,
+        backgroundColor: fmt.backgroundColor,
+        foregroundColor: fmt.foregroundColor,
+      });
+    }
+
+    if (formatUpdates.length === 0) {
+      this.logger.log(
+        `Final status colors: no Complete/Returned cells to format on "${opts.tab}"`,
+      );
+      await this.markFinalFormatForceDone();
+      return { formatUpdates, errors };
+    }
+
+    const sheetId = await this.sheets.getSheetIdByTitle(opts.tab);
+    if (sheetId == null) {
+      const msg = `CURRENT ORDERS: could not resolve sheetId for tab "${opts.tab}" (format skipped)`;
+      errors.push(msg);
+      this.logger.error(msg);
+      return { formatUpdates: [], errors };
+    }
+
+    const completeN = formatUpdates.filter((f) => f.status === 'Complete').length;
+    const returnedN = formatUpdates.filter((f) => f.status === 'Returned').length;
+    this.logger.log(
+      `Final status colors: applying sheetId=${sheetId} tab="${opts.tab}" col=${opts.finalColIndex0} complete=${completeN} returned=${returnedN} total=${formatUpdates.length}`,
+    );
+
+    const applied = await this.sheets.batchUpdateCellFormats(
+      formatUpdates.map((f) => ({
+        sheetId,
+        sheetRow: f.sheetRow,
+        colIndex0: f.finalColIndex0,
+        backgroundColor: f.backgroundColor,
+        foregroundColor: f.foregroundColor,
+      })),
+    );
+    this.logger.log(
+      `Final status colors: reformatted ${applied} Complete/Returned cell(s) (${completeN} green, ${returnedN} red)`,
+    );
+    await this.markFinalFormatForceDone();
+    return { formatUpdates, errors };
+  }
+
   /**
    * 1) Blue30 Quantity Received → CURRENT ORDERS Delivered=Yes
    * 2) Amazon reached (held + sold) → Home/Prep = "sent" on covered Delivered rows
    * 3) Amazon fulfilled sales → Final = Complete on covered sent rows (green)
    * 4) Amazon returned/refunded → Final = Returned on covered Complete rows (red)
-   * 5) Idempotent Final cell color backfill for Complete / Returned
+   * 5) Force Final cell color backfill for ALL Complete / Returned (raw column scan)
    * Never rewrites £/Unit or Units.
+   *
+   * Value writes are throttled; format backfill bypasses that throttle until the
+   * one-shot FORMAT_FORCE_KEY is marked done (then re-checks every 6h).
    */
   async syncBlue30ReceivedToPurchaseDelivered(opts?: {
     force?: boolean;
@@ -172,15 +289,22 @@ export class StockCostSheetReadService {
       return { ...empty, errors: ['Purchase Google Sheet not configured'] };
     }
 
+    const formatForceNeeded =
+      opts?.force === true || (await this.isFinalFormatForceNeeded());
+
+    let valueSyncThrottled = false;
     if (!opts?.force) {
       try {
         const throttled = await this.redis.get(SYNC_THROTTLE_KEY);
-        if (throttled) {
-          return { ...empty, skippedThrottle: true };
-        }
+        valueSyncThrottled = Boolean(throttled);
       } catch {
         // proceed without throttle if Redis unavailable
       }
+    }
+
+    // Both value sync and format backfill idle → skip entirely.
+    if (valueSyncThrottled && !formatForceNeeded) {
+      return { ...empty, skippedThrottle: true };
     }
 
     const errors: string[] = [];
@@ -189,6 +313,7 @@ export class StockCostSheetReadService {
     let completeUpdates: FinalCompleteUpdate[] = [];
     let returnedUpdates: FinalReturnedUpdate[] = [];
     let formatUpdates: FinalStatusFormatUpdate[] = [];
+    const runValueSync = !valueSyncThrottled;
 
     try {
       const tab = this.currentTabTitle();
@@ -208,185 +333,144 @@ export class StockCostSheetReadService {
         errors.push('CURRENT ORDERS: Delivered column not found');
       }
 
-      const b30Id = this.blue30SpreadsheetId();
-      if (this.sheets.isAuthConfigured() && b30Id && deliveredColIndex0 >= 0) {
-        const b30Tab = this.blue30TabTitle();
-        const blue30Values = await this.sheets.getValues(
-          `'${b30Tab}'!A1:AZ`,
-          b30Id,
-        );
-        const parsedB30 = parseBlue30ArrivedRows(blue30Values);
-        errors.push(...parsedB30.errors);
-
-        deliveredUpdates = planDeliveredYesUpdatesFromBlue30({
-          purchaseInTransit: parsedPurchase.inTransit,
-          deliveredColIndex0,
-          blue30Arrived: parsedB30.arrived,
-        });
-
-        if (deliveredUpdates.length > 0) {
-          const colLetter = colIndexToA1(deliveredColIndex0);
-          await this.sheets.batchUpdateValues(
-            deliveredUpdates.map((u) => ({
-              range: `'${tab}'!${colLetter}${u.sheetRow}`,
-              values: [['Yes']],
-            })),
+      if (runValueSync) {
+        const b30Id = this.blue30SpreadsheetId();
+        if (this.sheets.isAuthConfigured() && b30Id && deliveredColIndex0 >= 0) {
+          const b30Tab = this.blue30TabTitle();
+          const blue30Values = await this.sheets.getValues(
+            `'${b30Tab}'!A1:AZ`,
+            b30Id,
           );
-          this.logger.log(
-            `Blue30→Delivered sync: set Delivered=Yes on ${deliveredUpdates.length} CURRENT ORDERS row(s)`,
-          );
-          // Re-read so Home/Prep=sent planning sees flipped Delivered rows.
-          purchaseValues = await this.sheets.getValues(`'${tab}'!A1:AZ`);
-          parsedPurchase = parsePurchaseSheetStageRows(purchaseValues);
-          errors.push(...parsedPurchase.errors);
-        }
-      } else if (!b30Id || !this.sheets.isAuthConfigured()) {
-        errors.push('Blue30 Inbound sheet not configured');
-      }
+          const parsedB30 = parseBlue30ArrivedRows(blue30Values);
+          errors.push(...parsedB30.errors);
 
-      const held = opts?.amazonHeldByAsin;
-      const sold = opts?.soldByAsin;
-      const returned = opts?.returnedByAsin;
-      if (held && homePrepColIndex0 >= 0) {
-        sentUpdates = planHomePrepSentUpdatesFromAmazonHeld({
-          purchaseDelivered: parsedPurchase.delivered,
-          homePrepColIndex0,
-          amazonHeldByAsin: held,
-          soldByAsin: sold,
-        });
-
-        if (sentUpdates.length > 0) {
-          const colLetter = colIndexToA1(homePrepColIndex0);
-          await this.sheets.batchUpdateValues(
-            sentUpdates.map((u) => ({
-              range: `'${tab}'!${colLetter}${u.sheetRow}`,
-              values: [[HOME_PREP_SENT_VALUE]],
-            })),
-          );
-          this.logger.log(
-            `Amazon→Home/Prep sync: set Home/Prep=${HOME_PREP_SENT_VALUE} on ${sentUpdates.length} CURRENT ORDERS row(s)`,
-          );
-          // Re-read so Final=Complete planning sees flipped sent rows.
-          purchaseValues = await this.sheets.getValues(`'${tab}'!A1:AZ`);
-          parsedPurchase = parsePurchaseSheetStageRows(purchaseValues);
-          errors.push(...parsedPurchase.errors);
-        }
-      } else if (held && homePrepColIndex0 < 0) {
-        errors.push('CURRENT ORDERS: Home/Prep column not found');
-      }
-
-      if (sold && finalColIndex0 >= 0) {
-        completeUpdates = planFinalCompleteUpdatesFromSold({
-          purchaseDelivered: parsedPurchase.delivered,
-          finalColIndex0,
-          soldByAsin: sold,
-        });
-
-        if (completeUpdates.length > 0) {
-          const colLetter = colIndexToA1(finalColIndex0);
-          await this.sheets.batchUpdateValues(
-            completeUpdates.map((u) => ({
-              range: `'${tab}'!${colLetter}${u.sheetRow}`,
-              values: [[PURCHASE_SHEET_COMPLETE_VALUE]],
-            })),
-          );
-          this.logger.log(
-            `Amazon sales→Final sync: set Final=${PURCHASE_SHEET_COMPLETE_VALUE} on ${completeUpdates.length} CURRENT ORDERS row(s)`,
-          );
-          // Re-read so Returned planning + format backfill see Complete values.
-          purchaseValues = await this.sheets.getValues(`'${tab}'!A1:AZ`);
-          parsedPurchase = parsePurchaseSheetStageRows(purchaseValues);
-          errors.push(...parsedPurchase.errors);
-        }
-      } else if (sold && finalColIndex0 < 0) {
-        errors.push(
-          'CURRENT ORDERS: Final/Complete column not found (expected Final or status column after Home/Prep)',
-        );
-      }
-
-      if (returned && finalColIndex0 >= 0) {
-        returnedUpdates = planFinalReturnedUpdatesFromReturns({
-          purchaseDelivered: parsedPurchase.delivered,
-          finalColIndex0,
-          returnedByAsin: returned,
-        });
-
-        if (returnedUpdates.length > 0) {
-          const colLetter = colIndexToA1(finalColIndex0);
-          await this.sheets.batchUpdateValues(
-            returnedUpdates.map((u) => ({
-              range: `'${tab}'!${colLetter}${u.sheetRow}`,
-              values: [[PURCHASE_SHEET_RETURNED_VALUE]],
-            })),
-          );
-          this.logger.log(
-            `Amazon returns→Final sync: set Final=${PURCHASE_SHEET_RETURNED_VALUE} on ${returnedUpdates.length} CURRENT ORDERS row(s)`,
-          );
-          purchaseValues = await this.sheets.getValues(`'${tab}'!A1:AZ`);
-          parsedPurchase = parsePurchaseSheetStageRows(purchaseValues);
-          errors.push(...parsedPurchase.errors);
-        }
-      }
-
-      if (finalColIndex0 >= 0) {
-        formatUpdates = planFinalStatusFormatUpdates({
-          lines: [
-            ...parsedPurchase.inTransit,
-            ...parsedPurchase.delivered,
-          ],
-          finalColIndex0,
-        });
-        // Also include rows we just wrote if parse somehow missed (shouldn't).
-        for (const u of completeUpdates) {
-          if (formatUpdates.some((f) => f.sheetRow === u.sheetRow)) continue;
-          const fmt = resolvePurchaseSheetFinalStatusFormat(
-            PURCHASE_SHEET_COMPLETE_VALUE,
-          );
-          if (!fmt) continue;
-          formatUpdates.push({
-            sheetRow: u.sheetRow,
-            finalColIndex0,
-            status: fmt.status,
-            backgroundColor: fmt.backgroundColor,
-            foregroundColor: fmt.foregroundColor,
+          deliveredUpdates = planDeliveredYesUpdatesFromBlue30({
+            purchaseInTransit: parsedPurchase.inTransit,
+            deliveredColIndex0,
+            blue30Arrived: parsedB30.arrived,
           });
-        }
-        for (const u of returnedUpdates) {
-          if (formatUpdates.some((f) => f.sheetRow === u.sheetRow)) continue;
-          const fmt = resolvePurchaseSheetFinalStatusFormat(
-            PURCHASE_SHEET_RETURNED_VALUE,
-          );
-          if (!fmt) continue;
-          formatUpdates.push({
-            sheetRow: u.sheetRow,
-            finalColIndex0,
-            status: fmt.status,
-            backgroundColor: fmt.backgroundColor,
-            foregroundColor: fmt.foregroundColor,
-          });
-        }
 
-        if (formatUpdates.length > 0) {
-          const sheetId = await this.sheets.getSheetIdByTitle(tab);
-          if (sheetId == null) {
-            errors.push(
-              `CURRENT ORDERS: could not resolve sheetId for tab "${tab}" (format skipped)`,
-            );
-          } else {
-            await this.sheets.batchUpdateCellFormats(
-              formatUpdates.map((f) => ({
-                sheetId,
-                sheetRow: f.sheetRow,
-                colIndex0: f.finalColIndex0,
-                backgroundColor: f.backgroundColor,
-                foregroundColor: f.foregroundColor,
+          if (deliveredUpdates.length > 0) {
+            const colLetter = colIndexToA1(deliveredColIndex0);
+            await this.sheets.batchUpdateValues(
+              deliveredUpdates.map((u) => ({
+                range: `'${tab}'!${colLetter}${u.sheetRow}`,
+                values: [['Yes']],
               })),
             );
             this.logger.log(
-              `Final status colors: formatted ${formatUpdates.length} Complete/Returned cell(s)`,
+              `Blue30→Delivered sync: set Delivered=Yes on ${deliveredUpdates.length} CURRENT ORDERS row(s)`,
             );
+            purchaseValues = await this.sheets.getValues(`'${tab}'!A1:AZ`);
+            parsedPurchase = parsePurchaseSheetStageRows(purchaseValues);
+            errors.push(...parsedPurchase.errors);
+          }
+        } else if (!b30Id || !this.sheets.isAuthConfigured()) {
+          errors.push('Blue30 Inbound sheet not configured');
+        }
+
+        const held = opts?.amazonHeldByAsin;
+        const sold = opts?.soldByAsin;
+        const returned = opts?.returnedByAsin;
+        if (held && homePrepColIndex0 >= 0) {
+          sentUpdates = planHomePrepSentUpdatesFromAmazonHeld({
+            purchaseDelivered: parsedPurchase.delivered,
+            homePrepColIndex0,
+            amazonHeldByAsin: held,
+            soldByAsin: sold,
+          });
+
+          if (sentUpdates.length > 0) {
+            const colLetter = colIndexToA1(homePrepColIndex0);
+            await this.sheets.batchUpdateValues(
+              sentUpdates.map((u) => ({
+                range: `'${tab}'!${colLetter}${u.sheetRow}`,
+                values: [[HOME_PREP_SENT_VALUE]],
+              })),
+            );
+            this.logger.log(
+              `Amazon→Home/Prep sync: set Home/Prep=${HOME_PREP_SENT_VALUE} on ${sentUpdates.length} CURRENT ORDERS row(s)`,
+            );
+            purchaseValues = await this.sheets.getValues(`'${tab}'!A1:AZ`);
+            parsedPurchase = parsePurchaseSheetStageRows(purchaseValues);
+            errors.push(...parsedPurchase.errors);
+          }
+        } else if (held && homePrepColIndex0 < 0) {
+          errors.push('CURRENT ORDERS: Home/Prep column not found');
+        }
+
+        if (sold && finalColIndex0 >= 0) {
+          completeUpdates = planFinalCompleteUpdatesFromSold({
+            purchaseDelivered: parsedPurchase.delivered,
+            finalColIndex0,
+            soldByAsin: sold,
+          });
+
+          if (completeUpdates.length > 0) {
+            const colLetter = colIndexToA1(finalColIndex0);
+            await this.sheets.batchUpdateValues(
+              completeUpdates.map((u) => ({
+                range: `'${tab}'!${colLetter}${u.sheetRow}`,
+                values: [[PURCHASE_SHEET_COMPLETE_VALUE]],
+              })),
+            );
+            this.logger.log(
+              `Amazon sales→Final sync: set Final=${PURCHASE_SHEET_COMPLETE_VALUE} on ${completeUpdates.length} CURRENT ORDERS row(s)`,
+            );
+            purchaseValues = await this.sheets.getValues(`'${tab}'!A1:AZ`);
+            parsedPurchase = parsePurchaseSheetStageRows(purchaseValues);
+            errors.push(...parsedPurchase.errors);
+          }
+        } else if (sold && finalColIndex0 < 0) {
+          errors.push(
+            'CURRENT ORDERS: Final/Complete column not found (expected Final or status column after Home/Prep)',
+          );
+        }
+
+        if (returned && finalColIndex0 >= 0) {
+          returnedUpdates = planFinalReturnedUpdatesFromReturns({
+            purchaseDelivered: parsedPurchase.delivered,
+            finalColIndex0,
+            returnedByAsin: returned,
+          });
+
+          if (returnedUpdates.length > 0) {
+            const colLetter = colIndexToA1(finalColIndex0);
+            await this.sheets.batchUpdateValues(
+              returnedUpdates.map((u) => ({
+                range: `'${tab}'!${colLetter}${u.sheetRow}`,
+                values: [[PURCHASE_SHEET_RETURNED_VALUE]],
+              })),
+            );
+            this.logger.log(
+              `Amazon returns→Final sync: set Final=${PURCHASE_SHEET_RETURNED_VALUE} on ${returnedUpdates.length} CURRENT ORDERS row(s)`,
+            );
+            purchaseValues = await this.sheets.getValues(`'${tab}'!A1:AZ`);
+            parsedPurchase = parsePurchaseSheetStageRows(purchaseValues);
+            errors.push(...parsedPurchase.errors);
           }
         }
+      } else {
+        this.logger.log(
+          'Sheet value sync throttled; running Final Complete/Returned format-only backfill',
+        );
+      }
+
+      // Always force-apply colors when format force is needed OR after value writes.
+      if (finalColIndex0 >= 0 && (formatForceNeeded || runValueSync)) {
+        const formatted = await this.applyFinalStatusFormats({
+          tab,
+          purchaseValues,
+          finalColIndex0,
+          completeUpdates,
+          returnedUpdates,
+        });
+        formatUpdates = formatted.formatUpdates;
+        errors.push(...formatted.errors);
+      } else if (finalColIndex0 < 0 && formatForceNeeded) {
+        errors.push(
+          'CURRENT ORDERS: Final/Complete column not found (format backfill skipped)',
+        );
       }
 
       if (
@@ -398,15 +482,17 @@ export class StockCostSheetReadService {
         await this.invalidatePipelineCache();
       }
 
-      try {
-        await this.redis.set(SYNC_THROTTLE_KEY, '1', SYNC_THROTTLE_SEC);
-      } catch {
-        // ignore
+      if (runValueSync) {
+        try {
+          await this.redis.set(SYNC_THROTTLE_KEY, '1', SYNC_THROTTLE_SEC);
+        } catch {
+          // ignore
+        }
       }
 
       return {
         attempted: true,
-        skippedThrottle: false,
+        skippedThrottle: !runValueSync,
         updated: deliveredUpdates.length,
         updates: deliveredUpdates,
         sentUpdated: sentUpdates.length,
@@ -427,7 +513,7 @@ export class StockCostSheetReadService {
       this.logger.warn(`Sheet stage sync failed: ${msg}`);
       return {
         attempted: true,
-        skippedThrottle: false,
+        skippedThrottle: !runValueSync,
         updated: 0,
         updates: [],
         sentUpdated: 0,
@@ -446,21 +532,25 @@ export class StockCostSheetReadService {
   /**
    * Read CURRENT ORDERS after optional Blue30→Delivered + Home/Prep→sent +
    * Final→Complete sync. Prep candidates = Delivered=Yes, Home/Prep ≠ sent,
-   * Final ≠ Complete. Cached ~90s in Redis.
+   * Final ≠ Complete. Cached ~90s in Redis (bypassed while Final format force
+   * is pending so greys get fixed on the next dashboard load).
    */
   async getPurchasedAndArrivedByAsin(opts?: {
     amazonHeldByAsin?: Map<string, number>;
     soldByAsin?: Map<string, number>;
     returnedByAsin?: Map<string, number>;
   }): Promise<SheetStageSnapshots> {
-    try {
-      const raw = await this.redis.get(CACHE_KEY_PIPELINE);
-      if (raw) {
-        const parsed = JSON.parse(raw) as CachedJsonMaps;
-        return this.jsonToMaps(parsed);
+    const formatForceNeeded = await this.isFinalFormatForceNeeded();
+    if (!formatForceNeeded) {
+      try {
+        const raw = await this.redis.get(CACHE_KEY_PIPELINE);
+        if (raw) {
+          const parsed = JSON.parse(raw) as CachedJsonMaps;
+          return this.jsonToMaps(parsed);
+        }
+      } catch {
+        // ignore cache read errors
       }
-    } catch {
-      // ignore cache read errors
     }
 
     const sync = await this.syncBlue30ReceivedToPurchaseDelivered({

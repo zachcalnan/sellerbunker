@@ -13,6 +13,7 @@ import {
   planFinalCompleteUpdatesFromSold,
   planFinalReturnedUpdatesFromReturns,
   planFinalStatusFormatUpdates,
+  planFinalStatusFormatUpdatesFromValues,
   planHomePrepSentUpdatesFromAmazonHeld,
   PURCHASE_SHEET_COMPLETE_BG,
   PURCHASE_SHEET_COMPLETE_FG,
@@ -535,6 +536,27 @@ describe('stock-cost-sheet.util', () => {
     ]);
     expect(formats[0].backgroundColor).toEqual(PURCHASE_SHEET_COMPLETE_BG);
     expect(formats[1].backgroundColor).toEqual(PURCHASE_SHEET_RETURNED_BG);
+  });
+
+  it('scans raw Final column including rows parse would skip (no ASIN/qty)', () => {
+    const formats = planFinalStatusFormatUpdatesFromValues({
+      finalColIndex0: 2,
+      values: [
+        ['ASIN', 'Units', 'Final'],
+        ['B0A', '2', 'COMPLETE'],
+        ['', '', 'complete'], // no ASIN — still format
+        ['B0B', '0', 'Returned'], // qty 0 — still format
+        ['B0C', '1', 'Ebay'],
+        ['B0D', '1', 'pending return'],
+        ['B0E', '1', ''],
+      ],
+    });
+    expect(formats.map((f) => [f.sheetRow, f.status])).toEqual([
+      [2, 'Complete'],
+      [3, 'Complete'],
+      [4, 'Returned'],
+      [6, 'Returned'],
+    ]);
   });
 
   it('builds purchased / prep candidates from Delivered flag only (ignores raw B30)', () => {

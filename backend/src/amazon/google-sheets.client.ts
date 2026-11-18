@@ -133,6 +133,7 @@ export class GoogleSheetsClient {
   /**
    * Apply background + text color via repeatCell (userEnteredFormat).
    * `sheetRow` is 1-based (A1); `colIndex0` is 0-based.
+   * Returns number of cells submitted (throws on API failure — never silent).
    */
   async batchUpdateCellFormats(
     cells: Array<{
@@ -143,10 +144,15 @@ export class GoogleSheetsClient {
       foregroundColor: { red: number; green: number; blue: number };
     }>,
     spreadsheetId?: string,
-  ): Promise<void> {
-    if (cells.length === 0) return;
+  ): Promise<number> {
+    if (cells.length === 0) return 0;
     const id = this.resolveSpreadsheetId(spreadsheetId);
+    const sheetId = cells[0]?.sheetId;
+    this.logger.log(
+      `batchUpdateCellFormats: spreadsheet=${id} sheetId=${sheetId} cells=${cells.length}`,
+    );
     const chunkSize = 100;
+    let applied = 0;
     for (let i = 0; i < cells.length; i += chunkSize) {
       const chunk = cells.slice(i, i + chunkSize);
       const requests: sheets_v4.Schema$Request[] = chunk.map((c) => {
@@ -174,11 +180,24 @@ export class GoogleSheetsClient {
           },
         };
       });
-      await this.sheets().spreadsheets.batchUpdate({
-        spreadsheetId: id,
-        requestBody: { requests },
-      });
+      try {
+        await this.sheets().spreadsheets.batchUpdate({
+          spreadsheetId: id,
+          requestBody: { requests },
+        });
+        applied += chunk.length;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        this.logger.error(
+          `batchUpdateCellFormats failed (spreadsheet=${id} sheetId=${sheetId} chunk=${i}-${i + chunk.length - 1}): ${msg}`,
+        );
+        throw e;
+      }
     }
+    this.logger.log(
+      `batchUpdateCellFormats: applied ${applied}/${cells.length} cell format(s)`,
+    );
+    return applied;
   }
 
   async appendValues(
