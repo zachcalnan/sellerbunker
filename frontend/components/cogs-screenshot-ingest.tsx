@@ -8,6 +8,32 @@ import { getDevImpersonationHeaders } from "@/lib/impersonation";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
 
+/** Image on the clipboard, from a screenshot copy or a copied file. */
+function imageFileFromClipboard(data: DataTransfer | null): File | null {
+  if (!data) return null;
+  const asImage = (file: File | null): File | null => {
+    if (!file) return null;
+    if (file.type.startsWith("image/")) return file;
+    if (!file.type) {
+      return new File([file], file.name || "pasted-screenshot.png", {
+        type: "image/png",
+      });
+    }
+    return null;
+  };
+  const fromFiles = Array.from(data.files ?? [])
+    .map((f) => asImage(f))
+    .find((f): f is File => f != null);
+  if (fromFiles) return fromFiles;
+  for (const item of Array.from(data.items ?? [])) {
+    if (item.kind !== "file") continue;
+    if (item.type && !item.type.startsWith("image/")) continue;
+    const file = asImage(item.getAsFile());
+    if (file) return file;
+  }
+  return null;
+}
+
 function defaultAlertLocalDatetime(daysAhead = 3): string {
   const d = new Date();
   d.setDate(d.getDate() + daysAhead);
@@ -733,12 +759,14 @@ export function CogsScreenshotIngest({
   }, []);
 
   const handleFile = useCallback(
-    async (file: File | null) => {
+    async (file: File | null, opts?: { forceAi?: boolean }) => {
       if (!file) return;
-      if (!useAiSearch) {
+      if (extractBusy) return;
+      if (!useAiSearch && !opts?.forceAi) {
         setLocalError("Enable AI to analyse a screenshot.");
         return;
       }
+      if (opts?.forceAi) setUseAiSearch(true);
       if (!file.type.startsWith("image/")) {
         setLocalError("Please drop a screenshot image (PNG/JPEG/WebP).");
         return;
@@ -795,8 +823,48 @@ export function CogsScreenshotIngest({
         setExtractBusy(false);
       }
     },
-    [hint, onExtract, onLoadQuota, quota, useAiSearch],
+    [hint, onExtract, onLoadQuota, quota, useAiSearch, extractBusy],
   );
+
+  useEffect(() => {
+    if (!open && !isPage) return;
+    const onPaste = (e: ClipboardEvent) => {
+      const file = imageFileFromClipboard(e.clipboardData);
+      if (!file) return;
+      const target = e.target instanceof HTMLElement ? e.target : null;
+      const inField =
+        target?.tagName === "INPUT" ||
+        target?.tagName === "TEXTAREA" ||
+        target?.isContentEditable === true;
+      const text = e.clipboardData?.getData("text/plain") ?? "";
+      if (inField && text.trim()) return;
+      e.preventDefault();
+      void handleFile(file, { forceAi: true });
+    };
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  }, [open, isPage, handleFile]);
+
+  const pasteFromClipboard = useCallback(async () => {
+    if (!navigator.clipboard?.read) {
+      setLocalError("Click the box and press Ctrl+V to paste a screenshot.");
+      return;
+    }
+    try {
+      const items = await navigator.clipboard.read();
+      for (const item of items) {
+        const type = item.types.find((t) => t.startsWith("image/"));
+        if (!type) continue;
+        const blob = await item.getType(type);
+        const file = new File([blob], "pasted-screenshot", { type });
+        void handleFile(file, { forceAi: true });
+        return;
+      }
+      setLocalError("Clipboard has no screenshot. Copy an image, then paste.");
+    } catch {
+      setLocalError("Click the box and press Ctrl+V to paste a screenshot.");
+    }
+  }, [handleFile]);
 
   const onDrop = useCallback(
     (e: React.DragEvent) => {
@@ -1045,6 +1113,19 @@ export function CogsScreenshotIngest({
               />
               <span className="font-medium">AI</span>
             </label>
+            {!useAiSearch ? (
+              <p className="mb-3 text-xs text-[var(--muted-foreground)]">
+                Copy a screenshot, then{" "}
+                <button
+                  type="button"
+                  className="font-medium text-sb-accent underline"
+                  onClick={() => void pasteFromClipboard()}
+                >
+                  paste
+                </button>{" "}
+                or press Ctrl+V.
+              </p>
+            ) : null}
 
             {useAiSearch && quota ? (
               <p className="mb-3 text-xs text-[var(--muted-foreground)]">
@@ -1104,10 +1185,18 @@ export function CogsScreenshotIngest({
               ) : (
                 <>
                   <p className="font-medium text-[var(--foreground)]">
-                    Drop order confirmation screenshot
+                    Drop or paste an order screenshot
                   </p>
                   <p className="mt-1 text-xs">
-                    or{" "}
+                    Ctrl+V,{" "}
+                    <button
+                      type="button"
+                      className="font-medium text-sb-accent underline"
+                      onClick={() => void pasteFromClipboard()}
+                    >
+                      paste
+                    </button>
+                    , or{" "}
                     <button
                       type="button"
                       className="font-medium text-sb-accent underline"
@@ -1135,14 +1224,24 @@ export function CogsScreenshotIngest({
 
             <div className="mb-4 flex flex-wrap items-center gap-3">
               {useAiSearch && previewUrl ? (
-                <button
-                  type="button"
-                  onClick={() => inputRef.current?.click()}
-                  className="text-xs text-sb-accent underline"
-                  disabled={extractBusy || busy}
-                >
-                  Choose a different image
-                </button>
+                <>
+                  <button
+                    type="button"
+                    onClick={() => void pasteFromClipboard()}
+                    className="text-xs text-sb-accent underline"
+                    disabled={extractBusy || busy}
+                  >
+                    Paste a different screenshot
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => inputRef.current?.click()}
+                    className="text-xs text-sb-accent underline"
+                    disabled={extractBusy || busy}
+                  >
+                    Choose a different image
+                  </button>
+                </>
               ) : null}
               {!draft ? (
                 <button
