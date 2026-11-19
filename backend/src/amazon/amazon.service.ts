@@ -28,6 +28,7 @@ import {
 } from './stock-cost-pipeline.util';
 import { sumSheetAwareStockCostPipeline } from './stock-cost-sheet.util';
 import { StockCostSheetReadService } from './stock-cost-sheet-read.service';
+import { RedisService } from '../redis/redis.service';
 import type { IngestSupplierOrderDto } from './dto/ingest-supplier-order.dto';
 import { UsersService } from '../users/users.service';
 import {
@@ -122,7 +123,25 @@ const PRISMA_RETURNED_AMAZON_ORDER_STATUSES: string[] = [
   'PendingReturn',
 ];
 
+/** Dashboard stock-cost tiles: serve last-good Redis snapshot; soft-revalidate. */
+const STOCK_COST_RESPONSE_CACHE_PREFIX = 'stock-cost:dashboard-response:v1';
+const STOCK_COST_RESPONSE_HARD_TTL_SEC = 30 * 60;
+const STOCK_COST_RESPONSE_SOFT_TTL_MS = 45 * 1000;
+const STOCK_COST_RESPONSE_REFRESH_LOCK_PREFIX =
+  'stock-cost:dashboard-response-lock:v1';
+const STOCK_COST_RESPONSE_REFRESH_LOCK_SEC = 120;
+
 type OrderSalesExclusionKind = 'cancelled' | 'returned' | 'unfulfillable';
+
+type StockCostPipelineResponse = {
+  currency: string;
+  stockPurchased: { qty: number; cost: number };
+  stockForPrep: { qty: number; cost: number };
+  stockSent: { qty: number; cost: number };
+  availableStock: { qty: number; cost: number };
+  totalCost: number;
+  note: string | null;
+};
 
 @Injectable()
 export class AmazonService {
@@ -136,6 +155,7 @@ export class AmazonService {
     private readonly repricerService: RepricerService,
     private readonly pushService: PushService,
     private readonly stockCostSheetRead: StockCostSheetReadService,
+    private readonly redis: RedisService,
   ) {}
 
   private async resolveOrgIdForUser(userId: string): Promise<string | null> {
@@ -3932,39 +3952,140 @@ export class AmazonService {
     };
   }
 
+  private stockCostPipelineCacheKey(
+    orgId: string,
+    marketplaceId?: string,
+  ): string {
+    return `${STOCK_COST_RESPONSE_CACHE_PREFIX}:${orgId}:${marketplaceId?.trim() || 'all'}`;
+  }
+
+  private stockCostPipelineLockKey(
+    orgId: string,
+    marketplaceId?: string,
+  ): string {
+    return `${STOCK_COST_RESPONSE_REFRESH_LOCK_PREFIX}:${orgId}:${marketplaceId?.trim() || 'all'}`;
+  }
+
   /**
    * Dashboard: cumulative stock COGS by exclusive pipeline stage.
-   * Purchased / for-prep are CURRENT ORDERS Delivered flag (Blue30 sync
-   * flips Delivered=Yes on receive; Home/Prep→sent from Amazon held; Final→
-   * Complete from fulfilled sales). Available / sent from Amazon inventory
-   * (sold-through Complete rows leave sheet stages). See
-   * `stock-cost-sheet.util.ts` + `stock-cost-pipeline.util.ts`.
+   * Serves last-good Redis snapshot immediately (SWR); sheet sync + recompute
+   * run in the background so tiles are not blocked on Google writes.
+   * Pass `bypassCache: true` for admin/scripts that need a fresh compute.
    */
   async getStockCostPipeline(
     orgId: string,
     marketplaceId?: string,
-  ): Promise<{
-    currency: string;
-    stockPurchased: { qty: number; cost: number };
-    stockForPrep: { qty: number; cost: number };
-    stockSent: { qty: number; cost: number };
-    availableStock: { qty: number; cost: number };
-    totalCost: number;
-    note: string | null;
-  }> {
+    opts?: { bypassCache?: boolean; awaitSheetSync?: boolean },
+  ): Promise<StockCostPipelineResponse> {
+    const cacheKey = this.stockCostPipelineCacheKey(orgId, marketplaceId);
+    if (!opts?.bypassCache) {
+      try {
+        const raw = await this.redis.get(cacheKey);
+        if (raw) {
+          const parsed = JSON.parse(raw) as {
+            cachedAt?: number;
+            data: StockCostPipelineResponse;
+          };
+          if (parsed?.data) {
+            const age = Date.now() - (Number(parsed.cachedAt) || 0);
+            if (!(age >= 0) || age >= STOCK_COST_RESPONSE_SOFT_TTL_MS) {
+              this.scheduleStockCostPipelineRefresh(orgId, marketplaceId);
+            }
+            return parsed.data;
+          }
+        }
+      } catch {
+        // ignore cache read errors
+      }
+    }
+
+    const result = await this.computeStockCostPipeline(orgId, marketplaceId, {
+      awaitSheetSync: opts?.awaitSheetSync === true,
+    });
+    try {
+      await this.redis.set(
+        cacheKey,
+        JSON.stringify({ cachedAt: Date.now(), data: result }),
+        STOCK_COST_RESPONSE_HARD_TTL_SEC,
+      );
+    } catch {
+      // ignore
+    }
+    return result;
+  }
+
+  private scheduleStockCostPipelineRefresh(
+    orgId: string,
+    marketplaceId?: string,
+  ): void {
+    void this.refreshStockCostPipelineCache(orgId, marketplaceId).catch(
+      (e) => {
+        const msg = e instanceof Error ? e.message : String(e);
+        this.logger.warn(
+          `Stock-cost dashboard background refresh failed (orgId=${orgId}): ${msg}`,
+        );
+      },
+    );
+  }
+
+  private async refreshStockCostPipelineCache(
+    orgId: string,
+    marketplaceId?: string,
+  ): Promise<void> {
+    const lockKey = this.stockCostPipelineLockKey(orgId, marketplaceId);
+    let locked = false;
+    try {
+      locked = await this.redis.setIfNotExistsWithExpiry(
+        lockKey,
+        '1',
+        STOCK_COST_RESPONSE_REFRESH_LOCK_SEC,
+      );
+    } catch {
+      locked = true;
+    }
+    if (!locked) return;
+
+    try {
+      const result = await this.computeStockCostPipeline(orgId, marketplaceId);
+      await this.redis.set(
+        this.stockCostPipelineCacheKey(orgId, marketplaceId),
+        JSON.stringify({ cachedAt: Date.now(), data: result }),
+        STOCK_COST_RESPONSE_HARD_TTL_SEC,
+      );
+    } finally {
+      try {
+        await this.redis.del(lockKey);
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  /**
+   * Full compute: DB inventory + sold/returned + sheet stage maps.
+   * Sheet writes are not awaited on the dashboard path (SWR); scripts may
+   * pass `awaitSheetSync: true`.
+   */
+  private async computeStockCostPipeline(
+    orgId: string,
+    marketplaceId?: string,
+    opts?: { awaitSheetSync?: boolean },
+  ): Promise<StockCostPipelineResponse> {
     const currency = this.resolveCurrencyFromMarketplace('GBP', marketplaceId);
-    const empty = {
+    const empty: StockCostPipelineResponse = {
       currency,
       stockPurchased: { qty: 0, cost: 0 },
       stockForPrep: { qty: 0, cost: 0 },
       stockSent: { qty: 0, cost: 0 },
       availableStock: { qty: 0, cost: 0 },
       totalCost: 0,
-      note: null as string | null,
+      note: null,
     };
 
-    const aggUserIds = await this.getOrgAmazonAggregateUserIds(orgId);
-    const memberUserIds = await this.getOrgMemberUserIds(orgId);
+    const [aggUserIds, memberUserIds] = await Promise.all([
+      this.getOrgAmazonAggregateUserIds(orgId),
+      this.getOrgMemberUserIds(orgId),
+    ]);
     if (aggUserIds.length === 0 && memberUserIds.length === 0) {
       return empty;
     }
@@ -4010,7 +4131,58 @@ export class AmazonService {
 
     const productUserIds =
       aggUserIds.length > 0 ? aggUserIds : memberUserIds;
-    const products = (await this.prisma.product.findMany({
+    const soldUserIds =
+      aggUserIds.length > 0
+        ? aggUserIds
+        : memberUserIds.length > 0
+          ? memberUserIds
+          : [];
+
+    // Products + sold/returned aggregates are independent — run together.
+    const marketplaceFilter = this.resolveMarketplaceFilter(marketplaceId);
+    const soldReturnedPromise =
+      soldUserIds.length > 0
+        ? Promise.all([
+            (this.prisma as any).orderItem.groupBy({
+              by: ['asin'],
+              where: {
+                userId: { in: soldUserIds },
+                asin: { not: null },
+                quantity: { gt: 0 },
+                marketplace: marketplaceFilter,
+                order: {
+                  amazonOrderStatus: {
+                    notIn: PRISMA_EXCLUDED_AMAZON_ORDER_STATUSES,
+                  },
+                },
+              },
+              _sum: { quantity: true },
+            }),
+            (this.prisma as any).orderItem.groupBy({
+              by: ['asin'],
+              where: {
+                userId: { in: soldUserIds },
+                asin: { not: null },
+                quantity: { gt: 0 },
+                marketplace: marketplaceFilter,
+                order: {
+                  amazonOrderStatus: {
+                    in: PRISMA_RETURNED_AMAZON_ORDER_STATUSES,
+                  },
+                },
+              },
+              _sum: { quantity: true },
+            }),
+          ]).catch((e: unknown) => {
+            const msg = e instanceof Error ? e.message : String(e);
+            this.logger.warn(
+              `Stock-cost sold/returned-by-ASIN aggregate failed (orgId=${orgId}): ${msg}`,
+            );
+            return [[], []] as [unknown[], unknown[]];
+          })
+        : Promise.resolve([[], []] as [unknown[], unknown[]]);
+
+    const productsPromise = this.prisma.product.findMany({
       where: { userId: { in: productUserIds } },
       select: {
         id: true,
@@ -4037,7 +4209,13 @@ export class AmazonService {
           },
         },
       },
-    })) as unknown as ProductRow[];
+    });
+    const [productsRaw, soldReturnedRows] = await Promise.all([
+      productsPromise,
+      soldReturnedPromise,
+    ]);
+    const products = productsRaw as unknown as ProductRow[];
+    const [soldRows, returnedRows] = soldReturnedRows;
 
     // Canonical row per SKU (prefer inventory snapshot, then newest product).
     const bySku = new Map<string, ProductRow>();
@@ -4180,82 +4358,36 @@ export class AmazonService {
     const soldByAsin = new Map<string, number>();
     // Returned / refunded units by ASIN — flips Complete → Returned (red).
     const returnedByAsin = new Map<string, number>();
-    const soldUserIds =
-      aggUserIds.length > 0
-        ? aggUserIds
-        : memberUserIds.length > 0
-          ? memberUserIds
-          : [];
-    if (soldUserIds.length > 0) {
-      try {
-        const marketplaceFilter = this.resolveMarketplaceFilter(marketplaceId);
-        const soldRows = await (this.prisma as any).orderItem.groupBy({
-          by: ['asin'],
-          where: {
-            userId: { in: soldUserIds },
-            asin: { not: null },
-            quantity: { gt: 0 },
-            marketplace: marketplaceFilter,
-            order: {
-              amazonOrderStatus: {
-                notIn: PRISMA_EXCLUDED_AMAZON_ORDER_STATUSES,
-              },
-            },
-          },
-          _sum: { quantity: true },
-        });
-        for (const r of soldRows as {
-          asin: string | null;
-          _sum: { quantity: number | null };
-        }[]) {
-          const asin = String(r.asin ?? '')
-            .trim()
-            .toUpperCase();
-          if (!asin) continue;
-          const qty = Math.max(0, Math.floor(Number(r._sum?.quantity) || 0));
-          if (!(qty > 0)) continue;
-          soldByAsin.set(asin, (soldByAsin.get(asin) ?? 0) + qty);
-        }
-
-        const returnedRows = await (this.prisma as any).orderItem.groupBy({
-          by: ['asin'],
-          where: {
-            userId: { in: soldUserIds },
-            asin: { not: null },
-            quantity: { gt: 0 },
-            marketplace: marketplaceFilter,
-            order: {
-              amazonOrderStatus: {
-                in: PRISMA_RETURNED_AMAZON_ORDER_STATUSES,
-              },
-            },
-          },
-          _sum: { quantity: true },
-        });
-        for (const r of returnedRows as {
-          asin: string | null;
-          _sum: { quantity: number | null };
-        }[]) {
-          const asin = String(r.asin ?? '')
-            .trim()
-            .toUpperCase();
-          if (!asin) continue;
-          const qty = Math.max(0, Math.floor(Number(r._sum?.quantity) || 0));
-          if (!(qty > 0)) continue;
-          returnedByAsin.set(asin, (returnedByAsin.get(asin) ?? 0) + qty);
-        }
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        this.logger.warn(
-          `Stock-cost sold/returned-by-ASIN aggregate failed (orgId=${orgId}): ${msg}`,
-        );
-      }
+    for (const r of soldRows as {
+      asin: string | null;
+      _sum: { quantity: number | null };
+    }[]) {
+      const asin = String(r.asin ?? '')
+        .trim()
+        .toUpperCase();
+      if (!asin) continue;
+      const qty = Math.max(0, Math.floor(Number(r._sum?.quantity) || 0));
+      if (!(qty > 0)) continue;
+      soldByAsin.set(asin, (soldByAsin.get(asin) ?? 0) + qty);
+    }
+    for (const r of returnedRows as {
+      asin: string | null;
+      _sum: { quantity: number | null };
+    }[]) {
+      const asin = String(r.asin ?? '')
+        .trim()
+        .toUpperCase();
+      if (!asin) continue;
+      const qty = Math.max(0, Math.floor(Number(r._sum?.quantity) || 0));
+      if (!(qty > 0)) continue;
+      returnedByAsin.set(asin, (returnedByAsin.get(asin) ?? 0) + qty);
     }
 
     const sheet = await this.stockCostSheetRead.getPurchasedAndArrivedByAsin({
       amazonHeldByAsin,
       soldByAsin,
       returnedByAsin,
+      awaitSync: opts?.awaitSheetSync === true,
     });
     const sheetTotals = sumSheetAwareStockCostPipeline({
       skuRows,

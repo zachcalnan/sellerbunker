@@ -2336,6 +2336,42 @@ type StockCostPipelineProps = {
   currency: string;
 };
 
+const STOCK_COST_CLIENT_CACHE_PREFIX = "sb:stock-cost-pipeline:v1";
+
+function stockCostClientCacheKey(marketplaceId: string | null | undefined) {
+  return `${STOCK_COST_CLIENT_CACHE_PREFIX}:${marketplaceId?.trim() || "all"}`;
+}
+
+function readStockCostClientCache(
+  marketplaceId: string | null | undefined,
+): StockCostPipelineData | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = sessionStorage.getItem(stockCostClientCacheKey(marketplaceId));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as StockCostPipelineData;
+    if (!parsed || typeof parsed.totalCost !== "number") return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function writeStockCostClientCache(
+  marketplaceId: string | null | undefined,
+  data: StockCostPipelineData,
+) {
+  if (typeof window === "undefined") return;
+  try {
+    sessionStorage.setItem(
+      stockCostClientCacheKey(marketplaceId),
+      JSON.stringify(data),
+    );
+  } catch {
+    // ignore quota / private mode
+  }
+}
+
 function StockCostPipeline({
   baseUrl,
   isSignedIn,
@@ -2346,16 +2382,25 @@ function StockCostPipeline({
   const searchParams = useSearchParams();
   const devImpersonate = searchParams.get("impersonate");
   const [data, setData] = useState<StockCostPipelineData | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!isSignedIn) {
       setData(null);
+      setLoading(false);
       return;
     }
-    const fetchData = async () => {
+    const cached = readStockCostClientCache(selectedMarketplaceId);
+    // Instant paint from session cache; keep tiles while network refetch runs.
+    if (cached) {
+      setData(cached);
+      setLoading(false);
+    } else {
       setLoading(true);
+    }
+    let cancelled = false;
+    const fetchData = async () => {
       setError(null);
       try {
         const token = await getToken({ template: "backend" });
@@ -2372,15 +2417,21 @@ function StockCostPipeline({
         });
         if (!res.ok) throw new Error("Failed to load stock cost pipeline");
         const json = (await res.json()) as StockCostPipelineData;
+        if (cancelled) return;
         setData(json);
+        writeStockCostClientCache(selectedMarketplaceId, json);
       } catch {
-        setData(null);
+        if (cancelled) return;
+        if (!cached) setData(null);
         setError("Could not load stock cost");
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     };
     void fetchData();
+    return () => {
+      cancelled = true;
+    };
   }, [isSignedIn, getToken, baseUrl, selectedMarketplaceId, devImpersonate]);
 
   const cur = data?.currency ?? currency;
@@ -2437,14 +2488,14 @@ function StockCostPipeline({
         <h2 className="text-[10px] font-medium uppercase tracking-[0.1em] text-[var(--foreground)] sm:text-sm sm:tracking-[0.2em]">
           Stock cost by stage
         </h2>
-        {!loading && data ? (
+        {data ? (
           <span className="text-[10px] tabular-nums text-[var(--muted-foreground)]">
             Total {formatCurrency(data.totalCost, cur, 2)}
           </span>
         ) : null}
       </div>
 
-      {error ? (
+      {error && !data ? (
         <p className="text-[10px] text-red-600">{error}</p>
       ) : null}
 
@@ -2459,13 +2510,13 @@ function StockCostPipeline({
             >
               {label}
             </p>
-            {loading ? (
+            {loading && !data ? (
               <div className="mt-auto space-y-2">
                 <div className="h-5 w-3/4 animate-pulse rounded bg-[var(--surface-border)]" />
                 <div className="h-3 w-1/2 animate-pulse rounded bg-[var(--surface-border)]/70" />
               </div>
             ) : (
-              <div className="mt-auto">
+              <div className={`mt-auto ${loading && data ? "opacity-80" : ""}`}>
                 <p
                   className={`text-lg font-bold tabular-nums leading-tight tracking-tight sm:text-xl ${valueClass}`}
                 >

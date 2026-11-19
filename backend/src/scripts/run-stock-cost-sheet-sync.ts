@@ -76,9 +76,14 @@ async function main() {
     );
 
     // Full pipeline with held/sold maps (Complete/Returned FIFO + prep clamps).
+    // Bypass SWR caches so script totals reflect cells we just wrote.
     if (targetOrgId) {
       console.log(`Running stock-cost pipeline for org ${targetOrgId}…`);
-      const pipeline = await amazon.getStockCostPipeline(targetOrgId);
+      await sheetRead.invalidatePipelineCache();
+      const pipeline = await amazon.getStockCostPipeline(targetOrgId, undefined, {
+        bypassCache: true,
+        awaitSheetSync: true,
+      });
       console.log('Pipeline note:', pipeline.note);
       console.log(
         `stockPurchased=${pipeline.stockPurchased.qty} prep=${pipeline.stockForPrep.qty} sent=${pipeline.stockSent.qty} available=${pipeline.availableStock.qty}`,

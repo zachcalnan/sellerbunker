@@ -31,9 +31,17 @@ import {
   type HomePrepSentUpdate,
 } from './stock-cost-sheet.util';
 
-const CACHE_TTL_SEC = 90;
+/**
+ * Keep last-good pipeline maps for dashboard SWR. Soft age triggers background
+ * revalidate; hard TTL is how long we may serve stale totals.
+ */
+const CACHE_HARD_TTL_SEC = 30 * 60;
+const CACHE_SOFT_TTL_MS = 60 * 1000;
 /** Pipeline aggregates — bump when Complete / Returned / sold-through model changes. */
-const CACHE_KEY_PIPELINE = 'stock-cost:pipeline-maps:v7';
+const CACHE_KEY_PIPELINE = 'stock-cost:pipeline-maps:v8';
+/** Single-flight lock so dashboard opens don't stampede Google Sheets. */
+const REFRESH_LOCK_KEY = 'stock-cost:pipeline-refresh-lock:v1';
+const REFRESH_LOCK_SEC = 90;
 /** Throttle Blue30→Delivered + Home/Prep→sent + Final→Complete/Returned value writes. */
 const SYNC_THROTTLE_KEY = 'stock-cost:delivered-sync:v6';
 const SYNC_THROTTLE_SEC = 120;
@@ -89,6 +97,19 @@ type CachedJsonMaps = {
   blue30Ok: boolean;
   errors: string[];
   sourceNote: string;
+  /** Epoch ms when this snapshot was written (SWR soft TTL). */
+  cachedAt?: number;
+};
+
+type SheetReadOpts = {
+  amazonHeldByAsin?: Map<string, number>;
+  soldByAsin?: Map<string, number>;
+  returnedByAsin?: Map<string, number>;
+  /**
+   * When true, wait for sync+fresh read (scripts / admin). Dashboard path
+   * leaves this false so HTTP can return cached/read-only maps immediately.
+   */
+  awaitSync?: boolean;
 };
 
 @Injectable()
@@ -131,6 +152,7 @@ export class StockCostSheetReadService {
       blue30Ok: s.blue30Ok,
       errors: s.errors,
       sourceNote: s.sourceNote,
+      cachedAt: Date.now(),
     };
   }
 
@@ -148,12 +170,182 @@ export class StockCostSheetReadService {
     };
   }
 
+  private async readPipelineCache(): Promise<{
+    snapshot: SheetStageSnapshots;
+    cachedAt: number;
+  } | null> {
+    try {
+      const raw = await this.redis.get(CACHE_KEY_PIPELINE);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as CachedJsonMaps;
+      return {
+        snapshot: this.jsonToMaps(parsed),
+        cachedAt: Number(parsed.cachedAt) || 0,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private async writePipelineCache(snapshot: SheetStageSnapshots): Promise<void> {
+    try {
+      await this.redis.set(
+        CACHE_KEY_PIPELINE,
+        JSON.stringify(this.mapsToJson(snapshot)),
+        CACHE_HARD_TTL_SEC,
+      );
+    } catch {
+      // ignore cache write errors
+    }
+  }
+
   async invalidatePipelineCache(): Promise<void> {
     try {
       await this.redis.del(CACHE_KEY_PIPELINE);
     } catch {
       // ignore
     }
+  }
+
+  /** True when soft TTL expired or sheet force backfills still pending. */
+  private async shouldRevalidatePipelineMaps(cachedAt: number): Promise<boolean> {
+    if (!(cachedAt > 0) || Date.now() - cachedAt >= CACHE_SOFT_TTL_MS) {
+      return true;
+    }
+    if (await this.isFinalFormatForceNeeded()) return true;
+    if (await this.isHomePrepSentForceNeeded()) return true;
+    return false;
+  }
+
+  /**
+   * Single-flight background: sync sheet stages (writes) then refresh Redis maps.
+   * Dashboard HTTP never awaits this — last-good cache is served instead.
+   */
+  private schedulePipelineMapsRefresh(opts?: SheetReadOpts): void {
+    void this.runPipelineMapsRefresh(opts).catch((e) => {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.logger.warn(`Stock-cost pipeline background refresh failed: ${msg}`);
+    });
+  }
+
+  private async runPipelineMapsRefresh(opts?: SheetReadOpts): Promise<void> {
+    let locked = false;
+    try {
+      locked = await this.redis.setIfNotExistsWithExpiry(
+        REFRESH_LOCK_KEY,
+        '1',
+        REFRESH_LOCK_SEC,
+      );
+    } catch {
+      locked = true; // Redis down — still attempt once
+    }
+    if (!locked) return;
+
+    try {
+      const sync = await this.syncBlue30ReceivedToPurchaseDelivered({
+        amazonHeldByAsin: opts?.amazonHeldByAsin,
+        soldByAsin: opts?.soldByAsin,
+        returnedByAsin: opts?.returnedByAsin,
+      });
+      const snapshot = await this.readSheetMapsOnly(sync);
+      await this.writePipelineCache(snapshot);
+    } finally {
+      try {
+        await this.redis.del(REFRESH_LOCK_KEY);
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  /**
+   * Read-only CURRENT ORDERS → stage maps (no Blue30/Delivered/format writes).
+   * Used for cold dashboard paint and after background sync.
+   */
+  private async readSheetMapsOnly(
+    sync?: DeliveredSyncResult,
+  ): Promise<SheetStageSnapshots> {
+    const errors: string[] = [...(sync?.errors ?? [])];
+    let purchaseInTransit = [] as ReturnType<
+      typeof parsePurchaseSheetStageRows
+    >['inTransit'];
+    let purchaseDelivered = [] as ReturnType<
+      typeof parsePurchaseSheetStageRows
+    >['delivered'];
+    let purchaseSheetOk = false;
+    let blue30Ok = sync
+      ? sync.attempted && sync.errors.length === 0
+      : Boolean(this.blue30SpreadsheetId() && this.sheets.isAuthConfigured());
+
+    if (this.sheets.isConfigured()) {
+      try {
+        const tab = this.currentTabTitle();
+        const values = await this.sheets.getValues(`'${tab}'!A1:AZ`);
+        const parsed = parsePurchaseSheetStageRows(values);
+        purchaseInTransit = parsed.inTransit;
+        purchaseDelivered = parsed.delivered;
+        errors.push(...parsed.errors);
+        purchaseSheetOk =
+          parsed.errors.length === 0 ||
+          parsed.inTransit.length + parsed.delivered.length > 0;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        errors.push(`Purchase sheet read failed: ${msg}`);
+        this.logger.warn(`Purchase sheet read failed: ${msg}`);
+      }
+    } else {
+      errors.push('Purchase Google Sheet not configured');
+    }
+
+    if (!this.blue30SpreadsheetId() || !this.sheets.isAuthConfigured()) {
+      blue30Ok = false;
+    }
+
+    const { purchasedByAsin, arrivedByAsin, sheetSentByAsin } =
+      buildSheetPurchasedAndArrivedByAsin({
+        purchaseInTransit,
+        purchaseDelivered,
+      });
+
+    const syncParts: string[] = [];
+    if (sync) {
+      if (sync.updated > 0) {
+        syncParts.push(`synced Delivered=Yes on ${sync.updated} row(s)`);
+      }
+      if (sync.sentUpdated > 0) {
+        syncParts.push(
+          `synced Home/Prep=${HOME_PREP_SENT_VALUE} on ${sync.sentUpdated} row(s)`,
+        );
+      }
+      if (sync.completeUpdated > 0) {
+        syncParts.push(
+          `synced Final=${PURCHASE_SHEET_COMPLETE_VALUE} on ${sync.completeUpdated} row(s)`,
+        );
+      }
+      if (sync.returnedUpdated > 0) {
+        syncParts.push(
+          `synced Final=${PURCHASE_SHEET_RETURNED_VALUE} on ${sync.returnedUpdated} row(s)`,
+        );
+      }
+      if (sync.formatsUpdated > 0) {
+        syncParts.push(`formatted ${sync.formatsUpdated} Final status cell(s)`);
+      }
+      if (syncParts.length === 0 && sync.skippedThrottle) {
+        syncParts.push('sheet stage sync throttled');
+      }
+    } else {
+      syncParts.push('read-only (sync deferred)');
+    }
+
+    return {
+      purchasedByAsin,
+      arrivedByAsin,
+      sheetSentByAsin,
+      purchaseSheetOk,
+      blue30Ok,
+      errors,
+      sourceNote: syncParts.join('; '),
+    };
   }
 
   /** True when Final Complete/Returned colors must be force-applied (bypass value-sync throttle). */
@@ -425,7 +617,20 @@ export class StockCostSheetReadService {
 
     try {
       const tab = this.currentTabTitle();
-      let purchaseValues = await this.sheets.getValues(`'${tab}'!A1:AZ`);
+      const b30Id = this.blue30SpreadsheetId();
+      const canReadBlue30 =
+        runValueSync && Boolean(b30Id) && this.sheets.isAuthConfigured();
+      const b30Tab = this.blue30TabTitle();
+
+      // Parallel first paint of CURRENT ORDERS + Blue30 (independent spreadsheets).
+      const [purchaseValuesInitial, blue30ValuesInitial] = await Promise.all([
+        this.sheets.getValues(`'${tab}'!A1:AZ`),
+        canReadBlue30
+          ? this.sheets.getValues(`'${b30Tab}'!A1:AZ`, b30Id)
+          : Promise.resolve(null as unknown[][] | null),
+      ]);
+
+      let purchaseValues = purchaseValuesInitial;
       let parsedPurchase = parsePurchaseSheetStageRows(purchaseValues);
       errors.push(...parsedPurchase.errors);
 
@@ -443,14 +648,8 @@ export class StockCostSheetReadService {
       }
 
       if (runValueSync) {
-        const b30Id = this.blue30SpreadsheetId();
-        if (this.sheets.isAuthConfigured() && b30Id && deliveredColIndex0 >= 0) {
-          const b30Tab = this.blue30TabTitle();
-          const blue30Values = await this.sheets.getValues(
-            `'${b30Tab}'!A1:AZ`,
-            b30Id,
-          );
-          const parsedB30 = parseBlue30ArrivedRows(blue30Values);
+        if (canReadBlue30 && deliveredColIndex0 >= 0 && blue30ValuesInitial) {
+          const parsedB30 = parseBlue30ArrivedRows(blue30ValuesInitial);
           errors.push(...parsedB30.errors);
 
           deliveredUpdates = planDeliveredYesUpdatesFromBlue30({
@@ -681,121 +880,39 @@ export class StockCostSheetReadService {
   }
 
   /**
-   * Read CURRENT ORDERS after optional Blue30→Delivered + Home/Prep→sent +
-   * Final→Complete sync. Prep candidates = Delivered=Yes, Home/Prep ≠ sent,
-   * Final ≠ Complete. Cached ~90s in Redis (bypassed while Final format force
-   * or sold→sent force is pending so the sheet is fixed on the next dashboard load).
+   * CURRENT ORDERS stage maps for the dashboard.
+   *
+   * Fast path: serve Redis last-good immediately (even stale / while format or
+   * sold→sent force is pending). Sheet writes + re-read run in the background.
+   * Cold miss: one read-only sheet fetch, cache it, then sync async.
+   * Pass `awaitSync: true` for scripts that must flip cells before returning.
    */
-  async getPurchasedAndArrivedByAsin(opts?: {
-    amazonHeldByAsin?: Map<string, number>;
-    soldByAsin?: Map<string, number>;
-    returnedByAsin?: Map<string, number>;
-  }): Promise<SheetStageSnapshots> {
-    const formatForceNeeded = await this.isFinalFormatForceNeeded();
-    const sentForceNeeded = await this.isHomePrepSentForceNeeded();
-    if (!formatForceNeeded && !sentForceNeeded) {
-      try {
-        const raw = await this.redis.get(CACHE_KEY_PIPELINE);
-        if (raw) {
-          const parsed = JSON.parse(raw) as CachedJsonMaps;
-          return this.jsonToMaps(parsed);
-        }
-      } catch {
-        // ignore cache read errors
-      }
-    }
-
-    const sync = await this.syncBlue30ReceivedToPurchaseDelivered({
-      amazonHeldByAsin: opts?.amazonHeldByAsin,
-      soldByAsin: opts?.soldByAsin,
-      returnedByAsin: opts?.returnedByAsin,
-    });
-    const errors: string[] = [...sync.errors];
-    let purchaseInTransit = [] as ReturnType<
-      typeof parsePurchaseSheetStageRows
-    >['inTransit'];
-    let purchaseDelivered = [] as ReturnType<
-      typeof parsePurchaseSheetStageRows
-    >['delivered'];
-    let purchaseSheetOk = false;
-    let blue30Ok = sync.attempted && sync.errors.length === 0;
-
-    if (this.sheets.isConfigured()) {
-      try {
-        const tab = this.currentTabTitle();
-        const values = await this.sheets.getValues(`'${tab}'!A1:AZ`);
-        const parsed = parsePurchaseSheetStageRows(values);
-        purchaseInTransit = parsed.inTransit;
-        purchaseDelivered = parsed.delivered;
-        errors.push(...parsed.errors);
-        purchaseSheetOk =
-          parsed.errors.length === 0 ||
-          parsed.inTransit.length + parsed.delivered.length > 0;
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        errors.push(`Purchase sheet read failed: ${msg}`);
-        this.logger.warn(`Purchase sheet read failed: ${msg}`);
-      }
-    } else {
-      errors.push('Purchase Google Sheet not configured');
-    }
-
-    if (!this.blue30SpreadsheetId() || !this.sheets.isAuthConfigured()) {
-      blue30Ok = false;
-    }
-
-    const { purchasedByAsin, arrivedByAsin, sheetSentByAsin } =
-      buildSheetPurchasedAndArrivedByAsin({
-        purchaseInTransit,
-        purchaseDelivered,
+  async getPurchasedAndArrivedByAsin(
+    opts?: SheetReadOpts,
+  ): Promise<SheetStageSnapshots> {
+    if (opts?.awaitSync) {
+      const sync = await this.syncBlue30ReceivedToPurchaseDelivered({
+        amazonHeldByAsin: opts?.amazonHeldByAsin,
+        soldByAsin: opts?.soldByAsin,
+        returnedByAsin: opts?.returnedByAsin,
       });
-
-    const syncParts: string[] = [];
-    if (sync.updated > 0) {
-      syncParts.push(`synced Delivered=Yes on ${sync.updated} row(s)`);
-    }
-    if (sync.sentUpdated > 0) {
-      syncParts.push(
-        `synced Home/Prep=${HOME_PREP_SENT_VALUE} on ${sync.sentUpdated} row(s)`,
-      );
-    }
-    if (sync.completeUpdated > 0) {
-      syncParts.push(
-        `synced Final=${PURCHASE_SHEET_COMPLETE_VALUE} on ${sync.completeUpdated} row(s)`,
-      );
-    }
-    if (sync.returnedUpdated > 0) {
-      syncParts.push(
-        `synced Final=${PURCHASE_SHEET_RETURNED_VALUE} on ${sync.returnedUpdated} row(s)`,
-      );
-    }
-    if (sync.formatsUpdated > 0) {
-      syncParts.push(`formatted ${sync.formatsUpdated} Final status cell(s)`);
-    }
-    if (syncParts.length === 0 && sync.skippedThrottle) {
-      syncParts.push('sheet stage sync throttled');
+      const snapshot = await this.readSheetMapsOnly(sync);
+      await this.writePipelineCache(snapshot);
+      return snapshot;
     }
 
-    const snapshot: SheetStageSnapshots = {
-      purchasedByAsin,
-      arrivedByAsin,
-      sheetSentByAsin,
-      purchaseSheetOk,
-      blue30Ok,
-      errors,
-      sourceNote: syncParts.join('; '),
-    };
-
-    try {
-      await this.redis.set(
-        CACHE_KEY_PIPELINE,
-        JSON.stringify(this.mapsToJson(snapshot)),
-        CACHE_TTL_SEC,
-      );
-    } catch {
-      // ignore cache write errors
+    const cached = await this.readPipelineCache();
+    if (cached) {
+      if (await this.shouldRevalidatePipelineMaps(cached.cachedAt)) {
+        this.schedulePipelineMapsRefresh(opts);
+      }
+      return cached.snapshot;
     }
 
+    // Cold miss: read-only paint, then sync/writes off the HTTP path.
+    const snapshot = await this.readSheetMapsOnly();
+    await this.writePipelineCache(snapshot);
+    this.schedulePipelineMapsRefresh(opts);
     return snapshot;
   }
 }
