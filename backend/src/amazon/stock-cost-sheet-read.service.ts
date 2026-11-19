@@ -627,7 +627,7 @@ export class StockCostSheetReadService {
         this.sheets.getValues(`'${tab}'!A1:AZ`),
         canReadBlue30
           ? this.sheets.getValues(`'${b30Tab}'!A1:AZ`, b30Id)
-          : Promise.resolve(null as unknown[][] | null),
+          : Promise.resolve(null as string[][] | null),
       ]);
 
       let purchaseValues = purchaseValuesInitial;
@@ -649,7 +649,9 @@ export class StockCostSheetReadService {
 
       if (runValueSync) {
         if (canReadBlue30 && deliveredColIndex0 >= 0 && blue30ValuesInitial) {
-          const parsedB30 = parseBlue30ArrivedRows(blue30ValuesInitial);
+          const parsedB30 = parseBlue30ArrivedRows(
+            blue30ValuesInitial as string[][],
+          );
           errors.push(...parsedB30.errors);
 
           deliveredUpdates = planDeliveredYesUpdatesFromBlue30({
