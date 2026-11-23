@@ -91,10 +91,7 @@ import {
 } from './shipment-status.util';
 import { RepricerService } from '../repricer/repricer.service';
 import { PushService } from '../push/push.service';
-import {
-  toSaleAmountIconUrl,
-  toSaleCardUrl,
-} from '../push/push-image.util';
+import { toSaleCheckIconUrl } from '../push/push-image.util';
 import {
   buildSalePushLabel,
   buildSalePushTexts,
@@ -196,7 +193,6 @@ export class AmazonService {
   ): Promise<void> {
     const orgId = await this.resolveOrgIdForUser(userId);
 
-    let imageUrl = (args.imageUrl ?? '').trim() || null;
     let title = (args.title ?? '').trim() || null;
     let costPerUnit: number | null = null;
     let feePerUnit: number | null = null;
@@ -213,7 +209,6 @@ export class AmazonService {
           },
           select: {
             title: true,
-            imageUrl: true,
             costOfGoods: true,
             estimatedAmazonFeePerUnit: true,
           },
@@ -221,9 +216,6 @@ export class AmazonService {
         });
         if (product) {
           if (!title && product.title?.trim()) title = product.title.trim();
-          if (!imageUrl && product.imageUrl?.trim()) {
-            imageUrl = product.imageUrl.trim();
-          }
           if (product.costOfGoods != null) {
             const cogs = Number(product.costOfGoods);
             if (Number.isFinite(cogs)) costPerUnit = cogs;
@@ -253,28 +245,19 @@ export class AmazonService {
       return raw.length > 36 ? `${raw.slice(0, 33)}…` : raw;
     })();
 
-    // Title carries Sold: qty × product — ✅ £… once; body stays empty (no £ repeat).
+    // Title carries Sold: qty × product — ✅ £… once; body empty; no £ in icon/image.
     const texts = buildSalePushTexts({
       profitLabel,
       shortTitle,
       quantity: args.quantity,
     });
 
-    // Green £ figure as icon (always shown on lock screen); wide card as image.
-    const amountIcon = toSaleAmountIconUrl({ profitLabel: texts.profitLabel });
-    const saleCard = toSaleCardUrl({
-      imageUrl,
-      profitLabel: texts.profitLabel,
-      title: shortTitle,
-    });
-
     const payload = {
       title: texts.title,
-      body: texts.body,
+      body: '',
       url: '/orders',
       tag: `sale-${args.amazonOrderId}`,
-      icon: amountIcon,
-      image: saleCard,
+      icon: toSaleCheckIconUrl(),
       badge: 'https://www.sellerbunker.com/favicon-48x48.png',
       color: '#10B981',
       profitLabel: texts.profitLabel,

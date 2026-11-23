@@ -345,6 +345,9 @@ export async function renderSalePushCard(opts: {
  * Fully opaque dark-green plate (no transparent corners) — iOS often treats
  * transparent-corner icons as monochrome templates (white-on-dark).
  * Lock-screen *body* text still cannot be colored on Apple Web Push.
+ *
+ * @deprecated Sale pushes must not use this — the £ figure duplicates the title.
+ * Prefer {@link renderSalePushCheckIcon}.
  */
 export function renderSalePushAmountIcon(opts: {
   profitLabel: string;
@@ -394,6 +397,51 @@ export function renderSalePushAmountIcon(opts: {
         capScale,
         LIME,
       );
+    }
+
+    return encodePng(ICON, ICON, data);
+  } catch {
+    return null;
+  }
+}
+
+const WHITE: Rgba = { r: 255, g: 255, b: 255, a: 255 };
+
+/**
+ * Solid green mark with a white check — no £ digits.
+ * Used as the sale notification icon so the amount only appears in the title.
+ */
+export function renderSalePushCheckIcon(): Buffer | null {
+  try {
+    const data = Buffer.alloc(ICON * ICON * 4);
+    // Opaque emerald plate (no transparent corners for iOS templating).
+    fillRect(data, ICON, ICON, 0, 0, ICON, ICON, EMERALD, 0);
+    // Slightly darker inset so the mark reads as a badge even when tiny.
+    fillRect(
+      data,
+      ICON,
+      ICON,
+      10,
+      10,
+      ICON - 20,
+      ICON - 20,
+      { r: 0x05, g: 0x96, b: 0x69, a: 255 },
+      28,
+    );
+
+    // Thick white checkmark (two strokes).
+    const stroke = 14;
+    // Short arm: bottom-left → center
+    for (let t = 0; t <= 48; t++) {
+      const x = 48 + t;
+      const y = 100 + Math.floor(t * 0.85);
+      fillRect(data, ICON, ICON, x - stroke / 2, y - stroke / 2, stroke, stroke, WHITE, 3);
+    }
+    // Long arm: center → top-right
+    for (let t = 0; t <= 72; t++) {
+      const x = 96 + t;
+      const y = 140 - Math.floor(t * 1.05);
+      fillRect(data, ICON, ICON, x - stroke / 2, y - stroke / 2, stroke, stroke, WHITE, 3);
     }
 
     return encodePng(ICON, ICON, data);

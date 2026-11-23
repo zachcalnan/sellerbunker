@@ -1,4 +1,4 @@
-/* SellerBunker web push service worker — v19 (Sold: qty × product — ✅ £ once) */
+/* SellerBunker web push service worker — v20 (title £ once; check icon; no sale-card) */
 self.addEventListener("install", (event) => {
   self.skipWaiting();
 });
@@ -29,12 +29,15 @@ function stripTick(s) {
 }
 
 async function showSaleNotification(data) {
-  // Prefer green-amount icon; never fall back to the monochrome app mark for sales.
+  // Prefer green check icon. Never use sale-amount-icon / sale-card (they bake in £).
+  const rawIcon = String(data.icon || "");
+  const iconLooksLikeAmount =
+    rawIcon.includes("sale-amount-icon") || rawIcon.includes("sale-card");
   const icon =
-    absoluteUrl(data.icon) ||
-    absoluteUrl(data.image) ||
+    (!iconLooksLikeAmount && absoluteUrl(data.icon)) ||
+    absoluteUrl("/api/push/sale-check-icon?v=15") ||
     absoluteUrl("/icon-192.png");
-  const image = absoluteUrl(data.image) || null;
+  // Never attach sale-card image — it repeats the £ under the banner.
   const badge = absoluteUrl(data.badge) || absoluteUrl("/favicon-48x48.png");
   const profitLabel = stripTick(data.profitLabel || "");
   const amountMatch = profitLabel.match(/^(.*)\s+(profit|sale)$/i);
@@ -54,8 +57,8 @@ async function showSaleNotification(data) {
     title = `Sold: 1 \u00d7 item \u2014 \u2705 ${profitLabel}`;
   }
 
-  // Trust the server body. Never copy profitLabel into body — that duplicated £ on iOS.
-  const body = data.body == null ? "" : String(data.body);
+  // Force empty body — never copy profitLabel / amount into body.
+  const body = "";
   // Android notification accent (ignored on iOS). Emerald matches in-app profit.
   const color =
     typeof data.color === "string" && /^#[0-9A-Fa-f]{6}$/.test(data.color)
@@ -72,24 +75,14 @@ async function showSaleNotification(data) {
     requireInteraction: false,
   };
 
-  // Never await network. If the OS rejects `image` (common on iOS), retry without it
-  // so the alert still appears while the app is closed.
   try {
-    if (image) {
-      await self.registration.showNotification(title, { ...base, image });
-    } else {
-      await self.registration.showNotification(title, base);
-    }
+    await self.registration.showNotification(title, base);
   } catch (_) {
-    try {
-      await self.registration.showNotification(title, base);
-    } catch (_) {
-      await self.registration.showNotification(title, {
-        body: base.body,
-        tag: base.tag,
-        data: base.data,
-      });
-    }
+    await self.registration.showNotification(title, {
+      body: "",
+      tag: base.tag,
+      data: base.data,
+    });
   }
 
   try {
@@ -101,10 +94,10 @@ async function showSaleNotification(data) {
       c.postMessage({
         type: "SB_SALE_PUSH",
         title,
-        body,
+        body: "",
         profitLabel,
         icon,
-        image,
+        image: null,
         url: data.url || "/orders",
       });
     }
@@ -117,7 +110,7 @@ self.addEventListener("push", (event) => {
     body: "",
     url: "/orders",
     tag: "sb",
-    icon: "/icon-192.png",
+    icon: "/api/push/sale-check-icon?v=15",
     image: null,
     badge: "/favicon-48x48.png",
     profitLabel: "",

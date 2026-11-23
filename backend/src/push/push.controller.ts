@@ -17,12 +17,12 @@ import { PushAlertService } from './push-alert.service';
 import { CreatePushAlertDto } from './dto/create-push-alert.dto';
 import {
   isAllowedPushImageUrl,
-  toSaleAmountIconUrl,
-  toSaleCardUrl,
+  toSaleCheckIconUrl,
 } from './push-image.util';
 import {
   renderSalePushAmountIcon,
   renderSalePushCard,
+  renderSalePushCheckIcon,
 } from './sale-push-card.util';
 import { buildSalePushTexts } from './sale-push-profit.util';
 
@@ -120,7 +120,8 @@ export class PushController {
   }
 
   /**
-   * Square green-£ icon for lock-screen notifications (body text cannot be colored).
+   * Square green-£ icon (legacy). Sale pushes must use sale-check-icon instead
+   * so the £ amount is not painted into the notification icon.
    */
   @Get('sale-amount-icon')
   @Header('Cache-Control', 'public, max-age=300, stale-while-revalidate=3600')
@@ -131,6 +132,26 @@ export class PushController {
     try {
       const profitLabel = String(profit ?? '').trim() || 'Sale';
       const png = renderSalePushAmountIcon({ profitLabel });
+      if (!png) {
+        res.status(502).send('Could not render icon');
+        return;
+      }
+      res.setHeader('Content-Type', 'image/png');
+      res.setHeader('Content-Length', String(png.length));
+      res.send(png);
+    } catch {
+      res.status(502).send('Could not render icon');
+    }
+  }
+
+  /**
+   * Solid green check mark — no £ digits. Preferred sale notification icon.
+   */
+  @Get('sale-check-icon')
+  @Header('Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800')
+  async saleCheckIcon(@Res() res: Response) {
+    try {
+      const png = renderSalePushCheckIcon();
       if (!png) {
         res.status(502).send('Could not render icon');
         return;
@@ -210,27 +231,19 @@ export class PushController {
     if (!this.pushService.isConfigured()) {
       return { ok: false, error: 'Push is not configured on the server' };
     }
-    // Green £ amount as icon (lock screen) + wide card as image (Android expanded).
-    const sampleAmazon =
-      'https://m.media-amazon.com/images/I/41VCNSoEWeL.jpg';
+    // Title carries £ once; body empty; green check icon (no baked-in £); no sale-card image.
     const texts = buildSalePushTexts({
       profitLabel: '£6.40 profit',
       shortTitle: 'Test product',
       quantity: 1,
     });
-    const icon = toSaleAmountIconUrl({ profitLabel: texts.profitLabel });
-    const card = toSaleCardUrl({
-      imageUrl: sampleAmazon,
-      profitLabel: texts.profitLabel,
-      title: 'Test product',
-    });
+    const icon = toSaleCheckIconUrl();
     const payload = {
       title: texts.title,
-      body: texts.body,
+      body: '',
       url: '/orders',
       tag: `test-${Date.now()}`,
       icon,
-      image: card,
       badge: 'https://www.sellerbunker.com/favicon-48x48.png',
       color: '#10B981',
       profitLabel: texts.profitLabel,
@@ -241,24 +254,38 @@ export class PushController {
     const titleOk = /^Sold:\s+\d+\s+\u00d7\s+.+\s+\u2014\s+\u2705\s+/u.test(
       payload.title,
     );
+    const bodyEmpty = payload.body === '';
+    const noAmountIcon = !icon.includes('sale-amount-icon');
+    const noSaleCard =
+      !wireJson.includes('sale-card') && !('image' in payload);
+    const poundInTitleOnly =
+      (payload.title.match(/£/g) ?? []).length === 1 &&
+      !payload.body.includes('£');
     const { sent } = await this.pushService.notifyUser(req.user.userId, payload);
+    const checksOk =
+      hasTick && titleOk && bodyEmpty && noAmountIcon && noSaleCard && poundInTitleOnly;
     return {
-      ok: sent > 0 && hasTick && titleOk,
+      ok: sent > 0 && checksOk,
       sent,
       hasTick,
       titleOk,
+      bodyEmpty,
+      noAmountIcon,
+      noSaleCard,
+      poundInTitleOnly,
       wireJson,
       payload: {
         title: payload.title,
         body: payload.body,
+        icon: payload.icon,
         color: payload.color,
         profitLabel: payload.profitLabel,
       },
       error:
         sent > 0
-          ? hasTick && titleOk
+          ? checksOk
             ? undefined
-            : 'Wire payload missing Sold: … — ✅ title pattern'
+            : 'Wire payload must have Sold:…✅ title, empty body, check icon, no sale-card'
           : 'No push subscription saved for your account. Settings → Notifications → Enable alerts (Home Screen on iPhone).',
     };
   }

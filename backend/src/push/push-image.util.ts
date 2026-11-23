@@ -47,7 +47,7 @@ export function toPushIconUrl(
 }
 
 /** Bump when icon/card pixels change so OS / SW caches do not keep a white tile. */
-const SALE_PUSH_ASSET_VERSION = '14';
+const SALE_PUSH_ASSET_VERSION = '15';
 
 /** Card with product thumb + bright green £ amount (notification image). */
 export function toSaleCardUrl(opts: {
@@ -75,6 +75,9 @@ export function toSaleCardUrl(opts: {
  * Square PNG with a large green £ amount — used as the notification icon so
  * Android lock screens show the figure in green (iOS body text cannot be colored;
  * Apple often ignores or templates custom icons).
+ *
+ * @deprecated Sale pushes must not use this — £ in the icon duplicates the title.
+ * Prefer {@link toSaleCheckIconUrl}.
  */
 export function toSaleAmountIconUrl(opts: {
   profitLabel: string;
@@ -88,4 +91,18 @@ export function toSaleAmountIconUrl(opts: {
   params.set('profit', opts.profitLabel);
   params.set('v', SALE_PUSH_ASSET_VERSION);
   return `${origin}/api/push/sale-amount-icon?${params.toString()}`;
+}
+
+/**
+ * Solid green ✅ mark (no £ digits) for sale notification icons.
+ * Title already carries `✅ £X.XX profit` once.
+ */
+export function toSaleCheckIconUrl(opts?: { appOrigin?: string }): string {
+  const origin = (opts?.appOrigin ?? 'https://www.sellerbunker.com').replace(
+    /\/$/,
+    '',
+  );
+  const params = new URLSearchParams();
+  params.set('v', SALE_PUSH_ASSET_VERSION);
+  return `${origin}/api/push/sale-check-icon?${params.toString()}`;
 }
