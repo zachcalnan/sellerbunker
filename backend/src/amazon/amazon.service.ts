@@ -260,7 +260,9 @@ export class AmazonService {
 
     const payload = {
       title: `Sale · ${shortTitle}`,
-      body: profitLabel,
+      // 🟢 so Apple lock-screen body still shows green (OS cannot colour text;
+      // custom icons are often ignored or templated monochrome).
+      body: `🟢 ${profitLabel}`,
       url: '/orders',
       tag: `sale-${args.amazonOrderId}`,
       icon: amountIcon,

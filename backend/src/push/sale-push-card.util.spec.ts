@@ -25,4 +25,26 @@ describe('renderSalePushAmountIcon', () => {
     expect(png!.length).toBeGreaterThan(100);
     expect(png!.subarray(0, 8).equals(PNG_SIG)).toBe(true);
   });
+
+  it('is fully opaque with lime (not white) amount pixels', () => {
+    const { PNG } = require('pngjs') as typeof import('pngjs');
+    const png = renderSalePushAmountIcon({ profitLabel: '£6.40 profit' });
+    expect(png).toBeTruthy();
+    const decoded = PNG.sync.read(png!);
+    let transparent = 0;
+    let lime = 0;
+    let white = 0;
+    for (let i = 0; i < decoded.data.length; i += 4) {
+      const r = decoded.data[i]!;
+      const g = decoded.data[i + 1]!;
+      const b = decoded.data[i + 2]!;
+      const a = decoded.data[i + 3]!;
+      if (a < 250) transparent += 1;
+      if (a >= 250 && g > 180 && g > r + 40 && g > b + 40) lime += 1;
+      if (a >= 250 && r > 200 && g > 200 && b > 200) white += 1;
+    }
+    expect(transparent).toBe(0);
+    expect(lime).toBeGreaterThan(500);
+    expect(white).toBe(0);
+  });
 });

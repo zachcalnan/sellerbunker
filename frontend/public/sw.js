@@ -1,4 +1,4 @@
-/* SellerBunker web push service worker — v13 (green £ amount icon + card) */
+/* SellerBunker web push service worker — v14 (opaque green £ icon + card) */
 self.addEventListener("install", (event) => {
   self.skipWaiting();
 });
@@ -25,18 +25,30 @@ function absoluteUrl(url) {
 }
 
 async function showSaleNotification(data) {
-  const icon = absoluteUrl(data.icon) || absoluteUrl("/icon-192.png");
+  // Prefer green-amount icon; never fall back to the monochrome app mark for sales.
+  const icon =
+    absoluteUrl(data.icon) ||
+    absoluteUrl(data.image) ||
+    absoluteUrl("/icon-192.png");
   const image = absoluteUrl(data.image) || null;
   const badge = absoluteUrl(data.badge) || absoluteUrl("/favicon-48x48.png");
-  const profitLabel = data.profitLabel || data.body || "";
+  const profitLabel = String(data.profitLabel || data.body || "").replace(
+    /^🟢\s*/u,
+    "",
+  );
   const title = data.title || "SellerBunker";
+  // Body keeps a green emoji so Apple lock-screen text still shows *some* green
+  // (OS body colour cannot be set; custom icons are often ignored/templated).
+  const bodyRaw = String(data.body || profitLabel || "");
+  const body =
+    profitLabel && !/^🟢/u.test(bodyRaw) ? `🟢 ${profitLabel}` : bodyRaw || "";
   // Android notification accent (ignored on iOS). Emerald matches in-app profit.
   const color =
     typeof data.color === "string" && /^#[0-9A-Fa-f]{6}$/.test(data.color)
       ? data.color
       : "#10B981";
   const base = {
-    body: profitLabel || data.body || "",
+    body,
     tag: data.tag || "sellerbunker",
     data: { url: data.url || "/orders" },
     icon,

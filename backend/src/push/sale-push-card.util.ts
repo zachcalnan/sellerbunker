@@ -9,9 +9,13 @@ const THUMB = 112;
 const THUMB_PAD = 14;
 /** Bright sale green — matches Android `color` #10B981 and in-app toast. */
 const EMERALD = { r: 0x10, g: 0xb9, b: 0x81, a: 255 };
+/** Neon lime — high contrast on dark-green icon so it still reads as green. */
+const LIME = { r: 0x4a, g: 0xde, b: 0x80, a: 255 };
 const EMERALD_SOFT = { r: 0x34, g: 0xd3, b: 0x99, a: 255 };
 const MUTED = { r: 0xa3, g: 0xa3, b: 0xa3, a: 255 };
 const BG = { r: 0x0c, g: 0x0c, b: 0x0c, a: 255 };
+/** Opaque dark-green icon plate — no transparent corners (iOS templates those). */
+const ICON_BG = { r: 0x02, g: 0x2c, b: 0x22, a: 255 };
 const THUMB_BG = { r: 0x1a, g: 0x1a, b: 0x1a, a: 255 };
 
 /** Compact 5×7 glyphs for A–Z, a–z, 0–9, and common symbols. */
@@ -283,10 +287,11 @@ export async function renderSalePushCard(opts: {
     const title =
       titleRaw.length > 28 ? `${titleRaw.slice(0, 25)}…` : titleRaw;
     const { hero, caption, negative } = parseProfitHero(opts.profitLabel);
-    const heroColor = negative ? MUTED : EMERALD;
+    const heroColor = negative ? MUTED : LIME;
 
-    const data = Buffer.alloc(W * H * 4, 0);
-    fillRect(data, W, H, 0, 0, W, H, BG, 18);
+    // Opaque card plate — avoid transparent corners that some OSes template.
+    const data = Buffer.alloc(W * H * 4);
+    fillRect(data, W, H, 0, 0, W, H, BG, 0);
     fillRect(data, W, H, THUMB_PAD, THUMB_PAD, THUMB, THUMB, THUMB_BG, 12);
 
     const src = (opts.imageUrl ?? '').trim();
@@ -337,16 +342,26 @@ export async function renderSalePushCard(opts: {
 
 /**
  * Square notification icon with a big bright-green £ amount.
- * iOS/Android always show the icon; lock-screen body text cannot be colored.
+ * Fully opaque dark-green plate (no transparent corners) — iOS often treats
+ * transparent-corner icons as monochrome templates (white-on-dark).
+ * Lock-screen *body* text still cannot be colored on Apple Web Push.
  */
 export function renderSalePushAmountIcon(opts: {
   profitLabel: string;
 }): Buffer | null {
   try {
     const { hero, caption, negative } = parseProfitHero(opts.profitLabel);
-    const heroColor = negative ? MUTED : EMERALD;
-    const data = Buffer.alloc(ICON * ICON * 4, 0);
-    fillRect(data, ICON, ICON, 0, 0, ICON, ICON, BG, 28);
+    const heroColor = negative ? MUTED : LIME;
+    // Opaque fill first — every pixel must have alpha 255.
+    const data = Buffer.alloc(ICON * ICON * 4);
+    fillRect(data, ICON, ICON, 0, 0, ICON, ICON, ICON_BG, 0);
+    // Inner brighter green frame so the tile reads as "green" even when tiny.
+    fillRect(data, ICON, ICON, 8, 8, ICON - 16, ICON - 16, {
+      r: 0x06,
+      g: 0x4e,
+      b: 0x3b,
+      a: 255,
+    }, 0);
 
     // Fit amount on the square — shorter figures get a bigger scale.
     let scale = hero.length <= 5 ? 7 : hero.length <= 7 ? 6 : hero.length <= 9 ? 5 : 4;
@@ -355,7 +370,7 @@ export function renderSalePushAmountIcon(opts: {
       scale -= 1;
       width = measureText(hero, scale);
     }
-    const amountY = caption ? 58 : Math.floor((ICON - scale * 7) / 2);
+    const amountY = caption ? 52 : Math.floor((ICON - scale * 7) / 2);
     drawText(
       data,
       ICON,
@@ -375,9 +390,9 @@ export function renderSalePushAmountIcon(opts: {
         ICON,
         caption,
         Math.max(8, Math.floor((ICON - capW) / 2)),
-        amountY + scale * 7 + 14,
+        amountY + scale * 7 + 12,
         capScale,
-        EMERALD_SOFT,
+        LIME,
       );
     }
 

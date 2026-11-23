@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 type SaleToast = {
   id: number;
@@ -16,7 +16,7 @@ type SaleLine = {
 
 /** Pull the money off the push label. A leading minus is not profit. */
 function splitSaleLabel(label: string): SaleLine {
-  const trimmed = label.trim();
+  const trimmed = label.replace(/^🟢\s*/u, "").trim();
   const match = trimmed.match(/^(.*)\s+(profit|sale)$/i);
   const amount = (match?.[1] ?? trimmed).trim();
   const word = (match?.[2] ?? "").toLowerCase();
@@ -25,8 +25,15 @@ function splitSaleLabel(label: string): SaleLine {
   }
   if (word === "profit") return { amount, kind: "profit" };
   if (word === "sale") return { amount, kind: "sale" };
+  // Bare £6.40 still counts as money — force green.
+  if (/[£$€]\s*\d|\d+[.,]\d{2}/.test(amount)) {
+    return { amount, kind: "sale" };
+  }
   return { amount, kind: "plain" };
 }
+
+const GREEN = "#10B981";
+const GREEN_SOFT = "#34D399";
 
 /**
  * In-app toast when a sale push arrives while SellerBunker is open.
@@ -35,6 +42,8 @@ function splitSaleLabel(label: string): SaleLine {
  */
 export function SalePushToast() {
   const [toast, setToast] = useState<SaleToast | null>(null);
+  const amountRef = useRef<HTMLParagraphElement | null>(null);
+  const captionRef = useRef<HTMLSpanElement | null>(null);
 
   useEffect(() => {
     if (typeof window === "undefined" || !("serviceWorker" in navigator)) return;
@@ -62,10 +71,21 @@ export function SalePushToast() {
     return () => navigator.serviceWorker.removeEventListener("message", onMessage);
   }, []);
 
-  if (!toast) return null;
+  const line = toast ? splitSaleLabel(toast.profitLabel) : null;
+  const moneyLine = line != null && (line.kind === "profit" || line.kind === "sale");
 
-  const line = splitSaleLabel(toast.profitLabel);
-  const moneyLine = line.kind === "profit" || line.kind === "sale";
+  // Lock green past any theme / Safari -webkit-text-fill overrides.
+  useEffect(() => {
+    if (!moneyLine || !amountRef.current) return;
+    amountRef.current.style.setProperty("color", GREEN, "important");
+    amountRef.current.style.setProperty("-webkit-text-fill-color", GREEN, "important");
+    if (captionRef.current) {
+      captionRef.current.style.setProperty("color", GREEN_SOFT, "important");
+      captionRef.current.style.setProperty("-webkit-text-fill-color", GREEN_SOFT, "important");
+    }
+  }, [moneyLine, toast?.id, line?.kind]);
+
+  if (!toast || !line) return null;
 
   return (
     <div className="pointer-events-none fixed inset-x-0 top-14 z-[90] flex justify-center px-3 sm:top-4">
@@ -79,30 +99,40 @@ export function SalePushToast() {
           )}
         </div>
         <div className="min-w-0 flex-1">
-          <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-emerald-400">
+          <p
+            className="text-[10px] font-semibold uppercase tracking-[0.14em]"
+            style={{ color: GREEN, WebkitTextFillColor: GREEN }}
+          >
             New sale
           </p>
           <p className="truncate text-sm text-[var(--foreground)]">{toast.title}</p>
           <p
+            ref={amountRef}
             className={
               moneyLine
                 ? "mt-1 text-2xl font-bold tabular-nums leading-none tracking-tight"
                 : "mt-1 text-base font-semibold tabular-nums leading-none text-[var(--foreground)]"
             }
-            style={moneyLine ? { color: "#10B981" } : undefined}
+            style={
+              moneyLine
+                ? { color: GREEN, WebkitTextFillColor: GREEN }
+                : undefined
+            }
           >
             {line.amount}
             {line.kind === "profit" ? (
               <span
+                ref={captionRef}
                 className="ml-1.5 align-middle text-xs font-medium tracking-wide"
-                style={{ color: "#34D399" }}
+                style={{ color: GREEN_SOFT, WebkitTextFillColor: GREEN_SOFT }}
               >
                 profit
               </span>
             ) : line.kind === "sale" ? (
               <span
+                ref={captionRef}
                 className="ml-1.5 align-middle text-xs font-medium tracking-wide"
-                style={{ color: "#34D399" }}
+                style={{ color: GREEN_SOFT, WebkitTextFillColor: GREEN_SOFT }}
               >
                 sale
               </span>

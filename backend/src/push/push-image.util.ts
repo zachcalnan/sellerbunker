@@ -46,6 +46,9 @@ export function toPushIconUrl(
   return `${origin}/api/push/product-image?url=${encodeURIComponent(https)}`;
 }
 
+/** Bump when icon/card pixels change so OS / SW caches do not keep a white tile. */
+const SALE_PUSH_ASSET_VERSION = '14';
+
 /** Card with product thumb + bright green £ amount (notification image). */
 export function toSaleCardUrl(opts: {
   imageUrl?: string | null;
@@ -59,6 +62,7 @@ export function toSaleCardUrl(opts: {
   );
   const params = new URLSearchParams();
   params.set('profit', opts.profitLabel);
+  params.set('v', SALE_PUSH_ASSET_VERSION);
   if (opts.title?.trim()) params.set('title', opts.title.trim().slice(0, 40));
   const img = (opts.imageUrl ?? '').trim();
   if (img && isAllowedPushImageUrl(img.startsWith('http://') ? `https://${img.slice(7)}` : img)) {
@@ -69,7 +73,8 @@ export function toSaleCardUrl(opts: {
 
 /**
  * Square PNG with a large green £ amount — used as the notification icon so
- * iOS/Android lock screens show the figure in green (body text cannot be colored).
+ * Android lock screens show the figure in green (iOS body text cannot be colored;
+ * Apple often ignores or templates custom icons).
  */
 export function toSaleAmountIconUrl(opts: {
   profitLabel: string;
@@ -81,5 +86,6 @@ export function toSaleAmountIconUrl(opts: {
   );
   const params = new URLSearchParams();
   params.set('profit', opts.profitLabel);
+  params.set('v', SALE_PUSH_ASSET_VERSION);
   return `${origin}/api/push/sale-amount-icon?${params.toString()}`;
 }
