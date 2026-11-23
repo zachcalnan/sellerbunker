@@ -24,6 +24,7 @@ import {
   renderSalePushAmountIcon,
   renderSalePushCard,
 } from './sale-push-card.util';
+import { buildSalePushTexts } from './sale-push-profit.util';
 
 @Controller('push')
 export class PushController {
@@ -212,29 +213,38 @@ export class PushController {
     // Green £ amount as icon (lock screen) + wide card as image (Android expanded).
     const sampleAmazon =
       'https://m.media-amazon.com/images/I/41VCNSoEWeL.jpg';
-    const profitLabel = '£6.40 profit';
-    const icon = toSaleAmountIconUrl({ profitLabel });
+    const texts = buildSalePushTexts({
+      profitLabel: '£6.40 profit',
+      shortTitle: 'Test product',
+    });
+    const icon = toSaleAmountIconUrl({ profitLabel: texts.profitLabel });
     const card = toSaleCardUrl({
       imageUrl: sampleAmazon,
-      profitLabel,
+      profitLabel: texts.profitLabel,
       title: 'Test product',
     });
     const payload = {
-      title: 'Sale · Test product',
-      // ✅ so Apple lock-screen body still signals profit (OS cannot colour text).
-      body: `✅ ${profitLabel}`,
+      title: texts.title,
+      body: texts.body,
       url: '/orders',
       tag: `test-${Date.now()}`,
       icon,
       image: card,
       badge: 'https://www.sellerbunker.com/favicon-48x48.png',
       color: '#10B981',
-      profitLabel,
+      profitLabel: texts.profitLabel,
     };
+    const wireJson = JSON.stringify(payload);
+    const hasTick =
+      wireJson.includes('\u2705') &&
+      payload.title.includes('\u2705') &&
+      payload.body.includes('\u2705');
     const { sent } = await this.pushService.notifyUser(req.user.userId, payload);
     return {
-      ok: sent > 0,
+      ok: sent > 0 && hasTick,
       sent,
+      hasTick,
+      wireJson,
       payload: {
         title: payload.title,
         body: payload.body,
@@ -243,7 +253,9 @@ export class PushController {
       },
       error:
         sent > 0
-          ? undefined
+          ? hasTick
+            ? undefined
+            : 'Wire payload missing U+2705 tick'
           : 'No push subscription saved for your account. Settings → Notifications → Enable alerts (Home Screen on iPhone).',
     };
   }

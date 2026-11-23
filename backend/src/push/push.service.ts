@@ -179,12 +179,17 @@ export class PushService {
     payload: PushPayload,
   ): Promise<boolean> {
     try {
+      const wire = JSON.stringify(payload);
+      // Prove title/body bytes on the wire (U+2705 = ✅) before the push leaves.
+      this.logger.log(
+        `Push wire title=${JSON.stringify(payload.title)} body=${JSON.stringify(payload.body)} hasTick=${wire.includes('\u2705')} endpoint=${sub.endpoint.slice(0, 40)}…`,
+      );
       await webpush.sendNotification(
         {
           endpoint: sub.endpoint,
           keys: { p256dh: sub.p256dh, auth: sub.auth },
         },
-        JSON.stringify(payload),
+        wire,
         {
           // Prefer immediate delivery (helps when the app is backgrounded / locked).
           urgency: 'high',

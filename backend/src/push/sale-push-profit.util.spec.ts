@@ -1,4 +1,7 @@
-import { buildSalePushLabel } from './sale-push-profit.util';
+import {
+  buildSalePushLabel,
+  buildSalePushTexts,
+} from './sale-push-profit.util';
 
 describe('buildSalePushLabel', () => {
   it('does not show a sale as minus the sale price when fees swallowed the order', () => {
@@ -44,5 +47,25 @@ describe('buildSalePushLabel', () => {
         computedProfit: -64.99,
       }),
     ).toBe('New sale');
+  });
+});
+
+describe('buildSalePushTexts', () => {
+  it('puts ✅ next to £ in both title and body', () => {
+    const texts = buildSalePushTexts({
+      profitLabel: '£6.40 profit',
+      shortTitle: 'Test product',
+    });
+    expect(texts.title).toBe('✅ £6.40 · Test product');
+    expect(texts.body).toBe('✅ £6.40 profit');
+    expect(texts.title.includes('\u2705')).toBe(true);
+    expect(texts.body.includes('\u2705')).toBe(true);
+    expect(texts.profitLabel).toBe('£6.40 profit');
+  });
+
+  it('falls back to Sale when there is no product name', () => {
+    expect(
+      buildSalePushTexts({ profitLabel: '£6.40 profit' }).title,
+    ).toBe('✅ £6.40 · Sale');
   });
 });

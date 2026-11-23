@@ -1,4 +1,4 @@
-/* SellerBunker web push service worker — v17 (✅ tick + opaque green £ icon) */
+/* SellerBunker web push service worker — v18 (✅ in title + body) */
 self.addEventListener("install", (event) => {
   self.skipWaiting();
 });
@@ -24,6 +24,10 @@ function absoluteUrl(url) {
   }
 }
 
+function stripTick(s) {
+  return String(s || "").replace(/^(?:\u2705|🟢)\s*/u, "").trim();
+}
+
 async function showSaleNotification(data) {
   // Prefer green-amount icon; never fall back to the monochrome app mark for sales.
   const icon =
@@ -32,17 +36,25 @@ async function showSaleNotification(data) {
     absoluteUrl("/icon-192.png");
   const image = absoluteUrl(data.image) || null;
   const badge = absoluteUrl(data.badge) || absoluteUrl("/favicon-48x48.png");
-  const profitLabel = String(data.profitLabel || data.body || "").replace(
-    /^(?:✅|🟢)\s*/u,
-    "",
-  );
-  const title = data.title || "SellerBunker";
-  // Body keeps ✅ so Apple lock-screen text still signals profit at a glance
-  // (OS body colour cannot be set; custom icons are often ignored/templated).
+  const profitLabel = stripTick(data.profitLabel || data.body || "");
+  const amountMatch = profitLabel.match(/^(.*)\s+(profit|sale)$/i);
+  const amountHero = (amountMatch?.[1] ?? profitLabel).trim();
+
+  // iOS banners often show only the title — keep ✅ £… there even if the
+  // server forgot, or if an old client still has a title without the amount.
+  let title = String(data.title || "SellerBunker");
+  if (amountHero && !title.includes("\u2705")) {
+    if (title.includes(amountHero)) {
+      title = `\u2705 ${stripTick(title)}`;
+    } else {
+      title = `\u2705 ${amountHero} · ${stripTick(title) || "Sale"}`;
+    }
+  }
+
   const bodyRaw = String(data.body || profitLabel || "");
   const body =
-    profitLabel && !/^(?:✅|🟢)/u.test(bodyRaw)
-      ? `✅ ${profitLabel}`
+    profitLabel && !/^(?:\u2705|🟢)/u.test(bodyRaw)
+      ? `\u2705 ${profitLabel}`
       : bodyRaw || "";
   // Android notification accent (ignored on iOS). Emerald matches in-app profit.
   const color =
@@ -88,8 +100,8 @@ async function showSaleNotification(data) {
     for (const c of clients) {
       c.postMessage({
         type: "SB_SALE_PUSH",
-        title: data.title,
-        body: data.body,
+        title,
+        body,
         profitLabel,
         icon,
         image,

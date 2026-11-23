@@ -95,7 +95,10 @@ import {
   toSaleAmountIconUrl,
   toSaleCardUrl,
 } from '../push/push-image.util';
-import { buildSalePushLabel } from '../push/sale-push-profit.util';
+import {
+  buildSalePushLabel,
+  buildSalePushTexts,
+} from '../push/sale-push-profit.util';
 
 /** When we have no settled fees and no product fee estimate, use this share of revenue as fee so profit/ROI are not overstated. */
 const DEFAULT_AMAZON_FEE_RATE_WHEN_UNKNOWN = 0.35;
@@ -250,26 +253,27 @@ export class AmazonService {
       return raw.length > 36 ? `${raw.slice(0, 33)}…` : raw;
     })();
 
+    // Title + body both carry ✅ £… — iOS banners often show title only.
+    const texts = buildSalePushTexts({ profitLabel, shortTitle });
+
     // Green £ figure as icon (always shown on lock screen); wide card as image.
-    const amountIcon = toSaleAmountIconUrl({ profitLabel });
+    const amountIcon = toSaleAmountIconUrl({ profitLabel: texts.profitLabel });
     const saleCard = toSaleCardUrl({
       imageUrl,
-      profitLabel,
+      profitLabel: texts.profitLabel,
       title: shortTitle,
     });
 
     const payload = {
-      title: `Sale · ${shortTitle}`,
-      // ✅ so Apple lock-screen body still signals profit (OS cannot colour text;
-      // custom icons are often ignored or templated monochrome).
-      body: `✅ ${profitLabel}`,
+      title: texts.title,
+      body: texts.body,
       url: '/orders',
       tag: `sale-${args.amazonOrderId}`,
       icon: amountIcon,
       image: saleCard,
       badge: 'https://www.sellerbunker.com/favicon-48x48.png',
       color: '#10B981',
-      profitLabel,
+      profitLabel: texts.profitLabel,
     };
 
     if (!orgId) {

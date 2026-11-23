@@ -105,3 +105,26 @@ export function buildSalePushLabel(input: SalePushProfitInput): string {
   if (revenue > 0) return `${gbp(revenue)} sale`;
   return 'New sale';
 }
+
+const SALE_PUSH_TICK = '\u2705'; // ✅ — keep explicit so payloads can't silently drop emoji
+
+/**
+ * Title + body for sale / test pushes. iOS lock-screen banners often show only
+ * the title, so the tick and £ amount must live in both fields.
+ */
+export function buildSalePushTexts(opts: {
+  profitLabel: string;
+  /** Product / test name for the title suffix (optional). */
+  shortTitle?: string | null;
+}): { title: string; body: string; profitLabel: string } {
+  const raw = String(opts.profitLabel ?? '').trim() || 'New sale';
+  const profitLabel = raw.replace(/^(?:\u2705|🟢)\s*/u, '').trim() || 'New sale';
+  const amountMatch = profitLabel.match(/^(.*)\s+(profit|sale)$/i);
+  const amountHero = (amountMatch?.[1] ?? profitLabel).trim();
+  const product = String(opts.shortTitle ?? '').trim();
+  const title = product
+    ? `${SALE_PUSH_TICK} ${amountHero} · ${product}`
+    : `${SALE_PUSH_TICK} ${amountHero} · Sale`;
+  const body = `${SALE_PUSH_TICK} ${profitLabel}`;
+  return { title, body, profitLabel };
+}
