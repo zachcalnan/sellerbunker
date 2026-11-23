@@ -1,4 +1,4 @@
-/* SellerBunker web push service worker — v18 (✅ in title + body) */
+/* SellerBunker web push service worker — v19 (Sold: qty × product — ✅ £ once) */
 self.addEventListener("install", (event) => {
   self.skipWaiting();
 });
@@ -36,26 +36,26 @@ async function showSaleNotification(data) {
     absoluteUrl("/icon-192.png");
   const image = absoluteUrl(data.image) || null;
   const badge = absoluteUrl(data.badge) || absoluteUrl("/favicon-48x48.png");
-  const profitLabel = stripTick(data.profitLabel || data.body || "");
+  const profitLabel = stripTick(data.profitLabel || "");
   const amountMatch = profitLabel.match(/^(.*)\s+(profit|sale)$/i);
   const amountHero = (amountMatch?.[1] ?? profitLabel).trim();
 
-  // iOS banners often show only the title — keep ✅ £… there even if the
-  // server forgot, or if an old client still has a title without the amount.
+  // Title should already be "Sold: N × product — ✅ £…". Repair older payloads
+  // that still use the duplicated title/body style.
   let title = String(data.title || "SellerBunker");
-  if (amountHero && !title.includes("\u2705")) {
-    if (title.includes(amountHero)) {
-      title = `\u2705 ${stripTick(title)}`;
-    } else {
-      title = `\u2705 ${amountHero} · ${stripTick(title) || "Sale"}`;
-    }
+  if (profitLabel && !title.includes("\u2705")) {
+    const product =
+      stripTick(title)
+        .replace(/^Sold:\s*\d+\s*[x×]\s*/i, "")
+        .replace(/^Sale\s*[·•\-–—]\s*/i, "")
+        .trim() || "item";
+    title = `Sold: 1 \u00d7 ${product} \u2014 \u2705 ${profitLabel}`;
+  } else if (amountHero && !title.includes(amountHero) && !title.includes("\u2705")) {
+    title = `Sold: 1 \u00d7 item \u2014 \u2705 ${profitLabel}`;
   }
 
-  const bodyRaw = String(data.body || profitLabel || "");
-  const body =
-    profitLabel && !/^(?:\u2705|🟢)/u.test(bodyRaw)
-      ? `\u2705 ${profitLabel}`
-      : bodyRaw || "";
+  // Trust the server body. Never copy profitLabel into body — that duplicated £ on iOS.
+  const body = data.body == null ? "" : String(data.body);
   // Android notification accent (ignored on iOS). Emerald matches in-app profit.
   const color =
     typeof data.color === "string" && /^#[0-9A-Fa-f]{6}$/.test(data.color)

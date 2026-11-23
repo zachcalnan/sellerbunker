@@ -51,21 +51,41 @@ describe('buildSalePushLabel', () => {
 });
 
 describe('buildSalePushTexts', () => {
-  it('puts ✅ next to £ in both title and body', () => {
+  it('puts qty × product and ✅ £ once in the title; body empty', () => {
     const texts = buildSalePushTexts({
       profitLabel: '£6.40 profit',
       shortTitle: 'Test product',
+      quantity: 1,
     });
-    expect(texts.title).toBe('✅ £6.40 · Test product');
-    expect(texts.body).toBe('✅ £6.40 profit');
+    expect(texts.title).toBe('Sold: 1 × Test product — ✅ £6.40 profit');
+    expect(texts.body).toBe('');
     expect(texts.title.includes('\u2705')).toBe(true);
-    expect(texts.body.includes('\u2705')).toBe(true);
+    expect(texts.body.includes('\u2705')).toBe(false);
     expect(texts.profitLabel).toBe('£6.40 profit');
   });
 
-  it('falls back to Sale when there is no product name', () => {
+  it('uses real qty when provided', () => {
+    expect(
+      buildSalePushTexts({
+        profitLabel: '£12.80 profit',
+        shortTitle: 'Widget',
+        quantity: 2,
+      }).title,
+    ).toBe('Sold: 2 × Widget — ✅ £12.80 profit');
+  });
+
+  it('falls back to item when there is no product name', () => {
     expect(
       buildSalePushTexts({ profitLabel: '£6.40 profit' }).title,
-    ).toBe('✅ £6.40 · Sale');
+    ).toBe('Sold: 1 × item — ✅ £6.40 profit');
+  });
+
+  it('shows sale label when there is no profit', () => {
+    expect(
+      buildSalePushTexts({
+        profitLabel: '£64.99 sale',
+        shortTitle: 'Test product',
+      }).title,
+    ).toBe('Sold: 1 × Test product — ✅ £64.99 sale');
   });
 });

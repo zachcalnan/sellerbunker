@@ -253,8 +253,12 @@ export class AmazonService {
       return raw.length > 36 ? `${raw.slice(0, 33)}…` : raw;
     })();
 
-    // Title + body both carry ✅ £… — iOS banners often show title only.
-    const texts = buildSalePushTexts({ profitLabel, shortTitle });
+    // Title carries Sold: qty × product — ✅ £… once; body stays empty (no £ repeat).
+    const texts = buildSalePushTexts({
+      profitLabel,
+      shortTitle,
+      quantity: args.quantity,
+    });
 
     // Green £ figure as icon (always shown on lock screen); wide card as image.
     const amountIcon = toSaleAmountIconUrl({ profitLabel: texts.profitLabel });

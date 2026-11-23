@@ -216,6 +216,7 @@ export class PushController {
     const texts = buildSalePushTexts({
       profitLabel: '£6.40 profit',
       shortTitle: 'Test product',
+      quantity: 1,
     });
     const icon = toSaleAmountIconUrl({ profitLabel: texts.profitLabel });
     const card = toSaleCardUrl({
@@ -236,14 +237,16 @@ export class PushController {
     };
     const wireJson = JSON.stringify(payload);
     const hasTick =
-      wireJson.includes('\u2705') &&
-      payload.title.includes('\u2705') &&
-      payload.body.includes('\u2705');
+      wireJson.includes('\u2705') && payload.title.includes('\u2705');
+    const titleOk = /^Sold:\s+\d+\s+\u00d7\s+.+\s+\u2014\s+\u2705\s+/u.test(
+      payload.title,
+    );
     const { sent } = await this.pushService.notifyUser(req.user.userId, payload);
     return {
-      ok: sent > 0 && hasTick,
+      ok: sent > 0 && hasTick && titleOk,
       sent,
       hasTick,
+      titleOk,
       wireJson,
       payload: {
         title: payload.title,
@@ -253,9 +256,9 @@ export class PushController {
       },
       error:
         sent > 0
-          ? hasTick
+          ? hasTick && titleOk
             ? undefined
-            : 'Wire payload missing U+2705 tick'
+            : 'Wire payload missing Sold: … — ✅ title pattern'
           : 'No push subscription saved for your account. Settings → Notifications → Enable alerts (Home Screen on iPhone).',
     };
   }

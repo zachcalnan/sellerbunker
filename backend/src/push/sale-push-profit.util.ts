@@ -107,24 +107,27 @@ export function buildSalePushLabel(input: SalePushProfitInput): string {
 }
 
 const SALE_PUSH_TICK = '\u2705'; // ✅ — keep explicit so payloads can't silently drop emoji
+const SALE_PUSH_TIMES = '\u00d7'; // ×
+const SALE_PUSH_EM_DASH = '\u2014'; // —
 
 /**
  * Title + body for sale / test pushes. iOS lock-screen banners often show only
- * the title, so the tick and £ amount must live in both fields.
+ * the title, so the full line (qty × product — ✅ £…) lives there once.
+ * Body stays empty so the lock screen does not repeat the £ amount.
  */
 export function buildSalePushTexts(opts: {
   profitLabel: string;
-  /** Product / test name for the title suffix (optional). */
+  /** Product / test name (optional). */
   shortTitle?: string | null;
+  /** Units sold; defaults to 1. */
+  quantity?: number | null;
 }): { title: string; body: string; profitLabel: string } {
   const raw = String(opts.profitLabel ?? '').trim() || 'New sale';
   const profitLabel = raw.replace(/^(?:\u2705|🟢)\s*/u, '').trim() || 'New sale';
-  const amountMatch = profitLabel.match(/^(.*)\s+(profit|sale)$/i);
-  const amountHero = (amountMatch?.[1] ?? profitLabel).trim();
-  const product = String(opts.shortTitle ?? '').trim();
-  const title = product
-    ? `${SALE_PUSH_TICK} ${amountHero} · ${product}`
-    : `${SALE_PUSH_TICK} ${amountHero} · Sale`;
-  const body = `${SALE_PUSH_TICK} ${profitLabel}`;
+  const qtyRaw = num(opts.quantity);
+  const qty = Math.max(1, Math.floor(qtyRaw != null && qtyRaw > 0 ? qtyRaw : 1));
+  const product = String(opts.shortTitle ?? '').trim() || 'item';
+  const title = `Sold: ${qty} ${SALE_PUSH_TIMES} ${product} ${SALE_PUSH_EM_DASH} ${SALE_PUSH_TICK} ${profitLabel}`;
+  const body = '';
   return { title, body, profitLabel };
 }
