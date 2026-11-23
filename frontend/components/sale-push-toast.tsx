@@ -44,11 +44,12 @@ export function SalePushToast() {
       if (!data || data.type !== "SB_SALE_PUSH") return;
       const title = String(data.title ?? "New sale").replace(/^Sale\s*[·•\-–—]\s*/i, "");
       const profitLabel = String(data.profitLabel ?? data.body ?? "");
+      // Prefer the wide sale-card (product + green £) over the amount-only icon.
       const imageUrl =
-        typeof data.icon === "string"
-          ? data.icon
-          : typeof data.image === "string"
-            ? data.image
+        typeof data.image === "string"
+          ? data.image
+          : typeof data.icon === "string"
+            ? data.icon
             : null;
       const id = Date.now();
       setToast({ id, title, profitLabel, imageUrl });
@@ -85,17 +86,24 @@ export function SalePushToast() {
           <p
             className={
               moneyLine
-                ? "mt-1 text-xl font-semibold tabular-nums leading-none text-emerald-400"
+                ? "mt-1 text-2xl font-bold tabular-nums leading-none tracking-tight"
                 : "mt-1 text-base font-semibold tabular-nums leading-none text-[var(--foreground)]"
             }
+            style={moneyLine ? { color: "#10B981" } : undefined}
           >
             {line.amount}
             {line.kind === "profit" ? (
-              <span className="ml-1.5 align-middle text-xs font-medium tracking-wide text-emerald-300">
+              <span
+                className="ml-1.5 align-middle text-xs font-medium tracking-wide"
+                style={{ color: "#34D399" }}
+              >
                 profit
               </span>
             ) : line.kind === "sale" ? (
-              <span className="ml-1.5 align-middle text-xs font-medium tracking-wide text-emerald-300">
+              <span
+                className="ml-1.5 align-middle text-xs font-medium tracking-wide"
+                style={{ color: "#34D399" }}
+              >
                 sale
               </span>
             ) : null}

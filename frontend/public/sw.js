@@ -1,4 +1,4 @@
-/* SellerBunker web push service worker — v12 (green sale accent + positive profit) */
+/* SellerBunker web push service worker — v13 (green £ amount icon + card) */
 self.addEventListener("install", (event) => {
   self.skipWaiting();
 });

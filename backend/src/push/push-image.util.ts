@@ -46,7 +46,7 @@ export function toPushIconUrl(
   return `${origin}/api/push/product-image?url=${encodeURIComponent(https)}`;
 }
 
-/** Card with product thumb + emerald profit text (notification image). */
+/** Card with product thumb + bright green £ amount (notification image). */
 export function toSaleCardUrl(opts: {
   imageUrl?: string | null;
   profitLabel: string;
@@ -65,4 +65,21 @@ export function toSaleCardUrl(opts: {
     params.set('url', img.startsWith('http://') ? `https://${img.slice(7)}` : img);
   }
   return `${origin}/api/push/sale-card?${params.toString()}`;
+}
+
+/**
+ * Square PNG with a large green £ amount — used as the notification icon so
+ * iOS/Android lock screens show the figure in green (body text cannot be colored).
+ */
+export function toSaleAmountIconUrl(opts: {
+  profitLabel: string;
+  appOrigin?: string;
+}): string {
+  const origin = (opts.appOrigin ?? 'https://www.sellerbunker.com').replace(
+    /\/$/,
+    '',
+  );
+  const params = new URLSearchParams();
+  params.set('profit', opts.profitLabel);
+  return `${origin}/api/push/sale-amount-icon?${params.toString()}`;
 }

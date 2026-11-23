@@ -4,9 +4,12 @@ import { isAllowedPushImageUrl } from './push-image.util';
 
 const W = 420;
 const H = 140;
+const ICON = 192;
 const THUMB = 112;
 const THUMB_PAD = 14;
-const EMERALD = { r: 0x34, g: 0xd3, b: 0x99, a: 255 };
+/** Bright sale green — matches Android `color` #10B981 and in-app toast. */
+const EMERALD = { r: 0x10, g: 0xb9, b: 0x81, a: 255 };
+const EMERALD_SOFT = { r: 0x34, g: 0xd3, b: 0x99, a: 255 };
 const MUTED = { r: 0xa3, g: 0xa3, b: 0xa3, a: 255 };
 const BG = { r: 0x0c, g: 0x0c, b: 0x0c, a: 255 };
 const THUMB_BG = { r: 0x1a, g: 0x1a, b: 0x1a, a: 255 };
@@ -94,11 +97,12 @@ type Rgba = { r: number; g: number; b: number; a: number };
 function setPixel(
   data: Buffer,
   width: number,
+  height: number,
   x: number,
   y: number,
   c: Rgba,
 ): void {
-  if (x < 0 || y < 0 || x >= width || y >= H) return;
+  if (x < 0 || y < 0 || x >= width || y >= height) return;
   const i = (y * width + x) * 4;
   data[i] = c.r;
   data[i + 1] = c.g;
@@ -109,6 +113,7 @@ function setPixel(
 function fillRect(
   data: Buffer,
   width: number,
+  height: number,
   x0: number,
   y0: number,
   w: number,
@@ -125,14 +130,24 @@ function fillRect(
         const dy = y < y0 + radius ? y0 + radius - y : y >= y1 - radius ? y - (y1 - radius - 1) : 0;
         if (dx > 0 && dy > 0 && dx * dx + dy * dy > radius * radius) continue;
       }
-      setPixel(data, width, x, y, c);
+      setPixel(data, width, height, x, y, c);
     }
   }
+}
+
+function measureText(text: string, scale: number): number {
+  let w = 0;
+  for (const ch of text) {
+    const rows = GLYPHS[ch] ?? GLYPHS[ch.toUpperCase()] ?? GLYPHS['?'];
+    w += rows ? scale * 6 : scale * 6;
+  }
+  return w;
 }
 
 function drawChar(
   data: Buffer,
   width: number,
+  height: number,
   ch: string,
   x: number,
   y: number,
@@ -148,6 +163,7 @@ function drawChar(
         fillRect(
           data,
           width,
+          height,
           x + col * scale,
           y + row * scale,
           scale,
@@ -163,6 +179,7 @@ function drawChar(
 function drawText(
   data: Buffer,
   width: number,
+  height: number,
   text: string,
   x: number,
   y: number,
@@ -171,8 +188,28 @@ function drawText(
 ): void {
   let cx = x;
   for (const ch of text) {
-    cx += drawChar(data, width, ch, cx, y, scale, color);
+    cx += drawChar(data, width, height, ch, cx, y, scale, color);
   }
+}
+
+function parseProfitHero(profitLabel: string): {
+  hero: string;
+  caption: string;
+  negative: boolean;
+} {
+  const profit = (profitLabel || '').trim() || 'Sale';
+  const split = profit.match(/^(.*)\s+(profit|sale)$/i);
+  const amountText = (split?.[1] ?? profit).trim();
+  const kind = (split?.[2] ?? '').toLowerCase();
+  const negative = /^-|£\s*-|£-|−/.test(amountText);
+  const hero = negative ? 'New sale' : amountText;
+  const caption =
+    !negative && kind === 'profit'
+      ? 'profit'
+      : !negative && kind === 'sale'
+        ? 'sale'
+        : '';
+  return { hero, caption, negative };
 }
 
 function decodeImage(buf: Buffer): { width: number; height: number; data: Buffer } | null {
@@ -199,6 +236,7 @@ function decodeImage(buf: Buffer): { width: number; height: number; data: Buffer
 function blitCover(
   dest: Buffer,
   destW: number,
+  destH: number,
   src: { width: number; height: number; data: Buffer },
   dx: number,
   dy: number,
@@ -220,7 +258,7 @@ function blitCover(
         b: src.data[si + 2] ?? 0,
         a: src.data[si + 3] ?? 255,
       };
-      setPixel(dest, destW, dx + x, dy + y, c);
+      setPixel(dest, destW, destH, dx + x, dy + y, c);
     }
   }
 }
@@ -232,7 +270,7 @@ function encodePng(width: number, height: number, rgba: Buffer): Buffer {
 }
 
 /**
- * Small notification card: product thumb + emerald profit (matches app).
+ * Small notification card: product thumb + bright green £ amount (matches app).
  * Pure JS (pngjs/jpeg-js) — no sharp/libvips (avoids Docker Fontconfig segfaults).
  */
 export async function renderSalePushCard(opts: {
@@ -241,14 +279,15 @@ export async function renderSalePushCard(opts: {
   title?: string | null;
 }): Promise<Buffer | null> {
   try {
-    const profit = (opts.profitLabel || '').trim() || 'Sale';
     const titleRaw = (opts.title ?? '').trim();
     const title =
       titleRaw.length > 28 ? `${titleRaw.slice(0, 25)}…` : titleRaw;
+    const { hero, caption, negative } = parseProfitHero(opts.profitLabel);
+    const heroColor = negative ? MUTED : EMERALD;
 
     const data = Buffer.alloc(W * H * 4, 0);
-    fillRect(data, W, 0, 0, W, H, BG, 18);
-    fillRect(data, W, THUMB_PAD, THUMB_PAD, THUMB, THUMB, THUMB_BG, 12);
+    fillRect(data, W, H, 0, 0, W, H, BG, 18);
+    fillRect(data, W, H, THUMB_PAD, THUMB_PAD, THUMB, THUMB, THUMB_BG, 12);
 
     const src = (opts.imageUrl ?? '').trim();
     if (src && isAllowedPushImageUrl(src)) {
@@ -264,7 +303,7 @@ export async function renderSalePushCard(opts: {
           const buf = Buffer.from(await upstream.arrayBuffer());
           const decoded = decodeImage(buf);
           if (decoded) {
-            blitCover(data, W, decoded, THUMB_PAD, THUMB_PAD, THUMB);
+            blitCover(data, W, H, decoded, THUMB_PAD, THUMB_PAD, THUMB);
           }
         }
       } catch {
@@ -273,32 +312,77 @@ export async function renderSalePushCard(opts: {
     }
 
     const textX = THUMB_PAD + THUMB + 18;
-    const split = profit.match(/^(.*)\s+(profit|sale)$/i);
-    const amountText = (split?.[1] ?? profit).trim();
-    const kind = (split?.[2] ?? '').toLowerCase();
-    const negative = /^-|£\s*-|£-|−/.test(amountText);
-    const hero = negative ? 'New sale' : amountText;
-    // Positive sale / profit amounts are always emerald (user request: green).
-    const heroColor = negative ? MUTED : EMERALD;
-    const caption =
-      !negative && kind === 'profit'
-        ? 'profit'
-        : !negative && kind === 'sale'
-          ? 'sale'
-          : '';
+    // Larger scale so the £ figure dominates the card (user: "the 6.40 in green").
+    const amountScale = hero.length <= 7 ? 5 : 4;
 
     if (title) {
-      drawText(data, W, title, textX, 28, 2, MUTED);
-      drawText(data, W, hero, textX, 56, 4, heroColor);
-      if (caption) drawText(data, W, caption, textX, 96, 2, EMERALD);
+      drawText(data, W, H, title, textX, 22, 2, MUTED);
+      drawText(data, W, H, hero, textX, 48, amountScale, heroColor);
+      if (caption) {
+        drawText(data, W, H, caption, textX, 48 + amountScale * 7 + 8, 2, EMERALD_SOFT);
+      }
     } else {
-      drawText(data, W, hero, textX, 48, 4, heroColor);
-      if (caption) drawText(data, W, caption, textX, 88, 2, EMERALD);
+      drawText(data, W, H, hero, textX, 42, amountScale, heroColor);
+      if (caption) {
+        drawText(data, W, H, caption, textX, 42 + amountScale * 7 + 8, 2, EMERALD_SOFT);
+      }
     }
 
     return encodePng(W, H, data);
   } catch {
     // Never throw — sharp-era segfaults taught us to fail soft.
+    return null;
+  }
+}
+
+/**
+ * Square notification icon with a big bright-green £ amount.
+ * iOS/Android always show the icon; lock-screen body text cannot be colored.
+ */
+export function renderSalePushAmountIcon(opts: {
+  profitLabel: string;
+}): Buffer | null {
+  try {
+    const { hero, caption, negative } = parseProfitHero(opts.profitLabel);
+    const heroColor = negative ? MUTED : EMERALD;
+    const data = Buffer.alloc(ICON * ICON * 4, 0);
+    fillRect(data, ICON, ICON, 0, 0, ICON, ICON, BG, 28);
+
+    // Fit amount on the square — shorter figures get a bigger scale.
+    let scale = hero.length <= 5 ? 7 : hero.length <= 7 ? 6 : hero.length <= 9 ? 5 : 4;
+    let width = measureText(hero, scale);
+    while (width > ICON - 24 && scale > 3) {
+      scale -= 1;
+      width = measureText(hero, scale);
+    }
+    const amountY = caption ? 58 : Math.floor((ICON - scale * 7) / 2);
+    drawText(
+      data,
+      ICON,
+      ICON,
+      hero,
+      Math.max(8, Math.floor((ICON - width) / 2)),
+      amountY,
+      scale,
+      heroColor,
+    );
+    if (caption) {
+      const capScale = 3;
+      const capW = measureText(caption, capScale);
+      drawText(
+        data,
+        ICON,
+        ICON,
+        caption,
+        Math.max(8, Math.floor((ICON - capW) / 2)),
+        amountY + scale * 7 + 14,
+        capScale,
+        EMERALD_SOFT,
+      );
+    }
+
+    return encodePng(ICON, ICON, data);
+  } catch {
     return null;
   }
 }

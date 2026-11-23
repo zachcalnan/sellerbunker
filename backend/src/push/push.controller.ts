@@ -15,8 +15,15 @@ import { ClerkAuthGuard } from '../auth/clerk-auth.guard';
 import { PushService } from './push.service';
 import { PushAlertService } from './push-alert.service';
 import { CreatePushAlertDto } from './dto/create-push-alert.dto';
-import { isAllowedPushImageUrl, toPushIconUrl, toSaleCardUrl } from './push-image.util';
-import { renderSalePushCard } from './sale-push-card.util';
+import {
+  isAllowedPushImageUrl,
+  toSaleAmountIconUrl,
+  toSaleCardUrl,
+} from './push-image.util';
+import {
+  renderSalePushAmountIcon,
+  renderSalePushCard,
+} from './sale-push-card.util';
 
 @Controller('push')
 export class PushController {
@@ -76,7 +83,7 @@ export class PushController {
   }
 
   /**
-   * Sale notification card: product thumb + emerald profit (PNG).
+   * Sale notification card: product thumb + bright green £ amount (PNG).
    * Public so the OS can fetch it when rendering the push.
    */
   @Get('sale-card')
@@ -108,6 +115,30 @@ export class PushController {
       res.send(png);
     } catch {
       res.status(502).send('Could not render card');
+    }
+  }
+
+  /**
+   * Square green-£ icon for lock-screen notifications (body text cannot be colored).
+   */
+  @Get('sale-amount-icon')
+  @Header('Cache-Control', 'public, max-age=300, stale-while-revalidate=3600')
+  async saleAmountIcon(
+    @Query('profit') profit: string | undefined,
+    @Res() res: Response,
+  ) {
+    try {
+      const profitLabel = String(profit ?? '').trim() || 'Sale';
+      const png = renderSalePushAmountIcon({ profitLabel });
+      if (!png) {
+        res.status(502).send('Could not render icon');
+        return;
+      }
+      res.setHeader('Content-Type', 'image/png');
+      res.setHeader('Content-Length', String(png.length));
+      res.send(png);
+    } catch {
+      res.status(502).send('Could not render icon');
     }
   }
 
@@ -178,27 +209,26 @@ export class PushController {
     if (!this.pushService.isConfigured()) {
       return { ok: false, error: 'Push is not configured on the server' };
     }
-    // Sample Amazon product thumb + emerald profit card.
+    // Green £ amount as icon (lock screen) + wide card as image (Android expanded).
     const sampleAmazon =
       'https://m.media-amazon.com/images/I/41VCNSoEWeL.jpg';
-    const icon =
-      toPushIconUrl(sampleAmazon) ??
-      'https://www.sellerbunker.com/icon-192.png';
+    const profitLabel = '£6.40 profit';
+    const icon = toSaleAmountIconUrl({ profitLabel });
     const card = toSaleCardUrl({
       imageUrl: sampleAmazon,
-      profitLabel: '£6.40 profit',
+      profitLabel,
       title: 'Test product',
     });
     const payload = {
       title: 'Sale · Test product',
-      body: '£6.40 profit',
+      body: profitLabel,
       url: '/orders',
       tag: `test-${Date.now()}`,
       icon,
       image: card,
       badge: 'https://www.sellerbunker.com/favicon-48x48.png',
       color: '#10B981',
-      profitLabel: '£6.40 profit',
+      profitLabel,
     };
     const { sent } = await this.pushService.notifyUser(req.user.userId, payload);
     return {

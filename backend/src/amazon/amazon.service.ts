@@ -91,7 +91,10 @@ import {
 } from './shipment-status.util';
 import { RepricerService } from '../repricer/repricer.service';
 import { PushService } from '../push/push.service';
-import { toPushIconUrl, toSaleCardUrl } from '../push/push-image.util';
+import {
+  toSaleAmountIconUrl,
+  toSaleCardUrl,
+} from '../push/push-image.util';
 import { buildSalePushLabel } from '../push/sale-push-profit.util';
 
 /** When we have no settled fees and no product fee estimate, use this share of revenue as fee so profit/ROI are not overstated. */
@@ -242,14 +245,13 @@ export class AmazonService {
       computedProfit: args.profit,
     });
 
-    const pushIcon =
-      toPushIconUrl(imageUrl) ?? 'https://www.sellerbunker.com/icon-192.png';
-
     const shortTitle = (() => {
       const raw = title || args.sku || args.asin || 'New sale';
       return raw.length > 36 ? `${raw.slice(0, 33)}…` : raw;
     })();
 
+    // Green £ figure as icon (always shown on lock screen); wide card as image.
+    const amountIcon = toSaleAmountIconUrl({ profitLabel });
     const saleCard = toSaleCardUrl({
       imageUrl,
       profitLabel,
@@ -261,7 +263,7 @@ export class AmazonService {
       body: profitLabel,
       url: '/orders',
       tag: `sale-${args.amazonOrderId}`,
-      icon: pushIcon,
+      icon: amountIcon,
       image: saleCard,
       badge: 'https://www.sellerbunker.com/favicon-48x48.png',
       color: '#10B981',
