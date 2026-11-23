@@ -284,7 +284,7 @@ describe('stock-cost-sheet.util', () => {
     expect(matchUnitCostFromPurchaseSheet('B0AAA', '', lines)).toBe(12);
   });
 
-  it('plans Delivered=Yes from Blue30 by Order Ref+ASIN then ASIN FIFO', () => {
+  it('plans Delivered=Yes from Blue30 by Order Ref+ASIN; blank-ref ASIN FIFO', () => {
     const purchase = parsePurchaseSheetStageRows([
       [
         'Date',
@@ -318,7 +318,7 @@ describe('stock-cost-sheet.util', () => {
           sku: null,
           qtyReceived: 3,
           qtyOrdered: 10,
-          orderRef: 'UNKNOWN',
+          orderRef: '', // blank → ASIN FIFO allowed
           sheetRow: 3,
         },
         {
@@ -332,7 +332,7 @@ describe('stock-cost-sheet.util', () => {
       ],
     });
 
-    // Order+ASIN match flips O3; ASIN-only covers oldest B0ASIN (3 units) first;
+    // Order+ASIN match flips O3; blank-ref ASIN FIFO covers oldest B0ASIN;
     // already-delivered B0DONE is not in inTransit so never planned.
     expect(updates.map((u) => u.sheetRow).sort((a, b) => a - b)).toEqual([
       2, // B0BOTH O3
@@ -341,6 +341,116 @@ describe('stock-cost-sheet.util', () => {
     expect(updates.find((u) => u.asin === 'B0BOTH')?.match).toBe('order_asin');
     expect(updates.find((u) => u.asin === 'B0ASIN')?.match).toBe('asin');
     expect(updates.every((u) => u.deliveredColIndex0 === 5)).toBe(true);
+  });
+
+  it('does not ASIN-FIFO steal when Blue30 Order Ref is present but purchase already Delivered', () => {
+    // Otamatone-style: Blue30 still shows received for older order refs; newer
+    // open purchase rows of the same ASIN must stay undelivered.
+    const purchase = parsePurchaseSheetStageRows([
+      [
+        'Date',
+        'ASIN',
+        'Order Num',
+        'Units',
+        '£/Unit',
+        'Delivered ',
+      ],
+      ['1/10/2026', 'B07RM5DCFR', '202646.7273', '10', '£24.90', 'Yes'],
+      ['19/11/2026', 'B07RM5DCFR', 'not sure yet', '10', '£20.90', 'No'],
+      ['23/11/2026', 'B07RM5DCFR', '202648.1659', '10', '£20.90', 'No'],
+      ['23/11/2026', 'B07RM5DCFR', '202648.1662', '10', '£20.90', 'No'],
+      ['23/11/2026', 'B07RM5DCFR', '202648.1664', '10', '£20.90', 'No'],
+      ['23/11/2026', 'B07RM5DCFR', '202648.166880', '10', '£20.90', 'No'],
+    ]);
+
+    const updates = planDeliveredYesUpdatesFromBlue30({
+      purchaseInTransit: purchase.inTransit,
+      deliveredColIndex0: 5,
+      blue30Arrived: [
+        {
+          asin: 'B07RM5DCFR',
+          sku: null,
+          qtyReceived: 10,
+          qtyOrdered: 10,
+          orderRef: '202646.727337', // already Delivered on purchase (loose match)
+          sheetRow: 22,
+        },
+        {
+          asin: 'B07RM5DCFR',
+          sku: null,
+          qtyReceived: 10,
+          qtyOrdered: 10,
+          orderRef: '428803',
+          sheetRow: 10,
+        },
+      ],
+    });
+
+    expect(updates).toEqual([]);
+  });
+
+  it('matches truncated Order Refs loosely for Delivered sync', () => {
+    const purchase = parsePurchaseSheetStageRows([
+      [
+        'Date',
+        'ASIN',
+        'Order Num',
+        'Units',
+        '£/Unit',
+        'Delivered ',
+      ],
+      ['23/11/2026', 'B07RM5DCFR', '202648.1659', '10', '£20.90', 'No'],
+    ]);
+
+    const updates = planDeliveredYesUpdatesFromBlue30({
+      purchaseInTransit: purchase.inTransit,
+      deliveredColIndex0: 5,
+      blue30Arrived: [
+        {
+          asin: 'B07RM5DCFR',
+          sku: null,
+          qtyReceived: 10,
+          qtyOrdered: 10,
+          orderRef: '202648.165896',
+          sheetRow: 48,
+        },
+      ],
+    });
+
+    expect(updates).toHaveLength(1);
+    expect(updates[0].sheetRow).toBe(2);
+    expect(updates[0].match).toBe('order_asin');
+  });
+
+  it('does not ASIN-FIFO when Blue30 Order Ref is unknown/unmatched', () => {
+    const purchase = parsePurchaseSheetStageRows([
+      [
+        'Date',
+        'ASIN',
+        'Order Num',
+        'Units',
+        '£/Unit',
+        'Delivered ',
+      ],
+      ['2/11/2026', 'B0ASIN', 'O9', '3', '£2', 'No'],
+      ['3/11/2026', 'B0ASIN', 'O10', '7', '£2', 'No'],
+    ]);
+
+    const updates = planDeliveredYesUpdatesFromBlue30({
+      purchaseInTransit: purchase.inTransit,
+      deliveredColIndex0: 5,
+      blue30Arrived: [
+        {
+          asin: 'B0ASIN',
+          sku: null,
+          qtyReceived: 3,
+          qtyOrdered: 10,
+          orderRef: 'UNKNOWN',
+          sheetRow: 3,
+        },
+      ],
+    });
+    expect(updates).toEqual([]);
   });
 
   it('is idempotent: already Delivered rows are not re-planned', () => {

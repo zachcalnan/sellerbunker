@@ -428,6 +428,7 @@ export function parseBlue30ArrivedRows(values: string[][]): {
   const qtyIdx = findHeaderColumnIndex(header, ['Quantity', 'Qty', 'Units']);
   const recvIdx = findHeaderColumnIndex(header, [
     'Quantity Received',
+    'Quanity Received', // Blue30 header typo
     'Qty Received',
     'Received',
     'Received Qty',
@@ -483,6 +484,37 @@ export function normOrderRef(s: string): string {
 }
 
 /**
+ * Loose Order Ref equality for sheet display truncation/rounding
+ * (e.g. purchase `202648.1659` vs Blue30 `202648.165896`).
+ * Exact → prefix (true truncation) → numeric round-to-shorter-decimals.
+ */
+export function orderRefsLooselyMatch(a: string, b: string): boolean {
+  const x = normOrderRef(a);
+  const y = normOrderRef(b);
+  if (!x || !y) return false;
+  if (x === y) return true;
+
+  const shorter = x.length <= y.length ? x : y;
+  const longer = x.length <= y.length ? y : x;
+  if (shorter.length >= 8 && longer.startsWith(shorter)) return true;
+
+  // Sheets often round long numeric refs (not truncate), so prefix fails:
+  // 202648.165896 → displayed 202648.1659.
+  if (!x.includes('.') || !y.includes('.')) return false;
+  const nx = Number(x);
+  const ny = Number(y);
+  if (!Number.isFinite(nx) || !Number.isFinite(ny)) return false;
+  const shorterRaw = shorter;
+  const shorterNum = x.length <= y.length ? nx : ny;
+  const longerNum = x.length <= y.length ? ny : nx;
+  const dot = shorterRaw.indexOf('.');
+  if (dot < 0) return false;
+  const decimals = shorterRaw.length - dot - 1;
+  if (decimals < 1 || shorterRaw.length < 8) return false;
+  return Number(longerNum.toFixed(decimals)) === shorterNum;
+}
+
+/**
  * Match arrived qty to purchase-sheet unit costs.
  * Prefer same Order Ref + ASIN; else newest purchase-sheet cost for ASIN.
  */
@@ -497,8 +529,8 @@ export function matchUnitCostFromPurchaseSheet(
   if (sameAsin.length === 0) return 0;
 
   if (wantOrder) {
-    const byOrder = sameAsin.filter(
-      (l) => normOrderRef(l.orderRef) === wantOrder,
+    const byOrder = sameAsin.filter((l) =>
+      orderRefsLooselyMatch(l.orderRef, orderRef),
     );
     if (byOrder.length > 0) {
       // Weighted average if multiple lines for same order/ASIN.
@@ -897,7 +929,11 @@ export function planFinalStatusFormatUpdatesFromValues(opts: {
 
 /**
  * Plan idempotent Delivered=Yes writes from Blue30 Quantity Received.
- * Match Order Ref+ASIN first, else FIFO ASIN-only against undelivered rows.
+ * Prefer Order Ref+ASIN (loose ref match for truncated sheet numbers).
+ * When Blue30 has an Order Ref, never fall through to ASIN FIFO — that
+ * previously stole received qty onto unrelated open rows of the same ASIN
+ * after the matching purchase row was already Delivered.
+ * ASIN FIFO only when Blue30 Order Ref is blank.
  * Does not touch £/Unit, Units, or other cells.
  */
 export function planDeliveredYesUpdatesFromBlue30(opts: {
@@ -942,21 +978,22 @@ export function planDeliveredYesUpdatesFromBlue30(opts: {
     const wantOrder = normOrderRef(b30.orderRef);
 
     if (wantOrder) {
+      // Order Ref present: only claim matching open purchase rows. Do not
+      // FIFO-steal onto other open rows of the same ASIN when the matching
+      // purchase line is already Delivered (or refs don't match yet).
       const byOrder = open
         .filter(
           (l) =>
             !l.claimed &&
             l.asin === asin &&
-            normOrderRef(l.orderRef) === wantOrder,
+            orderRefsLooselyMatch(l.orderRef, b30.orderRef),
         )
         .sort(sortOldest);
-      if (byOrder.length > 0) {
-        for (const line of byOrder) pushUpdate(line, 'order_asin');
-        continue;
-      }
+      for (const line of byOrder) pushUpdate(line, 'order_asin');
+      continue;
     }
 
-    // ASIN-only: cover received qty FIFO across undelivered rows.
+    // Blank Blue30 Order Ref only: cover received qty FIFO across undelivered rows.
     let remaining = b30.qtyReceived;
     const byAsin = open
       .filter((l) => !l.claimed && l.asin === asin)
