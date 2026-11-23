@@ -273,11 +273,27 @@ export async function renderSalePushCard(opts: {
     }
 
     const textX = THUMB_PAD + THUMB + 18;
+    const split = profit.match(/^(.*)\s+(profit|sale)$/i);
+    const amountText = (split?.[1] ?? profit).trim();
+    const kind = (split?.[2] ?? '').toLowerCase();
+    const negative = /^-|£\s*-|£-|−/.test(amountText);
+    const hero = negative ? 'New sale' : amountText;
+    // Positive sale / profit amounts are always emerald (user request: green).
+    const heroColor = negative ? MUTED : EMERALD;
+    const caption =
+      !negative && kind === 'profit'
+        ? 'profit'
+        : !negative && kind === 'sale'
+          ? 'sale'
+          : '';
+
     if (title) {
-      drawText(data, W, title, textX, 36, 2, MUTED);
-      drawText(data, W, profit, textX, 78, 4, EMERALD);
+      drawText(data, W, title, textX, 28, 2, MUTED);
+      drawText(data, W, hero, textX, 56, 4, heroColor);
+      if (caption) drawText(data, W, caption, textX, 96, 2, EMERALD);
     } else {
-      drawText(data, W, profit, textX, 58, 4, EMERALD);
+      drawText(data, W, hero, textX, 48, 4, heroColor);
+      if (caption) drawText(data, W, caption, textX, 88, 2, EMERALD);
     }
 
     return encodePng(W, H, data);

@@ -13,6 +13,8 @@ export type PushPayload = {
   icon?: string;
   image?: string;
   badge?: string;
+  /** Android notification accent (#RRGGBB). Ignored on iOS. */
+  color?: string;
   /** In-app toast uses this for emerald profit styling. */
   profitLabel?: string;
 };

@@ -189,19 +189,27 @@ export class PushController {
       profitLabel: '£6.40 profit',
       title: 'Test product',
     });
-    const { sent } = await this.pushService.notifyUser(req.user.userId, {
-      title: 'Test product',
+    const payload = {
+      title: 'Sale · Test product',
       body: '£6.40 profit',
       url: '/orders',
       tag: `test-${Date.now()}`,
       icon,
       image: card,
       badge: 'https://www.sellerbunker.com/favicon-48x48.png',
+      color: '#10B981',
       profitLabel: '£6.40 profit',
-    });
+    };
+    const { sent } = await this.pushService.notifyUser(req.user.userId, payload);
     return {
       ok: sent > 0,
       sent,
+      payload: {
+        title: payload.title,
+        body: payload.body,
+        color: payload.color,
+        profitLabel: payload.profitLabel,
+      },
       error:
         sent > 0
           ? undefined

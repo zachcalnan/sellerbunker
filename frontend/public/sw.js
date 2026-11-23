@@ -1,4 +1,4 @@
-/* SellerBunker web push service worker — v11 (external alert URLs open in new window) */
+/* SellerBunker web push service worker — v12 (green sale accent + positive profit) */
 self.addEventListener("install", (event) => {
   self.skipWaiting();
 });
@@ -30,12 +30,18 @@ async function showSaleNotification(data) {
   const badge = absoluteUrl(data.badge) || absoluteUrl("/favicon-48x48.png");
   const profitLabel = data.profitLabel || data.body || "";
   const title = data.title || "SellerBunker";
+  // Android notification accent (ignored on iOS). Emerald matches in-app profit.
+  const color =
+    typeof data.color === "string" && /^#[0-9A-Fa-f]{6}$/.test(data.color)
+      ? data.color
+      : "#10B981";
   const base = {
     body: profitLabel || data.body || "",
     tag: data.tag || "sellerbunker",
     data: { url: data.url || "/orders" },
     icon,
     badge,
+    color,
     renotify: true,
     requireInteraction: false,
   };

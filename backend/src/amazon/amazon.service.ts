@@ -92,6 +92,7 @@ import {
 import { RepricerService } from '../repricer/repricer.service';
 import { PushService } from '../push/push.service';
 import { toPushIconUrl, toSaleCardUrl } from '../push/push-image.util';
+import { buildSalePushLabel } from '../push/sale-push-profit.util';
 
 /** When we have no settled fees and no product fee estimate, use this share of revenue as fee so profit/ROI are not overstated. */
 const DEFAULT_AMAZON_FEE_RATE_WHEN_UNKNOWN = 0.35;
@@ -180,21 +181,19 @@ export class AmazonService {
       amount: number;
       quantity?: number | null;
       profit?: number | null;
+      signedFeesTotal?: number | null;
+      tax?: number | null;
       title?: string | null;
       imageUrl?: string | null;
       status?: string | null;
     },
   ): Promise<void> {
     const orgId = await this.resolveOrgIdForUser(userId);
-    const money = (n: number) =>
-      `£${n.toLocaleString('en-GB', {
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2,
-      })}`;
 
     let imageUrl = (args.imageUrl ?? '').trim() || null;
     let title = (args.title ?? '').trim() || null;
-    let profit = args.profit ?? null;
+    let costPerUnit: number | null = null;
+    let feePerUnit: number | null = null;
 
     if (args.sku || args.asin) {
       try {
@@ -219,25 +218,29 @@ export class AmazonService {
           if (!imageUrl && product.imageUrl?.trim()) {
             imageUrl = product.imageUrl.trim();
           }
-          if (
-            profit == null &&
-            Number.isFinite(args.amount) &&
-            args.amount > 0 &&
-            product.costOfGoods != null
-          ) {
-            const qty = Math.max(1, Number(args.quantity) || 1);
-            const cogs = Number(product.costOfGoods) * qty;
-            const feesEst =
-              product.estimatedAmazonFeePerUnit != null
-                ? Number(product.estimatedAmazonFeePerUnit) * qty
-                : 0;
-            profit = Number((args.amount - cogs - feesEst).toFixed(2));
+          if (product.costOfGoods != null) {
+            const cogs = Number(product.costOfGoods);
+            if (Number.isFinite(cogs)) costPerUnit = cogs;
+          }
+          if (product.estimatedAmazonFeePerUnit != null) {
+            const fee = Number(product.estimatedAmazonFeePerUnit);
+            if (Number.isFinite(fee)) feePerUnit = fee;
           }
         }
       } catch {
         // Best-effort enrichment — still send a basic sale alert.
       }
     }
+
+    const profitLabel = buildSalePushLabel({
+      amount: args.amount,
+      quantity: args.quantity,
+      costPerUnit,
+      feePerUnit,
+      signedFeesTotal: args.signedFeesTotal,
+      tax: args.tax,
+      computedProfit: args.profit,
+    });
 
     const pushIcon =
       toPushIconUrl(imageUrl) ?? 'https://www.sellerbunker.com/icon-192.png';
@@ -247,13 +250,6 @@ export class AmazonService {
       return raw.length > 36 ? `${raw.slice(0, 33)}…` : raw;
     })();
 
-    const profitLabel =
-      profit != null && Number.isFinite(profit)
-        ? `${money(profit)} profit`
-        : Number.isFinite(args.amount) && args.amount > 0
-          ? `${money(args.amount)} sale`
-          : 'New sale';
-
     const saleCard = toSaleCardUrl({
       imageUrl,
       profitLabel,
@@ -261,13 +257,14 @@ export class AmazonService {
     });
 
     const payload = {
-      title: shortTitle,
+      title: `Sale · ${shortTitle}`,
       body: profitLabel,
       url: '/orders',
       tag: `sale-${args.amazonOrderId}`,
       icon: pushIcon,
       image: saleCard,
       badge: 'https://www.sellerbunker.com/favicon-48x48.png',
+      color: '#10B981',
       profitLabel,
     };
 
@@ -5870,6 +5867,8 @@ export class AmazonService {
               computedTotalProfit != null
                 ? Number(computedTotalProfit.toFixed(2))
                 : null,
+            signedFeesTotal: amazonFeesTotal,
+            tax: taxChargedTotal,
             title: titleFromProduct,
             imageUrl: imageFromProduct,
             status: apiOrderStatus != null ? String(apiOrderStatus) : null,
