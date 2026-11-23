@@ -221,8 +221,8 @@ export class PushController {
     });
     const payload = {
       title: 'Sale · Test product',
-      // 🟢 so Apple lock-screen body still shows green (OS cannot colour text).
-      body: `🟢 ${profitLabel}`,
+      // ✅ so Apple lock-screen body still signals profit (OS cannot colour text).
+      body: `✅ ${profitLabel}`,
       url: '/orders',
       tag: `test-${Date.now()}`,
       icon,

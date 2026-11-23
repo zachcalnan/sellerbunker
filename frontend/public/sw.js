@@ -1,4 +1,4 @@
-/* SellerBunker web push service worker — v14 (opaque green £ icon + card) */
+/* SellerBunker web push service worker — v17 (✅ tick + opaque green £ icon) */
 self.addEventListener("install", (event) => {
   self.skipWaiting();
 });
@@ -33,15 +33,17 @@ async function showSaleNotification(data) {
   const image = absoluteUrl(data.image) || null;
   const badge = absoluteUrl(data.badge) || absoluteUrl("/favicon-48x48.png");
   const profitLabel = String(data.profitLabel || data.body || "").replace(
-    /^🟢\s*/u,
+    /^(?:✅|🟢)\s*/u,
     "",
   );
   const title = data.title || "SellerBunker";
-  // Body keeps a green emoji so Apple lock-screen text still shows *some* green
+  // Body keeps ✅ so Apple lock-screen text still signals profit at a glance
   // (OS body colour cannot be set; custom icons are often ignored/templated).
   const bodyRaw = String(data.body || profitLabel || "");
   const body =
-    profitLabel && !/^🟢/u.test(bodyRaw) ? `🟢 ${profitLabel}` : bodyRaw || "";
+    profitLabel && !/^(?:✅|🟢)/u.test(bodyRaw)
+      ? `✅ ${profitLabel}`
+      : bodyRaw || "";
   // Android notification accent (ignored on iOS). Emerald matches in-app profit.
   const color =
     typeof data.color === "string" && /^#[0-9A-Fa-f]{6}$/.test(data.color)

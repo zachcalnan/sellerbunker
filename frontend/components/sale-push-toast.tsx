@@ -16,7 +16,7 @@ type SaleLine = {
 
 /** Pull the money off the push label. A leading minus is not profit. */
 function splitSaleLabel(label: string): SaleLine {
-  const trimmed = label.replace(/^🟢\s*/u, "").trim();
+  const trimmed = label.replace(/^(?:✅|🟢)\s*/u, "").trim();
   const match = trimmed.match(/^(.*)\s+(profit|sale)$/i);
   const amount = (match?.[1] ?? trimmed).trim();
   const word = (match?.[2] ?? "").toLowerCase();
@@ -119,6 +119,7 @@ export function SalePushToast() {
                 : undefined
             }
           >
+            {moneyLine ? "✅ " : null}
             {line.amount}
             {line.kind === "profit" ? (
               <span
