@@ -96,6 +96,10 @@ import {
   buildSalePushLabel,
   buildSalePushTexts,
 } from '../push/sale-push-profit.util';
+import {
+  feesEstimateItemsFromCaughtError,
+  mapGetMyFeesEstimatesResponse,
+} from './fees-estimate-api.util';
 
 /** When we have no settled fees and no product fee estimate, use this share of revenue as fee so profit/ROI are not overstated. */
 const DEFAULT_AMAZON_FEE_RATE_WHEN_UNKNOWN = 0.35;
@@ -15855,6 +15859,93 @@ try {
       return { ...out, savedTo: filePath };
     }
     return out;
+  }
+
+  /**
+   * Read-only Product Fees estimates for ASINs that may not be in the catalog.
+   * Uses SP-API getMyFeesEstimates (max 20). Does not write to the database.
+   */
+  async estimateFeesForAsins(
+    orgId: string,
+    input: {
+      items: Array<{
+        asin: string;
+        price: number;
+        fulfilment?: 'FBA' | 'FBM';
+        fulfillment?: 'FBA' | 'FBM';
+      }>;
+      fulfilment?: 'FBA' | 'FBM';
+      fulfillment?: 'FBA' | 'FBM';
+      marketplaceId?: string;
+      currency?: string;
+    },
+  ) {
+    const defaultFulfillment =
+      (input.fulfilment ?? input.fulfillment) === 'FBM' ? 'FBM' : 'FBA';
+    const marketplaceId =
+      input.marketplaceId?.trim() || AMAZON_UK_MARKETPLACE_ID_FOR_LISTINGS_RESTRICTIONS;
+    const currency =
+      input.currency?.trim() ||
+      MARKETPLACE_MAP.get(marketplaceId)?.currencyCode ||
+      'GBP';
+
+    const credentials = await this.getAmazonCredentialsForOrg(orgId);
+
+    const prepared = input.items.map((item, i) => {
+      const itemFulfilment = item.fulfilment ?? item.fulfillment;
+      const fulfilment: 'FBA' | 'FBM' =
+        itemFulfilment === 'FBM' || itemFulfilment === 'FBA'
+          ? itemFulfilment
+          : defaultFulfillment;
+      const asin = item.asin.trim().toUpperCase();
+      const identifier = `fee-asin-${asin}-${i}`;
+      return {
+        asin,
+        price: item.price,
+        fulfilment,
+        identifier,
+        currency,
+        request: {
+          idType: 'ASIN' as const,
+          idValue: asin,
+          marketplaceId,
+          isAmazonFulfilled: fulfilment === 'FBA',
+          listingPriceAmount: item.price,
+          listingPriceCurrency: currency,
+          identifier,
+        },
+      };
+    });
+
+    const requestItems = prepared.map((p) => ({
+      asin: p.asin,
+      price: p.price,
+      fulfilment: p.fulfilment,
+      identifier: p.identifier,
+      currency: p.currency,
+    }));
+
+    try {
+      const res = await this.spApiClient.getMyFeesEstimates(
+        credentials,
+        prepared.map((p) => p.request),
+      );
+      return {
+        marketplaceId,
+        currency,
+        fulfilment: defaultFulfillment,
+        items: mapGetMyFeesEstimatesResponse({ raw: res, items: requestItems }),
+      };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Fee estimate request failed';
+      this.logger.warn(`[estimateFeesForAsins] ${message}`);
+      return {
+        marketplaceId,
+        currency,
+        fulfilment: defaultFulfillment,
+        items: feesEstimateItemsFromCaughtError(requestItems, message),
+      };
+    }
   }
 
   async backfillOrderItems(
