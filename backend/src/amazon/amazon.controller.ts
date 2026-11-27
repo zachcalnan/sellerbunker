@@ -21,6 +21,7 @@ import { CreatePurchaseDto } from './dto/create-purchase.dto';
 import { UpdatePurchaseDto } from './dto/update-purchase.dto';
 import { ClerkAuthGuard } from '../auth/clerk-auth.guard';
 import { ApiKeyGuard } from '../auth/api-key.guard';
+import { FeesEstimateApiKeyDto } from './dto/fees-estimate-api-key.dto';
 import { AmazonSyncService } from './amazon-sync.service';
 import { AmazonSyncProcessor } from './amazon-sync.processor';
 
@@ -1150,6 +1151,29 @@ ping() {
   @Post('fees-estimate/refresh')
   async refreshFeeEstimates(@Req() req: { user: { orgId: string } }) {
     return this.amazonService.refreshFeeEstimatesForOrg(req.user.orgId);
+  }
+
+  /**
+   * Read-only fee estimates for sourcing candidates (ASINs the seller may not list yet).
+   * Server-to-server: `x-api-key: ${SELLERBUNKER_API_KEY}`.
+   * Env: SELLERBUNKER_API_KEY, SELLERBUNKER_API_ORG_ID.
+   * Uses the org's existing SP-API credentials. No DB writes.
+   *
+   * Example: POST /api/amazon/fees-estimate-api-key
+   */
+  @UseGuards(ApiKeyGuard)
+  @Post('fees-estimate-api-key')
+  async estimateFeesApiKey(@Body() dto: FeesEstimateApiKeyDto) {
+    const orgId = (process.env.SELLERBUNKER_API_ORG_ID ?? '').trim();
+    if (!orgId) {
+      throw new BadRequestException('SELLERBUNKER_API_ORG_ID is required');
+    }
+    return this.amazonService.estimateFeesForAsins(orgId, {
+      items: dto.items,
+      fulfilment: dto.fulfilment ?? dto.fulfillment,
+      marketplaceId: dto.marketplaceId,
+      currency: dto.currency,
+    });
   }
 
   /**

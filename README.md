@@ -128,6 +128,22 @@ The repo now includes:
 - `backend/.env.render.example` and `frontend/.env.render.example` for test/staging env templates
 - `docs/render-test-environment.md` for the full setup order, Clerk checklist, and Amazon enablement checklist
 
+## Server-to-server API (API key)
+
+These routes skip Clerk JWT and authenticate with the `x-api-key` header (`SELLERBUNKER_API_KEY`). They act as the org in `SELLERBUNKER_API_ORG_ID`.
+
+- `GET /api/amazon/replenish/smart-api-key` — smart replenishment
+- `POST /api/amazon/fees-estimate-api-key` — read-only Amazon UK fee estimates for up to 20 ASINs (does not need to be in your catalog; no DB writes)
+
+Example:
+
+```bash
+curl -sS -X POST "https://www.sellerbunker.com/api/amazon/fees-estimate-api-key" \
+  -H "content-type: application/json" \
+  -H "x-api-key: $SELLERBUNKER_API_KEY" \
+  -d '{"items":[{"asin":"B09SV93C9H","price":19.99}],"fulfilment":"FBA"}'
+```
+
 ## 📝 Next Steps
 
 1. ✅ Database schema created

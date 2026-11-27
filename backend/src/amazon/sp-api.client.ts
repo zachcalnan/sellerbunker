@@ -364,6 +364,61 @@ export class AmazonSpApiClient {
   }
 
   /**
+   * Product Fees API v0: getMyFeesEstimates
+   * POST /products/fees/v0/feesEstimate
+   *
+   * Batch fee estimates for up to 20 ASINs or SellerSKUs. Use IdType=ASIN for
+   * products the seller does not list yet.
+   */
+  async getMyFeesEstimates(
+    credentials: SpApiCredentials,
+    requests: Array<{
+      idType: 'ASIN' | 'SellerSKU';
+      idValue: string;
+      marketplaceId: string;
+      isAmazonFulfilled?: boolean;
+      listingPriceAmount?: number;
+      listingPriceCurrency?: string;
+      identifier?: string;
+    }>,
+  ): Promise<unknown> {
+    if (requests.length < 1 || requests.length > 20) {
+      throw new Error('getMyFeesEstimates accepts 1–20 requests');
+    }
+    const body = JSON.stringify(
+      requests.map((r, i) => {
+        const isAmazonFulfilled = r.isAmazonFulfilled ?? true;
+        const listingPriceCurrency = r.listingPriceCurrency ?? 'GBP';
+        return {
+          IdType: r.idType,
+          IdValue: r.idValue,
+          FeesEstimateRequest: {
+            MarketplaceId: r.marketplaceId,
+            IsAmazonFulfilled: isAmazonFulfilled,
+            PriceToEstimateFees: {
+              ListingPrice: {
+                CurrencyCode: listingPriceCurrency,
+                Amount: r.listingPriceAmount ?? 0,
+              },
+              Shipping: {
+                CurrencyCode: listingPriceCurrency,
+                Amount: 0,
+              },
+            },
+            Identifier: r.identifier ?? `fee-${r.idType}-${r.idValue}-${i}`,
+            ...(isAmazonFulfilled ? { OptionalFulfillmentProgram: 'FBA_CORE' } : {}),
+          },
+        };
+      }),
+    );
+    return this.signedSpApiRequest(credentials, {
+      method: 'POST',
+      path: '/products/fees/v0/feesEstimate',
+      body,
+    });
+  }
+
+  /**
    * Listings Items API v2021-08-01: getListingsItem
    * GET /listings/2021-08-01/items/{sellerId}/{sku}
    * Returns this seller's own listing (their SKU, their listed price). Not other sellers' or buy box price.
